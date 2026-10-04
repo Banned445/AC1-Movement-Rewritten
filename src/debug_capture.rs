@@ -68,6 +68,8 @@ enum Scenario {
     DropGrab,
     /// Run at the 0.6 m box with high profile + Legs: the < 0.7 m straight-jump band steps onto it (0xB21DA0).
     StepUp,
+    /// Stand still on the edge of the 0.3 m box, one foot over the edge (standing foot IK).
+    FootIk,
     /// Climb the tower's left column into the gap: the climb's jump up to the overhang (TryBackEject 0xDF2F50).
     ClimbJump,
     Overhang,
@@ -107,6 +109,7 @@ impl Plugin for DebugCapturePlugin {
                 "drop" => Scenario::Drop,
                 "dropgrab" => Scenario::DropGrab,
                 "stepup" => Scenario::StepUp,
+                "footik" => Scenario::FootIk,
                 "climbjump" => Scenario::ClimbJump,
                 "overhang" => Scenario::Overhang,
                 "corner" => Scenario::Corner(false),
@@ -230,6 +233,13 @@ fn place(sc: Res<Scenario>, mut q: Query<&mut Body, With<Player>>, mut rig: ResM
                 rig.distance = 7.0;
                 rig.pitch = 0.15;
             }
+            Scenario::FootIk => {
+                b.feet = Vec3::new(5.3, 0.3, 0.0);
+                b.heading = 0.0; // facing -Z along the box's west edge: the left foot is over it
+                rig.yaw = 0.0;
+                rig.distance = 3.0;
+                rig.pitch = 0.1;
+            }
             Scenario::StepUp => {
                 b.feet = Vec3::new(9.0, 0.0, -3.0);
                 b.heading = std::f32::consts::PI; // facing +Z, toward the box
@@ -338,7 +348,7 @@ fn autopilot(
     pad.magnitude = 1.0;
     pad.speed01 = 1.0;
     match *sc {
-        Scenario::Pose | Scenario::Back => {
+        Scenario::Pose | Scenario::Back | Scenario::FootIk => {
             pad.magnitude = 0.0;
             pad.speed01 = 0.0;
         }

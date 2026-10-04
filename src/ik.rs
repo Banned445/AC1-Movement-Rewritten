@@ -190,6 +190,9 @@ pub struct LimbIk {
     pub lean: f32,
     /// Hips, Spine, Head joint indices.
     body_bones: Option<[usize; 3]>,
+    /// The standing foot IK (`IKGroundBiped`): left and right foot, and the pelvis drop (m, ≤ 0).
+    pub ground: [GroundFoot; 2],
+    pub pelvis: f32,
     /// Joint indices of each chain (resolved once from the rig).
     chains: Option<[[usize; 3]; 4]>,
 }
@@ -249,9 +252,90 @@ fn contact_of(limb: usize, p: Vec3, normal: Vec3) -> Vec3 {
 /// PORT: ankle height above the sole (xx_h_wait_hipm: ankles ~0.09 m above the animation origin).
 const ANKLE_HEIGHT: f32 = 0.09;
 
-/// PORT stand-in for the game's ground foot IK (`GroundIKState` delay / fade in / running / fade out, RE/11 §2.4, not
-/// reversed): a foot the animation puts below the surface under it is lifted onto it. Without it the flight clips'
-/// reaching leg went through the roof on landings (and any clip played over a step or a lip clipped).
+/// One foot of the game's standing foot IK (`scimitar::FootIK`, 720 bytes, two of them in `IKGroundBiped` 0x430CA0).
+/// `state` follows the exe's FootIK +4: 0 off, 1 fading in, 2 running, 3 fading out (timer +64 / length +68).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GroundFoot {
+    pub state: u8,
+    t: f32,
+    dur: f32,
+    /// Ankle height where the fade started (+56 fade in, +88 fade out).
+    from: f32,
+    /// The ankle height on the ground under the foot (+40), and the smoothed one used while running.
+    pub target: f32,
+    cur: f32,
+    /// The ankle height handed to the leg solve this frame.
+    pub goal: f32,
+}
+
+/// `IKGroundBiped` fade time (`sub_42D5E0(0.2)`, `sub_42F290(…, 0.2)`).
+const GROUND_IK_FADE: f32 = 0.2;
+
+impl GroundFoot {
+    fn fade_in(&mut self, from: f32) {
+        // sub_42F290: from off or while fading out
+        if matches!(self.state, 0 | 3) {
+            self.state = 1;
+            (self.t, self.dur, self.from) = (0.0, GROUND_IK_FADE, from);
+        }
+    }
+    fn fade_out(&mut self) {
+        // sub_42D5E0: unless off, or already fading out with less than the new time left
+        if self.state != 0 && (self.state != 3 || self.dur - self.t > GROUND_IK_FADE) {
+            (self.t, self.dur, self.from) = (0.0, GROUND_IK_FADE, self.goal);
+            self.state = 3;
+        }
+    }
+    /// `sub_42F130` + `sub_42EFC0`: advance the timer and give the ankle height for this frame (None when off).
+    fn advance(&mut self, anim: f32, dt: f32) -> Option<f32> {
+        if self.state != 0 {
+            self.t += dt;
+            if self.t >= self.dur {
+                (self.t, self.dur) = (0.0, 0.0);
+                self.state = match self.state {
+                    1 => {
+                        self.cur = self.target;
+                        2
+                    }
+                    3 => 0,
+                    s => s,
+                };
+            }
+        }
+        let s = if self.dur > 0.0 { self.t / self.dur } else { 1.0 };
+        self.goal = match self.state {
+            1 => self.from + (self.target - self.from) * s,
+            // running: the ankle follows the ground under it, smoothed (sub_42E7E0 rate 2; PORT: exponential)
+            2 => {
+                self.cur += (self.target - self.cur) * (1.0 - (-2.0 * dt).exp());
+                self.cur
+            }
+            3 => self.from + (anim - self.from) * s,
+            _ => return None,
+        };
+        Some(self.goal)
+    }
+}
+
+/// `sub_432940`: the ground under an animated ankle, from 0.5 m above it to 0.5 m below (`sub_432570`, straight down),
+/// as an ankle height (+ the ankle's height above the root). None when nothing is hit, or when the knee would end up
+/// less than 0.15 m above the new ankle.
+fn ground_socket(c: &crate::collision::CollisionWorld, ankle: Vec3, knee: Vec3, ankle_height: f32) -> Option<f32> {
+    // a ray (not the controller's footprint): the highest top under the ankle's own x / z
+    let (top, bottom) = (ankle.y + 0.5, ankle.y - 0.5);
+    let h = c
+        .boxes
+        .iter()
+        .filter(|b| ankle.x >= b.min.x && ankle.x <= b.max.x && ankle.z >= b.min.z && ankle.z <= b.max.z)
+        .map(|b| b.max.y)
+        .filter(|y| *y <= top && *y >= bottom)
+        .fold(None, |m: Option<f32>, y| Some(m.map_or(y, |m| m.max(y))))?;
+    let target = h + ankle_height;
+    (knee.y - target >= 0.15).then_some(target)
+}
+
+/// PORT stand-in, outside the standing foot IK: a foot the animation puts below the surface under it is lifted onto
+/// it. Without it the flight clips' reaching leg went through the roof on landings.
 fn ground_foot_target(ankle: Vec3, collision: &crate::collision::CollisionWorld) -> Option<Vec3> {
     let h = collision.ground_height(Vec3::new(ankle.x, ankle.y + 0.5, ankle.z), 1.0)?;
     let want = h + ANKLE_HEIGHT;
@@ -327,6 +411,56 @@ fn solve_limbs(
                 }
             }
         }
+        // ---------------------------------------------------------------- standing foot IK (IKGroundBiped 0x432AC0)
+        // Only while standing still on the ground (speed ≤ 0.001; moving fades both feet out over 0.2 s). Each foot
+        // looks for the ground under it; the IK runs only when the ground is uneven (feet ≥ 5 cm apart in height, or
+        // the left foot ≥ 5 cm off the root), the pelvis drops for the lower foot (≤ 1.5 m/s) and each leg is solved
+        // onto its ankle height.
+        let standing = body.grounded && body.velocity.length() <= 0.001 && targets.feet.is_none() && targets.hands.is_none();
+        let mut ground_goal: [Option<f32>; 2] = [None; 2];
+        if let Some(c) = collision.as_deref() {
+            let ankle = [global[chains[2][2]].pos, global[chains[3][2]].pos];
+            let knee = [global[chains[2][1]].pos, global[chains[3][1]].pos];
+            if standing {
+                let sockets: [Option<f32>; 2] = std::array::from_fn(|f| ground_socket(c, ankle[f], knee[f], (ankle[f].y - body.feet.y).max(0.0)));
+                let z = [sockets[0].unwrap_or(ankle[0].y), sockets[1].unwrap_or(ankle[1].y)];
+                let (ah0, ah1) = (ankle[0].y - body.feet.y, ankle[1].y - body.feet.y);
+                let too_far = (ankle[0].y - ankle[1].y).abs() > 0.6;
+                if !too_far && ((z[0] - ah0 - (z[1] - ah1)).abs() >= 0.05 || (z[0] - ah0 - body.feet.y).abs() >= 0.05) {
+                    for f in 0..2 {
+                        if let Some(t) = sockets[f] {
+                            ik.ground[f].target = t;
+                            let from = if ik.ground[f].state == 0 { ankle[f].y } else { ik.ground[f].goal };
+                            ik.ground[f].fade_in(from);
+                        }
+                    }
+                } else {
+                    ik.ground.iter_mut().for_each(GroundFoot::fade_out);
+                }
+            } else {
+                ik.ground.iter_mut().for_each(GroundFoot::fade_out);
+            }
+            for f in 0..2 {
+                ground_goal[f] = ik.ground[f].advance(ankle[f].y, dt);
+            }
+            // the pelvis goes down by how far the lower foot's ankle sits below its animated height (sub_431240)
+            let want = (0..2).filter_map(|f| ground_goal[f].map(|g| g - ankle[f].y)).fold(0.0f32, f32::min);
+            ik.pelvis += (want - ik.pelvis).clamp(-1.5 * dt, 1.5 * dt);
+            if ground_goal.iter().any(Option::is_some) || ik.pelvis != 0.0 {
+                for f in 0..2 {
+                    if let Some(g) = ground_goal[f] {
+                        ground_fix[2 + f] = Some(Vec3::new(ankle[f].x, g, ankle[f].z));
+                    }
+                }
+                let offset = Vec3::Y * ik.pelvis;
+                for g in &mut global {
+                    g.pos += offset;
+                }
+                if let Ok(mut t) = joints.get_mut(rig.root) {
+                    t.translation += player.rot.inverse() * offset;
+                }
+            }
+        }
         if goals.iter().all(|g| g.is_none()) && ground_fix.iter().all(|g| g.is_none()) {
             ik.fit = Vec3::ZERO;
             continue;
@@ -389,6 +523,8 @@ fn solve_limbs(
             let (a, b, c) = (global[ia].pos, global[ib].pos, global[ic].pos);
             let (target, w) = match (goals[limb], ground_fix[limb]) {
                 (Some((contact, w)), _) => (c.lerp(effector_goal(limb, contact, n), w), w),
+                // the standing foot IK's ankle height
+                (None, Some(t)) if ground_goal[limb - 2].is_some() => (t, 1.0),
                 // the hips may have moved: re-check the foot against the surface
                 (None, Some(_)) => match collision.as_deref().and_then(|col| ground_foot_target(c, col)) {
                     Some(t) => (t, 1.0),
@@ -533,6 +669,13 @@ pub fn log_ik_error(q: Query<(&Rig, &LimbIk, &LimbTargets)>, globals: Query<&Glo
         if !parts.is_empty() {
             info!("ik error: {} | hips {:.3}m lean {:.2}", parts.join(" "), ik.fit.length(), ik.lean);
         }
+        if ik.ground.iter().any(|f| f.state != 0) || ik.pelvis != 0.0 {
+            let foot = |f: &GroundFoot, i: usize| {
+                let err = globals.get(rig.joints[chains[i][2]]).map(|g| (g.translation().y - f.goal).abs()).unwrap_or(-1.0);
+                format!("state {} goal {:.3} err {:.3}", f.state, f.goal, err)
+            };
+            info!("ground ik: L {} | R {} | pelvis {:.3}", foot(&ik.ground[0], 2), foot(&ik.ground[1], 3), ik.pelvis);
+        }
     }
 }
 
@@ -561,6 +704,31 @@ mod tests {
         let (da, db) = two_bone(a, b, c, t, Vec3::Z);
         let c2 = a + da * (b - a) + db * (c - b);
         assert!(c2.normalize().dot(t.normalize()) > 0.999);
+    }
+
+    #[test]
+    fn ground_foot_fades_in_and_out_over_0_2_s() {
+        let dt = 1.0 / 60.0;
+        let mut f = GroundFoot { target: 0.1, ..Default::default() };
+        assert_eq!(f.advance(0.4, dt), None, "off: no goal");
+        f.fade_in(0.4);
+        let mut frames = 0;
+        while f.state == 1 {
+            let g = f.advance(0.4, dt).unwrap();
+            assert!((0.1..=0.4).contains(&g));
+            frames += 1;
+        }
+        assert_eq!(f.state, 2);
+        assert!((11..=13).contains(&frames), "{frames}"); // 0.2 s
+        assert!((f.advance(0.4, dt).unwrap() - 0.1).abs() < 1e-4, "running: on the ground");
+        f.fade_out();
+        assert_eq!(f.state, 3);
+        let mut last = 0.0;
+        while let Some(g) = f.advance(0.4, dt) {
+            last = g;
+        }
+        assert_eq!(f.state, 0);
+        assert!(last > 0.35, "fades back to the animated ankle: {last}");
     }
 
     #[test]
