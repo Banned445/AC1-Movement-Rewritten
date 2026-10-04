@@ -2078,3 +2078,100 @@ fn a_long_reach_from_the_climb_into_a_free_hang_catches_one_handed() {
     assert_eq!(l.hang_type, ledge::LedgeHangType::Free);
     assert!(l.hand_l.x > -54.25 && l.hand_r.x > -54.25 && (l.hand_l.y - 3.6).abs() < 0.05, "both hands on slab Q: {:?} {:?}", l.hand_l, l.hand_r);
 }
+
+/// Grab the wall in front (facing +Z), climb with a light push until both feet are on the 2.4 m band, then push left
+/// (+X) lightly until `done`.
+fn climb_then_left(start: Vec3, done: impl Fn(&Sim) -> bool) -> Sim {
+    let mut s = Sim::new(start, FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
+    s.pad(Vec3::Z, 0.45, true, false);
+    let level = |s: &Sim| {
+        let c = &s.data().climb;
+        c.moving.is_none() && (c.foot_l.y - 2.4).abs() < 0.01 && (c.foot_r.y - 2.4).abs() < 0.01
+    };
+    assert!(s.run_until(10.0, level), "feet never reached 2.4 m: {:?} {:?}", s.data().climb.foot_l, s.data().climb.foot_r);
+    s.pad(Vec3::X, 0.45, true, false);
+    let ok = s.run_until(8.0, &done);
+    assert!(ok, "never got there: {} feet {:?} {:?}", s.data().climb.last_action, s.data().climb.foot_l, s.data().climb.foot_r);
+    s
+}
+
+#[test]
+fn the_climb_reaches_across_a_gap_onto_climb_holds() {
+    use crate::player::ledge_moves::CLIMB_REACH_TABLE;
+    // ReachOtherSurfaceSide 0xDF7850 type 0: wall R1's holds end at x -70; wall R2's start 2 m further left. The reach
+    // (`climb1m_tr_climb1m_left_3`: start in place, loop to the new holds, end in the wait) keeps the climb.
+    let mut s = climb_then_left(Vec3::new(-71.0, 0.0, -11.4), |s| s.data().climb.reach.is_some());
+    let r = s.data().climb.reach.unwrap();
+    assert_eq!(s.data().climb.last_action, "reach to climb holds");
+    assert_eq!(r.ids, CLIMB_REACH_TABLE[0][1][0], "the long left reach");
+    s.pad(Vec3::X, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().climb.reach.is_none() && s.data().climb.moving.is_none()), "never arrived");
+    let c = &s.data().climb;
+    assert_eq!(s.loco().current, ActorContextId::Climb);
+    assert!(c.settle.is_some_and(|(id, _)| id == r.ids[2]), "the end plays in the wait: {:?}", c.settle);
+    assert!(c.hand_l.x > -68.0 && c.foot_l.x > -68.0 && (c.foot_l.y - 2.4).abs() < 0.05 && (c.hand_l.y - 3.6).abs() < 0.05, "on wall R2: {:?} {:?}", c.hand_l, c.foot_l);
+    assert!((s.body().feet - c.frame.root).length() < 1e-3, "the root on the new pose");
+}
+
+#[test]
+fn the_climb_turns_into_an_inside_corner() {
+    use crate::player::climb::CORNER_CLIMB;
+    // TrySideJump 0xDF29E0 near: wall T stands square to wall S on its left, with holds on its -X face
+    let mut s = climb_then_left(Vec3::new(-81.0, 0.0, -11.4), |s| s.data().climb.last_action == "corner climb in");
+    assert_eq!(s.data().climb.move_action, Some(CORNER_CLIMB[0][0]), "`corner_left_090_in`");
+    s.pad(Vec3::X, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().climb.moving.is_none()), "never arrived");
+    let c = &s.data().climb;
+    assert!(c.normal.x < -0.99, "facing +X into wall T: {:?}", c.normal);
+    assert!((c.foot_l.x + 80.08).abs() < 0.01 && (c.hand_l.y - c.foot_l.y - 1.2).abs() < 0.01, "on wall T's holds: {:?} {:?}", c.foot_l, c.hand_l);
+    assert!((s.body().feet.x + 80.58).abs() < 0.05, "root 0.5 m out from wall T: {:?}", s.body().feet);
+}
+
+#[test]
+fn the_climb_goes_round_an_outside_corner() {
+    use crate::player::climb::CORNER_CLIMB;
+    // TrySideJump 0xDF29E0 far: wall U ends at x -90, its end face carries holds
+    let mut s = climb_then_left(Vec3::new(-91.0, 0.0, -11.4), |s| s.data().climb.last_action == "corner climb out");
+    assert_eq!(s.data().climb.move_action, Some(CORNER_CLIMB[1][0]), "`corner_left_090_out`");
+    s.pad(Vec3::X, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().climb.moving.is_none()), "never arrived");
+    let c = &s.data().climb;
+    assert!(c.normal.x > 0.99, "facing -X into the end face: {:?}", c.normal);
+    assert!((c.foot_l.x + 89.92).abs() < 0.01, "on the end face's holds: {:?}", c.foot_l);
+    assert!(s.body().feet.x > -89.6, "root out from the end face: {:?}", s.body().feet);
+}
+
+#[test]
+fn the_climb_reaches_onto_a_ladder_at_the_side() {
+    use crate::player::ladder::LadderPhase;
+    // SideReachToLadder 0xDEF3A0: the ladder at x -100 is 2 m left of wall W's last holds
+    let mut s = climb_then_left(Vec3::new(-102.8, 0.0, -11.4), |s| s.data().climb.reach.is_some_and(|r| r.ladder.is_some()));
+    s.pad(Vec3::X, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "never reached the ladder: {}", s.data().climb.last_action);
+    assert_eq!(s.data().ladder.phase, Some(LadderPhase::Entry), "the reach's end `…_tr_ladder_wait_r`");
+    assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled");
+    let f = s.body().feet;
+    assert!((f.x + 100.0).abs() < 0.05 && (f.z + 11.0).abs() < 0.05, "0.5 m out from the ladder: {f:?}");
+    assert_eq!(s.data().ladder.foot, 1, "right foot ahead after a left reach");
+}
+
+#[test]
+fn the_climb_reaches_up_past_missing_holds() {
+    use crate::player::climb::{reach_ids, CLIMB_REACH_VERTICAL};
+    // ReachOtherSurfaceVertical 0xDF0050: wall V has no band at 3.0 m. With the hands on 2.4 m a short step up finds no
+    // hold (a hard push would take the LONG grid move); the reach goes to feet 2.4 / hands 3.6.
+    let mut s = Sim::new(Vec3::new(-116.0, 0.0, -11.4), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed");
+    s.pad(Vec3::Z, 0.45, true, false);
+    assert!(s.run_until(10.0, |s| s.data().climb.reach.is_some()), "no reach: {} {:?}", s.data().climb.last_action, s.data().climb.foot_l);
+    let r = s.data().climb.reach.unwrap();
+    assert_eq!(s.data().climb.last_action, "reach up / down");
+    assert!(r.ids == reach_ids(CLIMB_REACH_VERTICAL[0][0]) || r.ids == reach_ids(CLIMB_REACH_VERTICAL[1][0]), "a short reach up: {:x?}", r.ids);
+    assert!((r.holds[2].y - 2.4).abs() < 0.05 && (r.holds[0].y - 3.6).abs() < 0.05, "feet 2.4 / hands 3.6: {:?}", r.holds);
+    s.pad(Vec3::Z, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().climb.reach.is_none() && s.data().climb.moving.is_none()), "never arrived");
+    assert!((s.data().climb.foot_l.y - 2.4).abs() < 0.05);
+}

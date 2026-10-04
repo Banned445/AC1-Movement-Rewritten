@@ -875,6 +875,11 @@ fn choose_clip(
                 match (c.moving, c.move_action) {
                     // a grid move plays the action of its SHORT/LONG table entry
                     (Some(_), Some(id)) => action(&lib, &[id], false, 6_000_000 + c.move_seq as u64, Some(0.1), None),
+                    // a reach's end action, played when the root arrives (0xDE9B50)
+                    (None, _) if c.settle.is_some() => {
+                        let (id, _) = c.settle.unwrap();
+                        action(&lib, &[id], false, 6_000_000 + c.move_seq as u64, Some(0.1), None)
+                    }
                     // no move for the stick: look around toward it (0xDF4410)
                     (None, _) if c.look.is_some() => {
                         let id = c.look.unwrap();
