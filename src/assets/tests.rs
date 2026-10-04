@@ -66,6 +66,36 @@ fn altair_model_loads_from_install() {
 }
 
 #[test]
+fn anim_event_tracks_decode_from_the_install() {
+    use super::ac_anim::{decode_events, EventKind};
+    if !install_present() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    let mut f = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let e = f.find("Game Fix").cloned().unwrap();
+    let res = f.resources(&e).unwrap();
+    let anims: Vec<_> = res.iter().filter(|r| r.class_hash == 0x0FA3_067F).collect();
+    let failed: Vec<_> = anims.iter().filter(|r| decode_events(&r.payload).is_err()).map(|r| r.name.as_str()).collect();
+    // RE/10 §2.1: all but the clips with an FXEvent or the one unknown assassination event
+    assert!(anims.len() > 12_000 && failed.len() <= 23, "{} of {} failed: {:?}", failed.len(), anims.len(), &failed[..failed.len().min(5)]);
+    // a jog stop: walk end, slide, pivot at 16, 18 and 22 / 120 s
+    let stop = anims.iter().find(|r| r.name == "xx_h_jogstop_footr").unwrap();
+    let ev = decode_events(&stop.payload).unwrap();
+    let got: Vec<(i32, u32)> = ev
+        .iter()
+        .map(|e| ((e.time * 120.0).round() as i32, match e.kind { EventKind::Contact { ty, .. } => ty, _ => u32::MAX }))
+        .collect();
+    assert_eq!(got, vec![(16, 13), (18, 8), (22, 6)]);
+    // the joined walk cycle steps once per foot (ft_walk_cycle at 0.167 s into each half)
+    let (clips, _, _) = super::anims::load_locomotion(&game_dir()).expect("load clips");
+    let walk = clips.iter().find(|c| c.name == "walk").unwrap();
+    let steps: Vec<f32> = walk.events.iter().filter(|e| e.kind == EventKind::Contact { ty: 12, bits: 3 }).map(|e| e.time).collect();
+    assert_eq!(steps.len(), 2, "{:?}", walk.events);
+    assert!((steps[0] - 20.0 / 120.0).abs() < 1e-4 && (steps[1] - (0.5333 + 20.0 / 120.0)).abs() < 1e-3, "{steps:?}");
+}
+
+#[test]
 fn locomotion_clips_decode_with_measured_speeds() {
     if !install_present() {
         eprintln!("skipped: game install not found");

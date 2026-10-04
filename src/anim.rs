@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::assets::ac_actions::{ActBlend, ActionGraph, DisplacementMode};
+use crate::assets::ac_anim::{AnimEvent, EventKind, CONTACT_HUMAN};
 use crate::assets::anims::load_locomotion;
 use crate::assets::game_dir;
 use crate::model::Rig;
@@ -29,6 +30,38 @@ pub struct AnimClip {
     pub root_speed: f32,
     /// ACUATORCONTACTS keys (bitmask held until the next key; bits = `AcuatorsContactsTypes`).
     pub contacts: Vec<(f32, u8)>,
+    /// Event track keys in time order (footsteps, landings, sounds; RE/10 §2.1).
+    pub events: Vec<AnimEvent>,
+}
+
+/// An event key the playing clip passed this frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FiredEvent {
+    pub clip: String,
+    pub time: f32,
+    pub kind: EventKind,
+}
+
+/// The event keys passed when a clip's time goes from `from` to `to`: (from, to], or, when the time went backwards
+/// (the loop wrapped), (from, end] and then [0, to]. `from = None`: the clip just started, [0, to].
+/// PORT (hypothesis): the game's firing rule (inclusive ends, keys skipped by a jump in time) is not traced.
+fn passed_events(events: &[AnimEvent], from: Option<f32>, to: f32) -> impl Iterator<Item = &AnimEvent> {
+    let (a, wrap) = match from {
+        Some(f) if to >= f => (f, false),
+        Some(f) => (f, true),
+        None => (-1.0, false),
+    };
+    let (end, head) = if wrap { (f32::INFINITY, to) } else { (to, -1.0) };
+    events.iter().filter(move |e| e.time > a && e.time <= end).chain(events.iter().filter(move |e| e.time <= head))
+}
+
+/// A readable name for an event (the ContactEventTypeHuman name for contacts).
+pub fn event_label(k: &EventKind) -> String {
+    match k {
+        EventKind::Contact { ty, .. } => CONTACT_HUMAN.get(*ty as usize).map_or_else(|| format!("contact {ty}"), |s| s.to_string()),
+        EventKind::Audio { sound } => format!("audio {sound:08x}"),
+        EventKind::Other(c) => format!("event {c:08x}"),
+    }
 }
 
 fn find_span<T>(keys: &[(f32, T)], t: f32) -> (usize, usize, f32) {
@@ -228,6 +261,11 @@ pub struct AnimPlayer {
     pub hold: Option<ActorContextId>,
     /// Contact tags of the current frame (written by `apply_clip`).
     pub contacts: ContactState,
+    /// Event keys the dominant clip passed this frame (written by `apply_clip`; footstep / landing sounds and FX
+    /// read these).
+    pub events: Vec<FiredEvent>,
+    /// The dominant clip and its time when events were last collected.
+    event_cursor: Option<(String, f32)>,
     seen_landing: u32,
     /// InAir entry the fall-entry clip was started for.
     seen_fall: Option<u32>,
@@ -944,6 +982,20 @@ pub fn apply_clip(
         // contact tags of the dominant clip (for the limb IK); ACTBlendAcuatorMode FROMA keeps A's while blending
         p.contacts = lib.dominant(&item).map(|c| contact_state(c, p.phase * c.duration)).unwrap_or_default();
 
+        // event keys the dominant clip passed since the last frame
+        p.events.clear();
+        if let Some(c) = lib.dominant(&item) {
+            let t = p.phase * c.duration;
+            let from = p.event_cursor.as_ref().filter(|(n, _)| *n == c.name).map(|(_, f)| *f);
+            let fired: Vec<FiredEvent> =
+                passed_events(&c.events, from, t).map(|e| FiredEvent { clip: c.name.clone(), time: e.time, kind: e.kind.clone() }).collect();
+            for e in &fired {
+                debug!("anim event: {} t={:.3} {}", e.clip, e.time, event_label(&e.kind));
+            }
+            p.events = fired;
+            p.event_cursor = Some((c.name.clone(), t));
+        }
+
         let fading = p.fade < 1.0 && p.prev.is_some();
         if fading && p.blend.acuator == 0 {
             p.contacts = match p.a_roll.as_ref() {
@@ -1026,7 +1078,7 @@ fn load_library(mut lib: ResMut<AnimLibrary>) {
                     .and_then(|k| Some((k.first()?.1, k.last()?.1)))
                     .map(|(a, b)| (b - a).length() / c.duration.max(1e-3))
                     .unwrap_or(0.0);
-                lib.clips.insert(c.name.clone(), AnimClip { name: c.name, duration: c.duration, rotations, translations, root_speed, contacts: c.contacts });
+                lib.clips.insert(c.name.clone(), AnimClip { name: c.name, duration: c.duration, rotations, translations, root_speed, contacts: c.contacts, events: c.events });
             }
             lib.status = format!("anims: {} clips, {} graph actions from your install", lib.clips.len(), graph.actions.len());
             lib.graph = graph;
@@ -1100,6 +1152,20 @@ mod tests {
         let w = fall_grasp_weights(-f * 0.5, f);
         assert!((w[0] - 0.5).abs() < 1e-4);
         assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn passed_events_cover_the_frame_and_the_loop_wrap() {
+        let ev = |t: f32| AnimEvent { time: t, kind: EventKind::Contact { ty: 12, bits: 3 } };
+        let keys = [ev(0.0), ev(0.167), ev(0.7)];
+        let times = |from: Option<f32>, to: f32| passed_events(&keys, from, to).map(|e| e.time).collect::<Vec<_>>();
+        // a new clip fires its key at 0
+        assert_eq!(times(None, 0.01), vec![0.0]);
+        // (from, to]: a key exactly at the frame's end fires once, not again next frame
+        assert_eq!(times(Some(0.1), 0.167), vec![0.167]);
+        assert!(times(Some(0.167), 0.2).is_empty());
+        // the loop wrapped: the tail of the cycle, then its start
+        assert_eq!(times(Some(0.68), 0.05), vec![0.7, 0.0]);
     }
 
     #[test]

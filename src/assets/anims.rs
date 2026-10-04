@@ -16,6 +16,8 @@ pub struct RawClip {
     /// ACUATORCONTACTS track (fixed track 2): contact bitmask per key, held until the next key.
     /// Bits (`AcuatorsContactsTypes`): 0 L heel, 1 R heel, 2 L toes, 3 R toes, 4 L hand, 5 R hand, 6 no look-at.
     pub contacts: Vec<(f32, u8)>,
+    /// Event track keys (footsteps, landings, sounds), in time order across the joined halves.
+    pub events: Vec<super::ac_anim::AnimEvent>,
 }
 
 /// Fixed track id of the contact bitmask (`AnimTrack::FixedTrackIds` 2 = ACUATORCONTACTS).
@@ -164,7 +166,7 @@ pub fn load_locomotion(game_dir: &Path) -> Result<(Vec<RawClip>, ActionGraph, Ha
         if !seen.insert(clip.clone()) {
             continue;
         }
-        let mut c = RawClip { name: clip.to_string(), duration: 0.0, rotations: HashMap::new(), translations: HashMap::new(), contacts: Vec::new() };
+        let mut c = RawClip { name: clip.to_string(), duration: 0.0, rotations: HashMap::new(), translations: HashMap::new(), contacts: Vec::new(), events: Vec::new() };
         let mut disp_end = [0f32; 3];
         for part in &parts {
             let payload = by_name.get(part.as_str()).ok_or(format!("animation {part} not found"))?;
@@ -180,6 +182,7 @@ pub fn load_locomotion(game_dir: &Path) -> Result<(Vec<RawClip>, ActionGraph, Ha
                 append(c.translations.entry(k).or_default(), &keys, off, |v| [v[0] + base[0], v[1] + base[1], v[2] + base[2]]);
             }
             append(&mut c.contacts, &contact_keys(&a), off, |v| v);
+            c.events.extend(a.events.iter().map(|e| super::ac_anim::AnimEvent { time: e.time + off, kind: e.kind.clone() }));
             if let Some(d) = c.translations.get(&TRACK_DISPLACEMENT).and_then(|k| k.last()) {
                 disp_end = d.1;
             }
