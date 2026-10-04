@@ -34,11 +34,18 @@ pub const STEP1_TO_HANGFREE: u32 = 0x0564_BB1E; // 90487582, probe C
 pub const STEP1_TO_PASSOVER: u32 = 0x0109_BB50;
 pub const ENTRY_TO_REBOUND: u32 = 0x0115_7E35;
 pub const STEP1_TO_REBOUND: u32 = 0x0115_7E36;
+/// `xx_h_rebound_footr_tr_fall`: VerticalEnd's last action, played when its rebound clip ends and the walling is left
+/// (0xE37590 SubState 6, flag +0x32).
+pub const REBOUND_TO_FALL: u32 = 0x0129_1762;
 
 pub const DUMPED_ACTIONS: &[u32] = &[
     ENTRY_A, ENTRY_B, STEP1, STEP1_TO_FALL, VERTICAL_END, ENTRY_TO_FALL, ENTRY_TO_KNEE, ENTRY_TO_PASSOVER, ENTRY_TO_HANGFREE,
-    STEP1_TO_KNEE, STEP1_TO_HANGWALL, STEP1_TO_HANGFREE, STEP1_TO_PASSOVER, ENTRY_TO_REBOUND, STEP1_TO_REBOUND,
+    STEP1_TO_KNEE, STEP1_TO_HANGWALL, STEP1_TO_HANGFREE, STEP1_TO_PASSOVER, ENTRY_TO_REBOUND, STEP1_TO_REBOUND, REBOUND_TO_FALL,
 ];
+
+/// The interpreter's walling state (`GoAssassinActionInterpreter` 0xEE05E0) pushes off straight back when the stick
+/// points within 50° of the facing (its angle to the facing, interp +0x1244), else along the stick.
+const PUSH_STRAIGHT_BACK: f32 = 0.872_664_6;
 
 /// entity+0x7C: the reference length of every walling band. 1.0 for Altaïr: the entry clip lifts the root
 /// exactly 1.0 m, which is the warp target's height (wall hit at 1.3·h minus 0.3·h, 0xE18390).
@@ -235,10 +242,30 @@ fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: 
     out.into_iter().map(|x| x.1).collect()
 }
 
-/// `ClassifyLedgeCandidate` 0xE341D0 (reduced): room to stand on top (≥ 0.4 m clear above, class 1).
-fn room_on_top(c: &LedgeCandidate, collision: &CollisionWorld) -> bool {
-    let top = c.point - c.normal * PULLUP_IN;
-    collision.ground_height(top + Vec3::Y * 0.05, 0.3).is_some() && collision.capsule_fits(Vec3::new(top.x, c.point.y, top.z))
+/// `HumanWalling__ClassifyLedgeCandidate` 0xE341D0: the room behind the edge. A cast (`sub_E1C820`, 2 m, layer 5)
+/// along the wall's inward direction turned 45° up about the edge (`flt_19BA7F0` = −45°), starting at the edge +
+/// 0.05·up + 0.05·n − 0.5·dir (out from the wall and below the edge, so it clears the corner). The flat distance from
+/// the edge to the hit (2 m when nothing is hit, or the hit is material class 3 with sub-material 8 / 9): < 0.03 → 0
+/// (blocked), < 0.4 → 2 (a hang only: no room to stand), else 1. The game never returns 3, so the pass-over exits
+/// (`…_tr_passover`, class 3 with WallingData +0x20) are unreachable. PORT: a 1 cm sphere sweep for the cast.
+fn classify(c: &LedgeCandidate, collision: &CollisionWorld) -> u8 {
+    let n = Vec3::new(c.normal.x, 0.0, c.normal.z).normalize_or_zero();
+    let dir = (Vec3::Y - n) * std::f32::consts::FRAC_1_SQRT_2;
+    let start = c.point + Vec3::Y * 0.05 + n * 0.05 - dir * 0.5;
+    let d = collision.sphere_free_distance(start, dir, 0.01, 2.0);
+    let flat = if d >= 2.0 {
+        2.0
+    } else {
+        let hit = start + dir * d;
+        Vec2::new(hit.x - c.point.x, hit.z - c.point.z).length()
+    };
+    if flat < 0.03 {
+        0
+    } else if flat < 0.4 {
+        2
+    } else {
+        1
+    }
 }
 
 fn hands(c: &LedgeCandidate) -> (Vec3, Vec3) {
@@ -289,14 +316,14 @@ fn pullup_exit(id: u32, b: f32, root: Vec3, c: &LedgeCandidate) -> LedgeEntry {
 fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &CollisionWorld) -> Option<LedgeEntry> {
     // A: FindLedge(pos, 0.3h, 1.05h+0.05, h, 0.8): 0.25h ≤ height ≤ h, room on top
     for c in find_ledge(g, root, root, facing, 0.3 * H, 1.05 * H + 0.05, 0.8) {
-        if (0.25 * H..=H).contains(&c.height) && room_on_top(&c, collision) {
+        if (0.25 * H..=H).contains(&c.height) && classify(&c, collision) == 1 {
             let b = ((c.height.max(0.3) - 0.3 * H) / (0.7 * H)).clamp(0.0, 1.0);
             return Some(pullup_exit(ENTRY_TO_KNEE, b, root, &c));
         }
     }
     // B: FindLedge(pos + 1.5·up − 0.6·fwd, 0.3h, h+0.05, …, 1.2): free hang, 4-way blend
     let o = root + Vec3::Y * 1.5 - facing * 0.6;
-    if let Some(c) = find_ledge(g, o, root, facing, 0.3 * H, H + 0.05, 1.2).into_iter().next() {
+    if let Some(c) = find_ledge(g, o, root, facing, 0.3 * H, H + 0.05, 1.2).into_iter().find(|c| classify(c, collision) != 0) {
         let hb = (c.height - 1.5).clamp(0.0, 1.0);
         let lat = (1.0 - (c.lateral.abs() - 0.1) / 0.7).clamp(0.0, 1.0);
         // clips: 250 min, 350 min, 250 max, 350 max (swing back)
@@ -313,7 +340,7 @@ fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Collisio
 fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &CollisionWorld) -> Option<LedgeEntry> {
     let oc = root - facing * 0.6 + Vec3::Y;
     for c in find_ledge(g, oc, root, facing, 0.3 * H, 1.7 * H + 0.1, 1.2) {
-        if c.lateral.abs() < 0.25 * H + 0.1 && (2.0 * H..2.7 * H + 0.1).contains(&c.height) {
+        if c.lateral.abs() < 0.25 * H + 0.1 && (2.0 * H..2.7 * H + 0.1).contains(&c.height) && classify(&c, collision) != 0 {
             let hb = ((c.height - 2.0) / 0.7).clamp(0.0, 1.0);
             let (hl, hr) = hands(&c);
             let to = hang_root_at(hl, hr, c.normal, LedgeHangType::Free, collision);
@@ -322,7 +349,11 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
     }
     let od = root - facing * 0.6;
     for c in find_ledge(g, od, root, facing, 0.8 * H, 2.7 * H + 0.1, 1.2) {
-        if (0.5 * H..H).contains(&c.height) && room_on_top(&c, collision) {
+        let class = classify(&c, collision);
+        if class == 0 {
+            continue;
+        }
+        if (0.5 * H..H).contains(&c.height) && class == 1 {
             return Some(pullup_exit(STEP1_TO_KNEE, (c.height - 0.5 * H) / (0.5 * H), root, &c));
         }
         if (H..2.7 * H + 0.1).contains(&c.height) {
@@ -341,7 +372,7 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
 
 pub fn update_walling(
     time: Res<Time>,
-    pad: Res<PadInput>,
+    mut pad: ResMut<PadInput>,
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
@@ -366,22 +397,36 @@ pub fn update_walling(
         let sub = w.sub_state;
         let done = w.t >= w.duration() - 1e-4;
 
-        // Rebound (ReboundJump 0xE365C0): push-off along the stick, within ±89° of the wall normal; the landing
-        // query is not ported: the fallback target pos + 7·dir − 3·up. PORT trigger: the stick pushed away from
-        // the wall (the game's stick vector +0x20 comes from the untraced pad controller).
-        if sub != WallingSubState::EntryA && pad.speed01 > 0.0 && pad.dir.dot(normal) > 0.5 {
-            let dir = Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or(normal);
-            let target = JumpTarget { position: body.feet + dir * 7.0 - Vec3::Y * 3.0, type_flags: jump_blend::TARGET_FREESTEP, hang: None, straight: None, pass: None };
-            body.heading = super::heading_of(dir);
+        // The interpreter's walling state (0xEE05E0) sets the input direction (+0x20, `SetInputDirection` 0xE36250)
+        // only while Legs was pressed within 0.3 s (interp +0x1126): straight back from the wall when the stick points
+        // within 50° of the facing, else along the stick; zero otherwise. It always sends command 0 (+0x38,
+        // `SetActionCommand` 0xE337D0): the player's wall run never falls off by command. PORT: a neutral stick pushes
+        // straight back (the game keeps the last stick angle).
+        let push = pad.jump_buffered().then(|| {
+            let stick = Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or_zero();
+            if pad.speed01 <= 0.0 || stick == Vec3::ZERO || stick.angle_between(facing) < PUSH_STRAIGHT_BACK {
+                normal
+            } else {
+                stick
+            }
+        });
+        // Rebound (0xE37590): at the end of EntryB, at any time in Vertical and in VerticalEnd (command ≠ 4)
+        let rebound = match sub {
+            WallingSubState::EntryA => false,
+            WallingSubState::EntryB => done,
+            WallingSubState::Vertical | WallingSubState::VerticalEnd => true,
+        };
+        if let Some(push) = push.filter(|_| rebound) {
+            pad.consume_jump();
             let from = body.feet;
+            let (dir, target) = rebound_jump(from, normal, push, &guidance, &collision);
+            body.heading = super::heading_of(dir);
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
             continue;
         }
         if !done {
             continue;
         }
-        // command 0 = keep going up / try the ledges (+0x38). PORT: Legs held.
-        let go_on = pad.legs_held;
         let feet = body.feet;
         let fall = InAirEntry::Fall { from: feet, velocity: Vec3::ZERO, origin: FallOrigin::Ground, speed_param: 0.0 };
         match sub {
@@ -390,11 +435,7 @@ pub fn update_walling(
                 data.walling.play(WallingSubState::EntryB, a, None, feet, None);
             }
             WallingSubState::EntryB => {
-                if !go_on {
-                    // command ≠ 0: entry_footl_tr_fall (0xFF7CA1) and leave → falling
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(fall));
-                    continue;
-                }
+                // (command ≠ 0 would play entry_footl_tr_fall 0xFF7CA1 and leave; only AI walls send it)
                 if let Some(e) = probe_entry(&guidance, feet, facing, &collision) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                     continue;
@@ -411,9 +452,33 @@ pub fn update_walling(
                 data.walling.play(WallingSubState::VerticalEnd, a, b, feet, None);
             }
             WallingSubState::VerticalEnd => {
-                // anim done → leave: falling back off the wall
+                // the rebound clip done (sub_501760) → `rebound_footr_tr_fall` and leave (flag +0x32): falling back off
+                // the wall
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(fall));
+                data.air.fall_action = single(REBOUND_TO_FALL, 0);
             }
         }
     }
+}
+
+/// `HumanWalling__ReboundJump` 0xE365C0: the character turns away from the wall; the push-off direction is kept within
+/// ±89° of the wall normal (beyond ±90° it is turned to ±89°). A jump target along it (IHuman vt56, the ground jumps'
+/// guidance search, picked by `sub_E96BF0`), else the fallback pos + 7·dir − 3·up; jump `sub_B27180`(…, 2), flag +0x31,
+/// ActorState 67 (camera reset). Returns the direction and the target. PORT: the target search is `find_jump_target`.
+fn rebound_jump(from: Vec3, normal: Vec3, push: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> (Vec3, JumpTarget) {
+    let n = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
+    let mut dir = Vec3::new(push.x, 0.0, push.z).normalize_or(n);
+    if dir.dot(n) <= 0.0 {
+        let max = 1.553_343_1;
+        let side = if n.cross(dir).y >= 0.0 { 1.0 } else { -1.0 };
+        dir = Quat::from_rotation_y(max * side) * n;
+    }
+    let target = super::targets::find_jump_target(from, dir, guidance, collision).unwrap_or(JumpTarget {
+        position: from + dir * 7.0 - Vec3::Y * 3.0,
+        type_flags: jump_blend::TARGET_FREESTEP,
+        hang: None,
+        straight: None,
+        pass: None,
+    });
+    (dir, target)
 }
