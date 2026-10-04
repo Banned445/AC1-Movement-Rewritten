@@ -74,6 +74,8 @@ pub fn contact_bits(keys: &[(f32, u8)], t: f32) -> u8 {
 pub struct AnimLibrary {
     pub clips: HashMap<String, AnimClip>,
     pub graph: ActionGraph,
+    /// Body-part channels and the bones of each part (from the install).
+    pub body: crate::assets::body_parts::BodyParts,
     /// Animation resource id → resource (clip) name.
     pub anim_names: HashMap<u32, String>,
     pub status: String,
@@ -238,6 +240,103 @@ pub struct AnimPlayer {
     /// Phase set by the simulation (the ground step cycle, `MoveBlend`): the player shows it instead of
     /// advancing its own clock.
     sim_phase: Option<f32>,
+    /// A partial-body action playing over the full-body one (a channel of slot group 1).
+    pub overlay: Option<Overlay>,
+}
+
+/// A partial-body slot (`Anim__PlayActionOnSlots` 0x4FE730: an action on a channel of slot group 1 plays on the
+/// slots whose mask meets the channel's, over the full-body slot). PORT (hypothesis on the slot model): one overlay
+/// slot with the channel's bones, faded in and out like the default transition (0.2 s); while it shows, its bones
+/// follow its action instead of the full-body one.
+#[derive(Clone, Debug, Default)]
+pub struct Overlay {
+    pub action: u32,
+    items: Vec<ItemPlay>,
+    item: usize,
+    phase: f32,
+    /// 0 → 1 over 0.2 s, back to 0 when the action ends.
+    pub weight: f32,
+    ending: bool,
+    looping: bool,
+    /// The channel's bones, and per joint whether the overlay animates it (resolved against the rig on first use).
+    bones: std::collections::HashSet<u32>,
+    mask: Vec<bool>,
+}
+
+/// Fade time of the overlay slot (PORT: the default transition's 0.2 s).
+const OVERLAY_FADE: f32 = 0.2;
+
+impl AnimPlayer {
+    /// Play `action` on the partial-body slot when its channel is in slot group 1; returns false for a full-body
+    /// action (play those through the normal selection).
+    pub fn play_overlay(&mut self, lib: &AnimLibrary, action: u32) -> bool {
+        if self.overlay.as_ref().is_some_and(|o| o.action == action && !o.ending) {
+            return true;
+        }
+        let Some(a) = lib.graph.actions.get(&action) else { return false };
+        let Some(ch) = lib.body.channels.get(&a.channel) else { return false };
+        if ch.group == 0 {
+            return false;
+        }
+        let Some(items) = lib.action_items(action) else { return false };
+        let bones = lib.body.bones(ch.mask);
+        let weight = self.overlay.as_ref().map_or(0.0, |o| o.weight);
+        self.overlay = Some(Overlay { action, items, item: 0, phase: 0.0, weight, ending: false, looping: a.repeat == 0, bones, mask: Vec::new() });
+        true
+    }
+
+    /// Set the layer weights of the overlay's current item (a blended action such as the fall-grasp blend).
+    pub fn set_overlay_weights(&mut self, w: &[f32]) {
+        if let Some(it) = self.overlay.as_mut().and_then(|o| o.items.get_mut(o.item)) {
+            if it.layers.len() == w.len() {
+                for (l, w) in it.layers.iter_mut().zip(w) {
+                    l.1 = *w;
+                }
+            }
+        }
+    }
+
+    /// Stop the partial-body action (it fades out).
+    pub fn stop_overlay(&mut self) {
+        if let Some(o) = self.overlay.as_mut() {
+            o.ending = true;
+        }
+    }
+}
+
+/// Blend the overlay's pose over the full-body pose on its bones; advances it by `dt`.
+fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, rig: &Rig, pose: &mut [(Quat, Vec3)], dt: f32) {
+    if o.mask.len() != rig.bone_ids.len() {
+        o.mask = rig.bone_ids.iter().map(|b| o.bones.contains(b)).collect();
+    }
+    let Some(it) = o.items.get(o.item).cloned() else { return };
+    let duration = lib.item_duration(&it).max(1e-3);
+    o.phase += dt / duration;
+    if o.phase >= 1.0 {
+        if o.item + 1 < o.items.len() {
+            o.item += 1;
+            o.phase = 0.0;
+        } else if o.looping {
+            o.item = 0;
+            o.phase = o.phase.fract();
+        } else {
+            o.phase = 1.0;
+            o.ending = true;
+        }
+    }
+    o.weight = if o.ending { (o.weight - dt / OVERLAY_FADE).max(0.0) } else { (o.weight + dt / OVERLAY_FADE).min(1.0) };
+    let mut ov = Vec::new();
+    sample_layers(lib, rig, &o.items[o.item].layers, o.phase, &mut ov);
+    blend_masked(pose, &ov, &o.mask, o.weight);
+}
+
+/// `pose[i]` → `over[i]` by `w` where `mask[i]`.
+pub fn blend_masked(pose: &mut [(Quat, Vec3)], over: &[(Quat, Vec3)], mask: &[bool], w: f32) {
+    for (i, p) in pose.iter_mut().enumerate() {
+        if let (Some(true), Some(&(r, t))) = (mask.get(i).copied(), over.get(i)) {
+            *p = (qinterp(p.0, r, w), p.1.lerp(t, w));
+        }
+    }
 }
 
 /// What the selector wants playing.
@@ -448,6 +547,10 @@ fn choose_clip(
     for (loco, data, body, mut p) in &mut q {
         let g = &data.ground;
         p.sim_phase = None;
+        // the falling blend belongs to InAir: leaving it (a landing, a catch) fades the partial slot out
+        if loco.current != ActorContextId::InAir && p.overlay.as_ref().is_some_and(|o| o.action == ACT_FALL) {
+            p.stop_overlay();
+        }
         if let Some(ctx) = p.hold {
             if ctx == loco.current && !(p.phase >= 1.0 && p.item + 1 >= p.items.len()) {
                 continue;
@@ -577,8 +680,20 @@ fn choose_clip(
                         Some(once(entry.into(), 4_000_000 + data.air.seq as u64, None, 0.12))
                     } else if p.clip.as_deref().is_some_and(|c| c.ends_with("_to_fall")) && p.phase < 1.0 {
                         continue;
+                    } else if p.clip.as_deref().is_some_and(|c| c.ends_with("_to_fall")) && p.play_overlay(&lib, ACT_FALL) {
+                        // the falling blend is an upper-body action (channel 1, BodyPartTemplate_Human): it plays on
+                        // the partial slot while the full-body slot holds the entry's last frame; grasp weights only
+                        // while the grab input (Legs) is held
+                        let facing = body.forward();
+                        let want = if pad.legs_held { if pad.speed01 > 0.0 { pad.dir } else { facing } } else { Vec3::ZERO };
+                        let k = (dt * 7.0).min(1.0);
+                        let gd = p.grasp_dir;
+                        p.grasp_dir = gd + (want - gd) * k;
+                        let w = fall_grasp_weights(p.grasp_dir, facing);
+                        p.set_overlay_weights(&w);
+                        continue;
                     } else {
-                        // the falling blend: grasp weights only while the grab input (Legs) is held
+                        // no body-part data (or no entry clip): the falling blend on the full body
                         let facing = body.forward();
                         let want = if pad.legs_held { if pad.speed01 > 0.0 { pad.dir } else { facing } } else { Vec3::ZERO };
                         let k = (dt * 7.0).min(1.0);
@@ -992,12 +1107,23 @@ pub fn apply_clip(
         let prev_pose = prev.as_ref().filter(|v| v.len() == cur.len()).unwrap_or(&empty);
         let mut shown = std::mem::take(&mut p.last_pose);
         shown.clear();
+        let mut base: Vec<(Quat, Vec3)> = (0..rig.joints.len())
+            .map(|i| {
+                let (rot, pos) = cur[i];
+                match prev_pose.get(i) {
+                    Some(&(r0, p0)) => (qinterp(r0, rot, weight), p0.lerp(pos, weight)),
+                    None => (rot, pos),
+                }
+            })
+            .collect();
+        if let Some(o) = p.overlay.as_mut() {
+            apply_overlay(o, &lib, rig, &mut base, dt);
+        }
+        if p.overlay.as_ref().is_some_and(|o| o.ending && o.weight <= 0.0) {
+            p.overlay = None;
+        }
         for (i, e) in rig.joints.iter().enumerate() {
-            let (mut rot, mut pos) = cur[i];
-            if let Some(&(r0, p0)) = prev_pose.get(i) {
-                rot = qinterp(r0, rot, weight);
-                pos = p0.lerp(pos, weight);
-            }
+            let (rot, pos) = base[i];
             shown.push((rot, pos));
             let Ok(mut tr) = joints.get_mut(*e) else { continue };
             if !(rot.is_finite() && pos.is_finite()) && std::env::var_os("AC_NAN_LOG").is_some() {
@@ -1031,6 +1157,10 @@ fn load_library(mut lib: ResMut<AnimLibrary>) {
             lib.status = format!("anims: {} clips, {} graph actions from your install", lib.clips.len(), graph.actions.len());
             lib.graph = graph;
             lib.anim_names = names;
+            match crate::assets::body_parts::load_body_parts(&game_dir()) {
+                Ok(b) => lib.body = b,
+                Err(e) => warn!("body parts not loaded: {e}"),
+            }
             info!("{}", lib.status);
         }
         Err(e) => {
@@ -1052,6 +1182,43 @@ mod tests {
             assert_eq!(blend_weight(&bl, 0.0), 0.0);
             assert!((blend_weight(&bl, 1.0) - 1.0).abs() < 1e-6);
             assert!((blend_weight(&bl, 0.5) - mid).abs() < 1e-6, "{bl:?}");
+        }
+    }
+
+    #[test]
+    fn masked_blend_touches_only_the_masked_bones() {
+        let mut pose = vec![(Quat::IDENTITY, Vec3::ZERO); 3];
+        let over = vec![(Quat::from_rotation_x(1.0), Vec3::X); 3];
+        blend_masked(&mut pose, &over, &[false, true, true], 0.5);
+        assert_eq!(pose[0], (Quat::IDENTITY, Vec3::ZERO));
+        assert!((pose[1].1.x - 0.5).abs() < 1e-6);
+        assert!((pose[2].0.angle_between(Quat::IDENTITY) - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn body_part_channels_load_from_the_install() {
+        let dir = game_dir();
+        if !dir.join("DataPC.forge").exists() {
+            eprintln!("skipped: game install not found");
+            return;
+        }
+        let b = crate::assets::body_parts::load_body_parts(&dir).expect("body parts");
+        let full = b.channels[&0x01B9_9BC5];
+        assert_eq!((full.group, full.mask), (0, 0xFFFF_FFFF), "channel 0: the full body");
+        let upper = b.channels[&0x01B9_9C0A];
+        assert_eq!((upper.group, upper.mask), (1, 0x1FE), "channel 1: every part but the legs");
+        assert_eq!(b.parts.len(), 10);
+        assert!(b.parts[5].contains(&0xeb83_0ada), "part 5 = the left arm (LeftArm)");
+        assert!(!b.bones(0x1FE).contains(&0xded1_0611), "the upper body leaves the hips to the full-body slot");
+        // every movement action is on the full-body channel
+        let (_, graph, _) = load_locomotion(&dir).expect("graph");
+        let movement = ["HumanClimb", "HumanLedge", "HumanInAir", "HumanWalling", "HumanNarrow", "HumanLadder"];
+        for a in graph.actions.values().filter(|a| movement.iter().any(|m| a.block.starts_with(m))) {
+            if a.id == ACT_FALL || a.id == 0xCD6F_5E10 {
+                assert_eq!(b.channels.get(&a.channel).map(|c| c.group), Some(1), "the falling blend is upper-body");
+            } else {
+                assert_eq!(b.channels.get(&a.channel).map(|c| c.group), Some(0), "{:08x} in {}", a.id, a.block);
+            }
         }
     }
 

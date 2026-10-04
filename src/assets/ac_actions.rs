@@ -106,6 +106,8 @@ pub struct Action {
     pub flags: u8,
     /// +28: how many times the action plays; 0 = it loops (0x72FC30).
     pub repeat: u32,
+    /// +12: the `BodyPartChannel` (object id in `BodyPartTemplate_Human`; `crate::assets::body_parts`).
+    pub channel: u32,
 }
 
 /// All decoded actions, by action id (the ids the exe passes to the animation graph).
@@ -193,7 +195,10 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
     match cls {
         CLASS_ACTION => {
             let _action_id = r.u32()?;
-            read_obj(r, c, true)?; // BodyPartChannel
+            let channel = match read_obj(r, c, true)? {
+                Obj::Ref(id) => id,
+                _ => 0,
+            };
             let tr = |o: Obj| if let Obj::Transition(t) = o { Some(t) } else { None };
             let in_transition = tr(read_obj(r, c, false)?);
             let out_transition = tr(read_obj(r, c, false)?);
@@ -218,7 +223,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                     _ => {}
                 }
             }
-            let a = Action { id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat };
+            let a = Action { id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, channel };
             c.actions.push(a.clone());
             Ok(Obj::Action(a))
         }
