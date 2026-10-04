@@ -2045,3 +2045,36 @@ fn a_long_side_jump_into_a_free_hang_catches_one_handed_then_reaches_with_the_ot
     assert!((gap - 0.25).abs() < 0.03, "second hand 0.25 m from the first: {gap}");
     assert!(l.hand_l.x > 28.55 && l.hand_r.x > 28.55, "both hands on slab I: {:?} {:?}", l.hand_l, l.hand_r);
 }
+
+#[test]
+fn a_long_reach_from_the_climb_into_a_free_hang_catches_one_handed() {
+    use crate::player::ledge_moves::{MoveKind, CLIMB_REACH_TABLE};
+    // TryReachOtherSurface 0xDF9B30: wall P's holds end at x -56; slab Q (x -54.2..-53.0, top 3.6, nothing below) is a
+    // free-hang edge at hand height past the gap. Pushing left (+X) at the end of the holds plays
+    // `climb1m_tr_hangfree_left_3` (start in the climb, loop into the Ledge context), caught on one hand (SecondHandGrab)
+    let mut s = Sim::new(Vec3::new(-56.8, 0.0, -11.4), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
+    s.pad(Vec3::Z, 0.45, true, false);
+    let level = |s: &Sim| {
+        let c = &s.data().climb;
+        c.moving.is_none() && (c.foot_l.y - 2.4).abs() < 0.01 && (c.foot_r.y - 2.4).abs() < 0.01
+    };
+    assert!(s.run_until(10.0, level), "feet never reached 2.4 m: {:?} {:?}", s.data().climb.foot_l, s.data().climb.foot_r);
+    s.pad(Vec3::X, 0.45, true, false);
+    let reached = s.run_until(6.0, |s| s.loco().current == ActorContextId::Ledge);
+    assert!(reached, "no reach: {} feet {:?} {:?}", s.data().climb.last_action, s.data().climb.foot_l, s.data().climb.foot_r);
+    assert_eq!(s.data().climb.last_action, "reach to a hang");
+    let mv = s.data().ledge.mv.expect("the reach");
+    assert!(matches!(mv.kind, MoveKind::ClimbReach { long: true }), "a long reach: {:?}", mv.kind);
+    let ids = CLIMB_REACH_TABLE[2][1][0];
+    assert_eq!(mv.seq.map(|a| a.map(|a| a.id)), [Some(ids[0]), Some(ids[1]), Some(ids[2]), None], "climb1m_tr_hangfree_left_3 a / b / c");
+    assert_eq!(mv.hand_l, mv.hand_r, "caught with one hand");
+    let tail = s.data().ledge.queue.first().copied().expect("the second hand's reach");
+    assert_eq!(tail.seq[0].map(|a| a.id), Some(ids[1] + 2), "`_3_d`");
+    s.pad(Vec3::X, 0.0, false, false);
+    assert!(s.run_until(5.0, |s| s.data().ledge.mv.is_none() && s.data().ledge.queue.is_empty()), "never settled");
+    let l = &s.data().ledge;
+    assert_eq!(l.hang_type, ledge::LedgeHangType::Free);
+    assert!(l.hand_l.x > -54.25 && l.hand_r.x > -54.25 && (l.hand_l.y - 3.6).abs() < 0.05, "both hands on slab Q: {:?} {:?}", l.hand_l, l.hand_r);
+}

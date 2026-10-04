@@ -90,6 +90,9 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     (-40.0, -10.0, 4.0, 1.0, 7.0),
     (-43.5, -10.0, 3.0, 1.0, 2.4),
     (-37.0, -11.5, 2.0, 2.0, 2.4),
+    // --- the climb's reach to a hang at the side (TryReachOtherSurface 0xDF9B30): wall P (x -60..-56, face z -10.5) with
+    //     bands to 6.6 m (CLIMB_WALLS); on its left (+X) slab Q, a free-hang edge at 3.6 m past a gap (SLABS)
+    (-58.0, -10.0, 4.0, 1.0, 7.0),
 ];
 
 /// Ladders (bottom, top on the wall face; outward normal): guidance edges of sub-type Ladder.
@@ -123,6 +126,9 @@ const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
     (29.1, 2.6, 50.0, 1.0, 0.6, 0.3),
     // the bay above wall K: 3.3..7.0 m, its face 0.9 m out at z -11.4
     (-30.0, 7.0, -10.95, 4.0, 0.9, 3.7),
+    // slab Q left of wall P (x -54.2..-53.0, top 3.6, edge on the face line z -10.5, nothing below): a long reach from the
+    // climb into a free hang, caught on one hand (`climb1m_tr_hangfree_left_3`, then SecondHandGrab)
+    (-53.6, 3.6, -10.2, 1.2, 0.6, 0.3),
 ];
 
 /// Further climb walls (x range, face z with normal -Z, band index range: heights 0.6·k): wall K's bands up to 3.0 m
@@ -132,6 +138,8 @@ const CLIMB_WALLS: &[((f32, f32), f32, (i32, i32))] = &[
     ((-31.6, -28.4), -11.4, (6, 11)),
     // wall M, between blocks N and O
     ((-41.95, -38.05), -10.5, (1, 11)),
+    // wall P, the climb's reach to slab Q
+    ((-59.95, -56.05), -10.5, (1, 11)),
 ];
 
 /// Extra ledges on wall faces (p0, p1, outward normal): stone ledges that are not roof edges.
