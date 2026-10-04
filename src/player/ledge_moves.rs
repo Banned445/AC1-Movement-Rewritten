@@ -432,10 +432,14 @@ pub fn try_side_jump(
 /// the hang over its length, the entry goes to LedgeData +312, SubState 14 (ParallelJump: Movement with a step
 /// running, hang type = category ≠ 1). The long free-hang loops are SecondHandGrab triggers (`second_hand_grab`).
 ///
-/// Ported: types 1 and 2. PORT: the search is guidance probes stepped 0.1 m (as `try_side_jump`); the feet are a probe
-/// 1.2 m below the hand edge (a hit = climb holds, type 0, not ported: returns None); wall or free comes from the
-/// collision foot rays (`hang_type_at`), the greybox has no Surface guidance. The root follows the clips' displacement
-/// plus a linear correction (hypothesis, as for the ledge jumps) instead of holding still through the start.
+/// Type 0 (feet on climb holds) stays in the climb: both hands on the hand record and both feet on the foot record, the
+/// climb pose of those holds (0xB1CC20); the start, then the loop while the root goes to that pose (`StartReachLoop`
+/// 0xDEEE60), then the end in the Wait state (0xDE9B50), `climb::ClimbReach`.
+///
+/// PORT: the search is guidance probes stepped 0.1 m (as `try_side_jump`); the feet are a probe 1.2 m below the hand
+/// edge (a hit = climb holds, type 0); wall or free comes from the collision foot rays (`hang_type_at`), the greybox has
+/// no Surface guidance. For the hangs the root follows the clips' displacement plus a linear correction (hypothesis, as
+/// for the ledge jumps) instead of holding still through the start.
 pub fn try_climb_reach(
     right: bool,
     diag: usize,
@@ -445,7 +449,7 @@ pub fn try_climb_reach(
     root: Vec3,
     guidance: &GuidanceWorld,
     collision: &CollisionWorld,
-) -> Option<LedgeMove> {
+) -> Option<ClimbReachTarget> {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let side = if right { right_of(facing) } else { -right_of(facing) };
     let mut base = (foot_l + foot_r) * 0.5;
@@ -461,9 +465,20 @@ pub fn try_climb_reach(
             if off_wall {
                 let nn = hit.wall_normal;
                 let fc = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
-                // feet on climb holds 1.2 m below → type 0 (climb → climb, not ported)
-                if guidance.probe(hit.point - Vec3::Y * 1.2, 0.35, 0.3, Some(fc), 45f32.to_radians()).is_some() {
-                    return None;
+                let u_back = |to: Vec3| root - (to - root).normalize_or_zero() * 0.2625;
+                let dist = Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length();
+                let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
+                // feet on climb holds 1.2 m below → type 0: climb → climb
+                if let Some(f) = guidance.probe(hit.point - Vec3::Y * 1.2, 0.35, 0.3, Some(fc), 45f32.to_radians()) {
+                    let holds = [hit.point, hit.point, f.point, f.point];
+                    let normals = [nn, nn, f.wall_normal, f.wall_normal];
+                    let to = super::climb::climb_pose(holds, normals, fc).root;
+                    let from = u_back(to);
+                    if !collision.capsule_cast_free(from - facing * 0.15, 1.8, 0.35, to - from) {
+                        return None;
+                    }
+                    let ids = CLIMB_REACH_TABLE[0][long as usize][right as usize];
+                    return Some(ClimbReachTarget::Climb(super::climb::ClimbReach::new(ids, holds, normals, None)));
                 }
                 let r = right_of(-nn);
                 let c = hit.point + side * HAND_SPACING * 0.5;
@@ -478,13 +493,11 @@ pub fn try_climb_reach(
                 if !collision.capsule_cast_free(from, height, 0.35, to - (root - u * 0.2625)) {
                     return None;
                 }
-                let dist = Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length();
-                let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
                 let ids = CLIMB_REACH_TABLE[ty][long as usize][right as usize];
                 let seq = [single(ids[0], 0), single(ids[1], 0), single(ids[2], 0), None];
                 let durations = seq_durations(&seq);
                 let found = durations.iter().sum::<f32>() > 0.0;
-                return Some(LedgeMove {
+                return Some(ClimbReachTarget::Hang(LedgeMove {
                     kind: MoveKind::ClimbReach { long },
                     seq,
                     durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
@@ -501,12 +514,20 @@ pub fn try_climb_reach(
                     hand_l: hl,
                     hand_r: hr,
                     normal: nn,
-                });
+                }));
             }
         }
         s += 0.1;
     }
     None
+}
+
+/// What the climb's sideways reach found: climb holds (type 0, the climb keeps the move) or a hang (types 1 / 2, the
+/// Ledge context).
+#[derive(Clone, Copy, Debug)]
+pub enum ClimbReachTarget {
+    Climb(super::climb::ClimbReach),
+    Hang(LedgeMove),
 }
 
 /// SecondHandGrab (Ledge state 17): the loop items that end in a one-hand catch (`HumanLedge__CornerAnimFinished`
@@ -852,7 +873,7 @@ pub fn try_side_to_ladder(
             hand_r: q,
             normal: ln,
         };
-        let entry = LadderEntry { base, top, n: ln, from: to, facing: -ln, from_top: false, high: false, foot, from_ledge: true };
+        let entry = LadderEntry { base, top, n: ln, from: to, facing: -ln, from_top: false, high: false, foot, from_ledge: true, action: None };
         return Some((mv, entry));
     }
     None

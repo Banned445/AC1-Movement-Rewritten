@@ -93,10 +93,28 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     // --- the climb's reach to a hang at the side (TryReachOtherSurface 0xDF9B30): wall P (x -60..-56, face z -10.5) with
     //     bands to 6.6 m (CLIMB_WALLS); on its left (+X) slab Q, a free-hang edge at 3.6 m past a gap (SLABS)
     (-58.0, -10.0, 4.0, 1.0, 7.0),
+    // --- climb → climb (all faces at z -10.5, the climber faces +Z, left = +X):
+    //     reach across a 2 m gap: wall R1 (x -74..-70) and wall R2 (x -68..-65.6), bands on both (CLIMB_WALLS)
+    (-72.0, -10.0, 4.0, 1.0, 7.0),
+    (-66.8, -10.0, 2.4, 1.0, 7.0),
+    //     into an inside corner: wall S (x -84..-80) and wall T square to it on its left, 2.5 m out toward the climber
+    //     (x -80..-79, z -13..-9.5), bands on its -X face (CLIMB_WALLS_X)
+    (-82.0, -10.0, 4.0, 1.0, 7.0),
+    (-79.5, -11.25, 1.0, 3.5, 7.0),
+    //     round an outside corner: wall U (x -94..-90), bands round its +X end face (CLIMB_WALLS_X)
+    (-92.0, -10.0, 4.0, 1.0, 7.0),
+    //     onto a ladder at the side: wall W (x -106..-102) and the ladder wall (x -100.8..-99.2), ladder at x -100 (LADDERS)
+    (-104.0, -10.0, 4.0, 1.0, 7.0),
+    (-100.0, -10.0, 1.6, 1.0, 7.0),
+    //     up across missing holds: wall V (x -118..-114), no band at 3.0 m (CLIMB_WALLS)
+    (-116.0, -10.0, 4.0, 1.0, 7.0),
 ];
 
 /// Ladders (bottom, top on the wall face; outward normal): guidance edges of sub-type Ladder.
-pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[(Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.0, 63.5), Vec3::NEG_Z)];
+pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
+    (Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.0, 63.5), Vec3::NEG_Z),
+    (Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), Vec3::NEG_Z),
+];
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
 pub const BEAMS: &[(Vec3, Vec3)] = &[
@@ -140,6 +158,26 @@ const CLIMB_WALLS: &[((f32, f32), f32, (i32, i32))] = &[
     ((-41.95, -38.05), -10.5, (1, 11)),
     // wall P, the climb's reach to slab Q
     ((-59.95, -56.05), -10.5, (1, 11)),
+    // walls R1 / R2, the reach across the gap
+    ((-73.95, -70.05), -10.5, (1, 11)),
+    ((-67.95, -65.65), -10.5, (1, 11)),
+    // wall S, stopping short of the corner with wall T
+    ((-83.95, -80.4), -10.5, (1, 11)),
+    // wall U
+    ((-93.95, -90.05), -10.5, (1, 11)),
+    // wall W, beside the ladder
+    ((-105.95, -102.05), -10.5, (1, 11)),
+    // wall V: bands to 2.4 m, none at 3.0 m, then 3.6 m up
+    ((-117.95, -114.05), -10.5, (1, 4)),
+    ((-117.95, -114.05), -10.5, (6, 11)),
+];
+
+/// Climb walls facing ±X (face x, z range, outward normal x, band index range): the corner climbs.
+const CLIMB_WALLS_X: &[(f32, (f32, f32), f32, (i32, i32))] = &[
+    // wall T's -X face, from the inside corner with wall S out toward the climber
+    (-80.0, (-12.95, -10.6), -1.0, (1, 11)),
+    // wall U's +X end face
+    (-90.0, (-10.45, -9.55), 1.0, (1, 11)),
 ];
 
 /// Extra ledges on wall faces (p0, p1, outward normal): stone ledges that are not roof edges.
@@ -154,8 +192,9 @@ const CLIMB_BANDS: std::ops::RangeInclusive<i32> = 1..=15; // 0.6 .. 9.0 m
 /// How far the stone bands stick out of the tower face.
 const CLIMB_BAND_DEPTH: f32 = 0.08;
 /// Missing holds (x range, y range): the right one tests blocked grid moves (look-around); the left one sits under an
-/// overhang slab (SLABS) for the climb's jump up to it (TryBackEject 0xDF2F50).
-const CLIMB_GAPS: &[((f32, f32), (f32, f32))] = &[((-18.6, -17.4), (2.9, 4.3)), ((-22.6, -21.4), (2.9, 4.3))];
+/// overhang slab (SLABS) for the climb's jump up to it (TryBackEject 0xDF2F50). The right one is 1.8 m wide: the climb's
+/// reach up (0xDE8400) tries feet up to 0.6 m to either side and hands 0.375 m beyond, so a narrower gap is reached past.
+const CLIMB_GAPS: &[((f32, f32), (f32, f32))] = &[((-19.2, -17.4), (2.9, 4.3)), ((-22.6, -21.4), (2.9, 4.3))];
 
 /// Tower G2's climb holds (x range, face z, band heights): the jump up from a hang on wall G (2.6 m) to climb holds
 /// (TryJumpUpToClimb 0xDD5E10). Hands land on the 4.1 m band (1.5 m up: beyond a hand step), feet on the 2.9 m one.
@@ -179,7 +218,7 @@ fn band_segments(y: f32) -> Vec<(f32, f32)> {
 pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
     let mut collision = CollisionWorld::default();
     let mut guidance = GuidanceWorld::default();
-    collision.boxes.push(Aabb3 { min: Vec3::new(-100.0, -1.0, -100.0), max: Vec3::new(100.0, 0.0, 100.0) });
+    collision.boxes.push(Aabb3 { min: Vec3::new(-150.0, -1.0, -150.0), max: Vec3::new(150.0, 0.0, 150.0) });
     for &(x, z, sx, sz, h) in BUILDINGS {
         let min = Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5);
         let max = Vec3::new(x + sx * 0.5, h, z + sz * 0.5);
@@ -237,6 +276,19 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
             });
         }
     }
+    for &(fx, (a, b), nx, (k0, k1)) in CLIMB_WALLS_X {
+        for k in k0..=k1 {
+            let y = 0.6 * k as f32;
+            let x = fx + nx * CLIMB_BAND_DEPTH;
+            guidance.edges.push(GuidanceEdge {
+                p0: Vec3::new(x, y, a),
+                p1: Vec3::new(x, y, b),
+                n0: Vec3::Y,
+                n1: Vec3::new(nx, 0.0, 0.0),
+                subtype: GuidanceSubType::LedgeGrab,
+            });
+        }
+    }
     let ((a, b), fz, rows) = JUMP_CLIMB_HOLDS;
     for &y in rows {
         guidance.edges.push(GuidanceEdge {
@@ -267,7 +319,7 @@ fn build_level(
         ..default()
     });
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(300.0, 300.0))),
         MeshMaterial3d(ground_mat),
     ));
     let wall_mat = materials.add(StandardMaterial {
@@ -319,6 +371,16 @@ fn build_level(
                 Mesh3d(meshes.add(Cuboid::new(b - a, 0.08, CLIMB_BAND_DEPTH))),
                 MeshMaterial3d(band_mat.clone()),
                 Transform::from_xyz((a + b) * 0.5, y - 0.04, fz - CLIMB_BAND_DEPTH * 0.5),
+            ));
+        }
+    }
+    for &(fx, (a, b), nx, (k0, k1)) in CLIMB_WALLS_X {
+        for k in k0..=k1 {
+            let y = 0.6 * k as f32;
+            commands.spawn((
+                Mesh3d(meshes.add(Cuboid::new(CLIMB_BAND_DEPTH, 0.08, b - a))),
+                MeshMaterial3d(band_mat.clone()),
+                Transform::from_xyz(fx + nx * CLIMB_BAND_DEPTH * 0.5, y - 0.04, (a + b) * 0.5),
             ));
         }
     }

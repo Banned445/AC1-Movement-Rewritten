@@ -78,7 +78,14 @@ enum Scenario {
     /// Climb wall P, then push left past its last holds: the long reach into a free hang on slab Q (TryReachOtherSurface
     /// 0xDF9B30) and the second hand's grab.
     ClimbReach,
+    /// Climb → climb (index into `CLIMB_CLIMB`): climb to the 2.4 m band, then push left: 0 the reach across the gap
+    /// (wall R1 → R2), 1 into the inside corner (S → T), 2 round the outside corner (wall U), 3 the reach onto the ladder
+    /// (wall W); 4 climb wall V straight up, past its missing band (the reach up).
+    ClimbClimb(usize),
 }
+
+/// The start x (facing +Z at z -11.4) of each `ClimbClimb` scenario.
+const CLIMB_CLIMB: [f32; 5] = [-71.0, -81.0, -91.0, -102.8, -116.0];
 
 impl Plugin for DebugCapturePlugin {
     fn build(&self, app: &mut App) {
@@ -118,6 +125,11 @@ impl Plugin for DebugCapturePlugin {
                 "corner" => Scenario::Corner(false),
                 "corner90" => Scenario::Corner(true),
                 "climbreach" => Scenario::ClimbReach,
+                "climbgap" => Scenario::ClimbClimb(0),
+                "cornerin" => Scenario::ClimbClimb(1),
+                "cornerout" => Scenario::ClimbClimb(2),
+                "climbladder" => Scenario::ClimbClimb(3),
+                "climbup" => Scenario::ClimbClimb(4),
                 _ => Scenario::Roofs,
             };
             app.insert_resource(sc)
@@ -237,6 +249,13 @@ fn place(sc: Res<Scenario>, mut q: Query<&mut Body, With<Player>>, mut rig: ResM
                 rig.distance = 7.0;
                 rig.pitch = 0.2;
             }
+            Scenario::ClimbClimb(i) => {
+                b.feet = Vec3::new(CLIMB_CLIMB[i], 0.0, -11.4);
+                b.heading = std::f32::consts::PI; // facing +Z
+                rig.yaw = std::f32::consts::PI - 0.6;
+                rig.distance = 7.0;
+                rig.pitch = 0.2;
+            }
             Scenario::Overhang => {
                 b.feet = Vec3::new(-30.0, 0.0, -11.4);
                 b.heading = std::f32::consts::PI; // facing +Z, wall K
@@ -343,6 +362,7 @@ fn autopilot(
     mut pad: ResMut<PadInput>,
     q: Query<(&crate::player::Locomotion, &crate::player::HumanDataBundle, &Body), With<Player>>,
     mut since: Local<(u32, f32)>,
+    mut level_at: Local<Option<f32>>,
 ) {
     let t = time.elapsed_secs();
     // seconds the narrow-object state has stayed the same (`since` = (state seq, time))
@@ -490,6 +510,29 @@ fn autopilot(
             } else {
                 pad.dir = Vec3::Z;
                 pad.magnitude = if t < 1.4 { 1.0 } else { 0.45 };
+            }
+            pad.speed01 = pad.magnitude;
+        }
+        Scenario::ClimbClimb(i) => {
+            // 1 s still, grab the wall, push up until both feet are on the 2.4 m band, then push left (light) for 4 s; the
+            // climb up (4) keeps pushing up for 6 s
+            let state = q.single().ok().map(|(l, _, b)| (l.current, b.feet.y));
+            let climbing = state.is_some_and(|(c, _)| c == crate::player::ActorContextId::Climb);
+            let level = i != 4 && state.is_some_and(|(_, y)| y > 2.3);
+            let since = &mut *level_at;
+            if level && since.is_none() {
+                *since = Some(t);
+            }
+            pad.high_profile = true;
+            pad.legs_held = (1.0..1.4).contains(&t);
+            if t < 1.0 || (!climbing && t > 2.0) {
+                pad.magnitude = 0.0;
+            } else if let Some(t0) = *since {
+                pad.dir = Vec3::X;
+                pad.magnitude = if t - t0 < 4.0 { 0.45 } else { 0.0 };
+            } else {
+                pad.dir = Vec3::Z;
+                pad.magnitude = if t < 1.4 { 1.0 } else if t < 7.0 { 0.45 } else { 0.0 };
             }
             pad.speed01 = pad.magnitude;
         }

@@ -478,7 +478,7 @@ pub fn update_ground(
                         if from_top {
                             pad.consume_jump();
                         }
-                        let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false };
+                        let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None };
                         switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
                         continue;
                     }

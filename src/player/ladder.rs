@@ -55,6 +55,8 @@ pub const TOP_ENTRY_DROP: f32 = 0.7;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LadderPhase {
     EnterGround,
+    /// An entry action in place (`LadderEntry::action`), then the wait.
+    Entry,
     /// The pull-down from the top (0), then its transition into the wait (items a, b).
     EnterTop(usize),
     Wait,
@@ -77,8 +79,12 @@ pub struct LadderEntry {
     pub from_top: bool,
     pub high: bool,
     pub foot: usize,
-    /// From a hang at the side (0xDD4CD0): the Ledge context already moved the root onto the ladder (`from`).
+    /// From a hang at the side (0xDD4CD0) or a climb's reach (0xDEF3A0): the Ledge or Climb context already moved the
+    /// root onto the ladder (`from`).
     pub from_ledge: bool,
+    /// The action that brings the limbs onto the rungs before the wait: the climb reach's end (fill 0xDEA680:
+    /// `xx_h_climb_{l_lhand,r_rhand}_2_tr_ladder_wait_{r,l}`, ladder state 4).
+    pub action: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -155,7 +161,13 @@ impl HumanLadderData {
         if e.from_ledge {
             // the side move's clip ends in the ladder wait (`…_tr_l_ladder_wait_{l,r}`): wait where it left the root
             self.height = (e.from.y - e.base.y).clamp(0.0, self.len());
-            self.wait();
+            match e.action.and_then(|id| blend(id, 0, &[])) {
+                Some(a) => {
+                    let p = self.root_at(self.height);
+                    self.play(LadderPhase::Entry, Some(a), e.from, p, false);
+                }
+                None => self.wait(),
+            }
         } else if e.from_top {
             // the pull-down: root interpolated to top − 0.7 m on the front over the action (sub_711130)
             self.height = self.len() - TOP_ENTRY_DROP;
@@ -249,7 +261,7 @@ pub fn update_ladder(
         let hi = l.high as usize;
         let mut leave: Option<TransitionSetup> = None;
         match phase {
-            LadderPhase::EnterGround => {
+            LadderPhase::EnterGround | LadderPhase::Entry => {
                 if done {
                     l.wait();
                 }
