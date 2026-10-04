@@ -2,6 +2,7 @@
 //! Formats are documented in RE/08 (.forge) and RE/09 (Mesh / Skeleton / TextureMap).
 
 pub mod ac_actions;
+pub mod body_parts;
 pub mod ac_anim;
 pub mod ac_formats;
 pub mod altair;
