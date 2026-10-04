@@ -31,6 +31,133 @@ pub struct Track {
 pub struct AnimData {
     pub duration: f32,
     pub tracks: Vec<Track>,
+    /// The clip's event tracks, all keys in time order (empty if a track holds an event class the decoder doesn't
+    /// know: FXEvent and one assassination event, 23 of 12,347 clips).
+    pub events: Vec<AnimEvent>,
+}
+
+/// Event key time unit: 1/120 s (`AnimTrack__GetLastKeyTime` 0x58FFB0 divides by the double 120.0 at 0x168E128).
+const EVENT_TIME_SCALE: f32 = 120.0;
+
+const CLASS_ANIM_TRACK_EVENT: u32 = 0x4168_2213;
+const CLASS_CONTACT_EVENT: u32 = 0x9784_0CBF;
+const CLASS_AUDIO_EVENT: u32 = 0xA7A6_4A34;
+const CLASS_EVENT_SEED_LINK: u32 = 0x6CE0_4D52;
+
+/// One key of an event track (`AnimTrackEvent`: a list of EventSeeds and one key time per seed).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimEvent {
+    /// Seconds into the clip.
+    pub time: f32,
+    pub kind: EventKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EventKind {
+    /// `ContactEvent`: a foot / body contact for the sound and FX of the surface. `ty` = ContactEventTypeHuman
+    /// (`CONTACT_HUMAN`), `bits` = the two flag bits at +12 (both set on almost every key; meaning unknown).
+    Contact { ty: u32, bits: u8 },
+    /// `AudioEvent`: a sound; `sound` = the id its sound reference points at.
+    Audio { sound: u32 },
+    /// Any other event (speech, sound sets, AI / sync events, blood): its class hash.
+    Other(u32),
+}
+
+/// ContactEventTypeHuman names (enum desc 0x18E185C).
+pub const CONTACT_HUMAN: [&str; 15] = [
+    "ft_body_roll", "ft_jump_start", "ft_land_hands", "ft_land_heavy", "ft_land_light", "ft_land_medium", "ft_pivot",
+    "ft_run_cycle", "ft_slide", "ft_sneak_cycle", "ft_step_foot", "ft_step_toe", "ft_walk_cycle", "ft_walk_end",
+    "ft_walk_start",
+];
+
+/// Fields after the Event base handle, per event class (each class's serializer, vtable slot 2): u = u32, b = u8,
+/// E = an embedded sound reference (u32 objId, u32 class, u32, u32 typed ref to the sound; 0x438EF0 / 0x524FD0).
+fn event_fields(class: u32) -> Option<&'static str> {
+    Some(match class {
+        CLASS_CONTACT_EVENT => "ubb", // 0x5B1E20
+        0xDF26_0DA5 => "uE",          // AudioBaseEvent 0x446120
+        CLASS_AUDIO_EVENT => "uEb",   // 0x446210
+        0x90D9_EC94 => "uE",          // SpeechEvent 0x446570
+        0x0EFF_FE90 => "uu",          // SoundSetEvent 0x445CE0
+        0xD84E_267F => "uuuu",        // BloodSplatterEvent 0xB7EC90
+        0x28C6_E4EE => "u",           // AnimAssassinationEvent 0xB36770
+        // EntityEvent 0x6AD6D0, DropObjectEvent, AnimSyncFall / Die, AIAnimationEvent: the handle only
+        0x691A_6344 | 0x46D8_B31E | 0x8ED2_8AE9 | 0x1B73_5FBF | 0xF9BF_CB7C => "",
+        _ => return None,
+    })
+}
+
+/// An object pointer (RE/09 §2): u8 0 = inline object (returns its class), 2 = a reference, 3 = null.
+fn object_ptr(r: &mut R) -> Result<Option<u32>, String> {
+    match r.u8()? {
+        0 => {
+            r.u32()?;
+            Ok(Some(r.u32()?))
+        }
+        2 => {
+            r.u32()?;
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The event tracks (payload 0x12: count, then AnimTrackEvent objects; `AnimTrackEvent__Serialize` 0x6DF4E0):
+/// u32 kind, u32 n, n × EventSeed, u32, then the AnimTrack key times (0x58D1C0: u16 k, k × u16).
+/// EventSeed (`EventSeed__Serialize` 0x525880): Event pointer, f32, u8, EventSeedLinkData pointer (u32, f32, u8).
+fn read_events(r: &mut R) -> Result<Vec<AnimEvent>, String> {
+    let n = r.u32()?;
+    let mut out = Vec::new();
+    for _ in 0..n {
+        if object_ptr(r)? != Some(CLASS_ANIM_TRACK_EVENT) {
+            return Err("not an AnimTrackEvent".into());
+        }
+        let _kind = r.u32()?;
+        let ns = r.u32()? as usize;
+        let mut kinds = Vec::with_capacity(ns);
+        for _ in 0..ns {
+            object_ptr(r)?; // the seed's class (ContactEventSeed, AudioEventSeed, …): EventSeed's fields
+            let mut kind = None;
+            if let Some(class) = object_ptr(r)? {
+                let fields = event_fields(class).ok_or_else(|| format!("event class {class:08x}"))?;
+                r.u32()?; // Event: handle
+                let mut vals = Vec::new();
+                for f in fields.bytes() {
+                    match f {
+                        b'u' => vals.push(r.u32()?),
+                        b'b' => vals.push(r.u8()? as u32),
+                        _ => {
+                            r.raw(12)?;
+                            vals.push(r.u32()?);
+                        }
+                    }
+                }
+                kind = Some(match class {
+                    CLASS_CONTACT_EVENT => EventKind::Contact { ty: vals[0], bits: (vals[1] & 1 | (vals[2] & 1) << 1) as u8 },
+                    CLASS_AUDIO_EVENT => EventKind::Audio { sound: vals[1] },
+                    c => EventKind::Other(c),
+                });
+            }
+            r.f32()?;
+            r.u8()?;
+            if let Some(c) = object_ptr(r)? {
+                if c != CLASS_EVENT_SEED_LINK {
+                    return Err("bad EventSeedLinkData".into());
+                }
+                r.raw(9)?;
+            }
+            kinds.push(kind);
+        }
+        r.u32()?;
+        let k = r.u16()? as usize;
+        let mut times = Vec::with_capacity(k);
+        for _ in 0..k {
+            times.push(r.u16()? as f32 / EVENT_TIME_SCALE);
+        }
+        out.extend(times.into_iter().zip(kinds).filter_map(|(time, k)| Some(AnimEvent { time, kind: k? })));
+    }
+    out.sort_by(|a, b| a.time.total_cmp(&b.time));
+    Ok(out)
 }
 
 struct R<'a> {
@@ -197,9 +324,15 @@ fn read_track(r: &mut R) -> Result<(Vec<f32>, TrackValues), String> {
     Ok((times, values))
 }
 
+/// Only the event tracks of an `Animation` payload.
+pub fn decode_events(payload: &[u8]) -> Result<Vec<AnimEvent>, String> {
+    read_events(&mut R { b: payload, o: 0x12 })
+}
+
 pub fn decode(payload: &[u8]) -> Result<AnimData, String> {
     let mut r = R { b: payload, o: 8 };
     let duration = r.f32()?;
+    let events = decode_events(payload).unwrap_or_default();
     // skip header hash, flags and the reflected event tracks: find the AnimTrackData object
     let start = r.o;
     let pat = CLASS_ANIM_TRACK_DATA.to_le_bytes();
@@ -222,7 +355,7 @@ pub fn decode(payload: &[u8]) -> Result<AnimData, String> {
         let (times, values) = read_track(&mut r)?;
         tracks.push(Track { key: *keys.get(k).unwrap_or(&u32::MAX), times, values });
     }
-    Ok(AnimData { duration, tracks })
+    Ok(AnimData { duration, tracks, events })
 }
 
 /// Bone tracks of a decoded clip: (rotation keys, translation keys) by key id.
