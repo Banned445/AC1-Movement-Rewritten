@@ -13,9 +13,16 @@
 //!   while climbing): `ADJUST_SLOPE` lowers the hips when the hands lean out beyond the feet, `ADJUST_HEAD` ducks the
 //!   head under an overhang and leans the chest back from a wall in front of the face (RE/11 §6).
 //!
-//! The port solves each limb analytically (two-bone, keeping the animation's bend plane), after which the hand/foot
-//! keeps its **animated world orientation** (the grip/finger pose stays as authored). PORT: HumanIK's own chain
-//! solve (shoulders, spine share) is not reproduced.
+//! - HumanIK's ways of sharing a reach with the rest of the body are all off for humans (`Entity__SetupGroundIK`
+//!   0x4E5070, also 0xE11C10; RE/11 §6.4): chest pull from the hands (`CtrlChestPullLeftHand` / `RightHand`,
+//!   default 1) is set to 0, `ShoulderCorrection` to 0, and with no effector pull the body pull and the resist
+//!   settings never act. No twist bones are mapped to HumanIK (26 bones, table 0x1698A00), so its roll shares
+//!   (`…ArmRoll` 0.6) have nothing to turn. A hand or foot reaches with its own arm or leg only; the shoulders and
+//!   spine stay on the animation unless a post-adjustment sets the hips / chest effectors.
+//!
+//! The port solves each limb analytically (two-bone, keeping the animation's bend plane), which is what the game
+//! asks of HumanIK. After it the hand/foot keeps its **animated world orientation** (the grip/finger pose stays as
+//! authored). PORT (hypothesis): with rotation reach 0 HumanIK may instead keep the end bone's local rotation.
 
 use bevy::prelude::*;
 
