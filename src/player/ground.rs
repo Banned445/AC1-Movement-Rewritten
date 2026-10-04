@@ -478,7 +478,7 @@ pub fn update_ground(
                         if from_top {
                             pad.consume_jump();
                         }
-                        let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None };
+                        let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None, ..Default::default() };
                         switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
                         continue;
                     }
@@ -786,7 +786,7 @@ pub fn straight_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld,
     let wall = super::ledge::hang_type_at(point, n, collision) == super::ledge::LedgeHangType::Wall;
     let dz = point.y - feet.y;
     let j = if beam { super::ledge_moves::hang_jump_in_beam(dz, wall)? } else { super::ledge_moves::hang_jump_in(dz, wall)? };
-    Some(JumpTarget { position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None })
+    Some(JumpTarget { position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None, ladder: None })
 }
 
 /// Pull-down type Wait (1) from Movement (0xDB1470 event 70 → fill 0xD843E0 → PullDown_Enter 0xDDE4D0): a

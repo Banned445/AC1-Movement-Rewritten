@@ -108,12 +108,17 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     (-100.0, -10.0, 1.6, 1.0, 7.0),
     //     up across missing holds: wall V (x -118..-114), no band at 3.0 m (CLIMB_WALLS)
     (-116.0, -10.0, 4.0, 1.0, 7.0),
+    //     onto a ladder at the side from the climb (TryLadder 0xDF10C0): wall X (x -134..-130) and a ladder wall
+    //     (x -130..-128.4), the ladder at x -129.4 (LADDERS), its top blocked by a slab (SLABS)
+    (-132.0, -10.0, 4.0, 1.0, 7.0),
+    (-129.2, -10.0, 1.6, 1.0, 7.0),
 ];
 
 /// Ladders (bottom, top on the wall face; outward normal): guidance edges of sub-type Ladder.
 pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
     (Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.0, 63.5), Vec3::NEG_Z),
     (Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), Vec3::NEG_Z),
+    (Vec3::new(-129.4, 0.0, -10.5), Vec3::new(-129.4, 7.0, -10.5), Vec3::NEG_Z),
 ];
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
@@ -147,6 +152,8 @@ const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
     // slab Q left of wall P (x -54.2..-53.0, top 3.6, edge on the face line z -10.5, nothing below): a long reach from the
     // climb into a free hang, caught on one hand (`climb1m_tr_hangfree_left_3`, then SecondHandGrab)
     (-53.6, 3.6, -10.2, 1.2, 0.6, 0.3),
+    // over the top of the ladder at x -129.4: the top is blocked (sub_E240B0), the climb stops below it
+    (-129.2, 8.4, -10.25, 1.6, 1.5, 0.9),
 ];
 
 /// Further climb walls (x range, face z with normal -Z, band index range: heights 0.6·k): wall K's bands up to 3.0 m
@@ -170,6 +177,8 @@ const CLIMB_WALLS: &[((f32, f32), f32, (i32, i32))] = &[
     // wall V: bands to 2.4 m, none at 3.0 m, then 3.6 m up
     ((-117.95, -114.05), -10.5, (1, 4)),
     ((-117.95, -114.05), -10.5, (6, 11)),
+    // wall X, its holds ending 0.65 m short of the ladder at x -129.4
+    ((-133.95, -130.05), -10.5, (1, 11)),
 ];
 
 /// Climb walls facing ±X (face x, z range, outward normal x, band index range): the corner climbs.

@@ -806,8 +806,43 @@ fn ladder_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld,
         foot: (!right) as usize,
         from_ledge: true,
         action: Some(ids[2]),
+        ..Default::default()
     };
     Some(ClimbReach::new(ids, [hl, hr, hit.point, hit.point], [-lf; 4], Some(entry)))
+}
+
+/// `HumanClimb__TryLadder` 0xDF10C0 (ChooseMove's first test, side dirs 4–9): a ladder edge in a box 0.35 m into the wall
+/// and 0.6 m to the side of the root (half extents 0.6 across, 0.5 deep, 0.5 up; any angle; mask 8), its normal within
+/// 45° of the facing axis. The ladder's forward is its normal turned along the facing; the root goes 0.5 m out from the
+/// hit. The limbs go onto the rungs where the low wait (left: foot r `0x01068FF8`, else foot l `0x01068FF7`) puts them.
+/// The action `FROM_CLIMB_SIDE` (dir 4: `0x56368E60`, any other: `0x56368E61`) plays while the root is interpolated over
+/// it (sub_711130), then the Ladder context (EntryType 4, state 4: the low wait when the action ends, blend 0.2).
+fn side_ladder(g: &GuidanceWorld, root: Vec3, facing: Vec3, dir: usize) -> Option<super::ladder::LadderEntry> {
+    if dir < 4 {
+        return None;
+    }
+    let left = matches!(dir, 4 | 6 | 8);
+    let centre = root + facing * 0.35 + right_of(facing) * if left { -0.6 } else { 0.6 };
+    let hit = g.probe_box(centre, right_of(facing), facing, Vec3::Y, Vec3::new(0.6, 0.5, 0.5), centre, std::f32::consts::PI, CLIMB_PROBE_STEP, 1 << crate::guidance::GuidanceSubType::Ladder as u32)?;
+    if hit.wall_normal.dot(facing).abs() <= std::f32::consts::FRAC_1_SQRT_2 {
+        return None;
+    }
+    let lf = if hit.wall_normal.dot(facing) >= 0.0 { hit.wall_normal } else { -hit.wall_normal };
+    let to = hit.point - lf * 0.5;
+    let e = &g.edges[hit.edge];
+    let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
+    Some(super::ladder::LadderEntry {
+        base,
+        top,
+        n: -lf,
+        from: root,
+        facing: lf,
+        foot: left as usize,
+        from_ledge: true,
+        action: Some(super::ladder::FROM_CLIMB_SIDE[(dir != 4) as usize]),
+        height: Some(to.y - base.y),
+        ..Default::default()
+    })
 }
 
 /// `HumanClimb__ReachOtherSurfaceVertical` 0xDF0050 (dirs 0–3, type 0) with `HumanClimb__FindVerticalReachHolds`
@@ -1094,6 +1129,15 @@ pub fn update_climb(
             continue;
         }
         let dir = quantize(pad.dir, facing);
+        // ChooseMove 0xDFDE90 step 2: a ladder at the side (TryLadder 0xDF10C0) before any grid move
+        if let Some(mut e) = side_ladder(&guidance, body.feet, facing, dir) {
+            e.from = body.feet;
+            limbs.hands = None;
+            limbs.feet = None;
+            d.last_action = "onto a ladder";
+            switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
+            continue;
+        }
         let grid = HoldGrid::build(&guidance, d, body.feet, facing);
         // ChooseMove 0xDFDE90: LONG first when the stick is pushed hard, then SHORT
         let mut chosen = None;

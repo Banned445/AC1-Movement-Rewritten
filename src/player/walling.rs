@@ -410,6 +410,14 @@ pub fn update_walling(
                 stick
             }
         });
+        // A ladder beside the wall (the interpreter's first test, 0xEE05E0 → IHumanWalling slots 7 / 8): taken at the end of a
+        // Vertical step with the stick toward it; it comes before the push-off.
+        if sub == WallingSubState::Vertical && done && pad.speed01 > 0.0 {
+            if let Some(e) = super::ladder::find_wall_run_ladder(body.feet, pad.dir, &guidance) {
+                switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
+                continue;
+            }
+        }
         // Rebound (0xE37590): at the end of EntryB, at any time in Vertical and in VerticalEnd (command ≠ 4)
         let rebound = match sub {
             WallingSubState::EntryA => false,
@@ -479,6 +487,7 @@ fn rebound_jump(from: Vec3, normal: Vec3, push: Vec3, guidance: &GuidanceWorld, 
         hang: None,
         straight: None,
         pass: None,
+        ladder: None,
     });
     (dir, target)
 }

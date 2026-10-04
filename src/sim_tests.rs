@@ -1489,6 +1489,129 @@ fn a_jump_off_a_ladder_into_it_is_refused_and_a_side_push_is_turned() {
     assert!((d.angle_between(Vec3::NEG_Z).to_degrees() - 89.0).abs() < 0.1 && d.x > 0.0, "turned to 89°: {d:?}");
 }
 
+#[test]
+fn falling_past_a_ladder_with_legs_held_catches_it() {
+    use crate::player::ladder::{LadderPhase, CATCH_AIR, WAIT};
+    // FindLadderCatch 0xE04100 (grab held): the catch height rounded down to 0.5 m, the catch action, then the low wait
+    let mut s = Sim::new(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
+    s.pad(Vec3::ZERO, 0.0, false, true);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ladder), "no catch: {:?} {:?}", s.loco().current, s.body().feet);
+    let l = &s.data().ladder;
+    assert_eq!(l.phase, Some(LadderPhase::Entry));
+    assert_eq!(l.action.map(|a| a.id), Some(CATCH_AIR));
+    assert!((l.height * 2.0).fract().abs() < 1e-4 && l.height >= 0.5 && l.height < 5.0 - 1.95, "on a rung: {}", l.height);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled");
+    assert_eq!(s.data().ladder.action.map(|a| a.id), Some(WAIT[0][0]), "the low wait, foot l");
+    let f = s.body().feet;
+    assert!((f.x - 50.0).abs() < 0.05 && (f.z - 63.0).abs() < 0.05, "0.5 m out from the ladder: {f:?}");
+}
+
+#[test]
+fn falling_past_a_ladder_without_legs_does_not_catch_it() {
+    let mut s = Sim::new(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "never landed");
+    assert!(s.saw_air);
+}
+
+#[test]
+fn a_jump_at_a_ladder_lands_on_it() {
+    use crate::player::ladder::{LadderPhase, ARRIVE_TARGET};
+    use crate::player::targets::TARGET_LADDER;
+    // a ladder jump target (type 0x1000): the arrival (0xE07D00) plays `ARRIVE_TARGET`, Ladder EntryType 1
+    let mut s = Sim::new(Vec3::new(50.0, 0.0, 59.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_legs();
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.loco().current);
+    assert_eq!(s.data().air.target.map(|t| t.type_flags), Some(TARGET_LADDER));
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "never arrived: {:?} {:?}", s.loco().current, s.body().feet);
+    assert_eq!(s.data().ladder.action.map(|a| a.id), Some(ARRIVE_TARGET));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled");
+    assert!((s.data().ladder.height - 1.0).abs() < 1e-3, "1 m up the ladder: {}", s.data().ladder.height);
+}
+
+#[test]
+fn a_wall_run_beside_a_ladder_steps_onto_it() {
+    use crate::player::ladder::{LadderPhase, CLIMB_UP};
+    use crate::player::walling::WallingSubState;
+    // the interpreter's walling state (0xEE05E0): a ladder within 0.6 m at the end of a Vertical step, the stick toward
+    // it → Ladder EntryType 3 (the high climb up's right-foot item)
+    let mut s = Sim::new(Vec3::new(50.2, 0.0, 62.0), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?}", s.loco().current);
+    assert!(s.run_until(3.0, |s| s.loco().current != ActorContextId::Walling), "never left the wall");
+    assert_eq!(s.loco().current, ActorContextId::Ladder, "the ladder (last walling state {:?})", s.data().walling.sub_state);
+    let l = &s.data().ladder;
+    assert_eq!(l.phase, Some(LadderPhase::Entry));
+    assert_eq!(l.action.map(|a| (a.id, a.item)), Some((CLIMB_UP[1], 1)));
+    assert!(l.high);
+    let _ = WallingSubState::Vertical;
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    assert!(s.run_until(2.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled");
+}
+
+#[test]
+fn a_wall_run_beside_a_ladder_without_the_stick_stays_on_the_wall() {
+    // no stick: the ladder search (sub_EDFBC0(1)) needs the stick
+    let mut s = Sim::new(Vec3::new(50.2, 0.0, 62.0), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Walling), "no wall run");
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    assert!(s.run_until(3.0, |s| s.loco().current != ActorContextId::Walling), "never left the wall");
+    assert_ne!(s.loco().current, ActorContextId::Ladder);
+}
+
+#[test]
+fn the_climb_steps_onto_a_ladder_at_the_side() {
+    use crate::player::ladder::{LadderPhase, FROM_CLIMB_SIDE, WAIT};
+    // TryLadder 0xDF10C0 (ChooseMove's first test): the ladder at x -129.4 is 0.65 m left of wall X's last holds
+    let mut s = climb_then_left(Vec3::new(-131.0, 0.0, -11.4), |s| s.loco().current == ActorContextId::Ladder);
+    assert_eq!(s.data().climb.last_action, "onto a ladder");
+    let l = &s.data().ladder;
+    assert_eq!(l.phase, Some(LadderPhase::Entry));
+    assert_eq!(l.action.map(|a| a.id), Some(FROM_CLIMB_SIDE[0]), "dir 4 (left)");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled");
+    assert_eq!(s.data().ladder.action.map(|a| a.id), Some(WAIT[0][1]), "the low wait, foot r after a left move");
+    let f = s.body().feet;
+    assert!((f.x + 129.4).abs() < 0.05 && (f.z + 11.0).abs() < 0.05, "0.5 m out from the ladder: {f:?}");
+}
+
+#[test]
+fn a_ladder_with_a_blocked_top_stops_the_climb() {
+    use crate::player::ladder::LadderPhase;
+    // sub_E240B0: a slab over the top of the ladder at x -129.4 → ReachedTop stops the climb (no exit to the top)
+    let mut s = Sim::new(Vec3::new(-129.4, 0.0, -12.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "never mounted");
+    assert!(s.run_until(30.0, |s| s.data().ladder.height + 1.63 >= 7.0), "never reached the top: {}", s.data().ladder.height);
+    s.run(3.0);
+    assert_eq!(s.loco().current, ActorContextId::Ladder, "climbed off a blocked top");
+    assert_eq!(s.data().ladder.phase, Some(LadderPhase::Wait));
+    assert!(s.data().ladder.height <= 7.0 - 1.0, "stopped below the top: {}", s.data().ladder.height);
+}
+
+#[test]
+fn a_low_profile_climb_with_a_light_push_is_slower() {
+    use crate::player::ladder::LadderPhase;
+    // 0xE24540: low profile, input value 0.5 (the stick in the walk band) → the climb plays at half rate
+    let time_up = |stick: f32| {
+        let mut s = Sim::new(Vec3::new(50.0, 0.0, 60.5), std::f32::consts::PI);
+        s.pad(Vec3::Z, 1.0, false, false);
+        assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait) || s.data().ladder.phase == Some(LadderPhase::ClimbUp)));
+        s.pad(Vec3::Z, stick, false, false);
+        let h0 = s.data().ladder.height;
+        s.run(2.0);
+        s.data().ladder.height - h0
+    };
+    let (slow, fast) = (time_up(0.45), time_up(1.0));
+    assert!(slow > 0.0 && slow < fast * 0.75, "slow {slow} fast {fast}");
+}
+
 // ---------------------------------------------------------------- per-frame traces (diagnostics, run by hand)
 
 fn trace_frames(s: &mut Sim, label: &str, seconds: f32, mut each: impl FnMut(&mut Sim, usize)) {

@@ -458,6 +458,7 @@ pub fn update_air(
         let mut narrow_on: Option<TransitionSetup> = None;
         let mut pass_on: Option<super::passover::PassOverEntry> = None;
         let mut swing_on = false;
+        let mut ladder_on: Option<super::ladder::LadderEntry> = None;
         let foot = (!air.foot_left) as usize;
         match air.mode {
             AirMode::Jump { from, clip_end, aim, apex, duration, t, then_fall_to, real, t_takeoff, fwd } => {
@@ -520,6 +521,18 @@ pub fn update_air(
                         }
                         hang_on = Some(e);
                     }
+                    // ladder target (0x1000): 0xE07D00 plays `ARRIVE_TARGET`, interpolates the root onto it (0.2 s) and
+                    // sets Ladder EntryType 1 (state 2 waits for the action, then the low wait)
+                    if let Some(mut e) = air.target.and_then(|t| t.ladder) {
+                        e.from = body.feet;
+                        // the arrival's first item blends [up, down, long] by the flight's weights (sub_502E30, +452)
+                        if let Some(f) = air.flight {
+                            for (k, x) in f.weights().iter().enumerate().take(3) {
+                                e.w[k] = *x;
+                            }
+                        }
+                        ladder_on = Some(e);
+                    }
                     // pass-over target (type 2): 0xE07D00 case 2 → Ledge HandPassOver
                     if let Some((edge, normal)) = air.target.and_then(|t| t.pass) {
                         let mut fw = [0.0f32; 5];
@@ -545,7 +558,7 @@ pub fn update_air(
                         narrow_on = narrow_catch(body.feet, fwd, foot, &guidance, &collision);
                     }
                     match then_fall_to {
-                        _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() => {}
+                        _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() || ladder_on.is_some() => {}
                         Some(p) if collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_none() => {
                             air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
                         }
@@ -616,8 +629,11 @@ pub fn update_air(
                 } else if r.landed && body.velocity.y <= 0.0 {
                     landed_at = Some(body.feet.y);
                 } else if pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 {
-                    // grab requested (SetGrabRequested 0xE102D0) → catch a ledge in reach
-                    if let Some(h) = find_air_catch(body.feet, body.forward(), &guidance) {
+                    // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
+                    // in reach
+                    if let Some(e) = super::ladder::find_ladder_catch(body.feet, body.forward(), true, &guidance, &collision) {
+                        ladder_on = Some(e);
+                    } else if let Some(h) = find_air_catch(body.feet, body.forward(), &guidance) {
                         air.long_catch = air.apex_y - body.feet.y >= 3.0;
                         hang_on = Some(LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception));
                     }
@@ -639,7 +655,11 @@ pub fn update_air(
         air.prev_y = body.feet.y;
         body.grounded = false;
 
-        if let Some(entry) = hang_on {
+        if let Some(e) = ladder_on {
+            air.mode = AirMode::Idle;
+            body.velocity = Vec3::ZERO;
+            switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
+        } else if let Some(entry) = hang_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             let flight = air.flight;
