@@ -1,0 +1,20 @@
+# build output
+/target/
+
+# local settings and captures (never committed)
+game_dir.txt
+/bugs/
+/dev_screenshots/
+/shots*/
+
+# editor / tool state
+.claude/
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# game data must never be committed
+*.forge
+*.exe

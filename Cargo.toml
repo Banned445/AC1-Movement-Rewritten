@@ -1,0 +1,16 @@
+[package]
+name = "ac_port"
+version = "0.1.0"
+edition = "2024"
+description = "Clean-room recreation of Assassin's Creed (2008) player movement in Bevy. Loads the animations and character from your own copy of the game at runtime."
+publish = false
+
+[dependencies]
+bevy = "0.19.1"
+
+# Fast iteration: optimise dependencies, keep our own crate debuggable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
