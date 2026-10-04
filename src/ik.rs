@@ -583,12 +583,12 @@ mod tests {
         use crate::collision::{Aabb3, CollisionWorld};
         let h = Vec3::new(0.0, 2.0, 0.0);
         // a slab 0.1 m above the head reaching 1 m out from the wall in front (−Z): duck 0.2 m
-        let c = CollisionWorld { boxes: vec![Aabb3 { min: Vec3::new(-1.0, 2.1, -1.0), max: Vec3::new(1.0, 2.4, 0.5) }] };
+        let c = CollisionWorld { boxes: vec![Aabb3 { min: Vec3::new(-1.0, 2.1, -1.0), max: Vec3::new(1.0, 2.4, 0.5) }], ..Default::default() };
         let (drop, lean) = head_clearance(&c, h, Vec3::NEG_Z);
         assert!((drop - 0.2).abs() < 0.03, "{drop}");
         assert_eq!(lean, 0.0);
         // a wall 0.1 m in front of the face: lean 0.1
-        let c = CollisionWorld { boxes: vec![Aabb3 { min: Vec3::new(-1.0, 0.0, -1.0), max: Vec3::new(1.0, 3.0, -0.1) }] };
+        let c = CollisionWorld { boxes: vec![Aabb3 { min: Vec3::new(-1.0, 0.0, -1.0), max: Vec3::new(1.0, 3.0, -0.1) }], ..Default::default() };
         let (drop, lean) = head_clearance(&c, h, Vec3::NEG_Z);
         assert_eq!(drop, 0.0);
         assert!((lean - 0.1).abs() < 0.03, "{lean}");

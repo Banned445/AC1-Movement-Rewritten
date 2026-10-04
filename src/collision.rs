@@ -37,6 +37,20 @@ pub struct Aabb3 {
 #[derive(Resource, Default)]
 pub struct CollisionWorld {
     pub boxes: Vec<Aabb3>,
+    /// Each box's collision layer (`crate::layers`); boxes past the end of the list are `STATIC`, as the greybox is.
+    pub layers: Vec<u8>,
+}
+
+impl CollisionWorld {
+    /// Box `i`'s collision layer.
+    pub fn layer_of(&self, i: usize) -> u8 {
+        self.layers.get(i).copied().unwrap_or(crate::layers::STATIC)
+    }
+
+    /// Does a query or shape on `layer` see box `i`? A filter word of 0 (layer 0) collides with everything (0x4DC2B0).
+    pub fn sees(&self, layer: u8, i: usize) -> bool {
+        layer == 0 || crate::layers::collides(layer, self.layer_of(i))
+    }
 }
 
 pub struct MoveResult {
@@ -267,7 +281,7 @@ mod tests {
     fn world() -> CollisionWorld {
         // floor slab, a 0.3 m step, a 0.45 m step, a 0.6 m block and a 2 m wall
         let b = |x0: f32, x1: f32, h: f32| Aabb3 { min: Vec3::new(x0, -1.0, -2.0), max: Vec3::new(x1, h, 2.0) };
-        CollisionWorld { boxes: vec![b(-20.0, 20.0, 0.0), b(2.0, 3.0, 0.3), b(5.0, 6.0, 0.45), b(8.0, 9.0, 0.6), b(11.0, 12.0, 2.0)] }
+        CollisionWorld { boxes: vec![b(-20.0, 20.0, 0.0), b(2.0, 3.0, 0.3), b(5.0, 6.0, 0.45), b(8.0, 9.0, 0.6), b(11.0, 12.0, 2.0)], ..Default::default() }
     }
 
     fn walk(w: &CollisionWorld, from: Vec3, to_x: f32) -> Vec3 {
@@ -303,7 +317,7 @@ mod tests {
 
     #[test]
     fn standing_past_a_roof_edge_holds_until_the_rim_tilts_past_45_degrees() {
-        let w = CollisionWorld { boxes: vec![Aabb3 { min: Vec3::new(-5.0, 0.0, -5.0), max: Vec3::new(0.0, 3.0, 5.0) }] };
+        let w = CollisionWorld { boxes: vec![Aabb3 { min: Vec3::new(-5.0, 0.0, -5.0), max: Vec3::new(0.0, 3.0, 5.0) }], ..Default::default() };
         let on = |x: f32| w.ground_support(Vec3::new(x, 3.0, 0.0));
         assert!((on(-0.5).unwrap().y - 3.0).abs() < 1e-5);
         // 0.2 m past: on the rim, sunk by r − √(r² − d²)
