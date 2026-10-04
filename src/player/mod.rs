@@ -229,7 +229,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(Startup, spawn_player)
             .add_systems(
                 Update,
-                (ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, sync_visuals)
+                (ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
                     .chain()
                     .in_set(PlayerSet),
             );
@@ -239,6 +239,25 @@ impl Plugin for PlayerPlugin {
 /// Limb IK targets belong to the hang / climb contexts only: any other context lets the hands and feet go (the game's
 /// contexts release their limb contacts on exit). Without this a context that never touches the targets (InAir after
 /// a swing jump, Ground after a pass-over …) kept the hands pinned to the last bar or ledge.
+/// The capsule's collision layer by context (each context's entry, through `Human__CharacterLayer` 0xB0EAA0, which turns
+/// Character 5 / CharacterNoInteractive 12 / CharacterNoStatic 20 into the main character's 21 / 22 / 23):
+/// - Character (→ MainCharacter): `HumanGround__OnActivateSetup` 0xDAE6E0, `HumanLedge__OnEnter` 0xDE3460, the
+///   pull-up blend 0xDCBF70, `HumanClimb__State7_Enter` 0xDE91B0, `HumanClimb__ExitCleanup` 0xDE9A00;
+/// - CharacterNoStatic (→ MainCharacterNoStatic): `HumanLedge__EnterCommon` 0xDE26D0, `HumanClimb__EnterCommon`
+///   0xDE97B0, `HumanLedge__PassOverToPullDown` 0xDE0220: hanging and climbing, the capsule ignores the static world.
+/// PORT: by context only (the ledge pull-up keeps NoStatic; the port's ledge / climb moves don't run the proxy).
+pub fn proxy_layer(mut q: Query<(&Locomotion, &mut Body), With<Player>>) {
+    for (loco, mut body) in &mut q {
+        let layer = match loco.current {
+            ActorContextId::Ledge | ActorContextId::Climb => crate::layers::MAIN_CHARACTER_NO_STATIC,
+            _ => crate::layers::MAIN_CHARACTER,
+        };
+        if body.proxy.layer != layer {
+            body.proxy.layer = layer;
+        }
+    }
+}
+
 pub fn release_limbs(mut q: Query<(&Locomotion, &mut LimbTargets), With<Player>>) {
     for (loco, mut limbs) in &mut q {
         if !matches!(loco.current, ActorContextId::Ledge | ActorContextId::Climb) && (limbs.hands.is_some() || limbs.feet.is_some()) {

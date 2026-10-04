@@ -13,6 +13,7 @@ mod guidance;
 mod hud;
 mod ik;
 mod input;
+mod layers;
 mod level;
 mod model;
 mod player;

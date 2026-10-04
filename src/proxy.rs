@@ -56,10 +56,12 @@ pub struct Contact {
     pub body: usize,
 }
 
-/// The proxy's persistent state (controller +232: the manifold).
+/// The proxy's persistent state (controller +232: the manifold; +0x68: the collision filter word, of which the port
+/// keeps the layer, set by the contexts through `Human__CharacterLayer` 0xB0EAA0; 0 = collide with everything).
 #[derive(Clone, Debug, Default)]
 pub struct ProxyState {
     pub manifold: Vec<Contact>,
+    pub layer: u8,
 }
 
 /// One solver plane (64 bytes: normal + distance, velocity, frictions, priority).
@@ -135,21 +137,21 @@ fn closest(world: &CollisionWorld, i: usize, p: Vec3, lift: f32) -> Contact {
 }
 
 /// The closest-point query of the shape (the start collector of 0x57B200): every box within the tolerance.
-fn closest_points(world: &CollisionWorld, p: Vec3, lift: f32) -> Vec<Contact> {
-    (0..world.boxes.len()).map(|i| closest(world, i, p, lift)).filter(|c| c.dist < COLLISION_TOLERANCE).collect()
+fn closest_points(world: &CollisionWorld, layer: u8, p: Vec3, lift: f32) -> Vec<Contact> {
+    (0..world.boxes.len()).filter(|&i| world.sees(layer, i)).map(|i| closest(world, i, p, lift)).filter(|c| c.dist < COLLISION_TOLERANCE).collect()
 }
 
 /// The linear cast of the shape from `p` by `disp` (0x57B200 with the cast collector), hits sorted by fraction
 /// (sub_FE4FC0). Each hit carries the fraction and the distance along its normal (−disp·n × fraction, 0x579870).
 /// PORT: conservative advancement against each box; boxes the shape already touches at the start are left to the
 /// closest-point query.
-fn linear_cast(world: &CollisionWorld, p: Vec3, disp: Vec3, lift: f32) -> Vec<Contact> {
+fn linear_cast(world: &CollisionWorld, layer: u8, p: Vec3, disp: Vec3, lift: f32) -> Vec<Contact> {
     let len = disp.length();
     let mut hits = Vec::new();
     if len < 1e-7 {
         return hits;
     }
-    for i in 0..world.boxes.len() {
+    for i in (0..world.boxes.len()).filter(|&i| world.sees(layer, i)) {
         let mut t = 0.0f32;
         let mut c = closest(world, i, p, lift);
         if c.dist <= 0.0 {
@@ -508,15 +510,15 @@ pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: V
     let mut out_vel = vel;
     if dt > EPS {
         for _ in 0..MAX_ITERATIONS {
-            let start = closest_points(world, pos, lift);
-            let cast = linear_cast(world, pos, planned, lift);
+            let start = closest_points(world, state.layer, pos, lift);
+            let cast = linear_cast(world, state.layer, pos, planned, lift);
             update_manifold(&mut state.manifold, &start, &cast);
             let planes = planes_from(&state.manifold, moving);
             let (disp, v, used) = simplex_solve(&planes, vel, up, remaining, min_dt);
             out_vel = v;
             let mut moved = false;
             if (disp - planned).abs().max_element() > 0.001 {
-                let hits = linear_cast(world, pos, disp, lift);
+                let hits = linear_cast(world, state.layer, pos, disp, lift);
                 if let Some(first) = hits.first() {
                     if find(&state.manifold, first).is_none() {
                         state.manifold.push(*first);
@@ -547,7 +549,7 @@ pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: V
     }
     // what is touching now (within a centimetre of the keep distance)
     let mut t = Touched::default();
-    for c in closest_points(world, pos, lift) {
+    for c in closest_points(world, state.layer, pos, lift) {
         if c.dist - KEEP_DISTANCE > 0.01 {
             continue;
         }
@@ -568,7 +570,8 @@ pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: V
 pub fn stick_to_ground(world: &CollisionWorld, feet: Vec3, lift: f32, reach: f32) -> Option<(f32, f32)> {
     let p = feet + Vec3::Y * lift;
     let cast = Vec3::NEG_Y * (reach + lift);
-    let hits = linear_cast(world, p, cast, lift);
+    // the Ground context's own cast: the character's layer (MainCharacter sees Static)
+    let hits = linear_cast(world, crate::layers::MAIN_CHARACTER, p, cast, lift);
     let h = hits.iter().find(|h| h.normal.y >= STICK_MIN_UP)?;
     let rest = p + cast * h.fraction + Vec3::Y * (KEEP_DISTANCE / h.normal.y);
     Some((rest.y, h.normal.y))
@@ -579,7 +582,7 @@ mod tests {
     use super::*;
 
     fn boxes(b: &[(Vec3, Vec3)]) -> CollisionWorld {
-        CollisionWorld { boxes: b.iter().map(|&(min, max)| Aabb3 { min, max }).collect() }
+        CollisionWorld { boxes: b.iter().map(|&(min, max)| Aabb3 { min, max }).collect(), ..Default::default() }
     }
 
     fn run(w: &CollisionWorld, mut p: Vec3, vel: Vec3, frames: usize, lift: f32) -> (Vec3, Vec3) {
@@ -602,6 +605,31 @@ mod tests {
         assert!((p.x - (1.0 - CAPSULE_RADIUS)).abs() < 0.01, "stopped at the keep distance: {p:?}");
         assert!((nv.z - 3.0).abs() < 1e-3 && nv.x.abs() < 1e-3, "slides along: {nv:?}");
         assert!(p.z > 2.0, "{p:?}");
+    }
+
+    #[test]
+    fn the_layer_table_matches_the_game() {
+        use crate::layers::*;
+        assert!(collides(MAIN_CHARACTER, STATIC) && collides(STATIC, MAIN_CHARACTER));
+        assert!(!collides(MAIN_CHARACTER_NO_STATIC, STATIC), "hanging / climbing: no static world");
+        assert!(collides(MAIN_CHARACTER_NO_STATIC, CHARACTER), "… but other characters still");
+        assert!(!collides(CAMERA, CHARACTER), "the camera passes through characters");
+        assert!(collides(CAMERA, STATIC));
+    }
+
+    #[test]
+    fn a_no_static_capsule_passes_through_the_wall() {
+        let w = boxes(&[(Vec3::new(1.0, -1.0, -50.0), Vec3::new(2.0, 3.0, 50.0))]);
+        let step = |layer: u8| {
+            let mut s = ProxyState { layer, ..Default::default() };
+            let mut p = Vec3::new(0.0, 1.0, 0.0);
+            for _ in 0..60 {
+                p = integrate(&w, &mut s, p, Vec3::new(3.0, 0.0, 0.0), 1.0 / 60.0, 0.0).0;
+            }
+            p
+        };
+        assert!(step(crate::layers::MAIN_CHARACTER).x < 1.0, "blocked");
+        assert!(step(crate::layers::MAIN_CHARACTER_NO_STATIC).x > 2.9, "passes");
     }
 
     #[test]
