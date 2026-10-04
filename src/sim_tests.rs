@@ -981,21 +981,41 @@ fn wall_run_without_a_ledge_drops_back() {
 }
 
 #[test]
-fn releasing_legs_on_the_wall_falls_off() {
+fn releasing_legs_on_the_wall_keeps_running() {
+    use crate::player::walling::WallingSubState;
+    // the interpreter's walling state (0xEE05E0) always sends command 0: letting go of Legs does not drop off the wall
     let mut s = wall_run_at(82.0);
     s.pad(Vec3::Z, 1.0, true, false);
-    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
+    assert!(s.run_until(1.5, |s| s.data().walling.sub_state == WallingSubState::VerticalEnd), "fell off: {:?}", s.loco().current);
 }
 
 #[test]
-fn pushing_away_from_the_wall_rebounds() {
+fn pressing_legs_on_the_wall_rebounds() {
+    use crate::player::walling::WallingSubState;
+    // ReboundJump 0xE365C0: a fresh Legs press while running up (Vertical) pushes off along the stick (pulled away from
+    // the wall); with nothing to land on, toward the fallback target 7 m out, 3 m down
     let mut s = wall_run_at(82.0);
-    s.run(0.15);
+    assert!(s.run_until(1.0, |s| s.data().walling.sub_state == WallingSubState::Vertical), "no vertical step");
     s.pad(Vec3::NEG_Z, 1.0, true, true);
-    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "no rebound: {:?}", s.loco().current);
+    s.press_legs();
+    assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir), "no rebound: {:?}", s.loco().current);
     let z0 = s.body().feet.z;
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
     assert!(s.body().feet.z < z0 - 2.0, "pushed off away from the wall: {:?}", s.body().feet);
+}
+
+#[test]
+fn pressing_legs_with_the_stick_at_the_wall_rebounds_straight_back() {
+    use crate::player::walling::WallingSubState;
+    // the stick within 50° of the facing (into the wall) pushes straight back from it (0xEE05E0)
+    let mut s = wall_run_at(82.0);
+    assert!(s.run_until(1.0, |s| s.data().walling.sub_state == WallingSubState::Vertical), "no vertical step");
+    let x0 = s.body().feet.x;
+    s.pad((Vec3::Z + Vec3::X * 0.5).normalize(), 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir), "no rebound");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
+    assert!((s.body().feet.x - x0).abs() < 0.3, "straight back, not sideways: {:?} from x {x0}", s.body().feet);
 }
 
 #[test]
