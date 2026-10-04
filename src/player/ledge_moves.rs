@@ -873,7 +873,7 @@ pub fn try_side_to_ladder(
             hand_r: q,
             normal: ln,
         };
-        let entry = LadderEntry { base, top, n: ln, from: to, facing: -ln, from_top: false, high: false, foot, from_ledge: true, action: None };
+        let entry = LadderEntry { base, top, n: ln, from: to, facing: -ln, from_top: false, high: false, foot, from_ledge: true, action: None, ..Default::default() };
         return Some((mv, entry));
     }
     None

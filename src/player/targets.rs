@@ -27,6 +27,8 @@ pub struct JumpTarget {
     pub straight: Option<super::ledge_moves::HangJumpIn>,
     /// Pass-over target (type 2): the near edge point on the wall top and its outward normal.
     pub pass: Option<(Vec3, Vec3)>,
+    /// Ladder target (type 0x1000): the Ladder context's entry on arrival (0xE07D00 → EntryType 1, ladder state 2).
+    pub ladder: Option<super::ladder::LadderEntry>,
 }
 
 /// Roof-edge landing spot: the game's free-step target type 1 (narrow object / edge; its flight is
@@ -39,6 +41,8 @@ pub const TARGET_LEDGE: u32 = 0x40;
 /// PORT: thickest wall top offered as a pass-over target (type 2).
 pub const PASSOVER_MAX_THICKNESS: f32 = 1.0;
 pub const TARGET_LEDGE_FREE: u32 = 0x80;
+/// Ladder targets (flight `…_to_surface`, arrival `HumanInAir__CheckJumpTargetArrival` 0xE07D00 case 0x1000).
+pub const TARGET_LADDER: u32 = 0x1000;
 
 pub fn find_jump_target(
     feet: Vec3,
@@ -82,7 +86,7 @@ pub fn find_jump_target(
         narrow.push(e.p0.lerp(e.p1, u));
     }
     for pos in narrow {
-        let target = JumpTarget { position: pos, type_flags: TARGET_GROUND, hang: None, straight: None, pass: None };
+        let target = JumpTarget { position: pos, type_flags: TARGET_GROUND, hang: None, straight: None, pass: None, ladder: None };
         let flat = Vec3::new(pos.x - feet.x, 0.0, pos.z - feet.z);
         let dist = flat.length();
         let dz = pos.y - feet.y;
@@ -132,13 +136,13 @@ pub fn find_jump_target(
             // the port offers wall tops ≤ 1 m thick (the vault's 30 ↔ 100 cm blend range, 0xDDB800). The target sits
             // 0.5 m before the edge (0xB1EC40 pulls targets back 0.5·h), the reception carries the root onto it.
             let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
-            Some(JumpTarget { position: on_edge + n * 0.5, type_flags: 2, hang: None, straight: None, pass: Some((on_edge, n)) })
+            Some(JumpTarget { position: on_edge + n * 0.5, type_flags: 2, hang: None, straight: None, pass: Some((on_edge, n)), ladder: None })
         } else if edge_dz <= GROUND_MAX_UP {
             // ground target: land on top of the roof
             let landing = on_edge - e.n1 * LAND_INSET;
             let Some(h) = collision.ground_height(landing + Vec3::Y * 0.05, 0.2) else { continue };
             let pos = Vec3::new(landing.x, h, landing.z);
-            Some(JumpTarget { position: pos, type_flags: TARGET_GROUND, hang: None, straight: None, pass: None })
+            Some(JumpTarget { position: pos, type_flags: TARGET_GROUND, hang: None, straight: None, pass: None, ladder: None })
         } else if edge_dz <= LEDGE_MAX_UP + WALL_HANG_DROP {
             // ledge target: hang from the edge (wall hang if there is wall below), both hands on the edge
             let on_edge = guidance.fit_hands(on_edge, e.n1);
@@ -152,7 +156,7 @@ pub fn find_jump_target(
                 continue;
             }
             let flags = if hang == LedgeHangType::Wall { TARGET_LEDGE } else { TARGET_LEDGE_FREE };
-            Some(JumpTarget { position: pos, type_flags: flags, hang: Some((on_edge, e.n1)), straight: None, pass: None })
+            Some(JumpTarget { position: pos, type_flags: flags, hang: Some((on_edge, e.n1)), straight: None, pass: None, ladder: None })
         } else {
             None
         };
@@ -194,6 +198,40 @@ pub fn find_jump_target(
             best = Some((target, dz, dist));
         }
     }
+    // ladders (type 0x1000, the surface bands 2.5 / −3 / 5.5 / 7.5 m). PORT: the game's ladder candidates (IHuman
+    // vt56) are not traced; the port offers each ladder 1 m above the jumper's feet snapped to 0.5 m, within the air
+    // catch's range (0.45 m … height − 1.95 m, 0xE04100), the root 0.5 m out on its front.
+    for e in &guidance.edges {
+        if e.subtype != GuidanceSubType::Ladder {
+            continue;
+        }
+        let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
+        let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+        let Some(h) = super::ladder::catch_height(feet.y + 1.0 - base.y, top.y - base.y) else { continue };
+        if Vec3::new(feet.x - base.x, 0.0, feet.z - base.z).dot(n) <= 0.0 {
+            continue;
+        }
+        let pos = base + n * super::ladder::ATTACH_OUT + Vec3::Y * h;
+        let flat = Vec3::new(pos.x - feet.x, 0.0, pos.z - feet.z);
+        let dist = flat.length();
+        let dz = pos.y - feet.y;
+        let (max_up, min_dz, _, _, far) = super::jump_blend::bands(TARGET_LADDER);
+        if !(0.6..=far).contains(&dist) || dz > max_up || dz < min_dz {
+            continue;
+        }
+        if flat.normalize().dot(want).clamp(-1.0, 1.0).acos() > TARGET_CONE {
+            continue;
+        }
+        let entry = super::ladder::LadderEntry { base, top, n, from: pos, facing: -n, from_ledge: true, height: Some(h), action: Some(super::ladder::ARRIVE_TARGET), chain: true, ..Default::default() };
+        let target = JumpTarget { position: pos, type_flags: TARGET_LADDER, hang: None, straight: None, pass: None, ladder: Some(entry) };
+        let better = match &best {
+            None => true,
+            Some((_, bdz, bd)) => dz > bdz + 0.25 || ((dz - bdz).abs() <= 0.25 && dist < *bd),
+        };
+        if better {
+            best = Some((target, dz, dist));
+        }
+    }
     // haystacks (type 0x800): the top centre; a Leap of Faith when ≥ 3 m below (bands −30 m / 7.5 m), else the
     // haystack free-step bands (−3 m / 6 m) (0xB1EC40). PORT: a haystack in the cone wins over roof targets
     // (the game's LeapOfFaith ability path, IHuman vt1540/1544, is not traced).
@@ -210,7 +248,7 @@ pub fn find_jump_target(
         if flat.normalize().dot(want).clamp(-1.0, 1.0).acos() > TARGET_CONE {
             continue;
         }
-        return Some(JumpTarget { position: top, type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None });
+        return Some(JumpTarget { position: top, type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None });
     }
     best.map(|b| b.0)
 }
