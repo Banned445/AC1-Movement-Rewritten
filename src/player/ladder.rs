@@ -106,6 +106,8 @@ pub struct HumanLadderData {
     follow: bool,
     fwd: Vec3,
     pub heading: Vec3,
+    /// The jump's push-off direction (horizontal), set when the jump starts.
+    pub jump_dir: Vec3,
 }
 
 fn blend(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -219,12 +221,13 @@ pub fn find_ladder(feet: Vec3, forward: Vec3, reach: f32, guidance: &GuidanceWor
 }
 
 /// `HumanLadder__UpdateFSM` 0xE27D30: entry (0xE25240), Main (0xE278E0: climb / wait by MvtAnimState from the
-/// table), exits. PORT triggers: the stick along the facing climbs up, against it down; Legs releases; high profile +
-/// Legs + the stick away from the ladder jumps (`wait_tr_rebound`).
+/// table), exits. The player's input is the interpreter's ladder state (0xEEB570, RE/05 §4.2): the stick climbs, the
+/// empty-hand button drops (QuickDrop), high profile + Legs jumps off (`wait_tr_rebound`).
 pub fn update_ladder(
     time: Res<Time>,
     mut pad: ResMut<PadInput>,
     collision: Res<CollisionWorld>,
+    guidance: Res<GuidanceWorld>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
@@ -256,8 +259,14 @@ pub fn update_ladder(
         body.feet = p;
         body.heading = super::heading_of(l.heading);
 
+        // The interpreter's ladder state (`GoAssassinActionInterpreter__LadderState` 0xEEB570): above the 0.35 dead
+        // zone, a stick within 60° of the facing axis (|dot(d, right)| ≤ 0.866) asks to climb (IHumanLadder slot 0, ±up:
+        // up when it points along the facing, `sub_571960` ≥ 0); within 30° of the right axis it is the side step
+        // (event 5, slots 8 / 9, not ported).
         let stick = pad.speed01 > 0.0;
-        let along = if stick { pad.dir.dot(-l.n) } else { 0.0 };
+        let fwd = -l.n;
+        let vertical = stick && pad.dir.dot(super::right_of(fwd)).abs() <= 0.866;
+        let along = if vertical { if pad.dir.dot(fwd) >= 0.0 { 1.0 } else { -1.0 } } else { 0.0 };
         let hi = l.high as usize;
         let mut leave: Option<TransitionSetup> = None;
         match phase {
@@ -284,6 +293,39 @@ pub fn update_ladder(
                 }
             }
             LadderPhase::Wait | LadderPhase::ClimbUp | LadderPhase::ClimbDown => {
+                // QuickDrop (event 0, slots 6 / 7): the empty-hand button (interp +0x1129), on a ladder within 30° of
+                // vertical (`sub_E1EAC0`) → the release (MvtAnimState 15 / 16), its action as the fall's animation
+                if pad.hand_just_pressed() && (l.top - l.base).normalize_or(Vec3::Y).y > (30f32).to_radians().cos() {
+                    pad.hand_pressed_ago = f32::INFINITY;
+                    let fall = blend(RELEASE[l.high as usize][l.foot], 0, &[]);
+                    let from = body.feet;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
+                    data.air.fall_action = fall;
+                    continue;
+                }
+                // Jump off (event 1, slots 4 / 5): high profile, the Legs buffer (+0x1126) and a push-off direction: the
+                // stick, or straight back with no stick; more than 135° from straight back (into the ladder) → none,
+                // 90°–135° → turned to ±89°. PORT: the target search (IHuman vt56 / vt76 / vt68) happens when the
+                // `wait_tr_rebound` clip ends.
+                if pad.high_profile && pad.jump_buffered() {
+                    let back = l.n;
+                    let d = if stick { Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or(back) } else { back };
+                    let a = back.angle_between(d);
+                    if a <= 135f32.to_radians() {
+                        let d = if a > std::f32::consts::FRAC_PI_2 {
+                            let side = if back.cross(d).y >= 0.0 { 1.0 } else { -1.0 };
+                            Quat::from_rotation_y(1.553_343_1 * side) * back
+                        } else {
+                            d
+                        };
+                        pad.consume_jump();
+                        l.jump_dir = d;
+                        let a = blend(JUMP[l.foot], 0, &[]);
+                        let from = body.feet;
+                        l.play(LadderPhase::Jump, a, from, from, true);
+                        continue;
+                    }
+                }
                 // the step in progress finishes first
                 let stepping = matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done;
                 if !stepping {
@@ -293,25 +335,7 @@ pub fn update_ladder(
                     l.high = pad.high_profile;
                     let hi = l.high as usize;
                     let len = l.len();
-                    if pad.jump_buffered() && !(pad.high_profile && stick && along < -0.5) {
-                        // release (MvtAnimState 15 / 16): the release action as the fall's animation
-                        pad.consume_jump();
-                        let fall = blend(RELEASE[hi][l.foot], 0, &[]);
-                        let from = body.feet;
-                        leave = Some(TransitionSetup::ToInAir(InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
-                        if let Some(f) = fall {
-                            data.air.fall_action = None;
-                            switch_context(&mut loco, &mut data, leave.take().unwrap());
-                            data.air.fall_action = Some(f);
-                            continue;
-                        }
-                    } else if pad.high_profile && pad.jump_buffered() && stick && along < -0.5 {
-                        // jump (17 / 18): `wait_tr_rebound`, then a jump away from the ladder
-                        pad.consume_jump();
-                        let a = blend(JUMP[l.foot], 0, &[]);
-                        let from = body.feet;
-                        l.play(LadderPhase::Jump, a, from, from, true);
-                    } else if along > 0.5 {
+                    if along > 0.5 {
                         let step = if l.high { 1.0 } else { 0.5 };
                         let rise = if l.high { 1.5 } else { 1.0 };
                         if l.height + rise >= len - 0.26 {
@@ -367,9 +391,14 @@ pub fn update_ladder(
             }
             LadderPhase::Jump => {
                 if done {
+                    // a jump target along the push-off (the guidance search of the ground jumps), else a free jump
                     let from = body.feet;
-                    leave = Some(TransitionSetup::ToInAir(InAirEntry::FreeJump { from, dir: l.n, speed_param: 0.5 }));
-                    body.heading = super::heading_of(l.n);
+                    let dir = l.jump_dir.normalize_or(l.n);
+                    leave = Some(TransitionSetup::ToInAir(match super::targets::find_jump_target(from, dir, &guidance, &collision) {
+                        Some(target) => InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: l.foot == 0 },
+                        None => InAirEntry::FreeJump { from, dir, speed_param: 0.5 },
+                    }));
+                    body.heading = super::heading_of(dir);
                 }
             }
         }

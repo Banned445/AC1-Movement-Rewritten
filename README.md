@@ -31,7 +31,7 @@ capsule in place of Altaïr and no animations.
 ## Controls
 
 WASD move, left mouse button capture the mouse (Esc releases it), right mouse button high profile, Space legs
-(with the right button held: sprint / free-run; into a wall: climb or grab), G show the climbable edges, F9 save a bug
+(with the right button held: sprint / free-run; into a wall: climb or grab), E empty hand (drop off a ladder), G show the climbable edges, F9 save a bug
 report, F1 hide the help. The full list is on screen.
 
 ## Tests

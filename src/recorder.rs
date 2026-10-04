@@ -50,12 +50,14 @@ pub struct InputFrame {
     pub legs_pressed_ago: f32,
     pub cam_yaw: f32,
     pub cam_pitch: f32,
+    /// The empty-hand button's age (12th field; older captures without it read as never pressed).
+    pub hand_pressed_ago: f32,
 }
 
 impl InputFrame {
     pub fn to_line(&self) -> String {
         format!(
-            "{} {:?} {:?} {:?} {:?} {:?} {} {} {:?} {:?} {:?}",
+            "{} {:?} {:?} {:?} {:?} {:?} {} {} {:?} {:?} {:?} {:?}",
             self.dt_nanos,
             self.dir.x,
             self.dir.y,
@@ -66,13 +68,14 @@ impl InputFrame {
             self.legs_held as u8,
             self.legs_pressed_ago,
             self.cam_yaw,
-            self.cam_pitch
+            self.cam_pitch,
+            self.hand_pressed_ago
         )
     }
 
     pub fn parse(line: &str) -> Option<Self> {
         let t: Vec<&str> = line.split_whitespace().collect();
-        if t.len() != 11 {
+        if t.len() != 11 && t.len() != 12 {
             return None;
         }
         let f = |i: usize| t[i].parse::<f32>().ok();
@@ -86,6 +89,7 @@ impl InputFrame {
             legs_pressed_ago: f(8)?,
             cam_yaw: f(9)?,
             cam_pitch: f(10)?,
+            hand_pressed_ago: if t.len() == 12 { f(11)? } else { f32::INFINITY },
         })
     }
 
@@ -96,6 +100,7 @@ impl InputFrame {
         pad.high_profile = self.high_profile;
         pad.legs_held = self.legs_held;
         pad.legs_pressed_ago = self.legs_pressed_ago;
+        pad.hand_pressed_ago = self.hand_pressed_ago;
     }
 }
 
@@ -223,6 +228,7 @@ fn record_input(time: Res<Time>, pad: Res<PadInput>, rig: Res<CameraRig>, mut re
         legs_pressed_ago: pad.legs_pressed_ago,
         cam_yaw: rig.yaw,
         cam_pitch: rig.pitch,
+        hand_pressed_ago: pad.hand_pressed_ago,
     };
     rec.inputs.push(f);
 }

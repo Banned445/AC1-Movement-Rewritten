@@ -33,7 +33,7 @@ impl Sim {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(1.0 / 60.0)))
-            .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, ..default() })
+            .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
             .insert_resource(SpawnPoint(SPAWN))
             .init_resource::<CameraRig>()
             .add_systems(Update, (ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
@@ -59,6 +59,7 @@ impl Sim {
             {
                 let mut p = self.app.world_mut().resource_mut::<PadInput>();
                 p.legs_pressed_ago += 1.0 / 60.0;
+                p.hand_pressed_ago += 1.0 / 60.0;
             }
             self.app.update();
             if self.loco().current == ActorContextId::InAir {
@@ -82,6 +83,10 @@ impl Sim {
     /// Press Legs (fills the jump buffer, like read_pad on a fresh press).
     fn press_legs(&mut self) {
         self.app.world_mut().resource_mut::<PadInput>().legs_pressed_ago = 0.0;
+    }
+    /// Press the empty-hand button: it reads as pressed on the next frame.
+    fn press_hand(&mut self) {
+        self.app.world_mut().resource_mut::<PadInput>().hand_pressed_ago = -1.0 / 60.0;
     }
     /// Run until `pred` holds or `max_s` elapses; returns whether it held.
     fn run_until(&mut self, max_s: f32, pred: impl Fn(&Sim) -> bool) -> bool {
@@ -1422,19 +1427,66 @@ fn enter_a_ladder_from_the_top_and_climb_down() {
     assert!(s.body().feet.y.abs() < 0.05, "on the floor: {:?}", s.body().feet);
 }
 
-#[test]
-fn letting_go_of_a_ladder_falls() {
-    use crate::player::ladder::{LadderPhase, RELEASE};
+/// Walk to the ladder at x 50 (front z 63.5), climb to 2 m and wait there.
+fn on_the_ladder() -> Sim {
+    use crate::player::ladder::LadderPhase;
     let mut s = Sim::new(Vec3::new(50.0, 0.0, 60.5), std::f32::consts::PI);
     s.pad(Vec3::Z, 1.0, false, false);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder));
     assert!(s.run_until(4.0, |s| s.data().ladder.height >= 2.0));
     s.pad(Vec3::ZERO, 0.0, false, false);
     assert!(s.run_until(1.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)));
-    s.press_legs();
+    s
+}
+
+#[test]
+fn letting_go_of_a_ladder_falls() {
+    use crate::player::ladder::RELEASE;
+    // QuickDrop (event 0): the empty-hand button (0xEEB570 → IHumanLadder slots 6 / 7)
+    let mut s = on_the_ladder();
+    s.press_hand();
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "no release");
     assert!(s.data().air.fall_action.is_some_and(|a| RELEASE[0].contains(&a.id)));
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
+}
+
+#[test]
+fn legs_alone_does_not_drop_off_a_ladder() {
+    // without high profile Legs does nothing on a ladder (the jump needs high profile; the drop is the empty hand)
+    let mut s = on_the_ladder();
+    s.press_legs();
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ladder);
+}
+
+#[test]
+fn high_profile_legs_jumps_off_a_ladder_straight_back() {
+    use crate::player::ladder::LadderPhase;
+    // event 1 (slots 4 / 5): high profile + Legs, no stick → straight back from the ladder (+n = -Z)
+    let mut s = on_the_ladder();
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(0.2, |s| s.data().ladder.phase == Some(LadderPhase::Jump)), "no jump");
+    assert!(s.data().ladder.jump_dir.distance(Vec3::NEG_Z) < 1e-3, "straight back: {:?}", s.data().ladder.jump_dir);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "never left");
+}
+
+#[test]
+fn a_jump_off_a_ladder_into_it_is_refused_and_a_side_push_is_turned() {
+    use crate::player::ladder::LadderPhase;
+    // more than 135° from straight back (the stick into the ladder): no jump
+    let mut s = on_the_ladder();
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    s.run(0.2);
+    assert_ne!(s.data().ladder.phase, Some(LadderPhase::Jump), "jumped into the ladder");
+    // 90°–135° (sideways and a little in): turned to 89° from straight back
+    let mut s = on_the_ladder();
+    s.pad((Vec3::X + Vec3::Z * 0.4).normalize(), 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(0.2, |s| s.data().ladder.phase == Some(LadderPhase::Jump)), "no jump");
+    let d = s.data().ladder.jump_dir;
+    assert!((d.angle_between(Vec3::NEG_Z).to_degrees() - 89.0).abs() < 0.1 && d.x > 0.0, "turned to 89°: {d:?}");
 }
 
 // ---------------------------------------------------------------- per-frame traces (diagnostics, run by hand)
