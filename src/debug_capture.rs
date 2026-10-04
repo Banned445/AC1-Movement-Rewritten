@@ -75,6 +75,9 @@ enum Scenario {
     Overhang,
     /// Climb wall M, then step right onto block N (`corner`) or left onto block O (`corner90`).
     Corner(bool),
+    /// Climb wall P, then push left past its last holds: the long reach into a free hang on slab Q (TryReachOtherSurface
+    /// 0xDF9B30) and the second hand's grab.
+    ClimbReach,
 }
 
 impl Plugin for DebugCapturePlugin {
@@ -114,6 +117,7 @@ impl Plugin for DebugCapturePlugin {
                 "overhang" => Scenario::Overhang,
                 "corner" => Scenario::Corner(false),
                 "corner90" => Scenario::Corner(true),
+                "climbreach" => Scenario::ClimbReach,
                 _ => Scenario::Roofs,
             };
             app.insert_resource(sc)
@@ -223,6 +227,13 @@ fn place(sc: Res<Scenario>, mut q: Query<&mut Body, With<Player>>, mut rig: ResM
                 b.feet = Vec3::new(if ninety { -38.9 } else { -41.0 }, 0.0, -11.4);
                 b.heading = std::f32::consts::PI; // facing +Z, wall M
                 rig.yaw = std::f32::consts::PI + if ninety { -1.0 } else { 1.0 };
+                rig.distance = 7.0;
+                rig.pitch = 0.2;
+            }
+            Scenario::ClimbReach => {
+                b.feet = Vec3::new(-56.8, 0.0, -11.4);
+                b.heading = std::f32::consts::PI; // facing +Z, wall P
+                rig.yaw = std::f32::consts::PI - 0.6;
                 rig.distance = 7.0;
                 rig.pitch = 0.2;
             }
@@ -456,6 +467,25 @@ fn autopilot(
                 pad.magnitude = 0.0;
             } else if level {
                 pad.dir = if ninety { Vec3::X } else { Vec3::NEG_X };
+                pad.magnitude = 0.45;
+            } else {
+                pad.dir = Vec3::Z;
+                pad.magnitude = if t < 1.4 { 1.0 } else { 0.45 };
+            }
+            pad.speed01 = pad.magnitude;
+        }
+        Scenario::ClimbReach => {
+            // 1 s still, grab wall P, push up until both feet are on the 2.4 m band, then push left (light) until the
+            // reach has hung the climber from slab Q
+            let state = q.single().ok().map(|(l, _, b)| (l.current, b.feet.y));
+            let climbing = state.is_some_and(|(c, _)| c == crate::player::ActorContextId::Climb);
+            let level = state.is_some_and(|(_, y)| y > 2.3);
+            pad.high_profile = true;
+            pad.legs_held = (1.0..1.4).contains(&t);
+            if t < 1.0 || (!climbing && t > 2.0) {
+                pad.magnitude = 0.0;
+            } else if level {
+                pad.dir = Vec3::X;
                 pad.magnitude = 0.45;
             } else {
                 pad.dir = Vec3::Z;

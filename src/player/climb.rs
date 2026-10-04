@@ -897,6 +897,33 @@ pub fn update_climb(
                 continue;
             }
         }
+        // a hang to the side beyond the grid (TryReachOtherSurface 0xDF9B30, dirs 4–9, after the corner moves): the reach's
+        // start action, then the Ledge context (fill sub_DEF0C0, SubState 14) with its loop while the root goes to the hang;
+        // a long jump into a free hang catches on one hand and the second hand follows (SecondHandGrab)
+        if dir >= 4 {
+            let right = matches!(dir, 5 | 7 | 9);
+            let diag = match dir {
+                6 | 7 => 1,
+                8 | 9 => 2,
+                _ => 0,
+            };
+            if let Some(mv) = super::ledge_moves::try_climb_reach(right, diag, d.foot_l, d.foot_r, n, body.feet, &guidance, &collision) {
+                let (mv, tail) = super::ledge_moves::second_hand_grab(mv, &guidance, &collision);
+                let e = LedgeEntry {
+                    hand_l: mv.hand_l,
+                    hand_r: mv.hand_r,
+                    normal: mv.normal,
+                    from_feet: body.feet,
+                    sub_state: LedgeSubState::ParallelJump,
+                    entry_move: Some(mv),
+                    entry_rest: [tail, None],
+                };
+                d.look = None;
+                d.last_action = "reach to a hang";
+                switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
+                continue;
+            }
+        }
         // no grid move: going up with the hands on a top edge → climb out (TryReachLedgeAbove 0xDF1730). Only from the
         // level poses (the pose record's "uneven" field must be 0: poses 0 / 3); 2m (pose 3) picks the 2m clip.
         // PORT: the game's standable test sub_B2E240 is the collision ground test at the top.
