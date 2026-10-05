@@ -27,17 +27,21 @@ pub struct PartMesh {
     /// Bevy space (Y-up, feet at y = 0, facing -Z), metres.
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    pub tangents: Vec<[f32; 4]>,
     pub uvs: Vec<[f32; 2]>,
     /// Skin: up to 4 skeleton joint indices per vertex and normalised weights.
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
     /// One index list per submesh, with its diffuse texture id.
     pub sections: Vec<(Vec<u32>, Option<u32>)>,
+    /// Normal texture for each section, in the same order (RE/09 §4.2, §6).
+    pub normal_maps: Vec<Option<u32>>,
 }
 
 pub struct AltairModel {
     pub parts: Vec<PartMesh>,
     pub textures: HashMap<u32, AcTexture>,
+    pub normal_textures: HashMap<u32, AcTexture>,
     /// Altaïr's skeleton (UCMA_Altair), game skeleton space.
     pub skeleton: Vec<SkelBone>,
     /// Lowest vertex z in model space (feet), used to put the feet at y = 0.
@@ -134,8 +138,8 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         }
     }
 
-    // material → diffuse texture id
-    let diffuse_of = |mat_id: u32| -> Option<u32> {
+    // Material → TextureSet → channel's TextureMapSpec → TextureMap (RE/09 §4.2).
+    let texture_of = |mat_id: u32, channel: &str| -> Option<u32> {
         let mut mat = *by_id.get(overrides.get(&mat_id).unwrap_or(&mat_id))?;
         if let Some(base) = mat.name.strip_suffix("_Empty") {
             // no override: the real material has the same name without "_Empty"
@@ -151,7 +155,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                 let r = by_id.get(&id)?;
                 for v in refs_in(&r.payload, |v| v != id && by_id.contains_key(&v)) {
                     let t = by_id[&v];
-                    if !t.name.contains("Diffuse") {
+                    if !t.name.contains(channel) {
                         continue;
                     }
                     if t.class_hash == c_tex {
@@ -204,6 +208,9 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
             for n in m.normals.iter_mut() {
                 *n = xform_dir(*n, &t);
             }
+            for n in m.tangents.iter_mut().chain(m.binormals.iter_mut()) {
+                *n = xform_dir(*n, &t);
+            }
         }
     }
 
@@ -215,10 +222,17 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     let joint_of: HashMap<u32, u16> = skeleton.iter().enumerate().map(|(i, b)| (b.bone_id, i as u16)).collect();
 
     let mut textures = HashMap::new();
+    let mut normal_textures = HashMap::new();
     let mut parts = Vec::new();
     for (name, m) in parsed {
         let positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| { let b = to_bevy(p); [b[0], b[1] - min_z, b[2]] }).collect();
         let normals: Vec<[f32; 3]> = m.normals.iter().map(|&n| to_bevy(n)).collect();
+        let tangents: Vec<[f32; 4]> = m.tangents.iter().zip(&m.binormals).zip(&normals).map(|((&t, &b), &n)| {
+            let t = bevy::prelude::Vec3::from_array(to_bevy(t)).normalize_or_zero();
+            let b = bevy::prelude::Vec3::from_array(to_bevy(b));
+            let n = bevy::prelude::Vec3::from_array(n);
+            [t.x, t.y, t.z, if n.cross(t).dot(b) < 0.0 { -1.0 } else { 1.0 }]
+        }).collect();
         // winding: compare geometric face normals with the stored vertex normals and flip if needed
         let mut agree = 0i64;
         for tri in m.indices.chunks_exact(3) {
@@ -231,6 +245,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         }
         let flip = agree < 0;
         let mut sections = Vec::new();
+        let mut normal_maps = Vec::new();
         for s in &m.submeshes {
             let range = s.istart as usize..(s.istart + 3 * s.tris) as usize;
             let mut idx: Vec<u32> = m.indices[range].iter().map(|&i| i as u32).collect();
@@ -239,7 +254,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                     tri.swap(1, 2);
                 }
             }
-            let tex = s.material.and_then(diffuse_of);
+            let tex = s.material.and_then(|id| texture_of(id, "Diffuse"));
             if let Some(t) = tex {
                 if let std::collections::hash_map::Entry::Vacant(e) = textures.entry(t) {
                     if let Some(decoded) = by_id.get(&t).and_then(|r| parse_texture(&r.payload)) {
@@ -248,6 +263,15 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                 }
             }
             sections.push((idx, tex.filter(|t| textures.contains_key(t))));
+            let normal = s.material.and_then(|id| texture_of(id, "Normal"));
+            if let Some(t) = normal {
+                if let std::collections::hash_map::Entry::Vacant(e) = normal_textures.entry(t) {
+                    if let Some(decoded) = by_id.get(&t).and_then(|r| parse_texture(&r.payload)) {
+                        e.insert(decoded);
+                    }
+                }
+            }
+            normal_maps.push(normal.filter(|t| normal_textures.contains_key(t)));
         }
         // skin: palette-local bone → mesh bone → BoneID → skeleton joint; bones the body skeleton
         // lacks (face, tags) fall back to the part's attach bone (or the root)
@@ -303,7 +327,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                 weights[v] = w;
             }
         }
-        parts.push(PartMesh { name, positions, normals, uvs: m.uvs.clone(), joints, weights, sections });
+        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps });
     }
-    Ok(AltairModel { parts, textures, skeleton, min_z, source: format!("{} / Rank 9", path.display()) })
+    Ok(AltairModel { parts, textures, normal_textures, skeleton, min_z, source: format!("{} / Rank 9", path.display()) })
 }

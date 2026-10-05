@@ -2,12 +2,14 @@
 //! as a skinned mesh driven by his 90-bone skeleton.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::assets::altair::load_altair;
+use crate::assets::ac_formats::CHARACTER_VISUAL_FIXES;
 use crate::assets::game_dir;
 use crate::player::Player;
 
@@ -97,15 +99,23 @@ fn attach_altair(
 
     // ---------------------------------------------------------------- textures
     let mut tex_handles = std::collections::HashMap::new();
-    for (id, t) in &model.textures {
+    for (id, t) in model.textures.iter().chain(model.normal_textures.iter()) {
         let mut img = Image::new_uninit(
             Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
             TextureDimension::D2,
-            TextureFormat::Rgba8UnormSrgb,
+            if model.normal_textures.contains_key(id) { TextureFormat::Rgba8Unorm } else { TextureFormat::Rgba8UnormSrgb },
             RenderAssetUsages::RENDER_WORLD,
         );
         img.texture_descriptor.mip_level_count = t.mips.len() as u32;
         img.data = Some(t.mips.concat());
+        if CHARACTER_VISUAL_FIXES {
+            // The outfit UVs tile beyond [0, 1]; clamp sampling smears the atlas border (RE/09 §6).
+            img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                address_mode_u: ImageAddressMode::Repeat,
+                address_mode_v: ImageAddressMode::Repeat,
+                ..ImageSamplerDescriptor::linear()
+            });
+        }
         tex_handles.insert(*id, images.add(img));
     }
     let untextured = materials.add(StandardMaterial {
@@ -119,11 +129,12 @@ fn attach_altair(
     // ---------------------------------------------------------------- meshes
     let mut tris = 0;
     for part in &model.parts {
-        for (idx, tex) in &part.sections {
+        for ((idx, tex), normal) in part.sections.iter().zip(&part.normal_maps) {
             tris += idx.len() / 3;
             let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, part.positions.clone());
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, part.normals.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, part.tangents.clone());
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, part.uvs.clone());
             if skinned {
                 mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(part.joints.clone()));
@@ -136,6 +147,9 @@ fn attach_altair(
                 // frayed edges and feathers: alpha-tested.
                 Some(h) => materials.add(StandardMaterial {
                     base_color_texture: Some(h.clone()),
+                    normal_map_texture: if CHARACTER_VISUAL_FIXES { normal.and_then(|id| tex_handles.get(&id)).cloned() } else { None },
+                    // PORT: DirectX normal-map convention; the game's shader lighting is not yet reproduced (RE/09 §6).
+                    flip_normal_map_y: true,
                     perceptual_roughness: 0.85,
                     double_sided: true,
                     cull_mode: None,

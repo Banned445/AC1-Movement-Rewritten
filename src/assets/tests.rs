@@ -66,6 +66,34 @@ fn altair_model_loads_from_install() {
 }
 
 #[test]
+fn altair_atlas_and_normal_maps_from_install() {
+    if !install_present() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    let m = load_altair(&game_dir()).expect("load Altaïr");
+    let body = m.parts.iter().find(|p| p.name == "UCMA_Altair_Body_C").unwrap();
+    // The robe intentionally uses a second atlas tile. Clamping it produces red/black strips.
+    assert!(body.uvs.iter().any(|uv| uv[0] > 1.9), "body must retain its tiled UVs");
+    let boots = m.parts.iter().find(|p| p.name == "UCMA_Altair_Boots_B").unwrap();
+    assert!(boots.uvs.iter().any(|uv| uv[1] > 0.99), "boots must use the bottom of the accessories atlas");
+    assert!(!m.normal_textures.is_empty(), "normal maps loaded separately from sRGB diffuse maps");
+    for part in &m.parts {
+        assert_eq!(part.sections.len(), part.normal_maps.len(), "{}", part.name);
+        assert_eq!(part.positions.len(), part.tangents.len(), "{}", part.name);
+        for t in &part.tangents {
+            assert!(t.iter().all(|x| x.is_finite()), "{}: invalid tangent", part.name);
+            assert!((t[0] * t[0] + t[1] * t[1] + t[2] * t[2] - 1.0).abs() < 1e-3);
+            assert!(t[3] == 1.0 || t[3] == -1.0);
+        }
+        for id in part.normal_maps.iter().flatten() {
+            let tex = &m.normal_textures[id];
+            assert_eq!(tex.mips[0].len(), (tex.width * tex.height * 4) as usize);
+        }
+    }
+}
+
+#[test]
 fn anim_event_tracks_decode_from_the_install() {
     use super::ac_anim::{decode_events, EventKind};
     if !install_present() {
