@@ -1,5 +1,5 @@
 //! Puts Altaïr's real model (loaded from the user's install) on the player, replacing the capsule,
-//! as a skinned mesh driven by his 90-bone skeleton.
+//! as skinned meshes driven by his movement skeleton and supplemental visual descendants.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
@@ -93,6 +93,14 @@ fn attach_altair(
         joints.push(e);
         rest.push(t);
     }
+    // Supplemental visual bones inherit main joints without entering the movement Rig (RE/09 §7).
+    let mut visual_joints = joints.clone();
+    for b in &model.visual_bones {
+        let t = Transform { translation: Vec3::from_array(b.local_pos), rotation: Quat::from_array(b.local_rot).normalize(), scale: Vec3::ONE };
+        let e = commands.spawn((t, Visibility::default())).id();
+        commands.entity(visual_joints[b.parent.expect("anchored visual bone")]).add_child(e);
+        visual_joints.push(e);
+    }
     let inv: Vec<Mat4> = global.iter().map(|g| g.inverse()).collect();
     let skinned = !joints.is_empty();
     let inv_handle = bindposes.add(SkinnedMeshInverseBindposes::from(inv));
@@ -129,6 +137,10 @@ fn attach_altair(
     // ---------------------------------------------------------------- meshes
     let mut tris = 0;
     for part in &model.parts {
+        let (part_inv, part_joints) = if CHARACTER_VISUAL_FIXES {
+            (bindposes.add(SkinnedMeshInverseBindposes::from(part.inverse_bindposes.iter().map(Mat4::from_cols_array).collect::<Vec<_>>())),
+             part.skin_joints.iter().map(|&j| visual_joints[j]).collect::<Vec<_>>())
+        } else { (inv_handle.clone(), joints.clone()) };
         for ((idx, tex), normal) in part.sections.iter().zip(&part.normal_maps) {
             tris += idx.len() / 3;
             let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
@@ -160,7 +172,7 @@ fn attach_altair(
             };
             let mut ec = commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat), Transform::default()));
             if skinned {
-                ec.insert(SkinnedMesh { inverse_bindposes: inv_handle.clone(), joints: joints.clone() });
+                ec.insert(SkinnedMesh { inverse_bindposes: part_inv.clone(), joints: part_joints.clone() });
             }
             let child = ec.id();
             commands.entity(player).add_child(child);
@@ -177,11 +189,12 @@ fn attach_altair(
         parents: model.skeleton.iter().map(|b| b.parent).collect(),
     }));
     status.0 = format!(
-        "model: Altair from your install ({} parts, {} tris, {} textures, {} bones)",
+        "model: Altair from your install ({} parts, {} tris, {} textures, {} movement + {} visual bones)",
         model.parts.len(),
         tris,
         model.textures.len(),
-        n
+        n,
+        model.visual_bones.len()
     );
     info!("{} — {}", status.0, model.source);
 }

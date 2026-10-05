@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::ac_formats::{parse_mesh, parse_skeleton, parse_texture, resolve_materials, AcMesh, AcTexture, SkelBone};
+use super::ac_formats::{parse_mesh, parse_skeleton, parse_texture, resolve_materials, AcMesh, AcTexture, SkelBone, CHARACTER_VISUAL_FIXES};
 use super::forge::{crc32, Forge, Resource};
 
 /// Body parts that make up the Rank 9 outfit (resource names in the archive).
@@ -36,6 +36,9 @@ pub struct PartMesh {
     pub sections: Vec<(Vec<u32>, Option<u32>)>,
     /// Normal texture for each section, in the same order (RE/09 §4.2, §6).
     pub normal_maps: Vec<Option<u32>>,
+    /// Mesh palette entries into the combined visual rig (RE/09 §7).
+    pub skin_joints: Vec<usize>,
+    pub inverse_bindposes: Vec<[f32; 16]>,
 }
 
 pub struct AltairModel {
@@ -44,6 +47,8 @@ pub struct AltairModel {
     pub normal_textures: HashMap<u32, AcTexture>,
     /// Altaïr's skeleton (UCMA_Altair), game skeleton space.
     pub skeleton: Vec<SkelBone>,
+    /// Additional visual descendants; parent indices address main + visual bones.
+    pub visual_bones: Vec<SkelBone>,
     /// Lowest vertex z in model space (feet), used to put the feet at y = 0.
     pub min_z: f32,
     pub source: String,
@@ -169,9 +174,12 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         None
     };
 
+    // PORT: the skirt renders its authored rest mesh until the DynamicMesh cloth solver is ported (RE/09 §7).
     // parse parts (game space)
     let mut parsed: Vec<(String, AcMesh)> = Vec::new();
-    for &name in PARTS {
+    let extra_parts: &[&str] = if CHARACTER_VISUAL_FIXES { &["Universal_Head_Obj_Clean", "UCMA_Altair_Cloth"] } else { &[] };
+    let names = PARTS.iter().chain(extra_parts).copied();
+    for name in names {
         let Some(r) = find(name, c_mesh) else { continue };
         let Some(mut m) = parse_mesh(&r.payload) else { continue };
         resolve_materials(&r.payload, &mut m, |id| by_id.get(&id).is_some_and(|r| r.class_hash == c_mat));
@@ -189,6 +197,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         parsed.iter().find(|(n, _)| n == "UCMA_Altair_Body_C").map(|(_, m)| m.bones.iter().map(|b| (b.bone_id, b.inv_bind)).collect()).unwrap_or_default();
     // bone a bone-space part is attached through (skin fallback for bones the body skeleton lacks)
     let mut attach_bone: HashMap<String, u32> = HashMap::new();
+    let mut rebases: HashMap<String, [f32; 16]> = HashMap::new();
     for (name, m) in parsed.iter_mut() {
         if name == "UCMA_Altair_Body_C" {
             continue;
@@ -202,6 +211,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         if let Some(shared) = m.bones.iter().find(|b| body_bones.contains_key(&b.bone_id)) {
             attach_bone.insert(name.clone(), shared.bone_id);
             let t = mat_mul(&shared.inv_bind, &rigid_inverse(&body_bones[&shared.bone_id]));
+            rebases.insert(name.clone(), t);
             for p in m.positions.iter_mut() {
                 *p = xform_point(*p, &t);
             }
@@ -219,7 +229,22 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
 
     // skeleton (for skinning / animation)
     let skeleton = find("UCMA_Altair", crc32("Skeleton")).map(|r| parse_skeleton(&r.payload)).unwrap_or_default();
-    let joint_of: HashMap<u32, u16> = skeleton.iter().enumerate().map(|(i, b)| (b.bone_id, i as u16)).collect();
+    let mut visual_bones = Vec::new();
+    if CHARACTER_VISUAL_FIXES {
+        // SkeletonComponent reads primary + secondary resources (0x4E4E30, RE/09 §7).
+        // PORT: retain secondary local rest poses; expression/cloth solvers are not ported.
+        for name in ["UCMA_Altair_Head", "UCMA_Altair_Skirt", "Human_Hood", "UCMA_Sword_Tag"] {
+            if let Some(r) = find(name, crc32("Skeleton")) {
+                merge_visual_bones(&skeleton, &mut visual_bones, &parse_skeleton(&r.payload))?;
+            }
+        }
+    }
+    let joint_of: HashMap<u32, u16> = skeleton.iter().chain(&visual_bones).enumerate().map(|(i, b)| (b.bone_id, i as u16)).collect();
+    // Column-vector form of model (-x,z,y), with the same feet offset as the vertices.
+    let conversion = bevy::prelude::Mat4::from_cols_array(&[
+        -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        0.0, 1.0, 0.0, 0.0, 0.0, -min_z, 0.0, 1.0,
+    ]);
 
     let mut textures = HashMap::new();
     let mut normal_textures = HashMap::new();
@@ -300,6 +325,17 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
             }
             best.1
         };
+        let mut skin_joints = Vec::new();
+        let mut inverse_bindposes = Vec::new();
+        if CHARACTER_VISUAL_FIXES {
+            let rebase = rebases.get(&name).map(bevy::prelude::Mat4::from_cols_array).unwrap_or(bevy::prelude::Mat4::IDENTITY);
+            for bone in &m.bones {
+                let joint = joint_of.get(&bone.bone_id).ok_or_else(|| format!("{name}: visual bone {:08x} not found", bone.bone_id))?;
+                skin_joints.push(*joint as usize);
+                let native = bevy::prelude::Mat4::from_cols_array(&bone.inv_bind);
+                inverse_bindposes.push((native * (conversion * rebase).inverse()).to_cols_array());
+            }
+        }
         let mut joints = vec![[0u16; 4]; m.positions.len()];
         let mut weights = vec![[1.0f32, 0.0, 0.0, 0.0]; m.positions.len()];
         for s in &m.submeshes {
@@ -311,7 +347,11 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                     w[k] = m.bone_w[v][k] as f32 / 255.0;
                     let mesh_bone = s.palette.get(local).and_then(|&mb| m.bones.get(mb as usize));
                     j[k] = match mesh_bone {
-                        Some(b) => joint_of.get(&b.bone_id).copied().unwrap_or_else(|| missing_joint(b)),
+                        Some(b) => if CHARACTER_VISUAL_FIXES { s.palette[local] as u16 } else { joint_of.get(&b.bone_id).copied().unwrap_or_else(|| missing_joint(b)) },
+                        None if CHARACTER_VISUAL_FIXES => {
+                            if m.bone_w[v][k] != 0 { return Err(format!("{name}: invalid weighted mesh palette entry")); }
+                            0
+                        },
                         None => fallback,
                     };
                 }
@@ -327,7 +367,28 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                 weights[v] = w;
             }
         }
-        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps });
+        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, skin_joints, inverse_bindposes });
     }
-    Ok(AltairModel { parts, textures, normal_textures, skeleton, min_z, source: format!("{} / Rank 9", path.display()) })
+    Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, min_z, source: format!("{} / Rank 9", path.display()) })
+}
+
+/// Add only new descendants, aliasing shared BoneIDs to existing animated joints (RE/09 §7).
+fn merge_visual_bones(main: &[SkelBone], added: &mut Vec<SkelBone>, source: &[SkelBone]) -> Result<(), String> {
+    let mut by_id: HashMap<u32, usize> = main.iter().chain(added.iter()).enumerate().map(|(i, b)| (b.bone_id, i)).collect();
+    let mut pending: Vec<usize> = (0..source.len()).filter(|&i| !by_id.contains_key(&source[i].bone_id)).collect();
+    while !pending.is_empty() {
+        let before = pending.len();
+        pending.retain(|&i| {
+            let b = &source[i];
+            let parent = b.parent.and_then(|p| by_id.get(&source[p].bone_id).copied());
+            if parent.is_none() { return true; }
+            let mut b = b.clone();
+            b.parent = parent;
+            by_id.insert(b.bone_id, main.len() + added.len());
+            added.push(b);
+            false
+        });
+        if before == pending.len() { return Err("secondary skeleton has an unanchored or cyclic hierarchy".into()); }
+    }
+    Ok(())
 }

@@ -178,3 +178,49 @@ fn limb_ik_chains_exist_in_altairs_skeleton() {
         assert!(is_ancestor(ia, ib) && is_ancestor(ib, ic), "chain {a:08x}/{b:08x}/{c:08x} is not a hierarchy line");
     }
 }
+
+#[test]
+fn altair_visual_rig_and_native_skinning_from_install() {
+    use bevy::prelude::*;
+    if !install_present() { eprintln!("skipped: game install not found"); return; }
+    let m = load_altair(&game_dir()).expect("load visual rig");
+    assert_eq!(m.skeleton.len(), 90, "movement rig keeps its original joint order");
+    assert!(!m.visual_bones.is_empty());
+    let bones: Vec<_> = m.skeleton.iter().chain(&m.visual_bones).collect();
+    let mut global = Vec::new();
+    for (i, bone) in bones.iter().enumerate() {
+        assert!(bone.parent.is_none_or(|p| p < i), "visual parents precede children");
+        let t = Mat4::from_rotation_translation(Quat::from_array(bone.local_rot).normalize(), Vec3::from_array(bone.local_pos));
+        global.push(bone.parent.map(|p| global[p]).unwrap_or(Mat4::IDENTITY) * t);
+    }
+    let face = m.parts.iter().find(|p| p.name == "Universal_Head_Obj_Clean").expect("eyes/mouth mesh");
+    assert_eq!(face.sections.len(), 2);
+    assert!(face.sections.iter().all(|(_, texture)| texture.is_some()));
+    assert!(face.skin_joints.iter().all(|&j| j >= m.skeleton.len()), "face uses authored facial descendants");
+    let skirt = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").expect("lower robe rest mesh");
+    assert_eq!(skirt.positions.len(), 146);
+    assert_eq!(skirt.sections.iter().map(|(idx, _)| idx.len()).sum::<usize>(), 624);
+    assert!(skirt.sections.iter().all(|(_, texture)| texture.is_some()));
+    for part in &m.parts {
+        assert_eq!(part.skin_joints.len(), part.inverse_bindposes.len());
+        assert!(part.skin_joints.iter().all(|&j| j < bones.len()));
+        for matrix in &part.inverse_bindposes {
+            assert!(matrix.iter().all(|v| v.is_finite()));
+            assert!((Mat4::from_cols_array(matrix).determinant() - 1.0).abs() < 0.01);
+        }
+        for (joint, weight) in part.joints.iter().zip(&part.weights) {
+            assert!(joint.iter().all(|&j| (j as usize) < part.skin_joints.len()), "{}: palette out of range", part.name);
+            assert!((weight.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        }
+        // Rest skinning must stay finite and within character scale, including the separate face frame.
+        for (i, position) in part.positions.iter().enumerate() {
+            let mut p = Vec3::ZERO;
+            for k in 0..4 {
+                let j = part.joints[i][k] as usize;
+                let skin = global[part.skin_joints[j]] * Mat4::from_cols_array(&part.inverse_bindposes[j]);
+                p += skin.transform_point3(Vec3::from_array(*position)) * part.weights[i][k];
+            }
+            assert!(p.is_finite() && p.length() < 4.0, "{}: misplaced rest skin", part.name);
+        }
+    }
+}
