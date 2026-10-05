@@ -21,6 +21,48 @@ pub struct ClothCollider {
     pub local_start: Vec3,
     pub local_end: Vec3,
     pub radius: f32,
+    pub mode: u32,
+    pub threshold: f32,
+}
+
+impl ClothCollider {
+    /// Native capsule response (Cloth__sub_6C8260 0x6C8260; RE/09 §8.2).
+    fn correct(&self, position: Vec3, target: Vec3, vertex_radius: f32, pull: f32) -> Vec3 {
+        if self.mode == 2 { return position; }
+        let axis = self.local_end - self.local_start;
+        let length = axis.length_squared();
+        let parameter = if length > 1e-12 { (position - self.local_start).dot(axis) / length } else { 0.0 };
+        let closest = self.local_start + axis * parameter.clamp(0.0, 1.0);
+        let delta = position - closest;
+        let distance_squared = delta.length_squared();
+        let radius = self.radius + vertex_radius;
+        let interior = parameter > 0.0 && parameter < 1.0;
+        if distance_squared >= radius * radius || (interior && radius * radius - distance_squared <= 0.0005) { return position; }
+        // PORT: deterministic escape for a zero-distance contact; native normalization is undefined here.
+        let radial = delta.try_normalize().or_else(|| (target - closest).try_normalize()).unwrap_or(Vec3::X);
+        let escape = (target - self.local_start).try_normalize().unwrap_or(radial); // 0x6C9C50
+        let radial_mode = self.mode == 1 || self.threshold > pull;
+        if radial_mode { return position + radial * (radius - distance_squared.sqrt()); }
+        if !interior { return position + escape * (radius - distance_squared.sqrt()); }
+        let axis = axis / length.sqrt();
+        let perpendicular = escape - axis * escape.dot(axis);
+        if 1.0 - escape.dot(axis).abs() <= 0.0005 {
+            return position + radial * (radius - distance_squared.sqrt());
+        }
+        let direction = perpendicular.normalize_or_zero();
+        let along = delta.dot(direction);
+        let across = delta - direction * along;
+        let exit = (radius * radius - across.length_squared()).max(0.0).sqrt();
+        position + direction * (exit - along)
+    }
+}
+
+fn adaptive_length_squared(base: f32, rest: [Vec3; 2], targets: [Vec3; 2], current: [Vec3; 2]) -> f32 {
+    // Cloth__sub_6C97B0 0x6C9D52–0x6CA172. PORT: retain base when both deviations vanish.
+    let r = rest[0].distance(current[0]) + rest[1].distance(current[1]);
+    let t = targets[0].distance(current[0]) + targets[1].distance(current[1]);
+    if r + t <= 1e-12 { return base; }
+    base + (targets[0].distance_squared(targets[1]) - base) * r / (r + t)
 }
 
 fn word(data: &[u8], p: usize) -> Option<u32> {
@@ -112,8 +154,9 @@ pub fn decode_colliders(entity: &[u8], ragdoll: &[u8]) -> Result<Vec<ClothCollid
             let a = Vec3::new(float(p + 8)?, float(p + 12)?, float(p + 16)?);
             let b = Vec3::new(float(p + 24)?, float(p + 28)?, float(p + 32)?);
             let radius = float(p + 40)? * scale;
-            if !a.is_finite() || !b.is_finite() || !radius.is_finite() || radius <= 0.0 { return None; }
-            colliders.push(ClothCollider { bone_id: *bone_id, local_start: frame.transform_point3(a), local_end: frame.transform_point3(b), radius });
+            let threshold = float(p + 4)?;
+            if !a.is_finite() || !b.is_finite() || !radius.is_finite() || radius <= 0.0 || !threshold.is_finite() { return None; }
+            colliders.push(ClothCollider { bone_id: *bone_id, local_start: frame.transform_point3(a), local_end: frame.transform_point3(b), radius, mode, threshold });
         }
         Some(colliders)
     };
@@ -225,14 +268,14 @@ pub struct ClothState {
 }
 
 impl ClothState {
-    pub fn advance(&mut self, settings: &ClothSettings, targets: &[Vec3], capsules: &[ClothCollider], anchor: Vec3, dt: f32) -> &[Vec3] {
+    pub fn advance(&mut self, settings: &ClothSettings, targets: &[Vec3], rigid_rest: &[Vec3], capsules: &[ClothCollider], anchor: Vec3, dt: f32) -> &[Vec3] {
         // PORT: fixed 60 Hz, bounded catch-up and reset on teleports; original scheduler not ported.
         let reset = self.current.len() != targets.len() || self.anchor.is_none_or(|p| p.distance_squared(anchor) > 4.0);
         self.anchor = Some(anchor);
         if reset {
             self.current = targets.to_vec();
             self.previous = targets.to_vec();
-            self.lengths_squared = settings.edges.iter().map(|[a, b]| targets[*a].distance_squared(targets[*b])).collect();
+            self.lengths_squared = settings.edges.iter().map(|[a, b]| rigid_rest[*a].distance_squared(rigid_rest[*b])).collect();
             self.accumulator = 0.0;
         }
         self.accumulator += dt.clamp(0.0, 0.1);
@@ -250,9 +293,17 @@ impl ClothState {
                 }
                 self.previous[i] = old;
             }
-            // Squared-length correction and pin handling from SoftBody__sub_4D3950 0x4D3950.
+            let lengths: Vec<_> = settings.edges.iter().zip(&self.lengths_squared).map(|([a, b], &base)|
+                adaptive_length_squared(base, [rigid_rest[*a], rigid_rest[*b]], [targets[*a], targets[*b]], [self.current[*a], self.current[*b]])).collect();
+            // Native default: contacts before each edge pass (0x4D398D; RE/09 §8.2).
             for _ in 0..settings.iterations {
-                for (edge, &rest) in settings.edges.iter().zip(&self.lengths_squared) {
+                for (i, position) in self.current.iter_mut().enumerate() {
+                    if settings.pinned[i] { continue; }
+                    for capsule in capsules {
+                        *position = capsule.correct(*position, targets[i], settings.vertex_radius[i], settings.pull[i]);
+                    }
+                }
+                for (edge, &rest) in settings.edges.iter().zip(&lengths) {
                     let [a, b] = *edge;
                     let delta = self.current[b] - self.current[a];
                     let denominator = delta.length_squared() + rest;
@@ -263,24 +314,6 @@ impl ClothState {
                         (true, false) => self.current[b] += 2.0 * correction,
                         (false, true) => self.current[a] -= 2.0 * correction,
                         _ => {}
-                    }
-                }
-            }
-            // Cloth__sub_6C8260 / 0x6C9520. PORT: radial response also replaces mode 0's
-            // cached escape direction; authored capsule frames/radii are retained (RE/09 §8.1).
-            for (i, position) in self.current.iter_mut().enumerate() {
-                if settings.pinned[i] { continue; }
-                for capsule in capsules {
-                    let axis = capsule.local_end - capsule.local_start;
-                    let length = axis.length_squared();
-                    let t = if length > 1e-12 { ((*position - capsule.local_start).dot(axis) / length).clamp(0.0, 1.0) } else { 0.0 };
-                    let closest = capsule.local_start + axis * t;
-                    let delta = *position - closest;
-                    let radius = capsule.radius + settings.vertex_radius[i];
-                    if delta.length_squared() < radius * radius {
-                        // PORT: use the skinned target to choose a stable escape at the capsule axis.
-                        let normal = delta.try_normalize().or_else(|| (targets[i] - closest).try_normalize()).unwrap_or(Vec3::X);
-                        *position = closest + normal * radius;
                     }
                 }
             }
@@ -303,11 +336,12 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
         let capsules: Option<Vec<_>> = settings.colliders.iter().zip(&cloth.collider_joints).map(|(c, &joint)| {
             let transform = transforms.get(joint).ok()?.to_matrix();
             Some(ClothCollider { bone_id: c.bone_id, local_start: transform.transform_point3(c.local_start),
-                local_end: transform.transform_point3(c.local_end), radius: c.radius * transform.x_axis.truncate().length() })
+                local_end: transform.transform_point3(c.local_end), radius: c.radius * transform.x_axis.truncate().length(), mode: c.mode, threshold: c.threshold })
         }).collect();
         let Some(capsules) = capsules else { continue; };
         let inverse = player.to_matrix().inverse();
-        let positions: Vec<[f32; 3]> = cloth.state.advance(&settings, &targets, &capsules, player.translation(), time.delta_secs()).iter()
+        let rigid_rest: Vec<_> = cloth.rest.iter().map(|&p| player.to_matrix().transform_point3(p)).collect();
+        let positions: Vec<[f32; 3]> = cloth.state.advance(&settings, &targets, &rigid_rest, &capsules, player.translation(), time.delta_secs()).iter()
             .map(|&p| inverse.transform_point3(p).to_array()).collect();
         let Some(mut mesh) = meshes.get_mut(&cloth.mesh) else { continue; };
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -329,18 +363,18 @@ mod tests {
         let settings = settings();
         let mut state = ClothState::default();
         let mut targets = vec![Vec3::ZERO, -Vec3::Y * 0.5, -Vec3::Y];
-        state.advance(&settings, &targets, &[], Vec3::ZERO, 0.0);
+        state.advance(&settings, &targets, &targets, &[], Vec3::ZERO, 0.0);
         for frame in 0..240 {
             let anchor = Vec3::X * (frame as f32 / 120.0).min(1.0);
             targets = vec![anchor, anchor - Vec3::Y * 0.5, anchor - Vec3::Y];
-            let current = state.advance(&settings, &targets, &[], anchor, 1.0 / 60.0);
+            let current = state.advance(&settings, &targets, &targets, &[], anchor, 1.0 / 60.0);
             assert_eq!(current[0], anchor);
             assert!(current.iter().all(|p| p.is_finite() && p.distance(anchor) < 1.2));
             if frame == 30 { assert!(current[2].x < anchor.x - 0.01, "free hem must lag the body"); }
         }
         let anchor = Vec3::X * 50.0;
         let targets = vec![anchor, anchor - Vec3::Y * 0.5, anchor - Vec3::Y];
-        assert_eq!(state.advance(&settings, &targets, &[], anchor, 0.0), targets);
+        assert_eq!(state.advance(&settings, &targets, &targets, &[], anchor, 0.0), targets);
     }
     #[test]
     fn cloth_is_stable_across_render_frame_rates() {
@@ -348,8 +382,8 @@ mod tests {
         let targets = vec![Vec3::ZERO, Vec3::new(0.5, -0.2, 0.0), Vec3::new(1.0, -0.4, 0.0)];
         let mut a = ClothState::default();
         let mut b = ClothState::default();
-        for _ in 0..120 { a.advance(&settings, &targets, &[], Vec3::ZERO, 1.0 / 60.0); }
-        for _ in 0..240 { b.advance(&settings, &targets, &[], Vec3::ZERO, 1.0 / 120.0); }
+        for _ in 0..120 { a.advance(&settings, &targets, &targets, &[], Vec3::ZERO, 1.0 / 60.0); }
+        for _ in 0..240 { b.advance(&settings, &targets, &targets, &[], Vec3::ZERO, 1.0 / 120.0); }
         for (a, b) in a.current.iter().zip(b.current.iter()) { assert!(a.distance(*b) < 1e-4); }
     }
     #[test]
@@ -357,15 +391,15 @@ mod tests {
         let mut settings = settings();
         settings.edges.clear();
         settings.gravity = 0.0;
-        let capsule = ClothCollider { bone_id: 0, local_start: -Vec3::Y, local_end: Vec3::Y, radius: 0.1 };
+        let capsule = ClothCollider { bone_id: 0, local_start: -Vec3::Y, local_end: Vec3::Y, radius: 0.1, mode: 1, threshold: 0.0 };
         let targets = vec![Vec3::ZERO, Vec3::X * 0.02, Vec3::ZERO];
         let mut state = ClothState::default();
         for _ in 0..120 {
-            let positions = state.advance(&settings, &targets, std::slice::from_ref(&capsule), Vec3::ZERO, 1.0 / 60.0);
+            let positions = state.advance(&settings, &targets, &targets, std::slice::from_ref(&capsule), Vec3::ZERO, 1.0 / 60.0);
             assert_eq!(positions[0], targets[0]);
             for p in &positions[1..] {
                 assert!(p.is_finite());
-                assert!(Vec2::new(p.x, p.z).length() >= 0.10999);
+                assert!(Vec2::new(p.x, p.z).length() >= 0.1076);
             }
         }
     }
@@ -376,5 +410,31 @@ mod tests {
             assert!(decode_settings(&bytes, &bytes, &[]).is_err());
             assert!(decode_colliders(&bytes, &bytes).is_err());
         }
+    }
+    #[test]
+    fn adaptive_edges_blend_rest_and_animated_lengths_by_pose_deviation() {
+        let rest = [Vec3::ZERO, Vec3::X];
+        let targets = [Vec3::ZERO, Vec3::X * 2.0];
+        assert_eq!(adaptive_length_squared(1.0, rest, targets, rest), 1.0);
+        assert_eq!(adaptive_length_squared(1.0, rest, targets, targets), 4.0);
+        assert_eq!(adaptive_length_squared(1.0, rest, targets, [Vec3::ZERO, Vec3::X * 1.5]), 2.5);
+        assert_eq!(adaptive_length_squared(1.0, rest, rest, rest), 1.0);
+    }
+    #[test]
+    fn directed_capsule_contacts_escape_toward_the_skinned_side() {
+        let mut capsule = ClothCollider { bone_id: 0, local_start: -Vec3::Y, local_end: Vec3::Y, radius: 0.1, mode: 0, threshold: 0.0 };
+        let position = Vec3::new(-0.04, 0.0, 0.03);
+        let target = Vec3::X * 0.3;
+        let directed = capsule.correct(position, target, 0.0, 0.015);
+        assert!(directed.x > 0.09);
+        assert!((directed.z - position.z).abs() < 1e-6);
+        assert!((Vec2::new(directed.x, directed.z).length() - 0.1).abs() < 1e-6);
+        capsule.threshold = 0.5;
+        assert!(capsule.correct(position, target, 0.0, 0.015).x < 0.0, "threshold selects radial response");
+        capsule.mode = 2;
+        assert_eq!(capsule.correct(position, target, 0.0, 0.015), position);
+        capsule.mode = 0;
+        let near_surface = Vec3::new(0.099, 0.0, 0.0);
+        assert_eq!(capsule.correct(near_surface, target, 0.0, 0.015), near_surface);
     }
 }
