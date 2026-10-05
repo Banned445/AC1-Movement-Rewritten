@@ -224,3 +224,35 @@ fn altair_visual_rig_and_native_skinning_from_install() {
         }
     }
 }
+
+#[test]
+fn character_attachments_and_cloth_constraints_from_install() {
+    if !install_present() { eprintln!("skipped: game install not found"); return; }
+    let m = load_altair(&game_dir()).expect("load character attachments");
+    for (name, id) in [("ARCM_Altair_Sword_D", 0x3A83_5926), ("UCMA_Altair_Dagger", 0x685E_46B6)] {
+        let part = m.parts.iter().find(|p| p.name == name).expect("weapon appearance mesh");
+        assert_eq!(part.skin_joints.len(), 1);
+        let bones: Vec<_> = m.skeleton.iter().chain(&m.visual_bones).collect();
+        assert_eq!(bones[part.skin_joints[0]].bone_id, id);
+        assert!(part.sections.iter().all(|(_, texture)| texture.is_some()));
+        assert!(part.weights.iter().all(|w| *w == [1.0, 0.0, 0.0, 0.0]));
+        let min = part.positions.iter().fold([f32::MAX; 3], |a, p| std::array::from_fn(|k| a[k].min(p[k])));
+        let max = part.positions.iter().fold([f32::MIN; 3], |a, p| std::array::from_fn(|k| a[k].max(p[k])));
+        let span = (0..3).map(|k| max[k] - min[k]).fold(0.0f32, f32::max);
+        assert!(span > 0.3 && span < 1.2, "{name}: weapon scale {span}");
+    }
+    let cloth = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap().cloth.as_ref().expect("cloth settings");
+    assert_eq!(cloth.pinned.len(), 146);
+    assert_eq!(cloth.pinned.iter().filter(|&&p| p).count(), 44);
+    assert_eq!(cloth.iterations, 3);
+    assert!((cloth.damping - 0.1).abs() < 1e-5);
+    assert!((cloth.upward_damping - 0.75).abs() < 1e-5);
+    assert!((cloth.gravity + 9.8).abs() < 1e-5);
+    assert!(cloth.edges.len() > 200);
+    assert!(cloth.edges.iter().all(|[a,b]| a != b && *a < 146 && *b < 146));
+    assert!(cloth.pull.iter().all(|p| (0.015..=0.99001).contains(p)));
+    assert_eq!(cloth.colliders.len(), 6);
+    assert!(cloth.vertex_radius.iter().all(|r| (0.01..=0.07001).contains(r)));
+    assert!(cloth.colliders.iter().all(|c| m.skeleton.iter().any(|b| b.bone_id == c.bone_id)
+        && c.local_start.is_finite() && c.local_end.is_finite() && (0.05..0.2).contains(&c.radius)));
+}

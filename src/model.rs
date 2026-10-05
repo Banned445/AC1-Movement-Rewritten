@@ -35,7 +35,8 @@ pub struct ModelPlugin;
 
 impl Plugin for ModelPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ModelStatus>().add_systems(PostStartup, attach_altair);
+        app.init_resource::<ModelStatus>().add_systems(PostStartup, attach_altair)
+            .add_systems(PostUpdate, crate::cloth::update_cloth.after(bevy::transform::TransformSystems::Propagate));
     }
 }
 
@@ -148,7 +149,7 @@ fn attach_altair(
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, part.normals.clone());
             mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, part.tangents.clone());
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, part.uvs.clone());
-            if skinned {
+            if skinned && part.cloth.is_none() {
                 mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(part.joints.clone()));
                 mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, part.weights.clone());
             }
@@ -170,8 +171,19 @@ fn attach_altair(
                 }),
                 None => untextured.clone(),
             };
-            let mut ec = commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat), Transform::default()));
-            if skinned {
+            let mesh_handle = meshes.add(mesh);
+            let mut ec = commands.spawn((Mesh3d(mesh_handle.clone()), MeshMaterial3d(mat), Transform::default(), Name::new(part.name.clone())));
+            if let Some(settings) = &part.cloth {
+                ec.insert(crate::cloth::CharacterCloth {
+                    settings: settings.clone(), rest: part.positions.iter().map(|p| Vec3::from_array(*p)).collect(),
+                    weights: part.weights.clone(), palette: part.joints.clone(),
+                    inverse_bindposes: part.inverse_bindposes.iter().map(Mat4::from_cols_array).collect(),
+                    joints: part_joints.clone(), collider_joints: settings.colliders.iter().map(|c| {
+                        let index = model.skeleton.iter().position(|b| b.bone_id == c.bone_id).expect("validated cloth bone");
+                        joints[index]
+                    }).collect(), mesh: mesh_handle, player, state: default(),
+                });
+            } else if skinned {
                 ec.insert(SkinnedMesh { inverse_bindposes: part_inv.clone(), joints: part_joints.clone() });
             }
             let child = ec.id();

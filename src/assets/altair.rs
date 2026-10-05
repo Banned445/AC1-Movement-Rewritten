@@ -39,6 +39,7 @@ pub struct PartMesh {
     /// Mesh palette entries into the combined visual rig (RE/09 §7).
     pub skin_joints: Vec<usize>,
     pub inverse_bindposes: Vec<[f32; 16]>,
+    pub cloth: Option<crate::cloth::ClothSettings>,
 }
 
 pub struct AltairModel {
@@ -174,14 +175,28 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         None
     };
 
-    // PORT: the skirt renders its authored rest mesh until the DynamicMesh cloth solver is ported (RE/09 §7).
+    // Cloth uses the compiled topology with decoded soft-body constraints (RE/09 §8).
     // parse parts (game space)
     let mut parsed: Vec<(String, AcMesh)> = Vec::new();
-    let extra_parts: &[&str] = if CHARACTER_VISUAL_FIXES { &["Universal_Head_Obj_Clean", "UCMA_Altair_Cloth"] } else { &[] };
+    let mut cloth_settings = HashMap::new();
+    let extra_parts: &[&str] = if CHARACTER_VISUAL_FIXES { &["Universal_Head_Obj_Clean", "UCMA_Altair_Cloth", "ARCM_Altair_Sword_D", "UCMA_Altair_Dagger"] } else { &[] };
     let names = PARTS.iter().chain(extra_parts).copied();
     for name in names {
         let Some(r) = find(name, c_mesh) else { continue };
         let Some(mut m) = parse_mesh(&r.payload) else { continue };
+        if name == "UCMA_Altair_Cloth" && CHARACTER_VISUAL_FIXES {
+            let entity = find("UCMA_Altair_Rank_9", crc32("Entity")).ok_or("cloth entity missing")?;
+            let mut settings = crate::cloth::decode_settings(&r.payload, &entity.payload, &m.positions)?;
+            let ragdoll = crate::cloth::collision_resource(&entity.payload).and_then(|id| by_id.get(&id)).ok_or("cloth collision resource missing")?;
+            settings.colliders = crate::cloth::decode_colliders(&entity.payload, &ragdoll.payload)?;
+            cloth_settings.insert(name.to_string(), settings);
+        }
+        if m.bones.is_empty() {
+            // Authored attachment tags (Human__sub_B11020 0xB11020, RE/09 §8).
+            let bone_id = match name { "ARCM_Altair_Sword_D" => 0x3A83_5926, "UCMA_Altair_Dagger" => 0x685E_46B6, _ => continue };
+            m.bones.push(super::ac_formats::MeshBone { bone_id, inv_bind: bevy::prelude::Mat4::IDENTITY.to_cols_array() });
+            for sub in &mut m.submeshes { sub.palette = vec![0]; }
+        }
         resolve_materials(&r.payload, &mut m, |id| by_id.get(&id).is_some_and(|r| r.class_hash == c_mat));
         parsed.push((name.to_string(), m));
     }
@@ -232,7 +247,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     let mut visual_bones = Vec::new();
     if CHARACTER_VISUAL_FIXES {
         // SkeletonComponent reads primary + secondary resources (0x4E4E30, RE/09 §7).
-        // PORT: retain secondary local rest poses; expression/cloth solvers are not ported.
+        // PORT: retain secondary local rest poses; expressions and hood-bone dynamics are not ported.
         for name in ["UCMA_Altair_Head", "UCMA_Altair_Skirt", "Human_Hood", "UCMA_Sword_Tag"] {
             if let Some(r) = find(name, crc32("Skeleton")) {
                 merge_visual_bones(&skeleton, &mut visual_bones, &parse_skeleton(&r.payload))?;
@@ -240,6 +255,9 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         }
     }
     let joint_of: HashMap<u32, u16> = skeleton.iter().chain(&visual_bones).enumerate().map(|(i, b)| (b.bone_id, i as u16)).collect();
+    if cloth_settings.values().flat_map(|s| &s.colliders).any(|c| !skeleton.iter().any(|b| b.bone_id == c.bone_id)) {
+        return Err("cloth collider bone absent from visual rig".into());
+    }
     // Column-vector form of model (-x,z,y), with the same feet offset as the vertices.
     let conversion = bevy::prelude::Mat4::from_cols_array(&[
         -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
@@ -304,7 +322,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         // Bones the 90-bone skeleton lacks (the hood / robe cloth bones and the sword bone, driven by the game's
         // cloth and attachment systems) take the skeleton joint nearest to their bind position, never the root
         // (`Reference`): with the root, the hood and robe tore off whenever an animation moved the root away
-        // from the body (jump takeoffs). PORT: no cloth simulation, so they follow that joint rigidly.
+        // from the body (jump takeoffs). PORT: unrecognized visual bones follow that joint rigidly.
         let missing_joint = |bone: &super::ac_formats::MeshBone| -> u16 {
             if let Some(j) = attach_bone.get(&name).and_then(|b| joint_of.get(b)) {
                 return *j;
@@ -367,7 +385,8 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                 weights[v] = w;
             }
         }
-        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, skin_joints, inverse_bindposes });
+        let cloth = cloth_settings.remove(&name);
+        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, skin_joints, inverse_bindposes, cloth });
     }
     Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, min_z, source: format!("{} / Rank 9", path.display()) })
 }

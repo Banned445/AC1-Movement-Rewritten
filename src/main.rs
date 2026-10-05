@@ -16,6 +16,7 @@ mod input;
 mod layers;
 mod level;
 mod model;
+mod cloth;
 mod player;
 mod proxy;
 mod recorder;
