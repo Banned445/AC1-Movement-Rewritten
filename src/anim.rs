@@ -253,6 +253,9 @@ pub struct AnimPlayer {
     prev_contacts: ContactState,
     /// The action sequence loops back to this item (the items before it are a transition action).
     loop_from: usize,
+    /// The simulation's phase applies from this item on (the items before it are a transition action playing on its
+    /// own clock).
+    sim_from: usize,
     /// Looping, or one-shot (the last item holds its last frame).
     pub looping: bool,
     /// One-shot stretched to this many seconds (e.g. a jump fitted to the jump's duration).
@@ -269,8 +272,10 @@ pub struct AnimPlayer {
     /// The dominant clip and its time when events were last collected.
     event_cursor: Option<(String, f32)>,
     seen_landing: u32,
-    /// InAir entry the fall-entry clip was started for.
+    /// InAir entry the fall was started for.
     seen_fall: Option<u32>,
+    /// The fall's reception phase (0xE00EF0): the full-body item the fall left is running to its end.
+    fall_entry: bool,
     /// Smoothed grasp direction while falling with grab held (HumanInAir+48, 7/s).
     grasp_dir: Vec3,
     /// Ledge grab whose reception has been played.
@@ -305,6 +310,20 @@ pub struct Overlay {
 const OVERLAY_FADE: f32 = 0.2;
 
 impl AnimPlayer {
+    /// Update the simulation-driven item in place (its weights change every frame), behind a transition action
+    /// that may still be playing.
+    fn set_sim_item(&mut self, it: ItemPlay) {
+        if self.items.is_empty() {
+            self.items = vec![it];
+            self.item = 0;
+            return;
+        }
+        let k = self.sim_from.min(self.items.len() - 1);
+        self.items[k] = it;
+        self.items.truncate(k + 1);
+        self.item = self.item.min(k);
+    }
+
     /// Play `action` on the partial-body slot when its channel is in slot group 1; returns false for a full-body
     /// action (play those through the normal selection).
     pub fn play_overlay(&mut self, lib: &AnimLibrary, action: u32) -> bool {
@@ -538,6 +557,8 @@ const ACT_CATCH_WALL: [u32; 2] = [0x1F0C_0C23, 0x1F0C_0C2D];
 const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
 /// Falling (6-way grasp blend).
 const ACT_FALL: u32 = 0x1F0C_22C2;
+/// The ground waits (HumanGround), [low, high profile] × [left, right foot ahead]: `xx_{l,h}_wait_hipm_foot{l,r}`.
+const ACT_WAIT: [[u32; 2]; 2] = [[0x00D8_243F, 0x00D8_24C5], [0x00D8_2508, 0x00D8_258E]];
 
 /// One item of a graph action with the sim's weights, if all its clips are loaded. Root motion is off:
 /// the sim already moves the body along it.
@@ -559,8 +580,7 @@ fn sim_request(p: &mut AnimPlayer, lib: &AnimLibrary, b: &crate::player::jump_bl
     let it = sim_item(lib, b)?;
     let key = format!("act_{:08x}", b.id);
     if p.clip.as_deref() == Some(key.as_str()) && p.token == token {
-        p.items = vec![it];
-        p.item = 0;
+        p.set_sim_item(it);
         return None;
     }
     Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false })
@@ -579,7 +599,7 @@ fn choose_clip(
     collision: Res<crate::collision::CollisionWorld>,
     mut q: Query<(&Locomotion, &HumanDataBundle, &crate::player::Body, &mut AnimPlayer)>,
 ) {
-    use crate::player::air::{AirMode, FallOrigin, LandingType};
+    use crate::player::air::AirMode;
     use crate::player::ledge::{LedgeHangType, LedgeSubState};
     let dt = time.delta_secs();
     for (loco, data, body, mut p) in &mut q {
@@ -616,14 +636,11 @@ fn choose_clip(
                 p.sim_phase = Some((l.t / l.action.duration().max(1e-4)).fract());
                 sim_request(&mut p, &lib, &l.action, 1_600_000 + g.pose_seq as u64, 0.3)
             }
+            // (a landing without its action, e.g. the clips are missing: nothing extra plays; the one-shot branch above
+            // shows the game's landing action)
             ActorContextId::Ground if g.landing_seq != p.seen_landing => {
                 p.seen_landing = g.landing_seq;
-                let clip = match g.last_landing {
-                    Some(l) if l.roll => "roll",
-                    Some(l) if l.kind == LandingType::HeavyDamage => "land_hard",
-                    _ => "land_soft",
-                };
-                Some(Request { hold: true, ..once(clip.into(), 1_000_000 + g.landing_seq as u64, None, 0.08) })
+                continue;
             }
             // after a pull-up the action ends standing: let it finish before idling
             ActorContextId::Ground if p.clip.as_deref().is_some_and(|c| c.starts_with(&format!("act_{ACT_PULLUP_WALL:08x}")) || c.starts_with(&format!("act_{ACT_PULLUP_FREE:08x}"))) && !(p.phase >= 1.0 && p.item + 1 >= p.items.len()) => continue,
@@ -636,25 +653,30 @@ fn choose_clip(
                 p.sim_phase = Some(g.blend.phase);
                 let key = format!("act_{ACT_GROUND_LOCOMOTION:08x}");
                 if p.clip.as_deref() == Some(key.as_str()) {
-                    p.items = vec![it];
-                    p.item = 0;
+                    p.set_sim_item(it);
                     continue;
                 }
                 Some(Request { key, items: vec![it], sim: true, looping: true, fit: None, token: 0, fade: CROSSFADE, hold: false })
             }
+            // standing: the game's wait action of the leading foot (MoveBlend foot: 0 = left ahead), entered through the
+            // graph's transition like every action (RE/13 §7)
+            ActorContextId::Ground if speed_band(g.speed_param) == SpeedBand::None => {
+                let id = ACT_WAIT[g.high_profile as usize][(g.blend.foot != 0) as usize];
+                let name = match (g.high_profile, g.blend.foot == 0) {
+                    (true, true) => "idle_high",
+                    (true, false) => "idle_high_r",
+                    (false, true) => "idle_low",
+                    (false, false) => "idle_low_r",
+                };
+                action(&lib, &[id], true, 0, None, Some(name))
+            }
+            // moving without the locomotion action's clips loaded (fallback): the named cycles
             ActorContextId::Ground => Some(looped(
                 match speed_band(g.speed_param) {
-                    // wait item of the leading foot (MoveBlend foot: 0 = left ahead)
-                    SpeedBand::None => match (g.high_profile, g.blend.foot == 0) {
-                        (true, true) => "idle_high",
-                        (true, false) => "idle_high_r",
-                        (false, true) => "idle_low",
-                        (false, false) => "idle_low_r",
-                    },
                     SpeedBand::Walk => "walk",
                     SpeedBand::Jog => "jog",
                     SpeedBand::Run => "run",
-                    SpeedBand::Sprint => "sprint",
+                    _ => "sprint",
                 },
                 CROSSFADE,
             )),
@@ -669,15 +691,8 @@ fn choose_clip(
                     p.sim_phase = Some(ph.min(1.0));
                     sim_request(&mut p, &lib, &b, 2_000_000 + data.air.seq as u64, 0.05)
                 }
-                // the takeoff/flight clip is stretched over the target-warped jump (RE/04)
-                AirMode::Jump { duration, .. } => {
-                    let clip = match data.air.target.and_then(|t| t.hang) {
-                        Some((pt, n)) if crate::player::ledge::hang_type_at(pt, n, &collision) == LedgeHangType::Wall => "jump_hangwall",
-                        Some(_) => "jump_hangfree",
-                        None => "jump",
-                    };
-                    Some(once(clip.into(), 2_000_000 + data.air.seq as u64, Some(duration), 0.1))
-                }
+                // a jump whose actions are not loaded: the pose carries on
+                AirMode::Jump { .. } => continue,
                 // Leap of Faith free-fall tail: `faith_jump_fall` (0xB1EC40 third action)
                 AirMode::Fall { .. } if data.air.flight.is_some_and(|f| f.id == crate::player::jump_blend::FLIGHT_FAITH) => {
                     let b = crate::player::jump_blend::ActionBlend::new(crate::player::jump_blend::FALL_FAITH, 0, &[1.0]);
@@ -705,20 +720,21 @@ fn choose_clip(
                     if p.seen_fall != Some(data.air.seq) {
                         p.seen_fall = Some(data.air.seq);
                         p.grasp_dir = Vec3::ZERO;
-                        let speed = Vec2::new(body.velocity.x, body.velocity.z).length();
-                        let entry = match data.air.fall_origin {
-                            FallOrigin::HangFree => "hangfree_to_fall",
-                            FallOrigin::HangWall | FallOrigin::Climb => "hangwall_to_fall",
-                            FallOrigin::Ground if p.clip.as_deref() == Some("jump") => "jump_to_fall",
-                            // PORT: an off-support fall (0xD8ADB0) enters InAir sub-state 3, which keeps the ground clip
-                            // for its remaining length (0xE00EF0); the port plays these named entries instead
-                            FallOrigin::Ground if speed >= 2.5 => "run_to_fall",
-                            FallOrigin::Ground => "walk_to_fall",
-                        };
-                        Some(once(entry.into(), 4_000_000 + data.air.seq as u64, None, 0.12))
-                    } else if p.clip.as_deref().is_some_and(|c| c.ends_with("_to_fall")) && p.phase < 1.0 {
+                        // InAir sub-state 3 (`HumanInAir__EnterReceptionState` 0xE00EF0), entered by walking / running off
+                        // an edge (0xD8ADB0) and by letting go of a hang (0xDD08F0), both TransitionSetupDataToInAir
+                        // +132 = 3: no entry clip. The playing item is left through its own exit (sub_5045F0 → 0x726F40;
+                        // the locomotion and hang waits author none) and the sub-state lasts its remaining length
+                        // (sub_502570); then the main fall plays the falling blend. The port lets the full-body item
+                        // run to its end and hold its last frame.
+                        p.fall_entry = p.clip.is_some() && !p.items.is_empty();
+                        if p.fall_entry {
+                            p.looping = false;
+                            continue;
+                        }
+                        None
+                    } else if p.fall_entry && p.overlay.is_none() && !(p.phase >= 1.0 && p.item + 1 >= p.items.len()) {
                         continue;
-                    } else if p.clip.as_deref().is_some_and(|c| c.ends_with("_to_fall")) && p.play_overlay(&lib, ACT_FALL) {
+                    } else if p.fall_entry && p.play_overlay(&lib, ACT_FALL) {
                         // the falling blend is an upper-body action (channel 1, BodyPartTemplate_Human): it plays on
                         // the partial slot while the full-body slot holds the entry's last frame; grasp weights only
                         // while the grab input (Legs) is held
@@ -814,25 +830,17 @@ fn choose_clip(
                     // (one reception per grab: once it has played the hang idle follows)
                     "grab" if loco.previous == ActorContextId::InAir && l.moving() && p.caught != Some(token) => {
                         p.caught = Some(token);
-                        let r = match p.clip.as_deref() {
-                            // jumped at the ledge: the reception that matches the jump-into-hang clip
-                            Some("jump_hangwall") => Some(once("catch_jump_wall".into(), token, None, 0.06)),
-                            Some("jump_hangfree") => Some(once("catch_jump_free".into(), token, None, 0.06)),
-                            _ => {
-                                let hi = data.air.long_catch as usize;
-                                let mut r = action(&lib, &[if wall { ACT_CATCH_WALL[hi] } else { ACT_CATCH_FREE[hi] }], false, token, None, Some(if wall { "catch_wall" } else { "catch_free" }));
-                                // CheckAirCatch snaps the 3-way wall catch (straight / 30° out / 45° in) to the
-                                // dominant angle class; the port's ledges are straight
-                                if let Some(r) = r.as_mut().filter(|_| wall) {
-                                    for it in &mut r.items {
-                                        for (k, l) in it.layers.iter_mut().enumerate() {
-                                            l.1 = if k == 0 { 1.0 } else { 0.0 };
-                                        }
-                                    }
+                        let hi = data.air.long_catch as usize;
+                        let mut r = action(&lib, &[if wall { ACT_CATCH_WALL[hi] } else { ACT_CATCH_FREE[hi] }], false, token, None, Some(if wall { "catch_wall" } else { "catch_free" }));
+                        // CheckAirCatch snaps the 3-way wall catch (straight / 30° out / 45° in) to the dominant angle
+                        // class; the port's ledges are straight
+                        if let Some(r) = r.as_mut().filter(|_| wall) {
+                            for it in &mut r.items {
+                                for (k, l) in it.layers.iter_mut().enumerate() {
+                                    l.1 = if k == 0 { 1.0 } else { 0.0 };
                                 }
-                                r
                             }
-                        };
+                        }
                         r.map(|r| Request { hold: true, ..r })
                     }
                     a if moving && a.starts_with("shimmy ") => {
@@ -851,7 +859,6 @@ fn choose_clip(
                         let k = (down as usize) * 4 + (second as usize) * 2 + (!first_left) as usize;
                         action(&lib, &[ACT_VSTEP[wi][k]], false, token, Some(0.1), None)
                     }
-                    "jump up" if moving => Some(once("hang_up".into(), token, None, 0.1)),
                     "pull-up" if moving => {
                         let ids: Vec<u32> = if wall {
                             vec![ACT_PULLUP_WALL, ACT_HANGKNEE_TO_WAIT]
@@ -904,13 +911,26 @@ fn choose_clip(
         let new_action = items.first().map(|i| i.action).unwrap_or(0);
         let cur_item = p.items.get(p.item.min(p.items.len().max(1) - 1)).filter(|_| p.clip.is_some()).cloned();
         let mut loop_from = 0;
+        let mut sim_from = 0;
         let blend = if new_action != 0 {
             match game_transition(&lib, cur_item.as_ref(), new_action) {
                 Some(t) => {
                     // a transition action plays first, blended in with blend A; the requested action follows it with
-                    // blend B (the slot queues both, SetAction 0x727F70)
-                    if t.action_a != 0 && !req.sim {
+                    // blend B (the slot queues both, SetAction 0x727F70). Also in front of a looping action (Action +28 = 0)
+                    // the simulation times (the ground locomotion, e.g. the roll's `roll_tr_l_walk` into the run; the beam
+                    // and ladder waits): the
+                    // transition plays on its own clock without root motion (the simulation moves the body), then the
+                    // simulation's phase takes over. Not in front of the simulation's one-shot moves, whose timing the
+                    // body follows (PORT: those enter with blend A directly).
+                    let loops = req.looping || lib.graph.actions.get(&new_action).is_some_and(|a| a.repeat == 0);
+                    if t.action_a != 0 && (!req.sim || loops) {
                         if let Some(mut ti) = lib.action_items(t.action_a) {
+                            if req.sim {
+                                for it in &mut ti {
+                                    it.root_motion = false;
+                                }
+                                sim_from = ti.len();
+                            }
                             items[0].blend = t.blend_b;
                             loop_from = ti.len();
                             ti.extend(items);
@@ -942,6 +962,7 @@ fn choose_clip(
         p.items = items;
         p.item = 0;
         p.loop_from = loop_from;
+        p.sim_from = sim_from;
         p.looping = req.looping;
         p.fit = req.fit;
         p.token = req.token;
@@ -1068,7 +1089,7 @@ pub fn apply_clip(
         // B frozen while the blend runs (AROLLBSTOP / ASTOPBSTOP*)
         let b_stopped = p.fade < 1.0 && matches!(p.blend.kind, 3 | 4 | 5);
         let next = if b_stopped { p.phase } else { p.phase + dt * rate / duration };
-        if let Some(ph) = p.sim_phase {
+        if let Some(ph) = p.sim_phase.filter(|_| p.item >= p.sim_from) {
             p.phase = ph;
         } else if next >= 1.0 && (p.item + 1 < p.items.len() || (p.looping && p.items.len() > 1)) {
             // the next item of the action's sequence (looping actions start again at their first item), entered with

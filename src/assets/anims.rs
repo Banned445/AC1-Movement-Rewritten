@@ -23,8 +23,14 @@ pub struct RawClip {
 /// Fixed track id of the contact bitmask (`AnimTrack::FixedTrackIds` 2 = ACUATORCONTACTS).
 pub const TRACK_ACUATOR_CONTACTS: u32 = 2;
 
-/// ActionBlocks whose clips are loaded (the movement contexts).
-pub const MOVEMENT_BLOCKS: &[&str] = &["HumanClimb", "HumanClimb_Jumps", "HumanLedge", "HumanInAir"];
+/// ActionBlocks whose clips are loaded: every movement block (no fight, facial or NPC reaction blocks), so the game's
+/// transition actions between the port's actions are there to play (a missing one turned the authored transition
+/// into a cut).
+pub const MOVEMENT_BLOCKS: &[&str] = &[
+    "HumanClimb", "HumanClimb_Jumps", "HumanGround", "HumanGround_Actions", "HumanGround_Hurt", "HumanGround_TurnOnSpot",
+    "HumanHayStack", "HumanInAir", "HumanKiosk", "HumanLadder", "HumanLedge", "HumanNarrowObject", "HumanOrientedMove",
+    "HumanWalling", "Human_Environment",
+];
 /// Single actions of other blocks whose clips are loaded too: the ground locomotion blend (MoveBlend 0xDA0810).
 pub const EXTRA_ACTIONS: &[u32] = &[
     crate::player::move_blend::ACT_GROUND_LOCOMOTION,
