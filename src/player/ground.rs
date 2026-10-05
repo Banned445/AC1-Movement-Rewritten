@@ -261,6 +261,20 @@ pub fn update_ground(
             g.oneshot = None;
         }
         let starting = starting && pad.speed01 > 0.0;
+        // The anim gate of Idle → Move (0xD84AC0) and of the pivot (0xD84B10): the playing item has ended, or its word
+        // allows leaving it for moving in this profile and it is not locked (`HumanGround__AnimAllowsModeExit`
+        // 0xD80010, `anim_gate`). A one-shot that allows it is left at once for the locomotion (its transition blends,
+        // RE/13 §7); locked ones (landings, run stops, pivots) play out. Not in the ground's own sub-states (the ledge
+        // stop, sub-state 38; the obstacle collision, 5): they leave by their own rules.
+        if !starting
+            && pad.speed01 > 0.0
+            && g.ledge_stop.is_none()
+            && g.collide.is_none()
+            && g.oneshot.is_some_and(|o| super::anim_gate::allows_mode_exit(&o.blend, true, pad.high_profile))
+        {
+            g.oneshot = None;
+            g.oneshot_next = None;
+        }
         let busy = g.oneshot.is_some() && !starting;
         let moving = pad.speed01 > 0.0 && !busy;
         let prev_high = g.high_profile;
@@ -330,12 +344,8 @@ pub fn update_ground(
             g.speed_param = 0.0;
             g.blend.speed_param = 0.0;
         }
-        // moving again during the run stop: its transitions to walk / jog take over (PORT: the stop is cut)
-        // (not while the stick is pulled back: the skid plays out, then the pivot)
-        if pad.speed01 > 0.0 && !reversed && g.oneshot.is_some_and(|o| jump_blend::RUN_STOP.contains(&o.blend.id) || jump_blend::RUN_STOP_TO_WAIT.contains(&o.blend.id)) {
-            g.oneshot = None;
-            g.oneshot_next = None;
-        }
+        // moving again during the run stop: the stop item is locked (0x20) and plays out; its settle into the wait
+        // allows leaving for moving (0x200 / 0x800), which the anim gate above does
         // pivot (Movement state 25, `HumanGround__Pivot_Enter` 0xDA6150): the wanted heading more than 90 deg (HG+0x720)
         // from the current one, from standing (guard 0xD84B10) or from a low-profile walk (Move guard 0xD84F10: the
         // current profile HG+1500 low). The turn action from the table at 0x1A2C120 by side, [from, to] profile and
@@ -384,8 +394,9 @@ pub fn update_ground(
             g.blend.speed_param = 0.0;
         }
 
-        // heading: rotate toward wanted at the player turn rate (0xD95290)
-        if moving {
+        // heading: rotate toward wanted at the player turn rate (0xD95290), unless the playing item turns the body
+        // itself (0x10)
+        if moving && !g.oneshot.is_some_and(|o| super::anim_gate::anim_turns(&o.blend)) {
             let mut d = angle_diff(want_heading, body.heading);
             // PORT: near 180 deg the shorter way flips sign with tiny stick changes, so the character turned back
             // and forth (jitter when reversing). Keep the side a turn already started on (RotateTowards 0xD94F30's
