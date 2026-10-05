@@ -33,9 +33,17 @@ use crate::player::{Body, HumanDataBundle, LimbTargets, Locomotion, Player, Play
 /// Frames of state kept for a bug report (10 s at 60 fps).
 pub const RING_FRAMES: usize = 600;
 
-/// Where bug folders go: `bugs/` in the crate root (fixed at build time).
+/// Where bug folders go: `bugs/` in the crate root when started by cargo (`cargo run` / `cargo test` set
+/// `CARGO_MANIFEST_DIR` at run time), else `bugs/` next to the executable, like `game_dir.txt`. Read at run time so
+/// no build-machine path is baked into the binary.
 pub fn bugs_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/bugs"))
+    if let Some(root) = std::env::var_os("CARGO_MANIFEST_DIR") {
+        return std::path::PathBuf::from(root).join("bugs");
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("bugs")))
+        .unwrap_or_else(|| std::path::PathBuf::from("bugs"))
 }
 
 /// One recorded frame of input.
