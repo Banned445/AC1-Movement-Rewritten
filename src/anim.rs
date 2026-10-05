@@ -557,6 +557,13 @@ const ACT_CATCH_WALL: [u32; 2] = [0x1F0C_0C23, 0x1F0C_0C2D];
 const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
 /// Falling (6-way grasp blend).
 const ACT_FALL: u32 = 0x1F0C_22C2;
+/// PORT (stand-in until the ground state tree with MoveBlend's transition path, RE/12 §1): the game also plays an
+/// authored transition action in front of the ground locomotion, and MoveBlend's start / transition blend layouts
+/// (HG+0x724, 0xDA08C0) keep speed and foot phase in step with it. The port has no such path yet, so these
+/// transitions are left out and the switch uses the default transition. Set to `true` once that path is ported;
+/// nothing else depends on this switch.
+const GROUND_LOCOMOTION_TRANSITIONS: bool = false;
+
 /// The ground waits (HumanGround), [low, high profile] × [left, right foot ahead]: `xx_{l,h}_wait_hipm_foot{l,r}`.
 const ACT_WAIT: [[u32; 2]; 2] = [[0x00D8_243F, 0x00D8_24C5], [0x00D8_2508, 0x00D8_258E]];
 
@@ -925,8 +932,10 @@ fn choose_clip(
                     // then jumped to another foot. Nor in front of the simulation's one-shot moves, whose timing the body
                     // follows.
                     let standing_loop = req.sim && !req.looping && lib.graph.actions.get(&new_action).is_some_and(|a| a.repeat == 0);
-                    let skipped = t.action_a != 0 && req.sim && !standing_loop;
-                    if t.action_a != 0 && (!req.sim || standing_loop) {
+                    let ground_locomotion = req.sim && req.looping && GROUND_LOCOMOTION_TRANSITIONS;
+                    let queued = !req.sim || standing_loop || ground_locomotion;
+                    let skipped = t.action_a != 0 && !queued;
+                    if t.action_a != 0 && queued {
                         if let Some(mut ti) = lib.action_items(t.action_a) {
                             if req.sim {
                                 for it in &mut ti {
