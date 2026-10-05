@@ -12,6 +12,12 @@
 //! 0xE50190). Falling onto either is caught by `CheckAirCatch` 0xE0BB70 (pilotis 0xB2B600, beam 0xE0B890).
 //! Jumps: the impulsion crouch (state +145, 0xF738A0), the jump on the spot (+148, 0xF717D0 → 0xF73B80) and
 //! free-step jumps to a target (kind 1, 0xE4D950 → `Human__SetupJumpToTarget`).
+//!
+//! The player's input (RE/05 §2.10): `GoAssassinActionInterpreter__BeamState` 0xEE9AF0 on a beam,
+//! `__NarrowObjectState` 0xEE8EC0 on a pilotis. Main's sub-states (`StateBeam_Update` 0xF808D0): Idle +91,
+//! Walk +94, Stop +97, the 90° wait +100 (facing across the beam), Turn180 +124, the turn to / from the 90° wait
+//! +127. Exits: the pull-down to a hang under the edge (event 9, the empty hand, 0xE504D0 → Ledge), the wall run
+//! (event 15, Walk only, 0xF77DC0 → Walling).
 
 use bevy::prelude::*;
 
@@ -53,6 +59,16 @@ pub const PILOTIS_FROM_AIR: u32 = 0x2F3E_9E0C;
 pub const PILOTIS_WAIT: u32 = 0x388E_97DA;
 /// Beam catch from a fall (0xE0B890 → BeamReception, mode 7): `xx_h_landing_damage_footl`.
 pub const BEAM_LANDING: u32 = jump_blend::LAND_DAMAGE;
+/// The 90° wait (facing across the beam): Idle with the stick to a side (75°–135°, `ClassifyStickDir` 1 left /
+/// 2 right) turns to it (`PlayTurnTo90` 0xF77640, tables 0x1A353F0 / 0x1A353FC by foot:
+/// `crouchwait_foot{l,r}_turn_{left,right}_to_crouchwait_90`), then waits in `crouchwait_90` (0xF702B0).
+pub const BEAM_TO_90: [[u32; 2]; 2] = [[0x350D_9386, 0x350D_9387], [0x350D_9388, 0x350D_9389]];
+pub const BEAM_WAIT_90: u32 = 0x02E4_A9DF;
+/// From the 90° wait: the stick to a side turns back along the beam (`Play90TurnBack` 0xF78630:
+/// `crouchwait_90_turn_{left,right}`), the stick back turns around across it (`PlayTurn180` 0xF78740:
+/// `crouchwait_90_turn180`). Pushing forward (off the beam) does nothing for the player (0xF7BA60 is AI only).
+pub const BEAM_90_TURN_BACK: [u32; 2] = [0x350D_A35D, 0x350D_A35E];
+pub const BEAM_90_TURN180: u32 = 0x4F8A_3DE7;
 
 pub const DUMPED_ACTIONS: &[u32] = &[
     BEAM_WAIT[0], BEAM_WAIT[1], BEAM_WALK, BEAM_START[0], BEAM_START[1], BEAM_JOG_STOP[0], BEAM_JOG_STOP[1], BEAM_TURN180[0], BEAM_TURN180[1],
@@ -60,6 +76,7 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     BEAM_TO_IMPULSE[0], BEAM_TO_IMPULSE[1], PILOTIS_TO_IMPULSE, BEAM_IMPULSE_WAIT, BEAM_IMPULSE_TO_JUMP, BEAM_IMPULSE_TO_CLEAR,
     BEAM_JUMP_CLEAR, BEAM_JUMP_CLEAR_FALL, PILOTIS_FROM_FREESTEP[0], PILOTIS_FROM_FREESTEP[1], PILOTIS_FROM_AIR, PILOTIS_WAIT,
     0x516D_52DB, 0x516D_52DC, 0x516D_52DD, 0x516D_52DE, 0x516D_52DF,
+    BEAM_TO_90[0][0], BEAM_TO_90[0][1], BEAM_TO_90[1][0], BEAM_TO_90[1][1], BEAM_WAIT_90, BEAM_90_TURN_BACK[0], BEAM_90_TURN_BACK[1], BEAM_90_TURN180,
 ];
 
 /// 0xF7C3A0: the root stops this far before a beam end.
@@ -114,6 +131,14 @@ pub enum BeamState {
     /// Pilotis (inner state 3): sub 4 / 5 entries, sub 6 wait.
     PilotisIn,
     PilotisWait,
+    /// +127: the turn from the wait to the 90° wait (toward `turn_left`).
+    TurnTo90,
+    /// +100: the 90° wait, facing across the beam (+1040 = 2).
+    Wait90,
+    /// +127: the turn from the 90° wait back along the beam (+1040 = 1 at its end).
+    TurnBack,
+    /// +124 with +1040 = 2: the turn-around across the beam (back to the 90° wait).
+    Turn90,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -179,6 +204,10 @@ pub struct HumanNarrowObjectData {
     pub lean: f32,
     /// Hand target found for the jump on the spot (beam +1840 ≠ 0x80000000).
     pub hand_target: Option<JumpTarget>,
+    /// Facing across the beam in the 90° wait (beam +1040 = 2); `None` = along it.
+    pub across: Option<Vec3>,
+    /// The playing turn goes to the left (`ClassifyStickDir` 1).
+    pub turn_left: bool,
 }
 
 fn item(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -204,6 +233,7 @@ impl HumanNarrowObjectData {
         self.entry_mode = e.mode;
         self.foot = e.foot;
         self.hand_target = None;
+        self.across = None;
         self.warp_from = e.from;
         self.warp_heading = (super::heading_of(e.facing), super::heading_of(self.facing()));
         match e.mode {
@@ -267,6 +297,7 @@ impl HumanNarrowObjectData {
     pub fn facing(&self) -> Vec3 {
         match self.kind {
             NarrowKind::Pilotis => self.pilotis_facing,
+            NarrowKind::Beam if self.across.is_some() => self.across.unwrap_or_default(),
             NarrowKind::Beam if self.toward_p1 => self.dir(),
             NarrowKind::Beam => -self.dir(),
         }
@@ -295,7 +326,7 @@ impl HumanNarrowObjectData {
         self.action.map(|a| {
             let ph = self.t / a.duration().max(1e-4);
             // loops: the waits
-            let looping = matches!(self.state, BeamState::ImpulseWait | BeamState::PilotisWait) || (self.state == BeamState::Wait && a.duration() > 1.0);
+            let looping = matches!(self.state, BeamState::ImpulseWait | BeamState::PilotisWait | BeamState::Wait90) || (self.state == BeamState::Wait && a.duration() > 1.0);
             (a, if looping { ph.fract() } else { ph.min(1.0) })
         })
     }
@@ -507,6 +538,75 @@ fn can_step_off(n: &HumanNarrowObjectData, collision: &CollisionWorld) -> bool {
     !collision.point_inside(beyond + Vec3::Y * 1.2) && collision.ground_height(beyond + Vec3::Y * 0.3, 0.6).is_some()
 }
 
+/// `HumanNarrowObject__CanPullDownToHang` 0xE504D0 (event 9's guard on a beam and a pilotis): guidance in the box
+/// ±0.6 m × ±0.6 m × ±0.5 m around the feet facing `dir`; a LedgeGrab edge whose outward normal lies within 45° of
+/// `dir`, within 0.6 m (sub_B1C550); more than 2.5 m above the floor below it; then the hang clearance (sub_B2E4F0,
+/// not ported). The search runs along `dir`, then along −`dir`. Returns the edge point, its outward normal and
+/// the side for the pull-down table (`FillLedgePullDown` 0xE4EF70: the normal vs `dir`, 0 front < 45°, 1 back
+/// > 135°; 2 / 3 left / right are only reached at exactly 45°).
+pub fn pull_down_edge(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3, usize)> {
+    let d0 = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+    if d0 == Vec3::ZERO {
+        return None;
+    }
+    for (side, d) in [(0usize, d0), (1, -d0)] {
+        let r = super::right_of(d);
+        let mut best: Option<(f32, Vec3, Vec3)> = None;
+        for e in &guidance.edges {
+            if e.subtype != GuidanceSubType::LedgeGrab {
+                continue;
+            }
+            let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+            if n.dot(d) < 45f32.to_radians().cos() {
+                continue;
+            }
+            let q = e.closest_point(feet);
+            let rel = q - feet;
+            if rel.dot(r).abs() > 0.6 || rel.dot(d).abs() > 0.6 || rel.y.abs() > 0.5 {
+                continue;
+            }
+            let dist = Vec2::new(rel.x, rel.z).length();
+            if dist > 0.6 {
+                continue;
+            }
+            let below = collision.ground_height(q + n * 0.6 - Vec3::Y * 0.05, 50.0).unwrap_or(q.y - 100.0);
+            if q.y - below <= 2.5 {
+                continue;
+            }
+            if best.as_ref().is_none_or(|b| dist < b.0) {
+                best = Some((dist, q, n));
+            }
+        }
+        if let Some((_, q, n)) = best {
+            return Some((q, n, side));
+        }
+    }
+    None
+}
+
+/// Event 9 (the empty hand) on a beam / pilotis: the Ledge pull-down of type 3 (`FillLedgePullDown` 0xE4EF70,
+/// `beam_pilotis_to_pulldown_soft_*`). The direction is the stick (> 0.35); without it the interpreter turns the
+/// beam's line 90° toward the camera (0xEE9AF0) and a pilotis uses the camera direction (0xEE8EC0). PORT: without
+/// the stick, the facing's right (beam) or the facing (pilotis); the guard tries the opposite side next anyway.
+fn try_pull_down(n: &HumanNarrowObjectData, stick: Option<Vec3>, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<super::ledge::LedgeEntry> {
+    let feet = n.stand();
+    let dir = stick.unwrap_or(match n.kind {
+        NarrowKind::Beam => super::right_of(n.facing()),
+        NarrowKind::Pilotis => n.facing(),
+    });
+    let (p, normal, side) = pull_down_edge(feet, dir, guidance, collision)?;
+    let moves = super::ledge_moves::pulldown_with(
+        p,
+        normal,
+        feet,
+        super::ledge_moves::PULLDOWN_BEAM_ORIENT[side],
+        super::ledge_moves::PULLDOWN_BEAM_DESCENT[side],
+        guidance,
+        collision,
+    )?;
+    Some(super::ground::pulldown_ledge_entry(moves, normal, feet))
+}
+
 /// A free-step jump target from the beam / pilotis in the stick direction (event 4: `Human__SetupJumpToTarget`
 /// with jump kind 1, 0xE4D950).
 fn jump_target(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
@@ -534,19 +634,54 @@ pub fn update_narrow(
         let facing = n.facing();
         body.velocity = Vec3::ZERO;
         body.grounded = true;
-        // stick vs facing (0xF76150)
+        // stick vs facing (0xF76150): the interpreter moves only past 0.35 (0xEE9AF0), which speed01 > 0 means
         let stick = pad.speed01 > 0.0;
         let a = if stick { pad.dir.dot(facing).clamp(-1.0, 1.0).acos() } else { 0.0 };
         let forward = stick && a < 75f32.to_radians();
         let back = stick && a > 135f32.to_radians();
+        let side = stick && !forward && !back;
+        let left = pad.dir.dot(super::right_of(facing)) < 0.0;
         let jog = pad.high_profile;
         let walk_w = if jog { [0.0, 1.0] } else { [1.0, 0.0] };
         let dur = n.action.map(|a| a.duration()).unwrap_or(0.3);
         let done = n.t >= dur;
 
-        // ------------------------------------------------ jumps (PORT trigger: high profile + Legs, as on the ground)
+        // ------------------------------------------------ the pull-down to a hang (event 9, the empty hand)
+        // Accepted in Idle, Walk and the 90° wait (CanHandle 0xF7A4F0 / 0xF7F150 / 0xF7A650) and in the pilotis wait
+        // (0xE50BF0).
+        let can_pull_down = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::PilotisWait);
+        if can_pull_down && pad.hand_just_pressed() {
+            if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), &guidance, &collision) {
+                pad.hand_pressed_ago = f32::INFINITY;
+                body.feet = n.stand();
+                switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
+                continue;
+            }
+        }
+
+        // ------------------------------------------------ the wall run (event 15, Walk only)
+        // 0xEE9AF0: high profile, Legs pressed, the stick > 0.35 within 60° of the facing; tested before the jumps.
+        // Guard `CanWallRun` 0xF77DC0 = the wall test 0xE18390 (1.5·h ahead), fill 0xB263B0 → Walling.
+        // PORT: the entry warps to the wall over the entry clip as from Ground (0xDA2C30); 0xB263B0 warps in 0.13 s.
+        if n.kind == NarrowKind::Beam
+            && matches!(n.state, BeamState::Start | BeamState::Walk)
+            && pad.high_profile
+            && pad.jump_buffered()
+            && stick
+            && a < 60f32.to_radians()
+        {
+            if let Some((contact, normal)) = super::walling::wall_ahead(n.stand(), facing, &collision) {
+                pad.consume_jump();
+                let from = n.stand();
+                body.feet = from;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from }));
+                continue;
+            }
+        }
+
+        // ------------------------------------------------ jumps (high profile + Legs, 0xEE9AF0 / 0xEE8EC0)
         let jump = pad.high_profile && pad.jump_buffered();
-        let can_jump = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Stop | BeamState::ImpulseWait | BeamState::PilotisWait);
+        let can_jump = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Stop | BeamState::Wait90 | BeamState::ImpulseWait | BeamState::PilotisWait);
         if jump && can_jump {
             let feet = n.stand();
             // event 4: a target in the stick direction → free-step jump (kind 1)
@@ -623,9 +758,14 @@ pub fn update_narrow(
                 continue;
             }
             BeamState::Wait => {
+                // Idle (0xF808D0 +91), in order: turn around, turn to the 90° wait, walk / step off
                 if back {
                     let t = item(BEAM_TURN180[n.foot], 0, &[]);
                     n.play(BeamState::Turn, t);
+                } else if side && n.kind == NarrowKind::Beam {
+                    n.turn_left = left;
+                    let t = item(BEAM_TO_90[!left as usize][n.foot], 0, &[]);
+                    n.play(BeamState::TurnTo90, t);
                 } else if forward && n.to_end() > BEAM_END_STOP + 0.05 {
                     let st = item(BEAM_START[n.foot], 0, &walk_w);
                     n.play(BeamState::Start, st);
@@ -662,6 +802,43 @@ pub fn update_narrow(
                 if done {
                     n.toward_p1 = !n.toward_p1;
                     n.wait_state();
+                }
+            }
+            BeamState::TurnTo90 => {
+                if done {
+                    // +1040 = 2: facing across, to the side turned to
+                    let r = super::right_of(facing);
+                    n.across = Some(if n.turn_left { -r } else { r });
+                    let w = item(BEAM_WAIT_90, 0, &[]);
+                    n.play(BeamState::Wait90, w);
+                }
+            }
+            BeamState::Wait90 => {
+                // +100 (0xF808D0): the stick to a side turns back along the beam, the stick back turns around
+                if side {
+                    n.turn_left = left;
+                    let t = item(BEAM_90_TURN_BACK[!left as usize], 0, &[]);
+                    n.play(BeamState::TurnBack, t);
+                } else if back {
+                    let t = item(BEAM_90_TURN180, 0, &[]);
+                    n.play(BeamState::Turn90, t);
+                }
+            }
+            BeamState::TurnBack => {
+                if done {
+                    // +1040 = 1: along the beam, toward the side turned to; then the wait (0xF70820)
+                    let r = super::right_of(facing);
+                    let along = if n.turn_left { -r } else { r };
+                    n.toward_p1 = along.dot(n.dir()) >= 0.0;
+                    n.across = None;
+                    n.wait_state();
+                }
+            }
+            BeamState::Turn90 => {
+                if done {
+                    n.across = Some(-facing);
+                    let w = item(BEAM_WAIT_90, 0, &[]);
+                    n.play(BeamState::Wait90, w);
                 }
             }
             BeamState::ImpulseIn => {

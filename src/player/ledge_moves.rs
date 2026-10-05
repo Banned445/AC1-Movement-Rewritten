@@ -82,7 +82,10 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     // running jump onto a ledge: wall reception and free-hang swing (0xE07D00 generic branch)
     RECEPTION_SURFACE_WALL, SWING_RECEPTION,
     // pull-down (0xDDE4D0 / 0xDDE980)
-    PULLDOWN_ORIENT[0], PULLDOWN_ORIENT[1], PULLDOWN_DESCENT, PULLDOWN_WALL[0], PULLDOWN_WALL[1], PULLDOWN_FREE[0], PULLDOWN_FREE[1],
+    PULLDOWN_ORIENT[0], PULLDOWN_ORIENT[1], PULLDOWN_DESCENT,
+    PULLDOWN_BEAM_ORIENT[0], PULLDOWN_BEAM_ORIENT[1], PULLDOWN_BEAM_ORIENT[2], PULLDOWN_BEAM_ORIENT[3],
+    PULLDOWN_BEAM_DESCENT[0], PULLDOWN_BEAM_DESCENT[1], PULLDOWN_BEAM_DESCENT[2], PULLDOWN_BEAM_DESCENT[3],
+    PULLDOWN_WALL[0], PULLDOWN_WALL[1], PULLDOWN_FREE[0], PULLDOWN_FREE[1],
     // ledge stop (HumanGround sub-state 38, 0xD93C60 / 0xD7D9D0)
     LEDGE_STOP_START, LEDGE_STOP_END,
     // pull-up (Pullup_Start 0xDDBE80)
@@ -1279,6 +1282,11 @@ pub const PULLDOWN_DESCENT: u32 = 0x082F_8C53;
 /// 0x082F9F3C (`_b` + `_tr`).
 pub const PULLDOWN_WALL: [u32; 2] = [0x06E8_BD81, 0x082F_820C];
 pub const PULLDOWN_FREE: [u32; 2] = [0x082F_9F3B, 0x082F_9F3C];
+/// Type 3 (from a beam or a pilotis, `HumanNarrowObject__FillLedgePullDown` 0xE4EF70), by side [front, back, left,
+/// right] (0xDCC2A0 fills 0x1A2C450 / 0x1A2C460): `beam_pilotis_to_pulldown_soft_{side}_orientation`, then
+/// `beam_pilotis_to_pulldown_soft_{side}`.
+pub const PULLDOWN_BEAM_ORIENT: [u32; 4] = [0x516D_5CFA, 0x516D_5D00, 0x516D_5D02, 0x516D_5D04];
+pub const PULLDOWN_BEAM_DESCENT: [u32; 4] = [0x516D_5CF9, 0x516D_5D01, 0x516D_5D03, 0x516D_5D05];
 
 /// `HumanLedge__PullDown_Enter` 0xDDE4D0 + `HumanLedge__PullDown_Update` 0xDDE980 (front side).
 /// `p` = the edge point, `n` = the edge's outward normal (the character faces along it, guard 0xD9D6C0),
@@ -1289,6 +1297,11 @@ pub const PULLDOWN_FREE: [u32; 2] = [0x082F_9F3B, 0x082F_9F3C];
 /// 3. Reception: foot support (`sub_B16130`) → wall reception (angle blend, straight here) to the wall-hang
 ///    root, else the free reception to the free-hang root.
 pub fn pulldown(p: Vec3, n: Vec3, from: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<[LedgeMove; 3]> {
+    pulldown_with(p, n, from, PULLDOWN_ORIENT[wait as usize], PULLDOWN_DESCENT, guidance, collision)
+}
+
+/// The pull-down with the type's orientation and descent actions (table 0x1A2C3F0).
+pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<[LedgeMove; 3]> {
     let n = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let facing_out = n;
     let facing_in = -n;
@@ -1320,9 +1333,9 @@ pub fn pulldown(p: Vec3, n: Vec3, from: Vec3, wait: bool, guidance: &GuidanceWor
     };
     let item = |id: u32, i: usize, w: &[f32]| jump_blend::action_items(id).filter(|it| it.len() > i).map(|_| ActionBlend::new(id, i, w));
     let p1 = Vec3::new(mid.x, mid.y, mid.z) + n * 0.5;
-    let orient = mk(1, [single(PULLDOWN_ORIENT[wait as usize], 0), None, None, None], from, p1, facing_out, facing_in, false, false);
+    let orient = mk(1, [single(orient_id, 0), None, None, None], from, p1, facing_out, facing_in, false, false);
     let p2 = mid + n * 1.0 - Vec3::Y * 0.8;
-    let descent = mk(2, [single(PULLDOWN_DESCENT, 0), None, None, None], p1, p2, facing_in, facing_in, false, false);
+    let descent = mk(2, [single(descent_id, 0), None, None, None], p1, p2, facing_in, facing_in, false, false);
     let wall = hang_type_at(mid, n, collision) == LedgeHangType::Wall;
     let straight = [1.0, 0.0, 0.0];
     let reception = if wall {

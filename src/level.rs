@@ -69,6 +69,9 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     // --- beam (NarrowObject, RE/05 §2): two 4 m platforms joined by a 6 m beam at 4 m (BEAMS) ---
     (70.0, 70.0, 4.0, 4.0, 4.0),
     (80.0, 70.0, 4.0, 4.0, 4.0),
+    // platform C (x 98..102) and a beam from it into wall Y (x 109..112, 8 m): the wall run from a beam (RE/05 §2.10)
+    (100.0, 70.0, 4.0, 4.0, 4.0),
+    (110.5, 70.0, 3.0, 4.0, 8.0),
     // --- pilotis (RE/05 §2.8): 0.5 m posts 2.5 m apart between two 3 m platforms, along +X at z 80 ---
     (70.0, 80.0, 4.0, 4.0, 3.0),
     (74.5, 80.0, 0.5, 0.5, 3.0),
@@ -126,6 +129,8 @@ pub const BEAMS: &[(Vec3, Vec3)] = &[
     (Vec3::new(72.0, 4.0, 70.0), Vec3::new(78.0, 4.0, 70.0)),
     // a free beam 2.5 m past platform B (x 82): reached by a running jump, a ledge 2.3 m above its far part
     (Vec3::new(84.5, 4.0, 70.0), Vec3::new(90.5, 4.0, 70.0)),
+    // platform C → wall Y
+    (Vec3::new(102.0, 4.0, 70.0), Vec3::new(108.8, 4.0, 70.0)),
 ];
 
 /// Haystacks (centre x, centre z, size x, size z, height): not solid, jump targets of type 0x800. The first
@@ -251,6 +256,13 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
         let (lo, hi) = (p0.min(p1), p0.max(p1));
         collision.boxes.push(Aabb3 { min: Vec3::new(lo.x - 0.1, lo.y - 0.2, lo.z - 0.1), max: Vec3::new(hi.x + 0.1, hi.y, hi.z + 0.1) });
         guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1: Vec3::Y, subtype: GuidanceSubType::Beam });
+        // PORT: the beam's two top side edges are LedgeGrab edges too, like a pilotis top (0xB2B600); a beam's own
+        // guidance data in the game files is not checked. The pull-down from a beam (0xE504D0) hangs from them.
+        let d = Vec3::new(p1.x - p0.x, 0.0, p1.z - p0.z).normalize_or_zero();
+        let side = Vec3::new(-d.z, 0.0, d.x);
+        for n in [side, -side] {
+            guidance.edges.push(GuidanceEdge { p0: p0 + n * 0.1, p1: p1 + n * 0.1, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::LedgeGrab });
+        }
     }
     for &(x, z, sx, sz, h) in HAYSTACKS {
         guidance.haystacks.push(Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) });
