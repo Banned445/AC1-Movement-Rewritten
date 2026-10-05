@@ -557,6 +557,13 @@ const ACT_CATCH_WALL: [u32; 2] = [0x1F0C_0C23, 0x1F0C_0C2D];
 const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
 /// Falling (6-way grasp blend).
 const ACT_FALL: u32 = 0x1F0C_22C2;
+/// PORT (stand-in until the ground state tree with MoveBlend's transition path, RE/12 §1): the game also plays an
+/// authored transition action in front of the ground locomotion, and MoveBlend's start / transition blend layouts
+/// (HG+0x724, 0xDA08C0) keep speed and foot phase in step with it. The port has no such path yet, so these
+/// transitions are left out and the switch uses the default transition. Set to `true` once that path is ported;
+/// nothing else depends on this switch.
+const GROUND_LOCOMOTION_TRANSITIONS: bool = false;
+
 /// The ground waits (HumanGround), [low, high profile] × [left, right foot ahead]: `xx_{l,h}_wait_hipm_foot{l,r}`.
 const ACT_WAIT: [[u32; 2]; 2] = [[0x00D8_243F, 0x00D8_24C5], [0x00D8_2508, 0x00D8_258E]];
 
@@ -916,14 +923,19 @@ fn choose_clip(
             match game_transition(&lib, cur_item.as_ref(), new_action) {
                 Some(t) => {
                     // a transition action plays first, blended in with blend A; the requested action follows it with
-                    // blend B (the slot queues both, SetAction 0x727F70). Also in front of a looping action (Action +28 = 0)
-                    // the simulation times (the ground locomotion, e.g. the roll's `roll_tr_l_walk` into the run; the beam
-                    // and ladder waits): the
-                    // transition plays on its own clock without root motion (the simulation moves the body), then the
-                    // simulation's phase takes over. Not in front of the simulation's one-shot moves, whose timing the
-                    // body follows (PORT: those enter with blend A directly).
-                    let loops = req.looping || lib.graph.actions.get(&new_action).is_some_and(|a| a.repeat == 0);
-                    if t.action_a != 0 && (!req.sim || loops) {
+                    // blend B (the slot queues both, SetAction 0x727F70). Also in front of a standing loop the simulation
+                    // times (the beam / ladder / pilotis waits, Action +28 = 0): the transition plays on its own clock
+                    // without root motion, then the simulation's phase takes over.
+                    // Not in front of the ground locomotion: while a transition plays the game's MoveBlend runs its own
+                    // path (the start / transition blend layouts, HG+0x724, 0xDA08C0, not ported) that keeps the speed
+                    // and the foot phase in step with it; without it a walk transition ran at run speed and the cycle
+                    // then jumped to another foot. Nor in front of the simulation's one-shot moves, whose timing the body
+                    // follows.
+                    let standing_loop = req.sim && !req.looping && lib.graph.actions.get(&new_action).is_some_and(|a| a.repeat == 0);
+                    let ground_locomotion = req.sim && req.looping && GROUND_LOCOMOTION_TRANSITIONS;
+                    let queued = !req.sim || standing_loop || ground_locomotion;
+                    let skipped = t.action_a != 0 && !queued;
+                    if t.action_a != 0 && queued {
                         if let Some(mut ti) = lib.action_items(t.action_a) {
                             if req.sim {
                                 for it in &mut ti {
@@ -937,7 +949,13 @@ fn choose_clip(
                             items = ti;
                         }
                     }
-                    t.blend_a
+                    if skipped {
+                        // PORT: the transition action is skipped, so its blend A (often a cut into that clip) would cut
+                        // into the destination: the default transition instead (ASTOPBROLL 0.2 s)
+                        ActBlend::DEFAULT
+                    } else {
+                        t.blend_a
+                    }
                 }
                 None => ActBlend::default(),
             }
@@ -1077,7 +1095,8 @@ pub fn apply_clip(
         let root_speed = item.layers.first().and_then(|(n, _)| lib.clips.get(n)).map(|c| c.root_speed).unwrap_or(0.0);
         // playback rate: locomotion cycles match their root motion to the actual speed (no foot
         // sliding); one-shots play at their own rate or are stretched to `fit`
-        let rate = if p.looping && root_speed > 0.1 {
+        // (only the looping part: a transition action queued in front plays at its own rate)
+        let rate = if p.looping && p.item >= p.loop_from && root_speed > 0.1 {
             let speed = Vec2::new(body.velocity.x, body.velocity.z).length();
             (speed / root_speed).clamp(0.3, 2.0)
         } else if let Some(fit) = p.fit {
