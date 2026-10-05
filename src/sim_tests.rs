@@ -1874,6 +1874,47 @@ fn landing_with_the_stick_released_plays_no_run_stop() {
 }
 
 #[test]
+fn moving_again_during_a_run_stop_waits_for_the_locked_stop_then_leaves_its_settle() {
+    use crate::player::anim_gate;
+    use crate::player::jump_blend::{RUN_STOP, RUN_STOP_TO_WAIT};
+    // the stop item is locked (word 0x3a / 0x35: 0x20); its settle into the wait allows leaving for moving
+    // (0xf8a / 0xf85: 0x200 / 0x800), `HumanGround__AnimAllowsModeExit` 0xD80010
+    let mut s = Sim::new(Vec3::new(0.0, 0.0, -30.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, true, false);
+    s.run(2.0);
+    s.pad(Vec3::X, 0.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    let stop = s.ground().oneshot.expect("run stop");
+    assert!(RUN_STOP.contains(&stop.blend.id) && anim_gate::locked(&stop.blend));
+    s.pad(Vec3::X, 1.0, true, false);
+    // the stop plays out (no cut)
+    for _ in 0..6 {
+        s.run(1.0 / 60.0 + 1e-4);
+        assert!(s.ground().oneshot.is_some_and(|o| RUN_STOP.contains(&o.blend.id)), "the locked stop was cut");
+    }
+    // then the locomotion takes over at once instead of the settle
+    assert!(s.run_until(1.5, |s| s.ground().oneshot.is_none() && s.ground().speed_param > 0.0), "never moved again");
+    let _ = RUN_STOP_TO_WAIT;
+}
+
+#[test]
+fn pushing_the_stick_after_a_pull_up_leaves_its_end_clip_at_once() {
+    use crate::player::anim_gate;
+    // the pull-up ends with `hangknee_foot*_tr_freestep_entry` (0x248E9730 / 31, word 0xfc4 / 0xfc8): every mode exit
+    // allowed, so the stick leaves it for the locomotion straight away (this wall top is narrow: the walk itself then
+    // halts at its far edge, 0xEE7BDA)
+    let mut s = hang_on_jump_up_wall();
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::Ground), "never pulled up");
+    let os = s.ground().oneshot;
+    if let Some(o) = os {
+        assert!(anim_gate::allows_mode_exit(&o.blend, true, false), "{:#x}", o.blend.id);
+    }
+    s.run(2.0 / 60.0 + 1e-4);
+    assert!(s.ground().oneshot.is_none(), "still in the pull-up's end clip: {:?}", s.ground().oneshot.map(|o| o.blend.id));
+}
+
+#[test]
 fn pull_up_ends_standing_still() {
     let mut s = hang_on_jump_up_wall();
     assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));

@@ -92,6 +92,12 @@ pub struct ActItem {
     pub blend: ActBlend,
     /// Outgoing transitions (`sub_5B98B0` matches `action_b` with the requested action).
     pub transitions: Vec<ActTransition>,
+    /// The item's word at +60 (`ActionItem::Serialize` 0x5BADF0): bits 0–1 / 2–3 the feet before / after
+    /// (`ACTFeetPosition`), bits 4–15 twelve flags read by the contexts through `sub_5021F0` (RE/13 §7.6:
+    /// 0x10 the animation turns the body, 0x20 locked, 0x40..0x800 mode exits allowed).
+    pub flags: u16,
+    /// +20, a float (meaning not decoded).
+    pub f20: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -241,12 +247,13 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
             let _ = (bid, bcls);
             let blend = read_blend(r)?;
             let disp = r.u32()?;
-            r.u32()?;
-            r.u32()?;
-            for _ in 0..12 {
-                r.u8()?;
+            let feet_from = (r.u32()? & 3) as u16;
+            let feet_to = (r.u32()? & 3) as u16;
+            let mut flags = feet_from | (feet_to << 2);
+            for b in 0..12 {
+                flags |= ((r.u8()? & 1) as u16) << (4 + b);
             }
-            r.f32()?;
+            let f20 = r.f32()?;
             r.u32()?;
             r.u8()?;
             let n = r.u32()?;
@@ -262,6 +269,8 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                 },
                 blend,
                 transitions,
+                flags,
+                f20,
             };
             c.items.insert(id, it.clone());
             Ok(Obj::Item(it))
