@@ -1289,6 +1289,55 @@ fn high_profile_legs_on_a_beam_runs_up_the_wall_ahead() {
     assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?} {:?}", s.loco().current, s.data().narrow.state);
 }
 
+#[test]
+fn jogging_a_beam_with_the_stick_at_a_branch_hops_onto_it() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState, BEAM_CORNER_HOP};
+    // beam x 102..108.8 (z 70) with a branch at x 105 toward +Z (from z 70.3): jogging +X, the stick to +Z near
+    // the branch → event 7 → the corner hop onto it (0xF7D2F0 → +151 / +154 / +157), then on along it
+    let point = Vec3::new(102.8, 4.0, 70.0);
+    let mut s = Sim::new(point, -std::f32::consts::FRAC_PI_2);
+    let (p0, p1) = (Vec3::new(102.0, 4.0, 70.0), Vec3::new(108.8, 4.0, 70.0));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::X }));
+    s.run(0.2);
+    s.pad(Vec3::X, 1.0, true, false);
+    assert!(s.run_until(3.0, |s| s.body().feet.x > 104.2), "never jogged up to the branch: {:?} {:?}", s.data().narrow.state, s.body().feet);
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(0.2, |s| s.data().narrow.state == BeamState::HopStart), "no corner hop: {:?}", s.data().narrow.state);
+    let h = s.data().narrow.hop.expect("hop target");
+    assert!((h.point - Vec3::new(105.0, 4.0, 71.0)).length() < 0.05, "lands where the branch leaves the search box: {:?}", h.point);
+    assert!(h.dir.dot(Vec3::Z) > 0.99);
+    assert!(h.w[1] > 0.0 && h.w[3] > 0.0 && h.w[0] == 0.0, "right / front-right blend: {:?}", h.w);
+    assert!(s.data().narrow.action.is_some_and(|a| a.id == BEAM_CORNER_HOP[0]));
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::HopEnd), "no landing: {:?}", s.data().narrow.state);
+    let f = s.body().feet;
+    assert!((f - Vec3::new(105.0, 4.0, 71.0)).length() < 0.05, "on the branch: {f:?}");
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Walk), "no jog after: {:?}", s.data().narrow.state);
+    assert!(s.run_until(2.0, |s| s.body().feet.z > 72.0), "jogs on along the branch: {:?}", s.body().feet);
+    assert!((s.body().feet.x - 105.0).abs() < 0.01 && s.body().forward().dot(Vec3::Z) > 0.99);
+}
+
+#[test]
+fn walking_a_bent_beam_carries_on_round_the_bend() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    // the branch (x 105, z 70.3..76) bends 30° onto (105, 76) → (106.5, 78.6): the next segment ahead
+    // (0xF753A0) takes over instead of the end stop
+    let point = Vec3::new(105.0, 4.0, 74.0);
+    let mut s = Sim::new(point, std::f32::consts::PI);
+    let (p0, p1) = (Vec3::new(105.0, 4.0, 70.3), Vec3::new(105.0, 4.0, 76.0));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::Z }));
+    s.run(0.2);
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(6.0, |s| s.data().narrow.p0 == Vec3::new(105.0, 4.0, 76.0)), "never switched segments: {:?} {:?} p0 {:?} p1 {:?} s {}", s.data().narrow.state, s.body().feet, s.data().narrow.p0, s.data().narrow.p1, s.data().narrow.s);
+    s.pad((Vec3::new(1.5, 0.0, 2.6)).normalize(), 1.0, false, false);
+    assert!(s.run_until(6.0, |s| s.body().feet.z > 77.5), "never walked on: {:?} {:?}", s.data().narrow.state, s.body().feet);
+    let f = s.body().feet;
+    let d = Vec3::new(1.5, 0.0, 2.6).normalize();
+    let off = (f - Vec3::new(105.0, 4.0, 76.0)).cross(d).length();
+    assert!(off < 0.01 && (f.y - 4.0).abs() < 0.01, "on the second segment's line: {f:?}");
+    assert_eq!(s.loco().current, ActorContextId::NarrowObject);
+    let _ = BeamState::Walk;
+}
+
 // ---------------------------------------------------------------- obstacle collision / lean, look-down (RE/02 §4.2)
 
 /// Send event 42 the way the game's (player-unreachable) sender would: the obstacle just ahead of the character →

@@ -17,7 +17,8 @@
 //! `__NarrowObjectState` 0xEE8EC0 on a pilotis. Main's sub-states (`StateBeam_Update` 0xF808D0): Idle +91,
 //! Walk +94, Stop +97, the 90° wait +100 (facing across the beam), Turn180 +124, the turn to / from the 90° wait
 //! +127. Exits: the pull-down to a hang under the edge (event 9, the empty hand, 0xE504D0 → Ledge), the wall run
-//! (event 15, Walk only, 0xF77DC0 → Walling).
+//! (event 15, Walk only, 0xF77DC0 → Walling). The corner hop (event 7, +151 / +154 / +157) jumps onto another beam
+//! beside the one walked along (RE/05 §2.11).
 
 use bevy::prelude::*;
 
@@ -69,6 +70,12 @@ pub const BEAM_WAIT_90: u32 = 0x02E4_A9DF;
 /// `crouchwait_90_turn180`). Pushing forward (off the beam) does nothing for the player (0xF7BA60 is AI only).
 pub const BEAM_90_TURN_BACK: [u32; 2] = [0x350D_A35D, 0x350D_A35E];
 pub const BEAM_90_TURN180: u32 = 0x4F8A_3DE7;
+/// The corner hop (event 7, `StartCornerHop` 0xF7D2F0): start (+151, 0xF7C960), the hop with the root interpolated
+/// onto the other beam over its duration (+154, 0xF7CCF0), the landing into the jog (+157, 0xF7CF50). Each action has
+/// one item of six clips [left, right, frontleft, frontright, backleft, backright] (`beam_cornerhop_*`). The walking
+/// variants (`beam_cornerwalk_*`, 0x5343E72E..30) are picked at walking speed, which event 7's CanHandle (0xF7F150)
+/// never accepts.
+pub const BEAM_CORNER_HOP: [u32; 3] = [0x340F_1CDE, 0x340F_1CDF, 0x340F_1CE0];
 
 pub const DUMPED_ACTIONS: &[u32] = &[
     BEAM_WAIT[0], BEAM_WAIT[1], BEAM_WALK, BEAM_START[0], BEAM_START[1], BEAM_JOG_STOP[0], BEAM_JOG_STOP[1], BEAM_TURN180[0], BEAM_TURN180[1],
@@ -77,6 +84,7 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     BEAM_JUMP_CLEAR, BEAM_JUMP_CLEAR_FALL, PILOTIS_FROM_FREESTEP[0], PILOTIS_FROM_FREESTEP[1], PILOTIS_FROM_AIR, PILOTIS_WAIT,
     0x516D_52DB, 0x516D_52DC, 0x516D_52DD, 0x516D_52DE, 0x516D_52DF,
     BEAM_TO_90[0][0], BEAM_TO_90[0][1], BEAM_TO_90[1][0], BEAM_TO_90[1][1], BEAM_WAIT_90, BEAM_90_TURN_BACK[0], BEAM_90_TURN_BACK[1], BEAM_90_TURN180,
+    BEAM_CORNER_HOP[0], BEAM_CORNER_HOP[1], BEAM_CORNER_HOP[2],
 ];
 
 /// 0xF7C3A0: the root stops this far before a beam end.
@@ -139,6 +147,24 @@ pub enum BeamState {
     TurnBack,
     /// +124 with +1040 = 2: the turn-around across the beam (back to the 90° wait).
     Turn90,
+    /// +151 / +154 / +157: the corner hop's start, flight onto the other beam, and landing into the jog.
+    HopStart,
+    Hop,
+    HopEnd,
+}
+
+/// A corner hop target (`HumanNarrowObjectBeam` vt0 0xF7A310 → sub_1173CD0): the other beam's segment, the point
+/// to land on (beam +2144) and the direction to go along it (+2160).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CornerHop {
+    pub p0: Vec3,
+    pub p1: Vec3,
+    pub point: Vec3,
+    pub dir: Vec3,
+    /// Clip weights [left, right, frontleft, frontright, backleft, backright] (0xF7C960).
+    pub w: [f32; 6],
+    pub from: Vec3,
+    pub from_heading: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -208,6 +234,8 @@ pub struct HumanNarrowObjectData {
     pub across: Option<Vec3>,
     /// The playing turn goes to the left (`ClassifyStickDir` 1).
     pub turn_left: bool,
+    /// The running corner hop.
+    pub hop: Option<CornerHop>,
 }
 
 fn item(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -607,6 +635,112 @@ fn try_pull_down(n: &HumanNarrowObjectData, stick: Option<Vec3>, guidance: &Guid
     Some(super::ground::pulldown_ledge_entry(moves, normal, feet))
 }
 
+/// Clip a segment to an oriented box (centre, unit axes, half extents); returns the parameter range kept.
+fn clip_segment(a: Vec3, b: Vec3, c: Vec3, axes: [Vec3; 3], half: [f32; 3]) -> Option<(f32, f32)> {
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for k in 0..3 {
+        let p = (a - c).dot(axes[k]);
+        let d = (b - a).dot(axes[k]);
+        if d.abs() < 1e-6 {
+            if p.abs() > half[k] {
+                return None;
+            }
+            continue;
+        }
+        let (mut u0, mut u1) = ((-half[k] - p) / d, (half[k] - p) / d);
+        if u0 > u1 {
+            std::mem::swap(&mut u0, &mut u1);
+        }
+        t0 = t0.max(u0);
+        t1 = t1.min(u1);
+        if t0 > t1 {
+            return None;
+        }
+    }
+    Some((t0, t1))
+}
+
+/// The corner hop's target search (`HumanNarrowObjectBeam` vt0 0xF7A310 → sub_1173CD0), with the interpreter's
+/// inputs (0xEE9AF0): the stick 40°–140° from the facing; `want` = the facing turned 45° (stick ahead) or 135°
+/// (stick behind) toward the stick's side.
+/// - The box: ±1.8 m along the facing, 0…r to the stick's side (centre at r / 2), ±0.5 m vertically; r = 0.75 m at
+///   walking speed, 1.0 m above it (the player only hops above it).
+/// - The Beam segments clipped to it (`GuidanceZone__FilterReport`), each oriented along `want` (sub_116DC30) and
+///   within 58° of it (sub_1173B10, hypothesis for its angle arguments).
+/// - The landing point is the clipped segment's far end; the stick's component toward it must exceed 0.766
+///   (as written, without a normalisation: hypothesis). The nearest one wins.
+pub fn find_corner_hop(root: Vec3, facing: Vec3, stick: Vec3, current: (Vec3, Vec3), guidance: &GuidanceWorld) -> Option<CornerHop> {
+    let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
+    let r_axis = super::right_of(f);
+    let to_right = stick.dot(r_axis) >= 0.0;
+    let side = if to_right { r_axis } else { -r_axis };
+    let behind = stick.dot(f) < 0.0;
+    let turn = if behind { 135f32 } else { 45f32 }.to_radians();
+    let want = (f * turn.cos() + side * turn.sin()).normalize_or_zero();
+    let r = 1.0;
+    let c = root + side * (r * 0.5);
+    let mut best: Option<(f32, CornerHop)> = None;
+    for e in &guidance.edges {
+        if e.subtype != GuidanceSubType::Beam || (e.p0 == current.0 && e.p1 == current.1) {
+            continue;
+        }
+        let Some((t0, t1)) = clip_segment(e.p0, e.p1, c, [f, side, Vec3::Y], [1.8, r * 0.5, 0.5]) else { continue };
+        let (a, b) = (e.p0.lerp(e.p1, t0), e.p0.lerp(e.p1, t1));
+        let mut d = Vec3::new(b.x - a.x, 0.0, b.z - a.z).normalize_or_zero();
+        let end = if d.dot(want) <= 0.0 { a } else { b };
+        if d.dot(want) <= 0.0 {
+            d = -d;
+        }
+        if d == Vec3::ZERO || d.dot(want) < 58f32.to_radians().cos() {
+            continue;
+        }
+        let rel = Vec3::new(end.x - root.x, 0.0, end.z - root.z);
+        if stick.dot(rel) <= 0.766 {
+            continue;
+        }
+        let dist = rel.length_squared();
+        if best.as_ref().is_none_or(|bst| dist < bst.0) {
+            best = Some((dist, CornerHop { p0: e.p0, p1: e.p1, point: end, dir: d, w: corner_hop_weights(root, f, end), from: root, from_heading: 0.0 }));
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// 0xF7C960: the start's six-clip blend. The target's offset along the facing over r (1.5 m above walking speed) is
+/// the front / back share k; the side share is 1 − k; the side of the facing picks left or right.
+fn corner_hop_weights(root: Vec3, facing: Vec3, target: Vec3) -> [f32; 6] {
+    let rel = Vec3::new(target.x - root.x, 0.0, target.z - root.z);
+    let k = (rel.dot(facing).abs() / 1.5).clamp(0.0, 1.0);
+    let right = rel.dot(super::right_of(facing)) >= 0.0;
+    let front = rel.dot(facing) >= 0.0;
+    let mut w = [0.0; 6];
+    w[right as usize] = 1.0 - k;
+    let fb = if front { 2 } else { 4 } + if right { 1 } else { 0 };
+    w[fb] = k;
+    w
+}
+
+/// `DetectBeamSegments` 0xF753A0, the next segment: a Beam edge crossing the box 0.4–1.0 m ahead of the root along
+/// the walking direction, ±0.5 m to the sides and vertically, running within 45° of it (sub_116E1A0, cone π/4).
+/// Returns its ends.
+fn next_segment(root: Vec3, forward: Vec3, current: (Vec3, Vec3), guidance: &GuidanceWorld) -> Option<(Vec3, Vec3)> {
+    let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let c = root + f * 0.7;
+    for e in &guidance.edges {
+        if e.subtype != GuidanceSubType::Beam || (e.p0 == current.0 && e.p1 == current.1) {
+            continue;
+        }
+        let d = Vec3::new(e.p1.x - e.p0.x, 0.0, e.p1.z - e.p0.z).normalize_or_zero();
+        if d.dot(f).abs() < 45f32.to_radians().cos() {
+            continue;
+        }
+        if clip_segment(e.p0, e.p1, c, [f, super::right_of(f), Vec3::Y], [0.3, 0.5, 0.5]).is_some() {
+            return Some((e.p0, e.p1));
+        }
+    }
+    None
+}
+
 /// A free-step jump target from the beam / pilotis in the stick direction (event 4: `Human__SetupJumpToTarget`
 /// with jump kind 1, 0xE4D950).
 fn jump_target(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
@@ -679,6 +813,25 @@ pub fn update_narrow(
             }
         }
 
+        // ------------------------------------------------ the corner hop (event 7, Walk above walking speed)
+        // 0xEE9AF0: vt232 (event 7 accepted: Walk, speed above the walk band, 0xF7F150) and the stick 40°–140° from
+        // the facing; the target search (vt288) → vt236 → `StartCornerHop` 0xF7D2F0.
+        if n.kind == NarrowKind::Beam
+            && matches!(n.state, BeamState::Start | BeamState::Walk)
+            && jog
+            && stick
+            && a > 40f32.to_radians()
+            && a < 140f32.to_radians()
+        {
+            if let Some(mut hop) = find_corner_hop(n.stand(), facing, pad.dir, (n.p0, n.p1), &guidance) {
+                hop.from_heading = super::heading_of(facing);
+                let w = hop.w;
+                n.hop = Some(hop);
+                n.play(BeamState::HopStart, item(BEAM_CORNER_HOP[0], 0, &w));
+            }
+        }
+        let n = &mut data.narrow;
+
         // ------------------------------------------------ jumps (high profile + Legs, 0xEE9AF0 / 0xEE8EC0)
         let jump = pad.high_profile && pad.jump_buffered();
         let can_jump = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Stop | BeamState::Wait90 | BeamState::ImpulseWait | BeamState::PilotisWait);
@@ -719,11 +872,27 @@ pub fn update_narrow(
             if n.kind == NarrowKind::Beam && matches!(n.state, BeamState::Walk | BeamState::Start | BeamState::Stop) {
                 let sign = if n.toward_p1 { 1.0 } else { -1.0 };
                 let mut s = n.s + step * sign;
-                let stop = if can_step_off(n, &collision) { BEAM_STEP_OFF } else { BEAM_END_STOP };
+                // a next segment ahead (0xF753A0) lets the root run to the end and on along it
+                let next = next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance);
+                let stop = if next.is_some() { 0.0 } else if can_step_off(n, &collision) { BEAM_STEP_OFF } else { BEAM_END_STOP };
                 let limit_lo = if n.toward_p1 { 0.0 } else { stop };
                 let limit_hi = if n.toward_p1 { n.len() - stop } else { n.len() };
+                let over = if n.toward_p1 { s - limit_hi } else { limit_lo - s };
                 s = s.clamp(limit_lo, limit_hi);
                 n.s = s;
+                if let (Some((q0, q1)), true) = (next, over >= 0.0) {
+                    // `ConstrainRootMotionToBeam` 0xF7C3A0 switches to the next segment; going along it from the
+                    // junction. PORT: the heading turns at once (the game steers to a look-ahead point 0.6 m ahead
+                    // on the next segment, beam +288)
+                    let junction = n.stand();
+                    let fwd = n.facing();
+                    n.p0 = q0;
+                    n.p1 = q1;
+                    let d = n.dir();
+                    n.toward_p1 = d.dot(fwd) >= 0.0;
+                    let sj = (junction - q0).dot(d).clamp(0.0, n.len());
+                    n.s = (sj + over.max(0.0) * if n.toward_p1 { 1.0 } else { -1.0 }).clamp(0.0, n.len());
+                }
             }
         }
 
@@ -841,6 +1010,48 @@ pub fn update_narrow(
                     n.play(BeamState::Wait90, w);
                 }
             }
+            BeamState::HopStart => {
+                // +151: the start in place (PORT: its root motion is not applied), then the hop (+154)
+                if done {
+                    let w = n.hop.map(|h| h.w).unwrap_or_default();
+                    n.play(BeamState::Hop, item(BEAM_CORNER_HOP[1], 0, &w));
+                }
+            }
+            BeamState::Hop => {
+                // +154: the root interpolated to the landing point, facing the new beam, over the hop's duration
+                // (sub_711130 / RootInterp__Advance)
+                if let Some(h) = n.hop {
+                    let k = (n.t / dur.max(1e-3)).min(1.0);
+                    body.feet = h.from.lerp(h.point, k);
+                    let h1 = super::heading_of(h.dir);
+                    let dh = (h1 - h.from_heading + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                    body.heading = h.from_heading + dh * k;
+                    if done {
+                        // now on the other beam (the next segment), going along `dir`
+                        n.p0 = h.p0;
+                        n.p1 = h.p1;
+                        n.s = (h.point - h.p0).dot(n.dir()).clamp(0.0, n.len());
+                        n.toward_p1 = h.dir.dot(n.dir()) >= 0.0;
+                        n.play(BeamState::HopEnd, item(BEAM_CORNER_HOP[2], 0, &h.w));
+                    }
+                    continue;
+                }
+                n.wait_state();
+            }
+            BeamState::HopEnd => {
+                // +157: `cornerhop_*_tr_jog_foot*`, then Main (+320 = 5, +1728 = 3): the jog when the stick still
+                // pushes along the beam
+                if done {
+                    n.hop = None;
+                    if forward {
+                        n.foot ^= 1;
+                        let w = item(BEAM_WALK, n.foot, &walk_w);
+                        n.play(BeamState::Walk, w);
+                    } else {
+                        n.wait_state();
+                    }
+                }
+            }
             BeamState::ImpulseIn => {
                 if done {
                     let w = item(BEAM_IMPULSE_WAIT, 0, &[]);
@@ -893,7 +1104,12 @@ pub fn update_narrow(
         body.feet = n.stand();
         body.heading = super::heading_of(n.facing());
         // step off the end onto the floor beyond (0xF77C00) → Ground
-        if n.kind == NarrowKind::Beam && matches!(n.state, BeamState::Walk | BeamState::Start) && n.to_end() <= BEAM_STEP_OFF + 1e-3 && can_step_off(n, &collision) {
+        if n.kind == NarrowKind::Beam
+            && matches!(n.state, BeamState::Walk | BeamState::Start)
+            && n.to_end() <= BEAM_STEP_OFF + 1e-3
+            && next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance).is_none()
+            && can_step_off(n, &collision)
+        {
             body.feet += n.facing() * (BEAM_STEP_OFF + 0.2);
             switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });
         }

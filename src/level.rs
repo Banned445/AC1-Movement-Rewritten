@@ -131,6 +131,10 @@ pub const BEAMS: &[(Vec3, Vec3)] = &[
     (Vec3::new(84.5, 4.0, 70.0), Vec3::new(90.5, 4.0, 70.0)),
     // platform C → wall Y
     (Vec3::new(102.0, 4.0, 70.0), Vec3::new(108.8, 4.0, 70.0)),
+    // a branch off it toward +Z at x 105 (0.3 m clear of it): the corner hop (RE/05 §2.11)
+    (Vec3::new(105.0, 4.0, 70.3), Vec3::new(105.0, 4.0, 76.0)),
+    // the branch bends 30° at z 76: walking on round the bend onto the next segment (0xF753A0)
+    (Vec3::new(105.0, 4.0, 76.0), Vec3::new(106.5, 4.0, 78.6)),
 ];
 
 /// Haystacks (centre x, centre z, size x, size z, height): not solid, jump targets of type 0x800. The first
