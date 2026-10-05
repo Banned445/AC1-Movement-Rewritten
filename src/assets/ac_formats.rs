@@ -14,8 +14,11 @@ fn f32_at(b: &[u8], o: usize) -> f32 {
 
 /// Skinned-mesh position quantisation: metres = s16 / 2048 (fitted, RE/09 §3.3).
 pub const POS_SCALE: f32 = 1.0 / 2048.0;
-/// UVs are s16 / 4096 (RE/09 §3.3, hypothesis checked visually).
-pub const UV_SCALE: f32 = 1.0 / 4096.0;
+/// Fences the character atlas/sampling/normal-map correction (RE/09 §6).
+pub const CHARACTER_VISUAL_FIXES: bool = true;
+/// UVs are s16 / 2048, including coordinates outside the first tile (RE/09 §6).
+/// PORT: shader-side scale remains a hypothesis; checked against the outfit's texture atlas.
+pub const UV_SCALE: f32 = if CHARACTER_VISUAL_FIXES { 1.0 / 2048.0 } else { 1.0 / 4096.0 };
 
 #[derive(Debug, Clone)]
 pub struct MeshBone {
@@ -41,6 +44,8 @@ pub struct AcMesh {
     /// Game space (Z-up, metres, model origin at the hips).
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    pub tangents: Vec<[f32; 3]>,
+    pub binormals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub bone_idx: Vec<[u8; 4]>,
     pub bone_w: Vec<[u8; 4]>,
@@ -87,6 +92,8 @@ pub fn parse_mesh(d: &[u8]) -> Option<AcMesh> {
         bones,
         positions: Vec::with_capacity(nv),
         normals: Vec::with_capacity(nv),
+        tangents: Vec::with_capacity(nv),
+        binormals: Vec::with_capacity(nv),
         uvs: Vec::with_capacity(nv),
         bone_idx: Vec::with_capacity(nv),
         bone_w: Vec::with_capacity(nv),
@@ -101,6 +108,9 @@ pub fn parse_mesh(d: &[u8]) -> Option<AcMesh> {
         let n = &d[o + 8..o + 11];
         let nv3 = [n[0] as f32 / 127.5 - 1.0, n[1] as f32 / 127.5 - 1.0, n[2] as f32 / 127.5 - 1.0];
         m.normals.push(nv3);
+        let direction = |o: usize| [d[o] as f32 / 127.5 - 1.0, d[o + 1] as f32 / 127.5 - 1.0, d[o + 2] as f32 / 127.5 - 1.0];
+        m.tangents.push(direction(o + 12));
+        m.binormals.push(direction(o + 16));
         m.uvs.push([i16_at(d, o + 20) as f32 * UV_SCALE, i16_at(d, o + 22) as f32 * UV_SCALE]);
         m.bone_idx.push(d[o + 24..o + 28].try_into().unwrap());
         m.bone_w.push(d[o + 28..o + 32].try_into().unwrap());
