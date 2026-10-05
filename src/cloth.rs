@@ -2,6 +2,9 @@
 
 use bevy::prelude::*;
 
+// PORT: final render contacts cover edge-pass penetration and frames without a solver step (RE/09 §8.3).
+const CLOTH_RENDER_CONTACT_GUARD: bool = true;
+
 #[derive(Clone)]
 pub struct ClothSettings {
     pub pinned: Vec<bool>,
@@ -26,6 +29,17 @@ pub struct ClothCollider {
 }
 
 impl ClothCollider {
+    fn closest(&self, position: Vec3) -> Vec3 {
+        let axis = self.local_end - self.local_start;
+        let length = axis.length_squared();
+        let t = if length > 1e-12 { ((position - self.local_start).dot(axis) / length).clamp(0.0, 1.0) } else { 0.0 };
+        self.local_start + axis * t
+    }
+
+    fn penetration(&self, position: Vec3, vertex_radius: f32) -> f32 {
+        if self.mode == 2 { return 0.0; }
+        (self.radius + vertex_radius - position.distance(self.closest(position))).max(0.0)
+    }
     /// Native capsule response (Cloth__sub_6C8260 0x6C8260; RE/09 §8.2).
     fn correct(&self, position: Vec3, target: Vec3, vertex_radius: f32, pull: f32) -> Vec3 {
         if self.mode == 2 { return position; }
@@ -265,6 +279,47 @@ pub struct ClothState {
     lengths_squared: Vec<f32>,
     accumulator: f32,
     anchor: Option<Vec3>,
+    contact_before: (usize, f32),
+    contact_after: (usize, f32),
+}
+
+fn contact_report(settings: &ClothSettings, positions: &[Vec3], capsules: &[ClothCollider]) -> (usize, f32) {
+    let mut count = 0;
+    let mut worst = 0.0f32;
+    for (i, &position) in positions.iter().enumerate() {
+        if settings.pinned[i] { continue; }
+        let depth = capsules.iter().map(|c| c.penetration(position, settings.vertex_radius[i])).fold(0.0f32, f32::max);
+        if depth > 0.001 { count += 1; }
+        worst = worst.max(depth);
+    }
+    (count, worst)
+}
+
+fn escape_overlapping_capsules(position: Vec3, target: Vec3, rest: Vec3, radius: f32, capsules: &[ClothCollider]) -> Vec3 {
+    let clear = |p| capsules.iter().all(|c| c.penetration(p, radius) <= 1e-5);
+    if clear(position) { return position; }
+    // PORT: alternating projections can cycle between overlapping leg capsules. Find the
+    // shortest bounded escape along pose directions or world axes; never change the pins.
+    let bound = 2.0 * capsules.iter().filter(|c| c.mode != 2).map(|c| c.radius + radius).fold(0.0f32, f32::max);
+    let mut best = position;
+    let mut best_distance = f32::INFINITY;
+    for direction in [target - position, rest - position, Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+        let Some(direction) = direction.try_normalize() else { continue; };
+        for step in 1..=32 {
+            let mut high = bound * step as f32 / 32.0;
+            if high >= best_distance { break; }
+            if !clear(position + direction * high) { continue; }
+            let mut low = bound * (step - 1) as f32 / 32.0;
+            for _ in 0..10 {
+                let middle = (low + high) * 0.5;
+                if clear(position + direction * middle) { high = middle; } else { low = middle; }
+            }
+            best = position + direction * high;
+            best_distance = high;
+            break;
+        }
+    }
+    best
 }
 
 impl ClothState {
@@ -320,11 +375,37 @@ impl ClothState {
         }
         // Pins follow the skeleton even on render frames with no simulation step.
         for (i, &target) in targets.iter().enumerate() { if settings.pinned[i] { self.current[i] = target; } }
+        self.contact_before = contact_report(settings, &self.current, capsules);
+        if CLOTH_RENDER_CONTACT_GUARD && (dt > 0.0 || reset) {
+            for (i, position) in self.current.iter_mut().enumerate() {
+                if settings.pinned[i] { continue; }
+                let before = *position;
+                for _ in 0..8 {
+                    let mut changed = false;
+                    for capsule in capsules {
+                        if capsule.penetration(*position, settings.vertex_radius[i]) <= 1e-5 { continue; }
+                        let closest = capsule.closest(*position);
+                        let direction = (*position - closest).try_normalize().or_else(|| (targets[i] - closest).try_normalize()).unwrap_or(Vec3::X);
+                        *position = closest + direction * (capsule.radius + settings.vertex_radius[i]);
+                        changed = true;
+                    }
+                    if !changed { break; }
+                }
+                *position = escape_overlapping_capsules(*position, targets[i], rigid_rest[i], settings.vertex_radius[i], capsules);
+                // PORT: presentation correction must not inject an extra Verlet velocity.
+                self.previous[i] += *position - before;
+            }
+        }
+        self.contact_after = contact_report(settings, &self.current, capsules);
         &self.current
     }
 }
 
-pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cloth: Query<&mut CharacterCloth>, mut meshes: ResMut<Assets<Mesh>>) {
+pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cloth: Query<&mut CharacterCloth>, mut meshes: ResMut<Assets<Mesh>>, mut diagnostics: Local<Option<bool>>, mut report_time: Local<f32>) {
+    let diagnostics = *diagnostics.get_or_insert_with(|| std::env::var_os("AC_CLOTH_DIAGNOSTICS").is_some());
+    *report_time += time.delta_secs();
+    let report = diagnostics && *report_time >= 0.5;
+    if report { *report_time = 0.0; }
     for mut cloth in &mut cloth {
         let Ok(player) = transforms.get(cloth.player) else { continue; };
         let matrices: Option<Vec<_>> = cloth.joints.iter().zip(&cloth.inverse_bindposes)
@@ -343,6 +424,10 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
         let rigid_rest: Vec<_> = cloth.rest.iter().map(|&p| player.to_matrix().transform_point3(p)).collect();
         let positions: Vec<[f32; 3]> = cloth.state.advance(&settings, &targets, &rigid_rest, &capsules, player.translation(), time.delta_secs()).iter()
             .map(|&p| inverse.transform_point3(p).to_array()).collect();
+        if report {
+            eprintln!("cloth t={:.2} contacts>1mm: {} -> {}; max depth: {:.4} -> {:.4} m", time.elapsed_secs(),
+                cloth.state.contact_before.0, cloth.state.contact_after.0, cloth.state.contact_before.1, cloth.state.contact_after.1);
+        }
         let Some(mut mesh) = meshes.get_mut(&cloth.mesh) else { continue; };
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         // PORT: rebuild the shading frame from deformed geometry instead of the game's normal solver.
@@ -436,5 +521,57 @@ mod tests {
         capsule.mode = 0;
         let near_surface = Vec3::new(0.099, 0.0, 0.0);
         assert_eq!(capsule.correct(near_surface, target, 0.0, 0.015), near_surface);
+    }
+    #[test]
+    fn render_guard_handles_fast_turns_and_jumps_between_solver_steps() {
+        let mut settings = settings();
+        settings.edges.clear();
+        let rest = vec![Vec3::Y, Vec3::X * 0.16, Vec3::new(0.16, -0.5, 0.0)];
+        let mut state = ClothState::default();
+        state.advance(&settings, &rest, &rest, &[], Vec3::ZERO, 0.0);
+        for frame in 0..480 {
+            let t = frame as f32 / 240.0;
+            let angle = if t < 0.5 { 0.0 } else { ((t - 0.5) * 12.0).min(std::f32::consts::PI) };
+            let rotation = Quat::from_rotation_y(angle);
+            let anchor = Vec3::Y * (t * std::f32::consts::PI).sin().max(0.0);
+            let targets: Vec<_> = rest.iter().map(|&p| anchor + rotation * p).collect();
+            let capsule = ClothCollider { bone_id: 0, local_start: anchor - Vec3::Y, local_end: anchor + Vec3::Y,
+                radius: 0.2, mode: 0, threshold: 0.0 };
+            let current = state.advance(&settings, &targets, &targets, std::slice::from_ref(&capsule), anchor, 1.0 / 240.0);
+            assert_eq!(current[0], targets[0], "pins follow every frame");
+            for &p in &current[1..] {
+                assert!(p.is_finite());
+                assert!(capsule.penetration(p, 0.01) <= 1.1e-5, "contact on a frame without a solver step");
+            }
+        }
+    }
+    #[test]
+    fn render_guard_cleans_up_penetration_reintroduced_by_edges() {
+        let mut settings = settings();
+        settings.pinned = vec![true, false, true];
+        let rest = vec![Vec3::ZERO, Vec3::X * 0.05, Vec3::X * 0.1];
+        let capsule = ClothCollider { bone_id: 0, local_start: -Vec3::Y, local_end: Vec3::Y, radius: 0.2, mode: 1, threshold: 0.0 };
+        let mut state = ClothState::default();
+        for _ in 0..120 {
+            let p = state.advance(&settings, &rest, &rest, std::slice::from_ref(&capsule), Vec3::ZERO, 1.0 / 60.0);
+            assert_eq!(p[0], rest[0]);
+            assert_eq!(p[2], rest[2]);
+            assert!(capsule.penetration(p[1], 0.01) <= 1.1e-5);
+        }
+        assert!(state.contact_before.0 > 0, "native edge pass reproduces penetration");
+        assert_eq!(state.contact_after.0, 0);
+        let before = state.current.clone();
+        state.advance(&settings, &rest, &rest, std::slice::from_ref(&capsule), Vec3::ZERO, 0.0);
+        assert_eq!(state.current, before, "paused screenshots must not evolve the cloth");
+    }
+    #[test]
+    fn overlapping_leg_capsules_do_not_trap_the_render_projection() {
+        let capsules: Vec<_> = [-0.15, 0.15].into_iter().map(|x| ClothCollider {
+            bone_id: 0, local_start: Vec3::new(x, -1.0, 0.0), local_end: Vec3::new(x, 1.0, 0.0),
+            radius: 0.2, mode: 1, threshold: 0.0,
+        }).collect();
+        let escaped = escape_overlapping_capsules(Vec3::ZERO, Vec3::Z * 0.3, Vec3::Z * 0.3, 0.01, &capsules);
+        assert!(escaped.is_finite() && escaped.length() < 0.15);
+        assert!(capsules.iter().all(|c| c.penetration(escaped, 0.01) <= 1.1e-5));
     }
 }
