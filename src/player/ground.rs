@@ -853,13 +853,18 @@ fn look_down_edge(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision
 
 /// Pull-down from the ground at edge `p` / normal `n`: type Wait (from Movement) or EdgeStop (from the ledge stop).
 fn pulldown_entry(p: Vec3, n: Vec3, feet: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<super::ledge::LedgeEntry> {
-    let [orient, descent, reception] = super::ledge_moves::pulldown(p, n, feet, wait, guidance, collision)?;
+    let moves = super::ledge_moves::pulldown(p, n, feet, wait, guidance, collision)?;
+    Some(pulldown_ledge_entry(moves, n, feet))
+}
+
+/// The Ledge entry (SubState 11 PullDown, `PullDown_Enter` 0xDDE4D0) that plays the pull-down's three stages.
+pub(super) fn pulldown_ledge_entry([orient, descent, reception]: [super::ledge_moves::LedgeMove; 3], n: Vec3, feet: Vec3) -> super::ledge::LedgeEntry {
     let mut e = super::ledge::LedgeEntry::at((orient.hand_l + orient.hand_r) * 0.5, n, feet, super::ledge::LedgeSubState::PullDown);
     e.hand_l = orient.hand_l;
     e.hand_r = orient.hand_r;
     e.entry_move = Some(orient);
     e.entry_rest = [Some(descent), Some(reception)];
-    Some(e)
+    e
 }
 
 trait AnyHit {

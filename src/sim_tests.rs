@@ -1191,6 +1191,104 @@ fn beam_jump_at_a_ledge_above() {
     assert!(f.x > 88.0 && (f.y - 6.3).abs() < 0.05, "on top of the slab: {f:?}");
 }
 
+// ---------------------------------------------------------------- beam input: 90° waits, pull-down, wall run (RE/05 §2.10)
+
+/// Standing on the free beam (x 84.5..90.5, z 70, 4 m) at `x`, facing +X.
+fn on_free_beam(x: f32) -> Sim {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode};
+    let point = Vec3::new(x, 4.0, 70.0);
+    let mut s = Sim::new(point, -std::f32::consts::FRAC_PI_2);
+    let (p0, p1) = (Vec3::new(84.5, 4.0, 70.0), Vec3::new(90.5, 4.0, 70.0));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::X }));
+    s.run(0.2);
+    s
+}
+
+#[test]
+fn stick_to_the_side_on_a_beam_turns_to_the_90_wait_and_back() {
+    use crate::player::narrow::{BeamState, BEAM_WAIT_90};
+    // Idle +91 → TurnTo90 (0xF77640) → Wait90 +100 facing across; then the stick along the beam turns back
+    // (0xF78630) and the stick back turns around across it (0xF78740)
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::TurnTo90), "no turn: {:?}", s.data().narrow.state);
+    s.pad(Vec3::Z, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Wait90), "no 90° wait: {:?}", s.data().narrow.state);
+    assert!(s.data().narrow.action.is_some_and(|a| a.id == BEAM_WAIT_90));
+    assert!(s.body().forward().dot(Vec3::Z) > 0.99, "facing across toward +Z: {:?}", s.body().forward());
+    let f = s.body().feet;
+    assert!((f - Vec3::new(87.0, 4.0, 70.0)).length() < 0.01, "stays on the line: {f:?}");
+    // back: turn around across the beam
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::Turn90), "no turn-around: {:?}", s.data().narrow.state);
+    s.pad(Vec3::NEG_Z, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Wait90));
+    assert!(s.body().forward().dot(Vec3::NEG_Z) > 0.99, "facing -Z: {:?}", s.body().forward());
+    // to a side: back along the beam toward -X
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::TurnBack), "no turn back: {:?}", s.data().narrow.state);
+    s.pad(Vec3::NEG_X, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Wait), "no wait: {:?}", s.data().narrow.state);
+    assert!(!s.data().narrow.toward_p1 && s.data().narrow.across.is_none());
+    assert!(s.body().forward().dot(Vec3::NEG_X) > 0.99, "facing -X: {:?}", s.body().forward());
+}
+
+#[test]
+fn empty_hand_on_a_beam_pulls_down_to_a_hang_under_it() {
+    use crate::player::ledge_moves::{MoveKind, PULLDOWN_BEAM_DESCENT, PULLDOWN_BEAM_ORIENT};
+    // event 9 (0xE504D0 → 0xE4EF70): the side edge toward the stick, 4 m above the ground → Ledge pull-down type 3
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    s.press_hand();
+    assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?} {:?}", s.loco().current, s.data().narrow.state);
+    let m = s.data().ledge.mv.expect("orientation stage");
+    assert_eq!(m.kind, MoveKind::PullDown { stage: 1 });
+    assert_eq!(m.seq[0].map(|a| a.id), Some(PULLDOWN_BEAM_ORIENT[0]), "beam_pilotis_to_pulldown_soft_front_orientation");
+    assert!(m.normal.dot(Vec3::NEG_Z) > 0.99, "the -Z side edge: {:?}", m.normal);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::PullDown { stage: 2 })));
+    assert_eq!(s.data().ledge.mv.unwrap().seq[0].map(|a| a.id), Some(PULLDOWN_BEAM_DESCENT[0]));
+    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_none()), "never settled: {:?}", s.data().ledge.mv.map(|m| m.kind));
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Free, "nothing below a beam: free hang");
+    let hands = (s.data().ledge.hand_l + s.data().ledge.hand_r) * 0.5;
+    assert!((hands.y - 4.0).abs() < 0.05 && (hands.z - 69.9).abs() < 0.05, "hands on the beam's -Z edge: {hands:?}");
+    assert!(s.body().feet.y < 3.0, "hanging below the beam: {:?}", s.body().feet);
+}
+
+#[test]
+fn empty_hand_on_a_pilotis_pulls_down_to_a_hang() {
+    use crate::player::ledge_moves::{MoveKind, PULLDOWN_BEAM_ORIENT};
+    use crate::player::narrow::{BeamState, PilotisEntry, PilotisEntryType};
+    let top = Vec3::new(77.0, 3.0, 80.0);
+    let mut s = Sim::new(top, -std::f32::consts::FRAC_PI_2);
+    force(&mut s, crate::player::TransitionSetup::ToPilotis(PilotisEntry { top, from: top, facing: Vec3::X, kind: PilotisEntryType::FromInAir, foot: 0 }));
+    assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::PilotisWait));
+    s.press_hand();
+    assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
+    let m = s.data().ledge.mv.expect("orientation stage");
+    assert_eq!(m.kind, MoveKind::PullDown { stage: 1 });
+    assert_eq!(m.seq[0].map(|a| a.id), Some(PULLDOWN_BEAM_ORIENT[0]));
+    assert!(m.normal.dot(Vec3::X) > 0.99, "the post's +X edge, ahead (no stick: the facing): {:?}", m.normal);
+    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_none()), "never hung");
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+}
+
+#[test]
+fn high_profile_legs_on_a_beam_runs_up_the_wall_ahead() {
+    use crate::player::narrow::BeamState;
+    // platform C → beam x 102..108.8 → wall Y at x 109: walking along it in high profile, Legs within 1.5 m of the
+    // wall starts the wall run (event 15, 0xF77DC0 → Walling)
+    let mut s = Sim::new(Vec3::new(101.0, 4.0, 70.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted: {:?}", s.loco().current);
+    assert!(s.run_until(8.0, |s| s.body().feet.x > 107.5), "never walked near the wall: {:?} {:?}", s.data().narrow.state, s.body().feet);
+    assert!(matches!(s.data().narrow.state, BeamState::Walk | BeamState::Start), "still walking: {:?}", s.data().narrow.state);
+    s.pad(Vec3::X, 1.0, true, false);
+    s.press_legs();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?} {:?}", s.loco().current, s.data().narrow.state);
+}
+
 // ---------------------------------------------------------------- obstacle collision / lean, look-down (RE/02 §4.2)
 
 /// Send event 42 the way the game's (player-unreachable) sender would: the obstacle just ahead of the character →
