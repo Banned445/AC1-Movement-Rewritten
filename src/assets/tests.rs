@@ -243,6 +243,8 @@ fn character_attachments_and_cloth_constraints_from_install() {
     }
     let cloth = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap().cloth.as_ref().expect("cloth settings");
     assert_eq!(m.visual_rotation_copies.len(), 2);
+    assert_eq!(m.visual_compressions.len(), 1);
+    assert!(m.visual_compressions.iter().all(|c| c.target >= m.skeleton.len() && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
     assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
     assert_eq!(cloth.pinned.len(), 146);
     assert_eq!(cloth.pinned.iter().filter(|&&p| p).count(), 44);
@@ -280,4 +282,19 @@ fn skirt_rotation_references_are_resolved_and_malformed_sources_rejected() {
     invalid[marker + 11..marker + 15].copy_from_slice(&0u32.to_le_bytes());
     assert!(crate::visual_pose::decode_rotation_copies(&invalid).is_err());
     assert!(crate::visual_pose::decode_rotation_copies(&payload[..marker + 13]).is_err());
+    let compressions = crate::visual_pose::decode_compressions(payload).unwrap();
+    assert_eq!(compressions.len(), 1);
+    assert_eq!(compressions[0].target, 1206536969);
+    assert_eq!(compressions[0].sources, [1486391408, 2601793068]);
+    assert_eq!(compressions[0].position_weight, 0.5);
+    assert_eq!(compressions[0].rotation_weight, 0.5);
+    assert!(compressions[0].position && compressions[0].rotation);
+    let marker = payload.windows(4).position(|b| b == crc32("CompressBoneModifier").to_le_bytes()).unwrap();
+    let mut invalid = payload.clone();
+    invalid[marker + 10..marker + 14].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(crate::visual_pose::decode_compressions(&invalid).is_err());
+    invalid = payload.clone();
+    invalid[marker + 28..marker + 32].copy_from_slice(&1.0f32.to_le_bytes());
+    assert!(crate::visual_pose::decode_compressions(&invalid).is_err());
+    assert!(crate::visual_pose::decode_compressions(&payload[..marker + 93]).is_err());
 }

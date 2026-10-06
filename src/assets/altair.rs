@@ -51,6 +51,7 @@ pub struct AltairModel {
     /// Additional visual descendants; parent indices address main + visual bones.
     pub visual_bones: Vec<SkelBone>,
     pub visual_rotation_copies: Vec<(usize, usize)>,
+    pub visual_compressions: Vec<crate::visual_pose::SkirtCompression>,
     /// Lowest vertex z in model space (feet), used to put the feet at y = 0.
     pub min_z: f32,
     pub source: String,
@@ -249,6 +250,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     let skeleton = find("UCMA_Altair", crc32("Skeleton")).map(|r| parse_skeleton(&r.payload)).unwrap_or_default();
     let mut visual_bones = Vec::new();
     let mut rotation_ids = Vec::new();
+    let mut visual_compressions = Vec::new();
     if CHARACTER_VISUAL_FIXES {
         // SkeletonComponent reads primary + secondary resources (0x4E4E30, RE/09 §7).
         // PORT: retain secondary local rest poses; expressions and hood-bone dynamics are not ported.
@@ -257,6 +259,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                 merge_visual_bones(&skeleton, &mut visual_bones, &parse_skeleton(&r.payload))?;
                 if name == "UCMA_Altair_Skirt" {
                     rotation_ids = crate::visual_pose::decode_rotation_copies(&r.payload)?;
+                    visual_compressions = crate::visual_pose::decode_compressions(&r.payload)?;
                 }
             }
         }
@@ -268,6 +271,13 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         if target < skeleton.len() { return Err("skirt rotation copy targets a movement joint"); }
         Ok((target, source))
     }).collect::<Result<_, &str>>()?;
+    for c in &mut visual_compressions {
+        c.target = *joint_of.get(&(c.target as u32)).ok_or("skirt compression target absent from rig")? as usize;
+        for source in &mut c.sources {
+            *source = *joint_of.get(&(*source as u32)).ok_or("skirt compression source absent from rig")? as usize;
+        }
+        if c.target < skeleton.len() { return Err("skirt compression targets a movement joint".into()); }
+    }
     if cloth_settings.values().flat_map(|s| &s.colliders).any(|c| !skeleton.iter().any(|b| b.bone_id == c.bone_id)) {
         return Err("cloth collider bone absent from visual rig".into());
     }
@@ -401,7 +411,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         let cloth = cloth_settings.remove(&name);
         parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, skin_joints, inverse_bindposes, cloth });
     }
-    Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, visual_rotation_copies, min_z, source: format!("{} / Rank 9", path.display()) })
+    Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, min_z, source: format!("{} / Rank 9", path.display()) })
 }
 
 /// Add only new descendants, aliasing shared BoneIDs to existing animated joints (RE/09 §7).

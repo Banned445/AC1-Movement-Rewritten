@@ -103,11 +103,12 @@ fn attach_altair(
         commands.entity(visual_joints[b.parent.expect("anchored visual bone")]).add_child(e);
         visual_joints.push(e);
     }
-    if !model.visual_rotation_copies.is_empty() {
+    if !model.visual_rotation_copies.is_empty() || !model.visual_compressions.is_empty() {
         commands.entity(player).insert(crate::visual_pose::VisualRotationCopies {
             joints: visual_joints.clone(),
             parents: model.skeleton.iter().chain(&model.visual_bones).map(|b| b.parent).collect(),
             copies: model.visual_rotation_copies.clone(),
+            compressions: model.visual_compressions.clone(),
         });
     }
     let inv: Vec<Mat4> = global.iter().map(|g| g.inverse()).collect();
