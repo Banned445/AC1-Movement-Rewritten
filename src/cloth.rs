@@ -4,7 +4,9 @@ use bevy::prelude::*;
 
 // PORT: final render contacts cover edge-pass penetration and frames without a solver step (RE/09 §8.3).
 const CLOTH_RENDER_CONTACT_GUARD: bool = true;
+// PORT: discrete surface contacts supplement native vertex contacts (RE/09 §8.4).
 const CLOTH_SURFACE_CONTACT_GUARD: bool = true;
+const CLOTH_NATIVE_TIMING: bool = true;
 
 #[derive(Clone)]
 pub struct ClothSettings {
@@ -18,6 +20,11 @@ pub struct ClothSettings {
     pub iterations: usize,
     pub vertex_radius: Vec<f32>,
     pub colliders: Vec<ClothCollider>,
+    pub pull_motion: Vec2,
+    pub pull_decay: f32,
+    pub upward_motion: Vec2,
+    pub action_settings: Vec<(u32, f32)>,
+    pub action_strength: f32,
 }
 
 #[derive(Clone)]
@@ -92,6 +99,29 @@ fn cloth_data(entity: &[u8]) -> Option<usize> {
 
 pub fn collision_resource(entity: &[u8]) -> Option<u32> {
     word(entity, cloth_data(entity)? + 4)
+}
+
+/// Cloth's typed action-settings reference follows seven floats and a flag (0x6C7CA0; RE/09 §8.5).
+pub fn action_resource(entity: &[u8]) -> Option<u32> {
+    let class = crate::assets::forge::crc32("Cloth");
+    let c = (4..entity.len().saturating_sub(4)).find(|&p| word(entity, p) == Some(class))?;
+    word(entity, c + 286)
+}
+
+pub fn decode_action_settings(data: &[u8]) -> Result<Vec<(u32, f32)>, String> {
+    let decode = || -> Option<Vec<(u32, f32)>> {
+        if word(data, 4)? != crate::assets::forge::crc32("ClothActionSettings") { return None; }
+        let count = word(data, 8)? as usize;
+        if count > 1024 || data.len() != 12 + count * 16 { return None; }
+        (0..count).map(|i| {
+            let p = 12 + i * 16;
+            if word(data, p)? != 0 || word(data, p + 4)? != 1319343419 { return None; }
+            let strength = f32::from_bits(word(data, p + 12)?);
+            if !strength.is_finite() || !(0.0..=1.0).contains(&strength) { return None; }
+            Some((word(data, p + 8)?, strength))
+        }).collect()
+    };
+    decode().ok_or_else(|| "unsupported cloth action settings".into())
 }
 
 /// Read only direct cloth-frame mappings, not Havok physics (0x5B4F00, 0x10B96F0; RE/09 §8.1).
@@ -223,8 +253,9 @@ pub fn decode_settings(mesh: &[u8], entity: &[u8], compiled: &[[f32; 3]]) -> Res
         // Rank 9's fixed-size base fields; layout traced through 0x4CFCF0 / 0x6C7CA0.
         let damping = float(entity, c + 28)?;
         let upward_damping = float(entity, c + 24)?;
-        let pull_min = float(entity, c + 257)?;
-        let pull_max = float(entity, c + 261)?;
+        // BoundingBox ends at +257 (0x4CF120); Cloth's seven floats follow (0x6C7CA0).
+        let pull_min = float(entity, c + 269)?;
+        let pull_max = float(entity, c + 273)?;
         let mut pinned = vec![false; n];
         let mut pull = vec![0.0; n];
         let mut vertex_radius = vec![0.0; n];
@@ -257,7 +288,9 @@ pub fn decode_settings(mesh: &[u8], entity: &[u8], compiled: &[[f32; 3]]) -> Res
                 if seen.insert(key) { edges.push([a, b]); }
             }
         }
-        Some(ClothSettings { pinned, pull, edges, triangles, damping, upward_damping, gravity, iterations, vertex_radius, colliders: Vec::new() })
+        Some(ClothSettings { pinned, pull, edges, triangles, damping, upward_damping, gravity, iterations, vertex_radius, colliders: Vec::new(),
+            pull_motion: Vec2::new(float(entity, c + 257)?, float(entity, c + 261)?), pull_decay: float(entity, c + 265)?,
+            upward_motion: Vec2::new(float(entity, c + 277)?, float(entity, c + 281)?), action_settings: Vec::new(), action_strength: 1.0 })
     };
     decode().ok_or_else(|| "unsupported or inconsistent character cloth layout".into())
 }
@@ -286,6 +319,9 @@ pub struct ClothState {
     contact_before: (usize, f32),
     contact_after: (usize, f32),
     surface_guard: Option<bool>,
+    motion: Vec3,
+    orientation: Option<Quat>,
+    action_pull: f32,
 }
 
 fn contact_report(settings: &ClothSettings, positions: &[Vec3], capsules: &[ClothCollider]) -> (usize, f32) {
@@ -397,7 +433,9 @@ fn fold_contacts(settings: &ClothSettings, positions: &mut [Vec3], previous: &[V
 
 impl ClothState {
     pub fn advance(&mut self, settings: &ClothSettings, targets: &[Vec3], rigid_rest: &[Vec3], capsules: &[ClothCollider], anchor: Vec3, dt: f32) -> &[Vec3] {
-        // PORT: fixed 60 Hz, bounded catch-up and reset on teleports; original scheduler not ported.
+        // Native component updates with 1/30 s (0x577276; RE/09 §8.5).
+        // PORT: accumulated render time, bounded catch-up and teleport reset replace engine scheduling.
+        let step = if CLOTH_NATIVE_TIMING { 1.0 / 30.0 } else { 1.0 / 60.0 };
         let reset = self.current.len() != targets.len() || self.anchor.is_none_or(|p| p.distance_squared(anchor) > 4.0);
         self.anchor = Some(anchor);
         if reset {
@@ -405,19 +443,30 @@ impl ClothState {
             self.previous = targets.to_vec();
             self.lengths_squared = settings.edges.iter().map(|[a, b]| rigid_rest[*a].distance_squared(rigid_rest[*b])).collect();
             self.accumulator = 0.0;
+            self.action_pull = 0.0;
         }
         self.accumulator += dt.clamp(0.0, 0.1);
-        while self.accumulator >= 1.0 / 60.0 {
-            self.accumulator -= 1.0 / 60.0;
+        while self.accumulator >= step {
+            self.accumulator -= step;
+            if CLOTH_NATIVE_TIMING {
+                // 0x6C9800–0x6C98BC: speed/turn pull, decaying previous pull and action strength.
+                let desired = settings.pull_motion.dot(self.motion.truncate());
+                let decayed = self.action_pull - settings.pull_decay * step;
+                let pull = desired.max(decayed).clamp(0.0, 1.0);
+                self.action_pull = 1.0 - (1.0 - pull) * settings.action_strength;
+            }
+            let upward = if CLOTH_NATIVE_TIMING {
+                (settings.upward_damping + self.motion.z * settings.upward_motion.x).max(0.0).min(settings.upward_motion.y)
+            } else { settings.upward_damping };
             for (i, &target) in targets.iter().enumerate() {
                 let old = self.current[i];
                 if settings.pinned[i] { self.current[i] = target; }
                 else {
                     let velocity = old - self.previous[i];
-                    let vertical_damping = if velocity.y >= 0.0 { settings.upward_damping } else { settings.damping };
+                    let vertical_damping = if velocity.y >= 0.0 { upward } else { settings.damping };
                     let predicted = old + velocity * Vec3::new(1.0 - settings.damping, 1.0 - vertical_damping, 1.0 - settings.damping)
-                        + Vec3::Y * settings.gravity / (60.0 * 60.0);
-                    self.current[i] = predicted.lerp(target, settings.pull[i]);
+                        + Vec3::Y * settings.gravity * step * step;
+                    self.current[i] = predicted.lerp(target, settings.pull[i].max(self.action_pull));
                 }
                 self.previous[i] = old;
             }
@@ -428,7 +477,7 @@ impl ClothState {
                 for (i, position) in self.current.iter_mut().enumerate() {
                     if settings.pinned[i] { continue; }
                     for capsule in capsules {
-                        *position = capsule.correct(*position, targets[i], settings.vertex_radius[i], settings.pull[i]);
+                        *position = capsule.correct(*position, targets[i], settings.vertex_radius[i], settings.pull[i].max(self.action_pull));
                     }
                 }
                 for (edge, &rest) in settings.edges.iter().zip(&lengths) {
@@ -499,7 +548,7 @@ impl ClothState {
     }
 }
 
-pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cloth: Query<&mut CharacterCloth>, mut meshes: ResMut<Assets<Mesh>>, mut diagnostics: Local<Option<bool>>, mut report_time: Local<f32>) {
+pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cloth: Query<&mut CharacterCloth>, mut meshes: ResMut<Assets<Mesh>>, animations: Query<&crate::anim::AnimPlayer>, mut diagnostics: Local<Option<bool>>, mut report_time: Local<f32>) {
     let diagnostics = *diagnostics.get_or_insert_with(|| std::env::var_os("AC_CLOTH_DIAGNOSTICS").is_some());
     *report_time += time.delta_secs();
     let report = diagnostics && *report_time >= 0.5;
@@ -511,7 +560,23 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
         let Some(matrices) = matrices else { continue; };
         let targets: Vec<Vec3> = cloth.rest.iter().enumerate().map(|(i, &p)| (0..4)
             .map(|k| matrices[cloth.palette[i][k] as usize].transform_point3(p) * cloth.weights[i][k]).sum()).collect();
-        let settings = cloth.settings.clone();
+        let mut settings = cloth.settings.clone();
+        if CLOTH_NATIVE_TIMING {
+            let dt = time.delta_secs();
+            let anchor = player.translation();
+            let rotation = player.rotation();
+            if dt > 0.0 {
+                if let Some(old) = cloth.state.anchor.filter(|old| old.distance_squared(anchor) <= 4.0) {
+                    let velocity = (anchor - old) / dt;
+                    // PORT: use propagated player transforms for the native component's entity-frame samples (0x5B4F00).
+                    let turn = cloth.state.orientation.map_or(0.0, |old| ((old.inverse() * rotation) * Vec3::ONE - Vec3::ONE).length() / dt);
+                    cloth.state.motion = Vec3::new(velocity.length(), turn, velocity.y);
+                } else { cloth.state.motion = Vec3::ZERO; }
+                cloth.state.orientation = Some(rotation);
+            }
+            let action = animations.get(cloth.player).ok().and_then(|a| a.items.get(a.item)).map(|a| a.action);
+            settings.action_strength = action.and_then(|id| settings.action_settings.iter().find(|(key, _)| *key == id)).map_or(1.0, |(_, strength)| *strength);
+        }
         let capsules: Option<Vec<_>> = settings.colliders.iter().zip(&cloth.collider_joints).map(|(c, &joint)| {
             let transform = transforms.get(joint).ok()?.to_matrix();
             Some(ClothCollider { bone_id: c.bone_id, local_start: transform.transform_point3(c.local_start),
@@ -543,7 +608,7 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
 mod tests {
     use super::*;
     fn settings() -> ClothSettings {
-        ClothSettings { pinned: vec![true, false, false], pull: vec![1.0, 0.015, 0.015], edges: vec![[0, 1], [1, 2]], triangles: Vec::new(), damping: 0.1, upward_damping: 0.75, gravity: -9.8, iterations: 3, vertex_radius: vec![0.01; 3], colliders: Vec::new() }
+        ClothSettings { pinned: vec![true, false, false], pull: vec![1.0, 0.015, 0.015], edges: vec![[0, 1], [1, 2]], triangles: Vec::new(), damping: 0.1, upward_damping: 0.75, gravity: -9.8, iterations: 3, vertex_radius: vec![0.01; 3], colliders: Vec::new(), pull_motion: Vec2::ZERO, pull_decay: 0.99, upward_motion: Vec2::new(0.0, 1.0), action_settings: Vec::new(), action_strength: 1.0 }
     }
     #[test]
     fn cloth_follows_pins_with_inertia_and_resets_on_teleport() {
@@ -590,6 +655,38 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn native_action_pull_uses_motion_decay_and_target_lock() {
+        let mut cfg = settings();
+        cfg.pull_motion = Vec2::new(0.03, 0.015);
+        let rest = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
+        let mut state = ClothState { motion: Vec3::new(10.0, 0.0, 0.0), ..default() };
+        state.advance(&cfg, &rest, &rest, &[], Vec3::ZERO, 1.0 / 30.0);
+        assert!((state.action_pull - 0.3).abs() < 1e-6);
+        state.motion = Vec3::ZERO;
+        state.advance(&cfg, &rest, &rest, &[], Vec3::ZERO, 1.0 / 30.0);
+        assert!((state.action_pull - 0.267).abs() < 1e-6);
+        cfg.action_strength = 0.0;
+        state.advance(&cfg, &rest, &rest, &[], Vec3::ZERO, 1.0 / 30.0);
+        assert_eq!(state.action_pull, 1.0);
+        assert_eq!(state.current, rest);
+        let pull = state.action_pull;
+        state.advance(&cfg, &rest, &rest, &[], Vec3::ZERO, 0.0);
+        assert_eq!(state.action_pull, pull);
+    }
+
+    #[test]
+    fn action_settings_reject_truncation_and_nonfinite_strengths() {
+        let mut data = Vec::new();
+        for value in [1, crate::assets::forge::crc32("ClothActionSettings"), 1, 0, 1319343419, 42, 0.5f32.to_bits()] {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(decode_action_settings(&data).unwrap(), vec![(42, 0.5)]);
+        assert!(decode_action_settings(&data[..data.len()-1]).is_err());
+        data[24..28].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(decode_action_settings(&data).is_err());
+    }
+
     #[test]
     fn malformed_cloth_data_is_rejected() {
         for n in 0..100 {

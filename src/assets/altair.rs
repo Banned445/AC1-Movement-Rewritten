@@ -189,6 +189,8 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
             let mut settings = crate::cloth::decode_settings(&r.payload, &entity.payload, &m.positions)?;
             let ragdoll = crate::cloth::collision_resource(&entity.payload).and_then(|id| by_id.get(&id)).ok_or("cloth collision resource missing")?;
             settings.colliders = crate::cloth::decode_colliders(&entity.payload, &ragdoll.payload)?;
+            let actions = crate::cloth::action_resource(&entity.payload).and_then(|id| by_id.get(&id)).ok_or("cloth action settings missing")?;
+            settings.action_settings = crate::cloth::decode_action_settings(&actions.payload)?;
             cloth_settings.insert(name.to_string(), settings);
         }
         if m.bones.is_empty() {

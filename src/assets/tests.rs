@@ -250,8 +250,14 @@ fn character_attachments_and_cloth_constraints_from_install() {
     assert!((cloth.gravity + 9.8).abs() < 1e-5);
     assert!(cloth.edges.len() > 200);
     assert!(cloth.edges.iter().all(|[a,b]| a != b && *a < 146 && *b < 146));
-    assert!(cloth.pull.iter().all(|p| (0.015..=0.99001).contains(p)));
+    assert!(cloth.pull.iter().all(|p| (0.0..=1.0).contains(p)));
+    assert!(cloth.pull.iter().any(|&p| p > 0.5), "authored pull strength, not speed/decay fields");
     assert_eq!(cloth.colliders.len(), 6);
+    assert_eq!(cloth.action_settings.len(), 20);
+    assert!((cloth.pull_motion.x - 0.03).abs() < 1e-6);
+    assert!((cloth.pull_motion.y - 0.015).abs() < 1e-6);
+    assert!((cloth.pull_decay - 0.99).abs() < 1e-6);
+    assert_eq!(cloth.upward_motion, bevy::prelude::Vec2::new(-2.0, 5.0));
     assert!(cloth.vertex_radius.iter().all(|r| (0.01..=0.07001).contains(r)));
     assert!(cloth.colliders.iter().all(|c| m.skeleton.iter().any(|b| b.bone_id == c.bone_id)
         && c.local_start.is_finite() && c.local_end.is_finite() && (0.05..0.2).contains(&c.radius)));
