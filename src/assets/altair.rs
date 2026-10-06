@@ -283,12 +283,12 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         for name in ["UCMA_Altair_Head", "UCMA_Altair_Skirt", "Human_Hood", "UCMA_Sword_Tag"] {
             if let Some(r) = find(name, crc32("Skeleton")) {
                 merge_visual_bones(&skeleton, &mut visual_bones, &parse_skeleton(&r.payload))?;
-                if name == "UCMA_Altair_Skirt" {
-                    rotation_ids = crate::visual_pose::decode_rotation_copies(&r.payload)?;
-                    visual_compressions = crate::visual_pose::decode_compressions(&r.payload)?;
-                    visual_look_at = crate::visual_pose::decode_look_at(&r.payload)?;
-                    visual_hinges = crate::skirt_hinge::decode_hinges(&r.payload)?;
-                }
+                // Authored secondary lists include hood and sword-tag modifiers (RE/09 §8.13).
+                rotation_ids.extend(crate::visual_pose::decode_rotation_copies(&r.payload)?);
+                visual_compressions.extend(crate::visual_pose::decode_compressions(&r.payload)?);
+                let equipment = name == "Human_Hood" || name == "UCMA_Sword_Tag";
+                visual_look_at.extend(crate::visual_pose::decode_look_at(&r.payload)?.into_iter().map(|mut m| { m.equipment = equipment; m }));
+                visual_hinges.extend(crate::skirt_hinge::decode_hinges(&r.payload)?.into_iter().map(|mut h| { h.equipment = equipment; h }));
             }
         }
     }

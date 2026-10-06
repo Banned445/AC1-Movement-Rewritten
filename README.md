@@ -95,8 +95,10 @@ Tests that need game data skip themselves when the game isn't found.
 For robe comparisons, `AC_CLOTH_NATIVE_DISPATCH=0` restores the previous accumulated 30 Hz schedule.
 The default passes one 0.033333 s step per active frame, with entity motion sampled over the same interval.
 Native task/LOD scheduling is still unported, so this is not a guarantee of identical behaviour at every frame rate.
-`AC_CLOTH_DIAGNOSTICS=1` reports target lag, edge stretch and contact counts. The full secondary skirt modifier
-chain remains experimental (`AC_SKIRT_ROTATION_COPIES=1`); it is disabled by default.
+`AC_CLOTH_DIAGNOSTICS=1` reports target lag, edge stretch and contact counts. Hood and sword-tag dynamics use
+four authored hinges, a hood look-at frame and the sword's soft angular limit. `AC_CHARACTER_EQUIPMENT_DYNAMICS=0`
+restores their previous rest poses. The secondary skirt chain remains experimental (`AC_SKIRT_ROTATION_COPIES=1`)
+and disabled by default because jump folds remain. Native pose/LOD scheduling and environmental forces are unfinished.
 
 To reproduce the native-map walk-to-freerun transition, set `AC_NATIVE_MAP=masyaf-village` and
 `AC_AUTOPILOT=native-freerun`. It walks from the map spawn and presses Legs in high profile after two seconds.

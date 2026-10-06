@@ -258,10 +258,16 @@ fn character_attachments_and_cloth_constraints_from_install() {
     let cloth = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap().cloth.as_ref().expect("cloth settings");
     assert_eq!(m.visual_rotation_copies.len(), 2);
     assert_eq!(m.visual_compressions.len(), 1);
-    assert_eq!(m.visual_look_at.len(), 1);
-    assert_eq!(m.visual_hinges.len(), 16);
+    assert_eq!(m.visual_look_at.len(), 2);
+    assert_eq!(m.visual_hinges.len(), 20);
+    assert_eq!(m.visual_hinges.iter().filter(|h| h.equipment).count(), 4);
+    assert_eq!(m.visual_look_at.iter().filter(|v| v.equipment).count(), 1);
+    assert_eq!(m.visual_hinges.iter().filter(|h| h.soft_min > 0.0).count(), 1, "authored sword soft limit");
+    assert_eq!(m.visual_look_at.iter().filter(|m| m.aim_axis == 0).count(), 1, "hood aim frame");
     assert!(m.visual_hinges.iter().all(|h| h.target >= m.skeleton.len() && h.min <= h.max && h.rest.rotation.is_finite()));
-    assert!(m.visual_look_at.iter().all(|m| m.target >= 90 && m.aim < 90));
+    assert!(m.visual_look_at.iter().all(|v| v.target >= m.skeleton.len()
+        && v.aim < m.skeleton.len() + m.visual_bones.len() && v.target != v.aim));
+    assert!(m.visual_look_at.iter().filter(|v| v.aim_axis == 2).all(|v| v.aim < m.skeleton.len()));
     assert!(m.visual_compressions.iter().all(|c| c.target >= m.skeleton.len() && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
     assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
     assert_eq!(cloth.pinned.len(), 146);
