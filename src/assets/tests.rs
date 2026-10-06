@@ -178,3 +178,157 @@ fn limb_ik_chains_exist_in_altairs_skeleton() {
         assert!(is_ancestor(ia, ib) && is_ancestor(ib, ic), "chain {a:08x}/{b:08x}/{c:08x} is not a hierarchy line");
     }
 }
+
+#[test]
+fn altair_visual_rig_and_native_skinning_from_install() {
+    use bevy::prelude::*;
+    if !install_present() { eprintln!("skipped: game install not found"); return; }
+    let m = load_altair(&game_dir()).expect("load visual rig");
+    assert_eq!(m.skeleton.len(), 90, "movement rig keeps its original joint order");
+    assert!(!m.visual_bones.is_empty());
+    let bones: Vec<_> = m.skeleton.iter().chain(&m.visual_bones).collect();
+    let mut global = Vec::new();
+    for (i, bone) in bones.iter().enumerate() {
+        assert!(bone.parent.is_none_or(|p| p < i), "visual parents precede children");
+        let t = Mat4::from_rotation_translation(Quat::from_array(bone.local_rot).normalize(), Vec3::from_array(bone.local_pos));
+        global.push(bone.parent.map(|p| global[p]).unwrap_or(Mat4::IDENTITY) * t);
+    }
+    let face = m.parts.iter().find(|p| p.name == "Universal_Head_Obj_Clean").expect("eyes/mouth mesh");
+    assert_eq!(face.sections.len(), 2);
+    assert!(face.sections.iter().all(|(_, texture)| texture.is_some()));
+    assert!(face.skin_joints.iter().all(|&j| j >= m.skeleton.len()), "face uses authored facial descendants");
+    let skirt = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").expect("lower robe rest mesh");
+    assert_eq!(skirt.positions.len(), 146);
+    assert_eq!(skirt.sections.iter().map(|(idx, _)| idx.len()).sum::<usize>(), 624);
+    assert!(skirt.sections.iter().all(|(_, texture)| texture.is_some()));
+    for part in &m.parts {
+        assert_eq!(part.skin_joints.len(), part.inverse_bindposes.len());
+        assert!(part.skin_joints.iter().all(|&j| j < bones.len()));
+        for matrix in &part.inverse_bindposes {
+            assert!(matrix.iter().all(|v| v.is_finite()));
+            assert!((Mat4::from_cols_array(matrix).determinant() - 1.0).abs() < 0.01);
+        }
+        for (joint, weight) in part.joints.iter().zip(&part.weights) {
+            assert!(joint.iter().all(|&j| (j as usize) < part.skin_joints.len()), "{}: palette out of range", part.name);
+            assert!((weight.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        }
+        // Rest skinning must stay finite and within character scale, including the separate face frame.
+        for (i, position) in part.positions.iter().enumerate() {
+            let mut p = Vec3::ZERO;
+            for k in 0..4 {
+                let j = part.joints[i][k] as usize;
+                let skin = global[part.skin_joints[j]] * Mat4::from_cols_array(&part.inverse_bindposes[j]);
+                p += skin.transform_point3(Vec3::from_array(*position)) * part.weights[i][k];
+            }
+            assert!(p.is_finite() && p.length() < 4.0, "{}: misplaced rest skin", part.name);
+        }
+    }
+}
+
+#[test]
+fn character_attachments_and_cloth_constraints_from_install() {
+    if !install_present() { eprintln!("skipped: game install not found"); return; }
+    let m = load_altair(&game_dir()).expect("load character attachments");
+    for (name, id) in [("ARCM_Altair_Sword_D", 0x3A83_5926), ("UCMA_Altair_Dagger", 0x685E_46B6)] {
+        let part = m.parts.iter().find(|p| p.name == name).expect("weapon appearance mesh");
+        assert_eq!(part.skin_joints.len(), 1);
+        let bones: Vec<_> = m.skeleton.iter().chain(&m.visual_bones).collect();
+        assert_eq!(bones[part.skin_joints[0]].bone_id, id);
+        assert!(part.sections.iter().all(|(_, texture)| texture.is_some()));
+        assert!(part.weights.iter().all(|w| *w == [1.0, 0.0, 0.0, 0.0]));
+        let min = part.positions.iter().fold([f32::MAX; 3], |a, p| std::array::from_fn(|k| a[k].min(p[k])));
+        let max = part.positions.iter().fold([f32::MIN; 3], |a, p| std::array::from_fn(|k| a[k].max(p[k])));
+        let span = (0..3).map(|k| max[k] - min[k]).fold(0.0f32, f32::max);
+        assert!(span > 0.3 && span < 1.2, "{name}: weapon scale {span}");
+    }
+    let cloth = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap().cloth.as_ref().expect("cloth settings");
+    assert_eq!(m.visual_rotation_copies.len(), 2);
+    assert_eq!(m.visual_compressions.len(), 1);
+    assert_eq!(m.visual_look_at.len(), 1);
+    assert_eq!(m.visual_hinges.len(), 16);
+    assert!(m.visual_hinges.iter().all(|h| h.target >= m.skeleton.len() && h.min <= h.max && h.rest.rotation.is_finite()));
+    assert!(m.visual_look_at.iter().all(|m| m.target >= 90 && m.aim < 90));
+    assert!(m.visual_compressions.iter().all(|c| c.target >= m.skeleton.len() && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
+    assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
+    assert_eq!(cloth.pinned.len(), 146);
+    let part = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap();
+    assert_eq!(part.weights.len(), 146);
+    assert!(part.weights.iter().flatten().any(|w| (w * 255.0 - (w * 255.0).round()).abs() > 0.01), "cloth must retain source float weights, not normalized compiled bytes");
+    assert!(part.weights.iter().all(|w| (w.iter().sum::<f32>() - 1.0).abs() < 0.0001));
+    assert!(part.joints.iter().flatten().all(|&i| (i as usize) < part.skin_joints.len()));
+    assert_eq!(cloth.pinned.iter().filter(|&&p| p).count(), 44);
+    assert_eq!(cloth.iterations, 3);
+    assert!((cloth.damping - 0.1).abs() < 1e-5);
+    assert!((cloth.upward_damping - 0.75).abs() < 1e-5);
+    assert!((cloth.gravity + 9.8).abs() < 1e-5);
+    assert!(cloth.edges.len() > 200);
+    assert!(cloth.edges.iter().all(|[a,b]| a != b && *a < 146 && *b < 146));
+    assert!(cloth.pull.iter().all(|p| (0.0..=1.0).contains(p)));
+    assert!(cloth.pull.iter().any(|&p| p > 0.5), "authored pull strength, not speed/decay fields");
+    assert_eq!(cloth.colliders.len(), 6);
+    assert_eq!(cloth.action_settings.len(), 20);
+    assert!((cloth.pull_motion.x - 0.03).abs() < 1e-6);
+    assert!((cloth.pull_motion.y - 0.015).abs() < 1e-6);
+    assert!((cloth.pull_decay - 0.99).abs() < 1e-6);
+    assert_eq!(cloth.upward_motion, bevy::prelude::Vec2::new(-2.0, 5.0));
+    assert!(cloth.vertex_radius.iter().all(|r| (0.01..=0.07001).contains(r)));
+    assert!(cloth.colliders.iter().all(|c| m.skeleton.iter().any(|b| b.bone_id == c.bone_id)
+        && c.local_start.is_finite() && c.local_end.is_finite() && (0.05..0.2).contains(&c.radius)));
+}
+
+#[test]
+fn skirt_rotation_references_are_resolved_and_malformed_sources_rejected() {
+    if !install_present() { eprintln!("skipped: game install not found"); return; }
+    let mut forge = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let entry = forge.find("Rank 9").cloned().unwrap();
+    let resources = forge.resources(&entry).unwrap();
+    let payload = &resources.iter().find(|r| r.name == "UCMA_Altair_Skirt" && r.class_hash == crc32("Skeleton")).unwrap().payload;
+    let copies = crate::visual_pose::decode_rotation_copies(payload).unwrap();
+    assert_eq!(copies, vec![(2339535765, 743623600), (3796064396, 743623600)]);
+    let class = crc32("RotationPasteModifier").to_le_bytes();
+    let marker = payload.windows(4).position(|b| b == class).unwrap();
+    let mut invalid = payload.clone();
+    invalid[marker + 11..marker + 15].copy_from_slice(&0u32.to_le_bytes());
+    assert!(crate::visual_pose::decode_rotation_copies(&invalid).is_err());
+    assert!(crate::visual_pose::decode_rotation_copies(&payload[..marker + 13]).is_err());
+    let compressions = crate::visual_pose::decode_compressions(payload).unwrap();
+    assert_eq!(compressions.len(), 1);
+    assert_eq!(compressions[0].target, 1206536969);
+    assert_eq!(compressions[0].sources, [1486391408, 2601793068]);
+    assert_eq!(compressions[0].position_weight, 0.5);
+    assert_eq!(compressions[0].rotation_weight, 0.5);
+    assert!(compressions[0].position && compressions[0].rotation);
+    let marker = payload.windows(4).position(|b| b == crc32("CompressBoneModifier").to_le_bytes()).unwrap();
+    let mut invalid = payload.clone();
+    invalid[marker + 10..marker + 14].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(crate::visual_pose::decode_compressions(&invalid).is_err());
+    invalid = payload.clone();
+    invalid[marker + 28..marker + 32].copy_from_slice(&1.0f32.to_le_bytes());
+    assert!(crate::visual_pose::decode_compressions(&invalid).is_err());
+    assert!(crate::visual_pose::decode_compressions(&payload[..marker + 93]).is_err());
+    let look_at = crate::visual_pose::decode_look_at(payload).unwrap();
+    assert_eq!(look_at.len(), 1);
+    assert_eq!(look_at[0].target, 1206536969);
+    assert_eq!(look_at[0].aim, 3738240529);
+    let marker = payload.windows(4).position(|b| b == crc32("LookAtBoneModifier").to_le_bytes()).unwrap();
+    let mut invalid = payload.clone();
+    invalid[marker + 36..marker + 40].copy_from_slice(&5u32.to_le_bytes());
+    assert!(crate::visual_pose::decode_look_at(&invalid).is_err());
+    invalid = payload.clone();
+    invalid[marker + 16..marker + 20].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(crate::visual_pose::decode_look_at(&invalid).is_err());
+    assert!(crate::visual_pose::decode_look_at(&payload[..marker + 39]).is_err());
+    let hinges = crate::skirt_hinge::decode_hinges(payload).unwrap();
+    assert_eq!(hinges.len(), 16);
+    assert_eq!(hinges[0].target, 1689260203);
+    assert_eq!((hinges[0].axis, hinges[0].direction), (2, 0));
+    assert_eq!(hinges[0].force, bevy::prelude::Vec3::new(0.0, 0.0, -50.0));
+    assert_eq!(hinges[0].constraint_reference, Some(1971262097));
+    assert_eq!(hinges[0].target, hinges[1].target);
+    assert!(hinges[1].constraint_reference.is_none());
+    let marker = payload.windows(4).position(|b| b == crc32("HingeBoneModifier").to_le_bytes()).unwrap();
+    let mut invalid = payload.clone();
+    invalid[marker + 10..marker + 14].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(crate::skirt_hinge::decode_hinges(&invalid).is_err());
+    assert!(crate::skirt_hinge::decode_hinges(&payload[..marker + 70]).is_err());
+}

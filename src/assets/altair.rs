@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::ac_formats::{parse_mesh, parse_skeleton, parse_texture, resolve_materials, AcMesh, AcTexture, SkelBone};
+use super::ac_formats::{parse_mesh, parse_skeleton, parse_texture, resolve_materials, AcMesh, AcTexture, SkelBone, CHARACTER_VISUAL_FIXES};
 use super::forge::{crc32, Forge, Resource};
 
 /// Body parts that make up the Rank 9 outfit (resource names in the archive).
@@ -36,6 +36,10 @@ pub struct PartMesh {
     pub sections: Vec<(Vec<u32>, Option<u32>)>,
     /// Normal texture for each section, in the same order (RE/09 §4.2, §6).
     pub normal_maps: Vec<Option<u32>>,
+    /// Mesh palette entries into the combined visual rig (RE/09 §7).
+    pub skin_joints: Vec<usize>,
+    pub inverse_bindposes: Vec<[f32; 16]>,
+    pub cloth: Option<crate::cloth::ClothSettings>,
 }
 
 pub struct AltairModel {
@@ -44,6 +48,12 @@ pub struct AltairModel {
     pub normal_textures: HashMap<u32, AcTexture>,
     /// Altaïr's skeleton (UCMA_Altair), game skeleton space.
     pub skeleton: Vec<SkelBone>,
+    /// Additional visual descendants; parent indices address main + visual bones.
+    pub visual_bones: Vec<SkelBone>,
+    pub visual_rotation_copies: Vec<(usize, usize)>,
+    pub visual_compressions: Vec<crate::visual_pose::SkirtCompression>,
+    pub visual_look_at: Vec<crate::visual_pose::SkirtLookAt>,
+    pub visual_hinges: Vec<crate::skirt_hinge::SkirtHinge>,
     /// Lowest vertex z in model space (feet), used to put the feet at y = 0.
     pub min_z: f32,
     pub source: String,
@@ -169,11 +179,30 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         None
     };
 
+    // Cloth uses the compiled topology with decoded soft-body constraints (RE/09 §8).
     // parse parts (game space)
     let mut parsed: Vec<(String, AcMesh)> = Vec::new();
-    for &name in PARTS {
+    let mut cloth_settings = HashMap::new();
+    let extra_parts: &[&str] = if CHARACTER_VISUAL_FIXES { &["Universal_Head_Obj_Clean", "UCMA_Altair_Cloth", "ARCM_Altair_Sword_D", "UCMA_Altair_Dagger"] } else { &[] };
+    let names = PARTS.iter().chain(extra_parts).copied();
+    for name in names {
         let Some(r) = find(name, c_mesh) else { continue };
         let Some(mut m) = parse_mesh(&r.payload) else { continue };
+        if name == "UCMA_Altair_Cloth" && CHARACTER_VISUAL_FIXES {
+            let entity = find("UCMA_Altair_Rank_9", crc32("Entity")).ok_or("cloth entity missing")?;
+            let mut settings = crate::cloth::decode_settings(&r.payload, &entity.payload, &m.positions)?;
+            let ragdoll = crate::cloth::collision_resource(&entity.payload).and_then(|id| by_id.get(&id)).ok_or("cloth collision resource missing")?;
+            settings.colliders = crate::cloth::decode_colliders(&entity.payload, &ragdoll.payload)?;
+            let actions = crate::cloth::action_resource(&entity.payload).and_then(|id| by_id.get(&id)).ok_or("cloth action settings missing")?;
+            settings.action_settings = crate::cloth::decode_action_settings(&actions.payload)?;
+            cloth_settings.insert(name.to_string(), settings);
+        }
+        if m.bones.is_empty() {
+            // Authored attachment tags (Human__sub_B11020 0xB11020, RE/09 §8).
+            let bone_id = match name { "ARCM_Altair_Sword_D" => 0x3A83_5926, "UCMA_Altair_Dagger" => 0x685E_46B6, _ => continue };
+            m.bones.push(super::ac_formats::MeshBone { bone_id, inv_bind: bevy::prelude::Mat4::IDENTITY.to_cols_array() });
+            for sub in &mut m.submeshes { sub.palette = vec![0]; }
+        }
         resolve_materials(&r.payload, &mut m, |id| by_id.get(&id).is_some_and(|r| r.class_hash == c_mat));
         parsed.push((name.to_string(), m));
     }
@@ -189,6 +218,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         parsed.iter().find(|(n, _)| n == "UCMA_Altair_Body_C").map(|(_, m)| m.bones.iter().map(|b| (b.bone_id, b.inv_bind)).collect()).unwrap_or_default();
     // bone a bone-space part is attached through (skin fallback for bones the body skeleton lacks)
     let mut attach_bone: HashMap<String, u32> = HashMap::new();
+    let mut rebases: HashMap<String, [f32; 16]> = HashMap::new();
     for (name, m) in parsed.iter_mut() {
         if name == "UCMA_Altair_Body_C" {
             continue;
@@ -202,6 +232,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         if let Some(shared) = m.bones.iter().find(|b| body_bones.contains_key(&b.bone_id)) {
             attach_bone.insert(name.clone(), shared.bone_id);
             let t = mat_mul(&shared.inv_bind, &rigid_inverse(&body_bones[&shared.bone_id]));
+            rebases.insert(name.clone(), t);
             for p in m.positions.iter_mut() {
                 *p = xform_point(*p, &t);
             }
@@ -219,13 +250,68 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
 
     // skeleton (for skinning / animation)
     let skeleton = find("UCMA_Altair", crc32("Skeleton")).map(|r| parse_skeleton(&r.payload)).unwrap_or_default();
-    let joint_of: HashMap<u32, u16> = skeleton.iter().enumerate().map(|(i, b)| (b.bone_id, i as u16)).collect();
+    let mut visual_bones = Vec::new();
+    let mut rotation_ids = Vec::new();
+    let mut visual_compressions = Vec::new();
+    let mut visual_look_at = Vec::new();
+    let mut visual_hinges = Vec::new();
+    if CHARACTER_VISUAL_FIXES {
+        // SkeletonComponent reads primary + secondary resources (0x4E4E30, RE/09 §7).
+        // PORT: retain secondary local rest poses; expressions and hood-bone dynamics are not ported.
+        for name in ["UCMA_Altair_Head", "UCMA_Altair_Skirt", "Human_Hood", "UCMA_Sword_Tag"] {
+            if let Some(r) = find(name, crc32("Skeleton")) {
+                merge_visual_bones(&skeleton, &mut visual_bones, &parse_skeleton(&r.payload))?;
+                if name == "UCMA_Altair_Skirt" {
+                    rotation_ids = crate::visual_pose::decode_rotation_copies(&r.payload)?;
+                    visual_compressions = crate::visual_pose::decode_compressions(&r.payload)?;
+                    visual_look_at = crate::visual_pose::decode_look_at(&r.payload)?;
+                    visual_hinges = crate::skirt_hinge::decode_hinges(&r.payload)?;
+                }
+            }
+        }
+    }
+    let joint_of: HashMap<u32, u16> = skeleton.iter().chain(&visual_bones).enumerate().map(|(i, b)| (b.bone_id, i as u16)).collect();
+    let visual_rotation_copies: Vec<_> = rotation_ids.into_iter().map(|(target, source)| {
+        let target = *joint_of.get(&target).ok_or("skirt rotation-copy target absent from rig")? as usize;
+        let source = *joint_of.get(&source).ok_or("skirt rotation-copy source absent from rig")? as usize;
+        if target < skeleton.len() { return Err("skirt rotation copy targets a movement joint"); }
+        Ok((target, source))
+    }).collect::<Result<_, &str>>()?;
+    for c in &mut visual_compressions {
+        c.target = *joint_of.get(&(c.target as u32)).ok_or("skirt compression target absent from rig")? as usize;
+        for source in &mut c.sources {
+            *source = *joint_of.get(&(*source as u32)).ok_or("skirt compression source absent from rig")? as usize;
+        }
+        if c.target < skeleton.len() { return Err("skirt compression targets a movement joint".into()); }
+    }
+    for m in &mut visual_look_at {
+        m.target = *joint_of.get(&(m.target as u32)).ok_or("skirt look-at target absent from rig")? as usize;
+        m.aim = *joint_of.get(&(m.aim as u32)).ok_or("skirt look-at aim absent from rig")? as usize;
+        if m.target < skeleton.len() || skeleton.iter().chain(&visual_bones).nth(m.target).and_then(|b| b.parent).is_none() {
+            return Err("skirt look-at target lacks a secondary parent".into());
+        }
+    }
+    for h in &mut visual_hinges {
+        h.target = *joint_of.get(&(h.target as u32)).ok_or("skirt hinge target absent from rig")? as usize;
+        for reference in [&mut h.force_reference, &mut h.constraint_reference] {
+            if let Some(id) = *reference { *reference = Some(*joint_of.get(&(id as u32)).ok_or("skirt hinge reference absent from rig")? as usize); }
+        }
+        if h.target < skeleton.len() { return Err("skirt hinge targets a movement joint".into()); }
+    }
+    if cloth_settings.values().flat_map(|s| &s.colliders).any(|c| !skeleton.iter().any(|b| b.bone_id == c.bone_id)) {
+        return Err("cloth collider bone absent from visual rig".into());
+    }
+    // Column-vector form of model (-x,z,y), with the same feet offset as the vertices.
+    let conversion = bevy::prelude::Mat4::from_cols_array(&[
+        -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        0.0, 1.0, 0.0, 0.0, 0.0, -min_z, 0.0, 1.0,
+    ]);
 
     let mut textures = HashMap::new();
     let mut normal_textures = HashMap::new();
     let mut parts = Vec::new();
     for (name, m) in parsed {
-        let positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| { let b = to_bevy(p); [b[0], b[1] - min_z, b[2]] }).collect();
+        let mut positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| { let b = to_bevy(p); [b[0], b[1] - min_z, b[2]] }).collect();
         let normals: Vec<[f32; 3]> = m.normals.iter().map(|&n| to_bevy(n)).collect();
         let tangents: Vec<[f32; 4]> = m.tangents.iter().zip(&m.binormals).zip(&normals).map(|((&t, &b), &n)| {
             let t = bevy::prelude::Vec3::from_array(to_bevy(t)).normalize_or_zero();
@@ -279,7 +365,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         // Bones the 90-bone skeleton lacks (the hood / robe cloth bones and the sword bone, driven by the game's
         // cloth and attachment systems) take the skeleton joint nearest to their bind position, never the root
         // (`Reference`): with the root, the hood and robe tore off whenever an animation moved the root away
-        // from the body (jump takeoffs). PORT: no cloth simulation, so they follow that joint rigidly.
+        // from the body (jump takeoffs). PORT: unrecognized visual bones follow that joint rigidly.
         let missing_joint = |bone: &super::ac_formats::MeshBone| -> u16 {
             if let Some(j) = attach_bone.get(&name).and_then(|b| joint_of.get(b)) {
                 return *j;
@@ -300,6 +386,17 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
             }
             best.1
         };
+        let mut skin_joints = Vec::new();
+        let mut inverse_bindposes = Vec::new();
+        if CHARACTER_VISUAL_FIXES {
+            let rebase = rebases.get(&name).map(bevy::prelude::Mat4::from_cols_array).unwrap_or(bevy::prelude::Mat4::IDENTITY);
+            for bone in &m.bones {
+                let joint = joint_of.get(&bone.bone_id).ok_or_else(|| format!("{name}: visual bone {:08x} not found", bone.bone_id))?;
+                skin_joints.push(*joint as usize);
+                let native = bevy::prelude::Mat4::from_cols_array(&bone.inv_bind);
+                inverse_bindposes.push((native * (conversion * rebase).inverse()).to_cols_array());
+            }
+        }
         let mut joints = vec![[0u16; 4]; m.positions.len()];
         let mut weights = vec![[1.0f32, 0.0, 0.0, 0.0]; m.positions.len()];
         for s in &m.submeshes {
@@ -311,7 +408,11 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                     w[k] = m.bone_w[v][k] as f32 / 255.0;
                     let mesh_bone = s.palette.get(local).and_then(|&mb| m.bones.get(mb as usize));
                     j[k] = match mesh_bone {
-                        Some(b) => joint_of.get(&b.bone_id).copied().unwrap_or_else(|| missing_joint(b)),
+                        Some(b) => if CHARACTER_VISUAL_FIXES { s.palette[local] as u16 } else { joint_of.get(&b.bone_id).copied().unwrap_or_else(|| missing_joint(b)) },
+                        None if CHARACTER_VISUAL_FIXES => {
+                            if m.bone_w[v][k] != 0 { return Err(format!("{name}: invalid weighted mesh palette entry")); }
+                            0
+                        },
                         None => fallback,
                     };
                 }
@@ -327,7 +428,38 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                 weights[v] = w;
             }
         }
-        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps });
+        let cloth = cloth_settings.remove(&name);
+        if let Some(settings) = &cloth {
+            if settings.source_palette.iter().flatten().any(|&bone| bone as usize >= m.bones.len()) {
+                return Err(format!("{name}: invalid source cloth bone"));
+            }
+            let rebase = rebases.get(&name).map(bevy::prelude::Mat4::from_cols_array).unwrap_or(bevy::prelude::Mat4::IDENTITY);
+            positions = settings.source_positions.iter().map(|&p| (conversion * rebase).transform_point3(p).to_array()).collect();
+            joints.clone_from(&settings.source_palette);
+            weights.clone_from(&settings.source_weights);
+        }
+        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, skin_joints, inverse_bindposes, cloth });
     }
-    Ok(AltairModel { parts, textures, normal_textures, skeleton, min_z, source: format!("{} / Rank 9", path.display()) })
+    Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, min_z, source: format!("{} / Rank 9", path.display()) })
+}
+
+/// Add only new descendants, aliasing shared BoneIDs to existing animated joints (RE/09 §7).
+fn merge_visual_bones(main: &[SkelBone], added: &mut Vec<SkelBone>, source: &[SkelBone]) -> Result<(), String> {
+    let mut by_id: HashMap<u32, usize> = main.iter().chain(added.iter()).enumerate().map(|(i, b)| (b.bone_id, i)).collect();
+    let mut pending: Vec<usize> = (0..source.len()).filter(|&i| !by_id.contains_key(&source[i].bone_id)).collect();
+    while !pending.is_empty() {
+        let before = pending.len();
+        pending.retain(|&i| {
+            let b = &source[i];
+            let parent = b.parent.and_then(|p| by_id.get(&source[p].bone_id).copied());
+            if parent.is_none() { return true; }
+            let mut b = b.clone();
+            b.parent = parent;
+            by_id.insert(b.bone_id, main.len() + added.len());
+            added.push(b);
+            false
+        });
+        if before == pending.len() { return Err("secondary skeleton has an unanchored or cyclic hierarchy".into()); }
+    }
+    Ok(())
 }

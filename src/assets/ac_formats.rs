@@ -14,7 +14,7 @@ fn f32_at(b: &[u8], o: usize) -> f32 {
 
 /// Skinned-mesh position quantisation: metres = s16 / 2048 (fitted, RE/09 §3.3).
 pub const POS_SCALE: f32 = 1.0 / 2048.0;
-/// Fences the character atlas/sampling/normal-map correction (RE/09 §6).
+/// Fences character texture and supplemental visual-rig corrections (RE/09 §6–7).
 pub const CHARACTER_VISUAL_FIXES: bool = true;
 /// UVs are s16 / 2048, including coordinates outside the first tile (RE/09 §6).
 /// PORT: shader-side scale remains a hypothesis; checked against the outfit's texture atlas.
@@ -58,15 +58,27 @@ pub struct AcMesh {
 pub const CLASS_MESH: u32 = 0x415D_9568;
 pub const CLASS_COMPILED_MESH: u32 = 0xFC9E_1595;
 
-/// Parse a skinned Mesh payload (vertex format 0x16, stride 32). Returns None for other layouts
-/// (e.g. the 24-byte unskinned weapon format, not decoded yet).
+/// Parse skinned stride-32 and static stride-24 Mesh payloads (RE/09 §3, §8).
 pub fn parse_mesh(d: &[u8]) -> Option<AcMesh> {
     if u32_at(d, 4)? != CLASS_MESH {
         return None;
     }
-    let nb = u32_at(d, 16)? as usize;
+    // Kind 4 has inline SubMesh data before the bones (Mesh__sub_9F6EE0, RE/09 §7).
+    // Locate its counted, contiguous MeshBone records; do not interpret the inline object as a count.
+    let (nb, mut p) = match u32_at(d, 8)? {
+        0 | 1 if u32_at(d, 12)? == 0 => (u32_at(d, 16)? as usize, 20),
+        4 if CHARACTER_VISUAL_FIXES => {
+            let header = (24..d.len().saturating_sub(4)).find(|&o| {
+                if u32_at(d, o) != Some(0x9EF0_E7A1) { return false; }
+                let Some(count) = u32_at(d, o - 8) else { return false; };
+                count > 0 && count <= 256 && (0..count as usize).all(|k| u32_at(d, o + 76 * k) == Some(0x9EF0_E7A1))
+            })?;
+            (u32_at(d, header - 8)? as usize, header - 4)
+        }
+        _ => return None,
+    };
+    d.get(p..p.checked_add(nb.checked_mul(76)?)?)?;
     let mut bones = Vec::with_capacity(nb);
-    let mut p = 20;
     for _ in 0..nb {
         let bone_id = u32_at(d, p + 8)?;
         let mut m = [0f32; 16];
@@ -83,10 +95,11 @@ pub fn parse_mesh(d: &[u8]) -> Option<AcMesh> {
     let vb = u32_at(d, data + 8)? as usize;
     let ib = u32_at(d, data + 12)? as usize;
     let nsub = u32_at(d, data + 24)? as usize;
-    if stride != 32 {
+    if ![24, 32].contains(&stride) || vb % stride != 0 || ib % 2 != 0 || nsub > 256 {
         return None;
     }
     let v0 = data + 36;
+    d.get(v0..v0.checked_add(vb)?.checked_add(ib)?.checked_add(nsub.checked_mul(40)?)?)?;
     let nv = vb / stride;
     let mut m = AcMesh {
         bones,
@@ -104,7 +117,9 @@ pub fn parse_mesh(d: &[u8]) -> Option<AcMesh> {
     for i in 0..nv {
         let o = v0 + i * stride;
         let q = [i16_at(d, o), i16_at(d, o + 2), i16_at(d, o + 4)];
-        m.positions.push([q[0] as f32 * POS_SCALE, q[1] as f32 * POS_SCALE, q[2] as f32 * POS_SCALE]);
+        // PORT: static weapon scale is fitted to authored tag/sheath extents (RE/09 §8).
+        let scale = if stride == 24 { 1.0 / 32768.0 } else { POS_SCALE };
+        m.positions.push([q[0] as f32 * scale, q[1] as f32 * scale, q[2] as f32 * scale]);
         let n = &d[o + 8..o + 11];
         let nv3 = [n[0] as f32 / 127.5 - 1.0, n[1] as f32 / 127.5 - 1.0, n[2] as f32 / 127.5 - 1.0];
         m.normals.push(nv3);
@@ -112,8 +127,8 @@ pub fn parse_mesh(d: &[u8]) -> Option<AcMesh> {
         m.tangents.push(direction(o + 12));
         m.binormals.push(direction(o + 16));
         m.uvs.push([i16_at(d, o + 20) as f32 * UV_SCALE, i16_at(d, o + 22) as f32 * UV_SCALE]);
-        m.bone_idx.push(d[o + 24..o + 28].try_into().unwrap());
-        m.bone_w.push(d[o + 28..o + 32].try_into().unwrap());
+        m.bone_idx.push(if stride == 32 { d[o + 24..o + 28].try_into().unwrap() } else { [0; 4] });
+        m.bone_w.push(if stride == 32 { d[o + 28..o + 32].try_into().unwrap() } else { [255, 0, 0, 0] });
     }
     let i0 = v0 + vb;
     for k in 0..ib / 2 {
@@ -137,10 +152,14 @@ pub fn parse_mesh(d: &[u8]) -> Option<AcMesh> {
         if d.get(t) != Some(&3) || d.get(t + 1) != Some(&1) {
             return None;
         }
-        let n = d[t + 2] as usize;
-        s.palette = d[t + 7..t + 7 + n].to_vec();
+        let n = *d.get(t + 2)? as usize;
+        s.palette = d.get(t + 7..t + 7 + n)?.to_vec();
         t += 7 + n;
     }
+    if m.indices.iter().any(|&i| i as usize >= nv) || m.submeshes.iter().any(|s| {
+        s.vstart as usize + s.vcount as usize > nv || s.istart as usize + 3 * s.tris as usize > m.indices.len()
+            || (stride == 32 && s.palette.iter().any(|&b| b as usize >= m.bones.len()))
+    }) { return None; }
     m.tail = t;
     Some(m)
 }
