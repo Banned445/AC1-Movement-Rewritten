@@ -242,6 +242,8 @@ fn character_attachments_and_cloth_constraints_from_install() {
         assert!(span > 0.3 && span < 1.2, "{name}: weapon scale {span}");
     }
     let cloth = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap().cloth.as_ref().expect("cloth settings");
+    assert_eq!(m.visual_rotation_copies.len(), 2);
+    assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
     assert_eq!(cloth.pinned.len(), 146);
     assert_eq!(cloth.pinned.iter().filter(|&&p| p).count(), 44);
     assert_eq!(cloth.iterations, 3);
@@ -261,4 +263,21 @@ fn character_attachments_and_cloth_constraints_from_install() {
     assert!(cloth.vertex_radius.iter().all(|r| (0.01..=0.07001).contains(r)));
     assert!(cloth.colliders.iter().all(|c| m.skeleton.iter().any(|b| b.bone_id == c.bone_id)
         && c.local_start.is_finite() && c.local_end.is_finite() && (0.05..0.2).contains(&c.radius)));
+}
+
+#[test]
+fn skirt_rotation_references_are_resolved_and_malformed_sources_rejected() {
+    if !install_present() { eprintln!("skipped: game install not found"); return; }
+    let mut forge = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let entry = forge.find("Rank 9").cloned().unwrap();
+    let resources = forge.resources(&entry).unwrap();
+    let payload = &resources.iter().find(|r| r.name == "UCMA_Altair_Skirt" && r.class_hash == crc32("Skeleton")).unwrap().payload;
+    let copies = crate::visual_pose::decode_rotation_copies(payload).unwrap();
+    assert_eq!(copies, vec![(2339535765, 743623600), (3796064396, 743623600)]);
+    let class = crc32("RotationPasteModifier").to_le_bytes();
+    let marker = payload.windows(4).position(|b| b == class).unwrap();
+    let mut invalid = payload.clone();
+    invalid[marker + 11..marker + 15].copy_from_slice(&0u32.to_le_bytes());
+    assert!(crate::visual_pose::decode_rotation_copies(&invalid).is_err());
+    assert!(crate::visual_pose::decode_rotation_copies(&payload[..marker + 13]).is_err());
 }

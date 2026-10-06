@@ -18,6 +18,7 @@ mod level;
 mod model;
 mod cloth;
 mod cloth_contacts;
+mod visual_pose;
 mod player;
 mod proxy;
 mod recorder;
