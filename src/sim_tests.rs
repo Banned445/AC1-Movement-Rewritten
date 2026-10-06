@@ -1451,6 +1451,25 @@ fn beam_impulsion_deadline_resets_on_reentry() {
 }
 
 #[test]
+fn beam_jump_release_waits_until_the_item_has_positive_leftover_time() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
+    assert!(s.run_until(1.0, |s| s.data().narrow.state == BeamState::ImpulseWait));
+    s.press_legs();
+    assert!(s.run_until(0.1, |s| s.data().narrow.state == BeamState::JumpOnPlace));
+    let duration = s.data().narrow.action.unwrap().duration();
+    let dt = s.app.world().resource::<Time>().delta_secs();
+    s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().narrow.t = duration - dt;
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.data().narrow.t, duration, "fixture lands exactly on the completion boundary");
+    assert_eq!(s.data().narrow.state, BeamState::JumpOnPlace);
+    assert_eq!(s.loco().current, ActorContextId::NarrowObject);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.loco().current, ActorContextId::InAir, "release on positive leftover time");
+}
+
+#[test]
 fn beam_step_off_travels_instead_of_teleporting_to_ground() {
     use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
     let point = Vec3::new(77.5, 4.0, 70.0);

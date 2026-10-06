@@ -114,6 +114,31 @@ mod completion_tests {
     use super::*;
 
     #[test]
+    fn native_beam_completion_actions_are_single_item_one_shots() {
+        use crate::assets::{ac_actions::{ActionGraph, CLASS_ACTION_BLOCK}, forge::Forge};
+        let Some(game) = crate::assets::find_game_dir() else { eprintln!("skipped: game install absent"); return; };
+        if !game.join("DataPC.forge").is_file() { eprintln!("skipped: main archive absent"); return; }
+        let mut forge = Forge::open(&game.join("DataPC.forge")).unwrap();
+        let entry = forge.find("Game Fix").cloned().unwrap();
+        let mut graph = ActionGraph::default();
+        for resource in forge.resources(&entry).unwrap().into_iter().filter(|r| r.class_hash == CLASS_ACTION_BLOCK) {
+            graph.add_block(&resource.name, &resource.payload).unwrap();
+        }
+        // The local timing reduction must fail validation if an install needs item seams or queued actions.
+        for id in [BEAM_IMPULSE_TO_JUMP, BEAM_IMPULSE_TO_CLEAR, BEAM_CORNER_HOP[0], BEAM_CORNER_HOP[2]] {
+            let action = &graph.actions[&id];
+            assert_eq!(action.repeat, 1, "{id:#x} must finish rather than loop");
+            assert_eq!(action.items.len(), 1, "{id:#x} requires sequence timing");
+            assert_eq!(action.items[0].blend.kind, 0, "{id:#x} has an item seam blend");
+            assert_eq!(action.items[0].f20, 1.0, "{id:#x} has different item timing data");
+            for transition in action.in_transition.iter().chain(action.out_transition.iter()).chain(action.items[0].transitions.iter()) {
+                assert_eq!(transition.action_a, 0, "{id:#x} requires a queued transition action");
+                assert_eq!(transition.blend_a.b_pos, 0, "{id:#x} requires phase inheritance");
+            }
+        }
+    }
+
+    #[test]
     fn lateral_root_motion_cannot_increase_error_and_correction_is_bounded() {
         let old = Vec3::Z * 0.2;
         assert_eq!(constrain_lateral(old, Vec3::Z * 0.3, false, 0.1), old);
@@ -959,7 +984,10 @@ pub fn update_narrow(
         let jog = pad.high_profile;
         let walk_w = if jog { [0.0, 1.0] } else { [1.0, 0.0] };
         let dur = n.action.map(|a| a.duration()).unwrap_or(0.3);
-        let done = n.t >= dur;
+        // RE/05 §2.14: item advance 0x778010 marks completion only with positive leftover time.
+        // PORT: these single-item, one-shot actions have no queued evaluator in the movement simulation.
+        let slot_done = matches!(n.state, BeamState::JumpOnPlace | BeamState::HopStart | BeamState::HopEnd);
+        let done = if BEAM_COMPLETION && slot_done { n.t > dur } else { n.t >= dur };
 
         // Event 17: walking into an obstacle with stick input searches a hand jump target before
         // pull-down / climb (0xEE9AF0 → 0xF7EF90 / 0xF7DB30 → 0xF70E50 → 0xB21DA0).
@@ -1320,7 +1348,8 @@ pub fn update_narrow(
                 }
             }
             BeamState::JumpOnPlace => {
-                // PORT: 0x5017B0 tests a native slot flag; its precise timing is still approximated by clip end.
+                // 0x5017B0 reads final queued evaluator completion (0x727B40); this action has one item.
+                // PORT: native queue/blend scheduling is represented by the isolated action clock above.
                 if done {
                     let from = n.stand();
                     to_air = Some(match n.hand_target {
