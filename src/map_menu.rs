@@ -60,7 +60,7 @@ fn create_menu(mut commands: Commands) {
         });
 }
 
-fn initialize(world: &mut World) {
+pub(crate) fn initialize(world: &mut World) {
     // PORT: optional startup-open switch for debug UI inspection.
     world.resource_mut::<MapMenu>().open = std::env::var_os("AC_DEBUG_MAP_MENU").is_some();
     // Environment selection remains supported for automated captures and existing workflows.

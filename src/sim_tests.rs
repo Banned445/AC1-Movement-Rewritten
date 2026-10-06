@@ -1262,6 +1262,8 @@ fn empty_hand_on_a_pilotis_pulls_down_to_a_hang() {
     use crate::player::narrow::{BeamState, PilotisEntry, PilotisEntryType};
     let top = Vec3::new(77.0, 3.0, 80.0);
     let mut s = Sim::new(top, -std::f32::consts::FRAC_PI_2);
+    // No stick: the native interpreter picks the camera direction, here the +X edge.
+    s.app.world_mut().resource_mut::<CameraRig>().yaw = std::f32::consts::FRAC_PI_2;
     force(&mut s, crate::player::TransitionSetup::ToPilotis(PilotisEntry { top, from: top, facing: Vec3::X, kind: PilotisEntryType::FromInAir, foot: 0 }));
     assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::PilotisWait));
     s.press_hand();
@@ -1311,6 +1313,8 @@ fn jogging_a_beam_with_the_stick_at_a_branch_hops_onto_it() {
     assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::HopEnd), "no landing: {:?}", s.data().narrow.state);
     let f = s.body().feet;
     assert!((f - Vec3::new(105.0, 4.0, 71.0)).length() < 0.05, "on the branch: {f:?}");
+    s.run(0.1);
+    assert!(s.body().feet.z > f.z + 0.02, "the landing action must carry root motion: {:?}", s.body().feet);
     assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Walk), "no jog after: {:?}", s.data().narrow.state);
     assert!(s.run_until(2.0, |s| s.body().feet.z > 72.0), "jogs on along the branch: {:?}", s.body().feet);
     assert!((s.body().feet.x - 105.0).abs() < 0.01 && s.body().forward().dot(Vec3::Z) > 0.99);
@@ -1336,6 +1340,173 @@ fn walking_a_bent_beam_carries_on_round_the_bend() {
     assert!(off < 0.01 && (f.y - 4.0).abs() < 0.01, "on the second segment's line: {f:?}");
     assert_eq!(s.loco().current, ActorContextId::NarrowObject);
     let _ = BeamState::Walk;
+}
+
+#[test]
+fn beam_support_loss_enters_air_and_descends() {
+    let mut s = on_free_beam(87.0);
+    s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>().edges
+        .retain(|e| e.subtype != crate::guidance::GuidanceSubType::Beam);
+    s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes
+        .retain(|b| !(b.min.x < 87.0 && b.max.x > 87.0 && b.min.z < 70.0 && b.max.z > 70.0 && (b.max.y-4.0).abs()<0.01));
+    assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir));
+    let y = s.body().feet.y;
+    s.run(0.3);
+    assert!(s.body().feet.y < y && !s.body().grounded);
+}
+
+#[test]
+fn beam_detection_does_not_snap_a_displaced_character_back() {
+    let mut s = on_free_beam(87.0);
+    s.app.world_mut().get_mut::<Body>(s.player).unwrap().feet.z += 3.0;
+    assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir));
+    assert!(s.body().feet.z > 72.5);
+}
+
+#[test]
+fn empty_hand_on_a_beam_reaches_climb_holds() {
+    let mut s = on_free_beam(87.0);
+    for y in [4.6, 5.8] {
+        s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>().edges.push(crate::guidance::GuidanceEdge {
+            p0:Vec3::new(87.95,y,69.5), p1:Vec3::new(87.95,y,70.5), n0:Vec3::Y, n1:Vec3::NEG_X,
+            subtype:crate::guidance::GuidanceSubType::LedgeGrab });
+    }
+    s.pad(Vec3::X,1.0,false,false); s.press_hand();
+    assert!(s.run_until(0.2,|s|s.loco().current==ActorContextId::Climb), "no beam climb: {:?}",s.loco().current);
+    assert!((s.data().climb.hand_l.y-5.8).abs()<0.01);
+    assert!((s.data().climb.foot_l.y-4.6).abs()<0.01);
+    s.run(1.0);
+    assert!(s.body().feet.is_finite());
+}
+
+#[test]
+fn walking_a_beam_into_an_obstacle_jumps_to_its_hand_target() {
+    let mut s = on_free_beam(87.5);
+    s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3 {
+        min:Vec3::new(88.0,0.0,69.5),max:Vec3::new(89.0,6.0,70.5) });
+    s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>().edges.push(crate::guidance::GuidanceEdge {
+        p0:Vec3::new(88.0,6.0,69.5),p1:Vec3::new(88.0,6.0,70.5),n0:Vec3::Y,n1:Vec3::NEG_X,
+        subtype:crate::guidance::GuidanceSubType::LedgeGrab });
+    s.pad(Vec3::X,1.0,false,false);
+    assert!(s.run_until(0.5,|s|s.loco().current==ActorContextId::InAir),"no obstacle hand jump");
+    assert!(s.data().air.target.is_some_and(|t| t.hang.is_some()));
+}
+
+#[test]
+fn beam_impulsion_keeps_side_and_back_input_but_resumes_forward() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::ImpulseWait));
+    s.pad(Vec3::Z, 1.0, true, false); s.run(0.3);
+    assert_eq!(s.data().narrow.state, BeamState::ImpulseWait);
+    s.pad(Vec3::NEG_X, 1.0, true, false); s.run(0.3);
+    assert_eq!(s.data().narrow.state, BeamState::ImpulseWait);
+    s.pad(Vec3::X, 1.0, true, false);
+    assert!(s.run_until(0.2, |s| s.data().narrow.state == BeamState::Walk));
+}
+
+#[test]
+fn beam_impulsion_resumes_after_timer_before_entry_clip_end() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
+    assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
+    let duration = s.data().narrow.action.unwrap().duration();
+    assert!(duration > 0.25, "fixture must distinguish the timer from clip completion");
+    s.pad(Vec3::X, 1.0, true, false);
+    s.run(0.18);
+    assert_eq!(s.data().narrow.state, BeamState::ImpulseIn, "forward stays gated before 0.2 s");
+    assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::Walk), "forward remains blocked after the deadline");
+    let x = s.body().feet.x;
+    s.run(0.1);
+    assert!(s.body().feet.x > x, "resumed walk must move the root");
+}
+
+#[test]
+fn beam_impulsion_jump_obeys_timer_during_entry_clip() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
+    assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
+    s.run(0.1); s.press_legs(); s.run(0.08);
+    assert_eq!(s.data().narrow.state, BeamState::ImpulseIn, "jump stays gated before 0.2 s");
+    assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::JumpOnPlace), "buffered jump must enter on the timer, before clip end");
+}
+
+#[test]
+fn beam_impulsion_deadline_resets_on_reentry() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    for _ in 0..2 {
+        s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
+        assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
+        s.pad(Vec3::X, 1.0, true, false); s.run(0.18);
+        assert_eq!(s.data().narrow.state, BeamState::ImpulseIn);
+        assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::Walk));
+        s.pad(Vec3::ZERO, 0.0, false, false);
+        assert!(s.run_until(1.0, |s| s.data().narrow.state == BeamState::Wait));
+    }
+}
+
+#[test]
+fn beam_jump_release_waits_until_the_item_has_positive_leftover_time() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
+    assert!(s.run_until(1.0, |s| s.data().narrow.state == BeamState::ImpulseWait));
+    s.press_legs();
+    assert!(s.run_until(0.1, |s| s.data().narrow.state == BeamState::JumpOnPlace));
+    let duration = s.data().narrow.action.unwrap().duration();
+    let dt = s.app.world().resource::<Time>().delta_secs();
+    s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().narrow.t = duration - dt;
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.data().narrow.t, duration, "fixture lands exactly on the completion boundary");
+    assert_eq!(s.data().narrow.state, BeamState::JumpOnPlace);
+    assert_eq!(s.loco().current, ActorContextId::NarrowObject);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.loco().current, ActorContextId::InAir, "release on positive leftover time");
+}
+
+#[test]
+fn beam_step_off_travels_instead_of_teleporting_to_ground() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    let point = Vec3::new(77.5, 4.0, 70.0);
+    let mut s = Sim::new(point, crate::player::heading_of(Vec3::X));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0: Vec3::new(72.0,4.0,70.0), p1: Vec3::new(78.0,4.0,70.0),
+        point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::X }));
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::StepOff));
+    let start = s.body().feet;
+    assert_eq!(s.loco().current, ActorContextId::NarrowObject);
+    for _ in 0..120 {
+        let before = s.body().feet;
+        s.run(1.0/60.0);
+        assert!(before.distance(s.body().feet) < 0.1, "discontinuous step-off");
+        if s.loco().current == ActorContextId::Ground { break; }
+    }
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    assert!((s.body().feet.x - start.x - 0.8).abs() < 0.06);
+}
+
+#[test]
+fn beam_bend_heading_changes_over_multiple_frames() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode};
+    let point = Vec3::new(105.0,4.0,75.4);
+    let mut s = Sim::new(point, crate::player::heading_of(Vec3::Z));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0: Vec3::new(105.0,4.0,70.3), p1: Vec3::new(105.0,4.0,76.0),
+        point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::Z }));
+    s.pad(Vec3::Z,1.0,false,false);
+    let mut turned = false;
+    for _ in 0..120 {
+        let heading = s.body().heading;
+        s.run(1.0/60.0);
+        let delta = (s.body().heading-heading+std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)-std::f32::consts::PI;
+        assert!(delta.abs() < 0.08, "abrupt bend: {delta}");
+        turned |= delta.abs() > 0.001;
+    }
+    assert!(turned);
 }
 
 // ---------------------------------------------------------------- obstacle collision / lean, look-down (RE/02 §4.2)
@@ -1688,6 +1859,29 @@ fn native_masyaf_authored_ladder_mounts_and_climbs() {
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "never mounted source ladder: {:?} {:?}", s.loco().current, s.body().feet);
     assert!(s.run_until(8.0, |s| s.data().ladder.height > 1.0), "did not climb source ladder");
     assert!(s.body().feet.is_finite());
+}
+
+#[test]
+fn native_masyaf_beam_guidance_supports_narrow_movement() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode};
+    let Some((collision, guidance, _)) = crate::native_map::village_simulation_fixture() else { return; };
+    let count = guidance.edges.iter().filter(|e| e.subtype == crate::guidance::GuidanceSubType::Beam).count();
+    let Some(edge) = guidance.edges.iter().find(|e| e.subtype == crate::guidance::GuidanceSubType::Beam
+        && e.p0.distance(e.p1) > 2.0 && collision.capsule_fits(e.p0.lerp(e.p1,0.5))) else {
+        eprintln!("native beam exercise skipped: {count} beam edges in the village slice, none with a clear standing midpoint");
+        return;
+    };
+    let (p0,p1) = (edge.p0,edge.p1);
+    let point = p0.lerp(p1,0.5);
+    let facing = (p1-p0).with_y(0.0).normalize();
+    let mut s = Sim::new_raw(point,crate::player::heading_of(facing));
+    s.app.insert_resource(collision).insert_resource(guidance);
+    s.app.update();
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0,p1,point,from:point,toward_p1:true,
+        mode:BeamEntryMode::Straight,foot:0,action:None,facing }));
+    s.pad(facing,1.0,false,false); s.run(0.4);
+    assert_eq!(s.loco().current,ActorContextId::NarrowObject);
+    assert!(s.body().feet.is_finite() && (s.body().feet-point).dot(facing)>0.01);
 }
 
 #[test]
