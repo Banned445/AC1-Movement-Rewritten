@@ -34,22 +34,56 @@ pub struct Aabb3 {
     pub max: Vec3,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct CollisionWorld {
     pub boxes: Vec<Aabb3>,
+    pub triangles: Vec<crate::triangles::Triangle>,
     /// Each box's collision layer (`crate::layers`); boxes past the end of the list are `STATIC`, as the greybox is.
     pub layers: Vec<u8>,
+    /// PORT: conservative bounds rejection, not Havok MOPP. Disable for comparison with
+    /// AC_NATIVE_QUERY_CULLING=0; exact collision tests and authored geometry are unchanged.
+    pub native_query_culling: bool,
+}
+
+impl Default for CollisionWorld {
+    fn default() -> Self {
+        Self { boxes: Vec::new(), triangles: Vec::new(), layers: Vec::new(),
+            native_query_culling: std::env::var("AC_NATIVE_QUERY_CULLING").as_deref() != Ok("0") }
+    }
 }
 
 impl CollisionWorld {
     /// Box `i`'s collision layer.
     pub fn layer_of(&self, i: usize) -> u8 {
+        if i >= self.boxes.len() { return self.triangles[i - self.boxes.len()].layer; }
         self.layers.get(i).copied().unwrap_or(crate::layers::STATIC)
     }
 
     /// Does a query or shape on `layer` see box `i`? A filter word of 0 (layer 0) collides with everything (0x4DC2B0).
     pub fn sees(&self, layer: u8, i: usize) -> bool {
         layer == 0 || crate::layers::collides(layer, self.layer_of(i))
+    }
+
+    pub fn triangle_candidates(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = usize> + '_ {
+        self.triangles.iter().enumerate().filter(move |(_, t)| t.overlaps(min, max)).map(|(i, _)| self.boxes.len() + i)
+    }
+
+    fn triangles_in_bounds(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = &crate::triangles::Triangle> {
+        // Include boundary contacts despite floating-point projection/ray rounding.
+        self.triangles.iter().filter(move |t| {
+            let epsilon = Vec3::splat(0.0001) + (t.bounds.max - t.bounds.min) * 0.000002;
+            !self.native_query_culling || t.overlaps(min - epsilon, max + epsilon)
+        })
+    }
+
+    fn box_extent(axes: [Vec3; 3], half: Vec3) -> Vec3 {
+        axes[0].abs() * half.x + axes[1].abs() * half.y + axes[2].abs() * half.z
+    }
+
+    /// PORT: camera obstruction ray against imported static faces; native NavigationCamera remains open.
+    pub fn camera_distance(&self, origin: Vec3, direction: Vec3, max: f32) -> f32 {
+        let end = origin + direction * max;
+        self.triangles_in_bounds(origin.min(end),origin.max(end)).filter_map(|t|t.ray(origin,direction,max)).fold(max,f32::min)
     }
 }
 
@@ -98,18 +132,18 @@ impl CollisionWorld {
 
     /// Height of the floor straight below `p` within `max` (a ray, no footprint).
     pub fn floor_height_below(&self, p: Vec3, max: f32) -> Option<f32> {
+        let origin = p + Vec3::Y * 0.02;
         self.boxes
             .iter()
             .filter(|b| p.x >= b.min.x && p.x <= b.max.x && p.z >= b.min.z && p.z <= b.max.z && b.max.y <= p.y + 0.02 && b.max.y >= p.y - max)
             .map(|b| b.max.y)
+            .chain(self.triangles_in_bounds(origin - Vec3::Y * (max + 0.02), origin).filter_map(|t| t.ray(origin, Vec3::NEG_Y, max + 0.02).map(|d| origin.y - d)))
             .reduce(f32::max)
     }
 
     /// Is there floor within `max` straight below `p` (a ray, no footprint)?
     pub fn floor_below(&self, p: Vec3, max: f32) -> bool {
-        self.boxes.iter().any(|b| {
-            p.x >= b.min.x && p.x <= b.max.x && p.z >= b.min.z && p.z <= b.max.z && b.max.y <= p.y + 0.02 && b.max.y >= p.y - max
-        })
+        self.floor_height_below(p, max).is_some()
     }
 
     /// Ground's support rule: the stick-to-ground support, kept while its contact is within 45° of vertical, or with a
@@ -130,17 +164,36 @@ impl CollisionWorld {
 
     /// Is `p` inside any solid box?
     pub fn point_inside(&self, p: Vec3) -> bool {
-        self.boxes.iter().any(|b| p.cmpge(b.min).all() && p.cmple(b.max).all())
+        if self.boxes.iter().any(|b| p.cmpge(b.min).all() && p.cmple(b.max).all()) { return true; }
+        // PORT: parity ray for closed authored mesh volumes, replacing Havok's point query.
+        let dir = Vec3::new(0.437, 0.731, 0.527).normalize();
+        let inverse = dir.recip();
+        let mut hits: Vec<f32> = self.triangles.iter().filter(|t| {
+            if !self.native_query_culling { return true; }
+            let epsilon = Vec3::splat(0.0001) + (t.bounds.max - t.bounds.min) * 0.000002;
+            // The fixed parity ray has positive components: entry/exit intervals need no axis swap.
+            let lo = (t.bounds.min - epsilon - p) * inverse;
+            let hi = (t.bounds.max + epsilon - p) * inverse;
+            lo.max_element().max(0.0) <= hi.min_element()
+        }).filter_map(|t| t.ray(p, dir, f32::MAX)).collect();
+        hits.sort_by(f32::total_cmp);
+        hits.dedup_by(|a, b| (*a - *b).abs() < 0.0001);
+        hits.len() % 2 == 1
     }
 
     /// Distance a sphere of radius `r` can travel from `origin` along `dir` before touching a box
     /// (capped at `max`). Used for the shimmy free-space sweep (ProbeLateral 0xDD9640).
     pub fn sphere_free_distance(&self, origin: Vec3, dir: Vec3, r: f32, max: f32) -> f32 {
         let step = 0.02;
+        // Gather once for the entire sweep, rather than scanning the map at every 2 cm sample.
+        let end = origin + dir * (max + step);
+        let radius = Vec3::splat(r);
+        let candidates: Vec<_> = self.triangles_in_bounds(origin.min(end) - radius, origin.max(end) + radius).collect();
         let mut d = 0.0;
         while d < max {
             let c = origin + dir * (d + step);
-            if self.boxes.iter().any(|b| (c - c.clamp(b.min, b.max)).length() < r) {
+            if self.boxes.iter().any(|b| (c - c.clamp(b.min, b.max)).length() < r)
+                || candidates.iter().any(|t| t.overlaps(c - radius, c + radius) && t.closest_point(c).distance_squared(c) < r * r) {
                 return d;
             }
             d += step;
@@ -151,9 +204,13 @@ impl CollisionWorld {
     /// Would a standing capsule fit with its feet at `feet`?
     pub fn capsule_fits(&self, feet: Vec3) -> bool {
         let (a, c) = Self::segment(feet + Vec3::Y * 0.02, 0.0);
+        let radius = Vec3::splat(CAPSULE_RADIUS * 0.95);
         !self.boxes.iter().any(|b| {
             let p = closest_segment_point_to_aabb(a, c, b);
             (p - p.clamp(b.min, b.max)).length() < CAPSULE_RADIUS * 0.95
+        }) && !self.triangles_in_bounds(a.min(c) - radius, a.max(c) + radius).any(|t| {
+            let (p, q) = t.segment_points(a, c);
+            p.distance_squared(q) < (CAPSULE_RADIUS * 0.95).powi(2)
         })
     }
 
@@ -161,12 +218,21 @@ impl CollisionWorld {
     /// without touching a box? A linear cast (`sub_B136E0`), checked in steps of at most 5 cm.
     pub fn capsule_cast_free(&self, bottom: Vec3, height: f32, r: f32, delta: Vec3) -> bool {
         let steps = ((delta.length() / 0.05).ceil() as usize).max(1);
+        let a = bottom + Vec3::Y * r;
+        let c = bottom + Vec3::Y * (height - r).max(r);
+        let radius = Vec3::splat(r);
+        let candidates: Vec<_> = self.triangles_in_bounds(a.min(c).min(a + delta).min(c + delta) - radius,
+            a.max(c).max(a + delta).max(c + delta) + radius).collect();
         (1..=steps).all(|i| {
             let p = bottom + delta * (i as f32 / steps as f32);
             let (a, c) = (p + Vec3::Y * r, p + Vec3::Y * (height - r).max(r));
             !self.boxes.iter().any(|b| {
                 let q = closest_segment_point_to_aabb(a, c, b);
                 (q - q.clamp(b.min, b.max)).length() < r
+            }) && !candidates.iter().any(|t| {
+                if !t.overlaps(a.min(c) - Vec3::splat(r), a.max(c) + Vec3::splat(r)) { return false; }
+                let (p, q) = t.segment_points(a, c);
+                p.distance_squared(q) < r * r
             })
         })
     }
@@ -174,6 +240,7 @@ impl CollisionWorld {
     /// Is an oriented box (centre, unit axes, half extents) clear of every box? Separating-axis test.
     pub fn obb_free(&self, centre: Vec3, axes: [Vec3; 3], half: Vec3) -> bool {
         let world = [Vec3::X, Vec3::Y, Vec3::Z];
+        let extent = Self::box_extent(axes, half);
         !self.boxes.iter().any(|b| {
             let (bc, bh) = ((b.min + b.max) * 0.5, (b.max - b.min) * 0.5);
             let d = bc - centre;
@@ -192,16 +259,20 @@ impl CollisionWorld {
                 let rb = bh.x * l.x.abs() + bh.y * l.y.abs() + bh.z * l.z.abs();
                 d.dot(*l).abs() <= ra + rb
             })
-        })
+        }) && !self.triangles_in_bounds(centre - extent, centre + extent).any(|t| t.intersects_box(centre, axes, half))
     }
 
     /// `Human__BoxQueryEmpty` 0xB2D2A0 with a contact out: the solid point inside an oriented box (centre, unit
     /// axes, half extents) lowest along `axes[k]`, or None when the box is empty. PORT: the exe takes the query's
     /// contact points; the port samples the box on a 5 cm grid.
     pub fn obb_lowest(&self, centre: Vec3, axes: [Vec3; 3], half: Vec3, k: usize) -> Option<Vec3> {
+        let extent = Self::box_extent(axes, half);
+        let triangle_point = self.triangles_in_bounds(centre - extent, centre + extent).flat_map(|t| t.clipped_box_points(centre, axes, half))
+            .min_by(|a, b| a.dot(axes[k]).total_cmp(&b.dot(axes[k])));
+        if self.boxes.is_empty() { return triangle_point; }
         let n = |h: f32| ((h * 2.0 / 0.05).ceil() as i32).max(1);
         let (nx, ny, nz) = (n(half.x), n(half.y), n(half.z));
-        let mut best: Option<(f32, Vec3)> = None;
+        let mut best = triangle_point.map(|p| ((p - centre).dot(axes[k]), p));
         for i in 0..=nx {
             for j in 0..=ny {
                 for l in 0..=nz {
@@ -234,6 +305,10 @@ impl CollisionWorld {
             if top <= feet.y + 0.02 && top >= feet.y - max {
                 best = Some(best.map_or(top, |h: f32| h.max(top)));
             }
+        }
+        // PORT: five footprint rays retain the greybox probe's footprint on source triangles.
+        for offset in [Vec3::ZERO, Vec3::X * r, Vec3::NEG_X * r, Vec3::Z * r, Vec3::NEG_Z * r].into_iter().filter(|_| !self.triangles.is_empty()) {
+            if let Some(y) = self.floor_height_below(feet + offset, max) { best = Some(best.map_or(y, |v| v.max(y))); }
         }
         best
     }

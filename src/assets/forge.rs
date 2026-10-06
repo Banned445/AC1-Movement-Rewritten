@@ -102,6 +102,18 @@ impl Forge {
         self.entries.iter().find(|e| e.name == name)
     }
 
+    /// Resource ids without inflating the resource container (RE/08 §4). Used to resolve
+    /// shared map dependencies across stored files rather than guessing from resource names.
+    pub fn resource_ids(&mut self, entry: &ForgeEntry) -> io::Result<Vec<u32>> {
+        let start = entry.offset + FILEDATA_HEADER_SIZE;
+        if rd_u64(&self.read_at(start, 8)?, 0) != COMPRESSED_MAGIC { return Ok(Vec::new()); }
+        let (toc, _) = self.container(start)?;
+        if toc.len() < 2 { return Err(bad("truncated resource TOC")); }
+        let n = rd_u16(&toc, 0) as usize;
+        if toc.len() != 2 + 8 * n { return Err(bad("invalid resource TOC length")); }
+        Ok((0..n).map(|i| rd_u32(&toc, 2 + 8 * i)).collect())
+    }
+
     /// Decode one compressed container (RE/08 §3); returns (bytes, end offset).
     fn container(&mut self, off: u64) -> io::Result<(Vec<u8>, u64)> {
         let h = self.read_at(off, 17)?;

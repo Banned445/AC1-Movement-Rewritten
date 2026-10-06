@@ -113,6 +113,15 @@ fn closest_on_segment_to_box(a: Vec3, b: Vec3, bx: &Aabb3) -> Vec3 {
 
 /// Closest point between the shape at `p` and box `i`.
 fn closest(world: &CollisionWorld, i: usize, p: Vec3, lift: f32) -> Contact {
+    if i >= world.boxes.len() {
+        let t = &world.triangles[i - world.boxes.len()];
+        let (a, b, rs) = shape(p, lift);
+        let (s, q) = t.segment_points(a, b);
+        let d = s - q;
+        let len = d.length();
+        let normal = if len > 1e-5 { d / len } else if t.normal.dot(p - t.vertices[0]) >= 0.0 { t.normal } else { -t.normal };
+        return Contact { pos: q, normal, dist: len - rs, fraction: 0.0, body: i };
+    }
     let bx = &world.boxes[i];
     let (a, b, rs) = shape(p, lift);
     let s = closest_on_segment_to_box(a, b, bx);
@@ -138,7 +147,10 @@ fn closest(world: &CollisionWorld, i: usize, p: Vec3, lift: f32) -> Contact {
 
 /// The closest-point query of the shape (the start collector of 0x57B200): every box within the tolerance.
 fn closest_points(world: &CollisionWorld, layer: u8, p: Vec3, lift: f32) -> Vec<Contact> {
-    (0..world.boxes.len()).filter(|&i| world.sees(layer, i)).map(|i| closest(world, i, p, lift)).filter(|c| c.dist < COLLISION_TOLERANCE).collect()
+    let (a, b, r) = shape(p, lift);
+    let margin = Vec3::splat(r + COLLISION_TOLERANCE);
+    (0..world.boxes.len()).chain(world.triangle_candidates(a.min(b) - margin, a.max(b) + margin))
+        .filter(|&i| world.sees(layer, i)).map(|i| closest(world, i, p, lift)).filter(|c| c.dist < COLLISION_TOLERANCE).collect()
 }
 
 /// The linear cast of the shape from `p` by `disp` (0x57B200 with the cast collector), hits sorted by fraction
@@ -151,7 +163,11 @@ fn linear_cast(world: &CollisionWorld, layer: u8, p: Vec3, disp: Vec3, lift: f32
     if len < 1e-7 {
         return hits;
     }
-    for i in (0..world.boxes.len()).filter(|&i| world.sees(layer, i)) {
+    let (a, b, r) = shape(p, lift);
+    let margin = Vec3::splat(r + COLLISION_TOLERANCE);
+    let min = a.min(b).min(a + disp).min(b + disp) - margin;
+    let max = a.max(b).max(a + disp).max(b + disp) + margin;
+    for i in (0..world.boxes.len()).chain(world.triangle_candidates(min, max)).filter(|&i| world.sees(layer, i)) {
         let mut t = 0.0f32;
         let mut c = closest(world, i, p, lift);
         if c.dist <= 0.0 {
@@ -654,5 +670,31 @@ mod tests {
         let (y, ny) = stick_to_ground(&w, Vec3::new(0.0, 0.3, 0.0), 0.37, 0.58).unwrap();
         assert!(y.abs() < 1e-3 && (ny - 1.0).abs() < 1e-5, "{y} {ny}");
         assert!(stick_to_ground(&w, Vec3::new(0.0, 0.7, 0.0), 0.37, 0.58).is_none(), "beyond 0.58 m below");
+    }
+
+    #[test]
+    fn source_triangles_slide_stop_and_respect_character_layers() {
+        use crate::triangles::Triangle;
+        let mut w = CollisionWorld::default();
+        let a = Vec3::new(1.0, -2.0, -10.0);
+        let b = Vec3::new(1.0, 4.0, -10.0);
+        let c = Vec3::new(1.0, 4.0, 10.0);
+        let d = Vec3::new(1.0, -2.0, 10.0);
+        w.triangles = vec![Triangle::new([a,b,c], crate::layers::STATIC).unwrap(), Triangle::new([a,c,d], crate::layers::STATIC).unwrap()];
+        let (p, v) = run(&w, Vec3::Y, Vec3::new(3.0, 0.0, 3.0), 60, 0.0);
+        assert!((p.x - 0.6).abs() < 0.01 && p.z > 2.0, "{p:?}");
+        assert!(v.x.abs() < 1e-3 && (v.z - 3.0).abs() < 1e-3, "{v:?}");
+        let mut state = ProxyState { layer: crate::layers::MAIN_CHARACTER_NO_STATIC, ..Default::default() };
+        let p = integrate(&w, &mut state, Vec3::Y, Vec3::X * 3.0, 1.0, 0.0).0;
+        assert!(p.x > 2.9, "climbing layer passes through static triangles: {p:?}");
+    }
+
+    #[test]
+    fn source_slope_support_tracks_the_triangle_surface() {
+        let mut w = CollisionWorld::default();
+        w.triangles.push(crate::triangles::Triangle::new([Vec3::new(-5.0,-1.0,-5.0), Vec3::new(5.0,1.0,-5.0), Vec3::new(0.0,0.0,5.0)], crate::layers::STATIC).unwrap());
+        let (y, normal_y) = stick_to_ground(&w, Vec3::new(0.0,0.3,0.0), 0.37, 0.58).unwrap();
+        assert!(y.abs() < 0.02 && normal_y > 0.97, "{y} {normal_y}");
+        assert!(w.floor_height_below(Vec3::new(4.5,1.0,4.5),2.0).is_none(), "outside the face, inside its AABB");
     }
 }

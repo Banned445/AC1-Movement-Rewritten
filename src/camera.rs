@@ -44,10 +44,12 @@ fn spawn_camera(mut commands: Commands) {
 }
 
 fn grab_cursor(
+    menu: Res<crate::map_menu::MapMenu>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
+    if menu.open { return; }
     let Ok(mut c) = cursor.single_mut() else { return };
     if mouse.just_pressed(MouseButton::Left) {
         c.grab_mode = CursorGrabMode::Locked;
@@ -60,6 +62,7 @@ fn grab_cursor(
 }
 
 fn orbit(
+    menu: Res<crate::map_menu::MapMenu>,
     time: Res<Time>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
@@ -67,6 +70,7 @@ fn orbit(
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     mut rig: ResMut<CameraRig>,
 ) {
+    if menu.open { return; }
     let locked = cursor.single().map(|c| c.grab_mode != CursorGrabMode::None).unwrap_or(false);
     if locked {
         rig.yaw -= motion.delta.x * 0.003;
@@ -83,6 +87,7 @@ fn orbit(
 }
 
 fn follow(
+    collision: Res<crate::collision::CollisionWorld>,
     time: Res<Time>,
     rig: Res<CameraRig>,
     player: Query<&Transform, (With<Player>, Without<MainCamera>)>,
@@ -93,7 +98,11 @@ fn follow(
     let rot = Quat::from_euler(EulerRot::YXZ, rig.yaw, rig.pitch, 0.0);
     let t = time.elapsed_secs();
     let shake = Vec3::new((t * 53.0).sin(), (t * 71.0).sin(), 0.0) * rig.shake * 0.08;
-    let wanted = focus + rot * Vec3::new(0.0, 0.0, rig.distance) + shake;
+    let direction = rot * Vec3::Z;
+    // PORT: source scenes need obstruction avoidance; keep the existing greybox camera unchanged.
+    let distance = if collision.triangles.is_empty() { rig.distance }
+        else { (collision.camera_distance(focus,direction,rig.distance)-0.20).clamp(0.25,rig.distance) };
+    let wanted = focus + direction * distance + shake;
     let k = 1.0 - (-12.0 * time.delta_secs()).exp();
     c.translation = c.translation.lerp(wanted, k);
     c.look_at(focus, Vec3::Y);

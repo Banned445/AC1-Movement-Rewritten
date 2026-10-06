@@ -14,6 +14,8 @@ pub struct DebugCapturePlugin;
 
 #[derive(Resource, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
+    /// Walk from the loaded map spawn, then press Legs in high profile (native-map hitch reproduction).
+    NativeFreerun,
     Roofs,
     Climb,
     Ledge,
@@ -92,6 +94,7 @@ impl Plugin for DebugCapturePlugin {
         if let Ok(v) = std::env::var("AC_AUTOPILOT") {
             let sc = match v.as_str() {
                 "climb" => Scenario::Climb,
+                "native-freerun" => Scenario::NativeFreerun,
                 "ledge" => Scenario::Ledge,
                 "pose" => Scenario::Pose,
                 "run" => Scenario::Run,
@@ -156,6 +159,9 @@ struct Capture {
 fn place(sc: Res<Scenario>, mut q: Query<&mut Body, With<Player>>, mut rig: ResMut<crate::camera::CameraRig>) {
     for mut b in &mut q {
         match *sc {
+            Scenario::NativeFreerun => {
+                b.heading = crate::player::heading_of(Vec3::NEG_X);
+            }
             Scenario::Roofs => {
                 b.feet = Vec3::new(7.0, 3.5, 12.0);
                 b.heading = -std::f32::consts::FRAC_PI_2;
@@ -363,6 +369,7 @@ fn autopilot(
     q: Query<(&crate::player::Locomotion, &crate::player::HumanDataBundle, &Body), With<Player>>,
     mut since: Local<(u32, f32)>,
     mut level_at: Local<Option<f32>>,
+    mut freerun_pressed: Local<bool>,
 ) {
     let t = time.elapsed_secs();
     // seconds the narrow-object state has stayed the same (`since` = (state seq, time))
@@ -379,6 +386,15 @@ fn autopilot(
     pad.magnitude = 1.0;
     pad.speed01 = 1.0;
     match *sc {
+        Scenario::NativeFreerun => {
+            pad.dir = Vec3::NEG_X;
+            pad.high_profile = t >= 2.0;
+            pad.legs_held = t >= 2.0;
+            if pad.legs_held && !*freerun_pressed {
+                pad.legs_pressed_ago = 0.0;
+                *freerun_pressed = true;
+            }
+        }
         Scenario::Pose | Scenario::Back | Scenario::FootIk => {
             pad.magnitude = 0.0;
             pad.speed01 = 0.0;
@@ -696,7 +712,8 @@ fn test_pose(rig: Query<&crate::model::Rig>, mut joints: Query<&mut Transform>) 
     }
 }
 
-fn capture(mut commands: Commands, time: Res<Time>, mut cap: ResMut<Capture>, mut exit: MessageWriter<AppExit>) {
+// Real time allows captures and automatic exit while the debug map menu pauses virtual time.
+fn capture(mut commands: Commands, time: Res<Time<Real>>, mut cap: ResMut<Capture>, mut exit: MessageWriter<AppExit>) {
     let t = time.elapsed_secs();
     match cap.taken {
         None if t >= cap.at => {

@@ -14,8 +14,7 @@ impl Plugin for LevelPlugin {
         app.insert_resource(ClearColor(Color::srgb(0.62, 0.72, 0.82)))
             // sky fill light: with Bevy's default (80) every face turned from the sun renders near-black, and the
             // baked folds of Altaïr's robe texture read as dark blotches
-            .insert_resource(GlobalAmbientLight { color: Color::srgb(0.80, 0.86, 1.0), brightness: 1500.0, ..default() })
-            .add_systems(Startup, build_level);
+            .insert_resource(GlobalAmbientLight { color: Color::srgb(0.80, 0.86, 1.0), brightness: 1500.0, ..default() });
     }
 }
 
@@ -327,7 +326,7 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
     (collision, guidance)
 }
 
-fn build_level(
+pub(crate) fn build_level(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -343,7 +342,7 @@ fn build_level(
         perceptual_roughness: 0.95,
         ..default()
     });
-    commands.spawn((
+    commands.spawn((crate::map_menu::MapEntity,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(300.0, 300.0))),
         MeshMaterial3d(ground_mat),
     ));
@@ -353,14 +352,14 @@ fn build_level(
         ..default()
     });
     for &(x, z, sx, sz, h) in BUILDINGS {
-        commands.spawn((
+        commands.spawn((crate::map_menu::MapEntity,
             Mesh3d(meshes.add(Cuboid::new(sx, h, sz))),
             MeshMaterial3d(wall_mat.clone()),
             Transform::from_xyz(x, h * 0.5, z),
         ));
     }
     for &(x, top, z, sx, sz, t) in SLABS {
-        commands.spawn((
+        commands.spawn((crate::map_menu::MapEntity,
             Mesh3d(meshes.add(Cuboid::new(sx, t, sz))),
             MeshMaterial3d(wall_mat.clone()),
             Transform::from_xyz(x, top - t * 0.5, z),
@@ -368,13 +367,13 @@ fn build_level(
     }
     let hay_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.85, 0.72, 0.30), perceptual_roughness: 1.0, ..default() });
     for &(x, z, sx, sz, h) in HAYSTACKS {
-        commands.spawn((Mesh3d(meshes.add(Cuboid::new(sx, h, sz))), MeshMaterial3d(hay_mat.clone()), Transform::from_xyz(x, h * 0.5, z)));
+        commands.spawn((crate::map_menu::MapEntity,Mesh3d(meshes.add(Cuboid::new(sx, h, sz))), MeshMaterial3d(hay_mat.clone()), Transform::from_xyz(x, h * 0.5, z)));
     }
     let beam_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.45, 0.32, 0.2), perceptual_roughness: 0.9, ..default() });
     for &(p0, p1) in BEAMS {
         let (lo, hi) = (p0.min(p1), p0.max(p1));
         let size = Vec3::new(hi.x - lo.x + 0.2, 0.2, hi.z - lo.z + 0.2);
-        commands.spawn((Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))), MeshMaterial3d(beam_mat.clone()), Transform::from_translation((lo + hi) * 0.5 - Vec3::Y * 0.1)));
+        commands.spawn((crate::map_menu::MapEntity,Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))), MeshMaterial3d(beam_mat.clone()), Transform::from_translation((lo + hi) * 0.5 - Vec3::Y * 0.1)));
     }
     // visual stone bands on the climb tower
     let band_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.62, 0.55, 0.45), ..default() });
@@ -382,7 +381,7 @@ fn build_level(
     for k in CLIMB_BANDS {
         let y = 0.6 * k as f32;
         for (a, b) in band_segments(y) {
-            commands.spawn((
+            commands.spawn((crate::map_menu::MapEntity,
                 Mesh3d(meshes.add(Cuboid::new(b - a, 0.08, CLIMB_BAND_DEPTH))),
                 MeshMaterial3d(band_mat.clone()),
                 Transform::from_xyz((a + b) * 0.5, y - 0.04, fz - CLIMB_BAND_DEPTH * 0.5),
@@ -392,7 +391,7 @@ fn build_level(
     for &((a, b), fz, (k0, k1)) in CLIMB_WALLS {
         for k in k0..=k1 {
             let y = 0.6 * k as f32;
-            commands.spawn((
+            commands.spawn((crate::map_menu::MapEntity,
                 Mesh3d(meshes.add(Cuboid::new(b - a, 0.08, CLIMB_BAND_DEPTH))),
                 MeshMaterial3d(band_mat.clone()),
                 Transform::from_xyz((a + b) * 0.5, y - 0.04, fz - CLIMB_BAND_DEPTH * 0.5),
@@ -402,7 +401,7 @@ fn build_level(
     for &(fx, (a, b), nx, (k0, k1)) in CLIMB_WALLS_X {
         for k in k0..=k1 {
             let y = 0.6 * k as f32;
-            commands.spawn((
+            commands.spawn((crate::map_menu::MapEntity,
                 Mesh3d(meshes.add(Cuboid::new(CLIMB_BAND_DEPTH, 0.08, b - a))),
                 MeshMaterial3d(band_mat.clone()),
                 Transform::from_xyz(fx + nx * CLIMB_BAND_DEPTH * 0.5, y - 0.04, (a + b) * 0.5),
@@ -411,7 +410,7 @@ fn build_level(
     }
     let ((a, b), fz, rows) = JUMP_CLIMB_HOLDS;
     for &y in rows {
-        commands.spawn((
+        commands.spawn((crate::map_menu::MapEntity,
             Mesh3d(meshes.add(Cuboid::new(b - a, 0.08, CLIMB_BAND_DEPTH))),
             MeshMaterial3d(band_mat.clone()),
             Transform::from_xyz((a + b) * 0.5, y - 0.04, fz - CLIMB_BAND_DEPTH * 0.5),
@@ -419,7 +418,7 @@ fn build_level(
     }
 
     // light
-    commands.spawn((
+    commands.spawn((crate::map_menu::MapEntity,
         DirectionalLight { illuminance: 12_000.0, shadow_maps_enabled: true, ..default() },
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));

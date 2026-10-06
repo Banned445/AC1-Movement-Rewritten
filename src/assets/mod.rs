@@ -8,6 +8,8 @@ pub mod ac_formats;
 pub mod altair;
 pub mod anims;
 pub mod forge;
+pub mod world;
+pub mod static_mesh;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

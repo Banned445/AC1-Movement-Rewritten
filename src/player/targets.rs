@@ -44,6 +44,20 @@ pub const TARGET_LEDGE_FREE: u32 = 0x80;
 /// Ladder targets (flight `…_to_surface`, arrival `HumanInAir__CheckJumpTargetArrival` 0xE07D00 case 0x1000).
 pub const TARGET_LADDER: u32 = 0x1000;
 
+/// PORT: static post candidates depend on map geometry, not the jumper. Build after all placements load.
+pub(crate) fn find_jump_pilotis(guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<Vec3> {
+    let mut pilotis: Vec<Vec3> = Vec::new();
+    for e in &guidance.edges {
+        if e.subtype != GuidanceSubType::LedgeGrab { continue; }
+        let mid = (e.p0 + e.p1) * 0.5;
+        let into = -Vec3::new(e.n1.x, 0.0, e.n1.z);
+        if let Some(top) = super::narrow::find_pilotis(mid, mid, into, false, guidance, collision) {
+            if !pilotis.iter().any(|p| (*p - top).length() < 0.1) { pilotis.push(top); }
+        }
+    }
+    pilotis
+}
+
 pub fn find_jump_target(
     feet: Vec3,
     want_dir: Vec3,
@@ -54,23 +68,16 @@ pub fn find_jump_target(
     if want == Vec3::ZERO {
         return None;
     }
+    let horizontally_reachable = |pos: Vec3, far: f32| {
+        let flat = Vec3::new(pos.x-feet.x,0.0,pos.z-feet.z);
+        (0.6..=far).contains(&flat.length()) && flat.normalize().dot(want).clamp(-1.0,1.0).acos() <= TARGET_CONE
+    };
     let mut best: Option<(JumpTarget, f32, f32)> = None; // (target, dz, dist)
     // PORT: the game's guidance candidates for beams and pilotis (IHuman vt56/64/68) are not traced; the port
     // offers free-step targets (type 1) on them: the beam line (≥ 0.3 m from its ends) and the pilotis tops
     // (0xB2B600), whose arrivals mount them (0xE07D00 → 0xE50190 / 0xE52AD0).
-    let mut pilotis: Vec<Vec3> = Vec::new();
-    for e in &guidance.edges {
-        if e.subtype != GuidanceSubType::LedgeGrab {
-            continue;
-        }
-        let mid = (e.p0 + e.p1) * 0.5;
-        let into = -Vec3::new(e.n1.x, 0.0, e.n1.z);
-        if let Some(top) = super::narrow::find_pilotis(mid, mid, into, false, guidance, collision) {
-            if !pilotis.iter().any(|p| (*p - top).length() < 0.1) {
-                pilotis.push(top);
-            }
-        }
-    }
+    let pilotis = guidance.jump_pilotis.as_ref().filter(|_| collision.native_query_culling)
+        .cloned().unwrap_or_else(|| find_jump_pilotis(guidance,collision));
     let mut narrow: Vec<Vec3> = pilotis.clone();
     for e in &guidance.edges {
         if e.subtype != GuidanceSubType::Beam {
@@ -129,8 +136,19 @@ pub fn find_jump_target(
         let ahead = feet + want * 4.0;
         let on_edge = e.closest_point(Vec3::new(ahead.x, e.p0.y, ahead.z));
         let edge_dz = on_edge.y - feet.y;
+        // PORT: reject unreachable edges before the expensive clearance / hang / opposite-edge probes.
+        // Keep slack for roof inset, hang offset and hand fitting; final scoring still uses the exact target.
+        let reach = GROUND_FAR.max(LEDGE_JUMP_FAR) + 2.0 + Vec2::new(e.n1.x,e.n1.z).length() * 0.5;
+        if collision.native_query_culling && Vec2::new(on_edge.x-feet.x,on_edge.z-feet.z).length_squared() > reach * reach {
+            continue;
+        }
 
-        let thin = super::passover::far_edge(on_edge, -Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero(), guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS);
+        if collision.native_query_culling && edge_dz <= GROUND_MAX_UP
+            && !horizontally_reachable(on_edge + Vec3::new(e.n1.x,0.0,e.n1.z).normalize_or_zero()*0.5,GROUND_FAR)
+            && !horizontally_reachable(on_edge-e.n1*LAND_INSET,GROUND_FAR) { continue; }
+        let thin = if edge_dz <= GROUND_MAX_UP || !collision.native_query_culling {
+            super::passover::far_edge(on_edge, -Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero(), guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS)
+        } else { None };
         let candidate = if edge_dz <= GROUND_MAX_UP && thin.is_some() {
             // pass-over target (type 2) on a thin wall top. PORT: the game's type-2 guidance candidates are not traced;
             // the port offers wall tops ≤ 1 m thick (the vault's 30 ↔ 100 cm blend range, 0xDDB800). The target sits
@@ -146,6 +164,9 @@ pub fn find_jump_target(
         } else if edge_dz <= LEDGE_MAX_UP + WALL_HANG_DROP {
             // ledge target: hang from the edge (wall hang if there is wall below), both hands on the edge
             let on_edge = guidance.fit_hands(on_edge, e.n1);
+            if collision.native_query_culling
+                && !horizontally_reachable(on_edge+e.n1*WALL_HANG_OUT,LEDGE_JUMP_FAR)
+                && !horizontally_reachable(on_edge+e.n1*FREE_HANG_OUT,LEDGE_JUMP_FAR) { continue; }
             let hang =if collision.point_inside(on_edge - e.n1 * 0.15 - Vec3::Y * 0.9) {
                 LedgeHangType::Wall
             } else {
