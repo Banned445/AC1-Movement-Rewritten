@@ -4,6 +4,7 @@ use crate::assets::ac_formats::parse_skeleton;
 
 #[derive(Clone, Debug)]
 pub struct SkirtHinge {
+    pub equipment: bool,
     pub target: usize,
     pub force_reference: Option<usize>,
     pub constraint_reference: Option<usize>,
@@ -15,6 +16,8 @@ pub struct SkirtHinge {
     pub direction: usize,
     pub min: f32,
     pub max: f32,
+    pub soft_min: f32,
+    pub soft_max: f32,
     pub rest: Transform,
     pub reference_direction: Vec3,
 }
@@ -52,12 +55,13 @@ pub fn decode_hinges(data: &[u8]) -> Result<Vec<SkirtHinge>, String> {
             let force_reference = pointer(&mut r)?;
             let environment_strength = scalar(r)?;
             let axis = word(r + 4)? as usize; let direction = word(r + 8)? as usize;
-            // PORT: Rank 9 has one constraint and no soft zones; reject other layouts.
+            // PORT: support one authored constraint; multi-constraint intersection remains unported.
             if axis > 2 || direction > 2 || axis == direction || word(r + 12)? != 1 { return None; } r += 16;
             if word(r + 4)? != 3181564545 { return None; } r += 8; // embedded constraint class, 0x654EA8 / 0x438EF0
             let constraint_reference = pointer(&mut r)?;
             let min = scalar(r)?; let max = scalar(r + 4)?;
-            if min > max || scalar(r + 8)? != 0.0 || scalar(r + 12)? != 0.0 { return None; } r += 16;
+            let soft_min = scalar(r + 8)?; let soft_max = scalar(r + 12)?;
+            if min > max || soft_min < 0.0 || soft_max < 0.0 { return None; } r += 16;
             for k in 0..16 { scalar(r + 4 * k)?; } r += 64;
             let basis = [Vec3::X, Vec3::Y, Vec3::Z];
             let axis_vector = Vec3::new(scalar(r)?, scalar(r + 4)?, scalar(r + 8)?);
@@ -70,8 +74,8 @@ pub fn decode_hinges(data: &[u8]) -> Result<Vec<SkirtHinge>, String> {
                 let b = bones.iter().find(|b| b.bone_id as usize == id).unwrap();
                 Quat::from_array(b.global_rot).normalize().inverse() * owner_direction
             });
-            Some(SkirtHinge { target, force_reference, constraint_reference, inertia, damping, force, environment_strength,
-                axis, direction, min, max, rest, reference_direction })
+            Some(SkirtHinge { equipment: false, target, force_reference, constraint_reference, inertia, damping, force, environment_strength,
+                axis, direction, min, max, soft_min, soft_max, rest, reference_direction })
         };
         result.push(decode().ok_or("unsupported skirt hinge layout")?);
     }
@@ -116,13 +120,22 @@ impl HingeState {
             let offset = reference_direction.map_or(0.0, |r| -signed_projected_angle(basis(base, h.direction), r, axis));
             let predicted = self.velocity * step + offset + angle;
             let clamped = predicted.clamp(h.min, h.max);
-            if predicted < h.min && self.velocity <= 0.0 || predicted > h.max && self.velocity >= 0.0 { self.velocity = 0.0; }
+            self.velocity = constrained_velocity(predicted, self.velocity, h.min, h.max, h.soft_min, h.soft_max);
             angle = clamped - offset;
             solved = base * Mat4::from_quat(Quat::from_axis_angle([Vec3::X, Vec3::Y, Vec3::Z][h.axis], angle));
             self.cached = Some(solved);
         }
         solved
     }
+}
+
+fn constrained_velocity(angle: f32, velocity: f32, min: f32, max: f32, soft_min: f32, soft_max: f32) -> f32 {
+    // HingeBoneModifier__Update 0x654090: clamp outward velocity, then authored soft-zone ramps.
+    if angle < min { return if velocity <= 0.0 { 0.0 } else { velocity }; }
+    if angle < min + soft_min { return if velocity < 0.0 { (angle-min)*velocity/soft_min } else { velocity }; }
+    if angle > max { return if velocity >= 0.0 { 0.0 } else { velocity }; }
+    if angle > max - soft_max && velocity >= 0.0 { return (max-angle)*velocity/soft_max; }
+    velocity
 }
 
 #[cfg(test)]
@@ -138,9 +151,21 @@ mod tests {
         assert_eq!(signed_projected_angle(Vec3::X, -Vec3::X, Vec3::Z), std::f32::consts::PI);
     }
     fn hinge() -> SkirtHinge {
-        SkirtHinge { target: 1, force_reference: None, constraint_reference: None,
+        SkirtHinge { equipment: false, target: 1, force_reference: None, constraint_reference: None,
             inertia: 0.2, damping: 0.5, force: Vec3::ZERO, environment_strength: 0.0,
-            axis: 2, direction: 0, min: -0.4, max: 0.6, rest: Transform::IDENTITY, reference_direction: Vec3::X }
+            axis: 2, direction: 0, min: -0.4, max: 0.6, soft_min: 0.0, soft_max: 0.0, rest: Transform::IDENTITY, reference_direction: Vec3::X }
+    }
+    #[test]
+    fn soft_limits_damp_only_outward_motion_with_native_branch_order() {
+        assert_eq!(constrained_velocity(-0.75, -4.0, -1.0, 1.0, 0.5, 0.5), -2.0);
+        assert_eq!(constrained_velocity(-0.75, 4.0, -1.0, 1.0, 0.5, 0.5), 4.0);
+        assert_eq!(constrained_velocity(0.75, 4.0, -1.0, 1.0, 0.5, 0.5), 2.0);
+        assert_eq!(constrained_velocity(0.75, -4.0, -1.0, 1.0, 0.5, 0.5), -4.0);
+        assert_eq!(constrained_velocity(-1.1, -4.0, -1.0, 1.0, 0.0, 0.0), 0.0);
+        assert_eq!(constrained_velocity(1.1, 4.0, -1.0, 1.0, 0.0, 0.0), 0.0);
+        assert_eq!(constrained_velocity(0.0, 4.0, -1.0, 1.0, 0.0, 0.0), 4.0);
+        // Native checks the lower soft zone before the upper bound for overlapping authored zones.
+        assert_eq!(constrained_velocity(1.1, 4.0, -1.0, 1.0, 3.0, 0.0), 4.0);
     }
     #[test]
     fn authored_limits_stop_outward_velocity_and_keep_position() {

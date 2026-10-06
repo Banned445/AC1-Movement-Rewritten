@@ -48,6 +48,20 @@ fn altair_model_loads_from_install() {
         return;
     }
     let m = load_altair(&game_dir()).expect("load Altaïr");
+    let names: std::collections::HashSet<_> = m.parts.iter().map(|p| p.name.as_str()).collect();
+    let required = super::altair::PARTS.iter().chain(super::altair::EXTRA_PARTS).copied().collect::<std::collections::HashSet<_>>();
+    assert_eq!(names, required, "the full Rank 9 appearance must load");
+    for part in &m.parts {
+        assert!(!part.positions.is_empty(), "{}: empty mesh", part.name);
+        for len in [part.normals.len(), part.tangents.len(), part.uvs.len(), part.joints.len(), part.weights.len()] {
+            assert_eq!(len, part.positions.len(), "{}: incomplete vertex stream", part.name);
+        }
+        for (indices, texture) in &part.sections {
+            assert_eq!(indices.len() % 3, 0, "{}: incomplete triangle", part.name);
+            assert!(indices.iter().all(|&i| (i as usize) < part.positions.len()), "{}: invalid triangle", part.name);
+            assert!(texture.is_some_and(|id| m.textures.contains_key(&id)), "{}: missing diffuse texture", part.name);
+        }
+    }
     let body = m.parts.iter().find(|p| p.name == "UCMA_Altair_Body_C").expect("body part");
     assert_eq!(body.positions.len(), 3128);
     let tris: usize = body.sections.iter().map(|s| s.0.len() / 3).sum();
@@ -90,6 +104,36 @@ fn altair_atlas_and_normal_maps_from_install() {
             let tex = &m.normal_textures[id];
             assert_eq!(tex.mips[0].len(), (tex.width * tex.height * 4) as usize);
         }
+    }
+}
+
+#[test]
+fn character_authored_materials_and_shader_dependencies_from_install() {
+    if !install_present() { eprintln!("skipped: game install not found"); return; }
+    let model = load_altair(&game_dir()).expect("load character materials");
+    let mut styles = std::collections::HashSet::new();
+    for part in &model.parts {
+        assert_eq!(part.sections.len(), part.materials.len());
+        assert_eq!(part.sections.len(), part.inside_materials.len());
+        for m in part.materials.iter().chain(part.inside_materials.iter().flatten()) {
+            let style = m.style().unwrap();
+            styles.insert(style);
+            if style != 1 && style != 4 { assert!(m.specular_map.is_some(), "{}: specular map missing", part.name); }
+            for id in [m.specular_map, m.multiply_map, m.ramp].into_iter().flatten() {
+                assert!(model.material_textures.contains_key(&id));
+            }
+            if style == 4 { assert!(m.eye_cube.is_some_and(|id| model.cube_textures.contains_key(&id))); }
+        }
+    }
+    assert_eq!(styles, [0, 1, 2, 3, 4].into_iter().collect());
+    let cloth = model.parts.iter().flat_map(|p| &p.materials).find(|m| m.template == 433482562 && m.scalar("SpecularPower", 0.0) == 2.0).unwrap();
+    assert!((cloth.scalar("SpecularFactor", 0.0) - 4.675857).abs() < 1e-5);
+    let skin = model.parts.iter().flat_map(|p| &p.materials).find(|m| m.template == 433482821).unwrap();
+    assert!((skin.scalar("SpecularPower", 0.0) - 1.415).abs() < 1e-5);
+    for cube in model.cube_textures.values() {
+        assert_eq!(cube.size, 32);
+        assert_eq!(cube.mips.len(), 6);
+        for (m, bytes) in cube.mips.iter().enumerate() { assert_eq!(bytes.len(), ((32u32 >> m).max(1).pow(2) * 4 * 6) as usize); }
     }
 }
 
@@ -244,10 +288,16 @@ fn character_attachments_and_cloth_constraints_from_install() {
     let cloth = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap().cloth.as_ref().expect("cloth settings");
     assert_eq!(m.visual_rotation_copies.len(), 2);
     assert_eq!(m.visual_compressions.len(), 1);
-    assert_eq!(m.visual_look_at.len(), 1);
-    assert_eq!(m.visual_hinges.len(), 16);
+    assert_eq!(m.visual_look_at.len(), 2);
+    assert_eq!(m.visual_hinges.len(), 20);
+    assert_eq!(m.visual_hinges.iter().filter(|h| h.equipment).count(), 4);
+    assert_eq!(m.visual_look_at.iter().filter(|v| v.equipment).count(), 1);
+    assert_eq!(m.visual_hinges.iter().filter(|h| h.soft_min > 0.0).count(), 1, "authored sword soft limit");
+    assert_eq!(m.visual_look_at.iter().filter(|m| m.aim_axis == 0).count(), 1, "hood aim frame");
     assert!(m.visual_hinges.iter().all(|h| h.target >= m.skeleton.len() && h.min <= h.max && h.rest.rotation.is_finite()));
-    assert!(m.visual_look_at.iter().all(|m| m.target >= 90 && m.aim < 90));
+    assert!(m.visual_look_at.iter().all(|v| v.target >= m.skeleton.len()
+        && v.aim < m.skeleton.len() + m.visual_bones.len() && v.target != v.aim));
+    assert!(m.visual_look_at.iter().filter(|v| v.aim_axis == 2).all(|v| v.aim < m.skeleton.len()));
     assert!(m.visual_compressions.iter().all(|c| c.target >= m.skeleton.len() && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
     assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
     assert_eq!(cloth.pinned.len(), 146);
