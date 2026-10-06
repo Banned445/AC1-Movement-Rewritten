@@ -269,6 +269,8 @@ pub struct HumanNarrowObjectData {
     pub state: BeamState,
     pub action: Option<ActionBlend>,
     pub t: f32,
+    /// Timer at beam +1968: entry sets its deadline to now +0.2 s (RE/05 §2.13, 0xF738A0 / 0x41F440).
+    impulse_elapsed: f32,
     /// Leading foot of the next walk item (0 left, 1 right).
     pub foot: usize,
     pub entry_from: Vec3,
@@ -364,6 +366,7 @@ impl HumanNarrowObjectData {
     }
 
     fn play(&mut self, state: BeamState, a: Option<ActionBlend>) {
+        if state == BeamState::ImpulseIn { self.impulse_elapsed = 0.0; }
         self.state = state;
         self.action = a;
         self.t = 0.0;
@@ -920,6 +923,7 @@ pub fn update_narrow(
         }
         let n = &mut data.narrow;
         n.t += dt;
+        if matches!(n.state, BeamState::ImpulseIn | BeamState::ImpulseWait) { n.impulse_elapsed += dt; }
         // Main loses support when neither the current nor next beam survives detection (0xF808D0).
         // PORT: reuse the existing ballistic fall; the native callback 0xF6ECF0 plays runtime action 33.
         if BEAM_COMPLETION && n.kind == NarrowKind::Beam
@@ -985,17 +989,6 @@ pub fn update_narrow(
             }
         }
 
-        // Event 16: buffered empty hand, accepted in Idle / Walk (0xEE9AF0, 0xF7A4F0 / 0xF7F150).
-        if BEAM_COMPLETION && n.kind == NarrowKind::Beam
-            && matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk)
-            && pad.hand_pressed_ago <= 0.2 {
-            if let Some(entry) = climb_from_beam(n.stand(), facing, n.foot == 1, &guidance, &collision) {
-                pad.hand_pressed_ago = f32::INFINITY;
-                switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
-                continue;
-            }
-        }
-
         // ------------------------------------------------ the wall run (event 15, Walk only)
         // 0xEE9AF0: high profile, Legs pressed, the stick > 0.35 within 60° of the facing; tested before the jumps.
         // Guard `CanWallRun` 0xF77DC0 = the wall test 0xE18390 (1.5·h ahead), fill 0xB263B0 → Walling.
@@ -1037,9 +1030,13 @@ pub fn update_narrow(
 
         // ------------------------------------------------ jumps (high profile + Legs, 0xEE9AF0 / 0xEE8EC0)
         let jump = pad.high_profile && pad.jump_buffered();
+        let impulsion = matches!(n.state, BeamState::ImpulseIn | BeamState::ImpulseWait);
+        let impulse_ready = n.impulse_elapsed >= 0.2;
         let can_jump = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::ImpulseWait | BeamState::PilotisWait)
+            || (BEAM_COMPLETION && n.state == BeamState::ImpulseIn && impulse_ready)
             || (!BEAM_COMPLETION && n.state == BeamState::Stop);
-        if jump && can_jump {
+        // 0xF7A740 gates events 4 / 5 / 6 on the timer, independently of the entry clip.
+        if jump && can_jump && (!BEAM_COMPLETION || !impulsion || impulse_ready) {
             let feet = n.stand();
             // event 4: a target in the stick direction → free-step jump (kind 1)
             if stick {
@@ -1051,7 +1048,7 @@ pub fn update_narrow(
                     continue;
                 }
             }
-            if n.state == BeamState::ImpulseWait {
+            if n.state == BeamState::ImpulseWait || (BEAM_COMPLETION && n.state == BeamState::ImpulseIn) {
                 // events 5 / 6 (+148, 0xF717D0): the jump on the spot, at a hand target when there is one
                 pad.consume_jump();
                 n.hand_target = super::ground::straight_hand_target(feet, facing, &guidance, &collision, true);
@@ -1064,6 +1061,18 @@ pub fn update_narrow(
                     else if BEAM_COMPLETION && n.across.is_some() { item(BEAM_90_TO_IMPULSE, 0, &[]) }
                     else { item(BEAM_TO_IMPULSE[n.foot], 0, &[]) };
                 n.play(BeamState::ImpulseIn, id);
+            }
+        }
+        let n = &mut data.narrow;
+
+        // Event 16 is the interpreter's final movement attempt, after wall runs / hops / jumps (0xEE9AF0).
+        if BEAM_COMPLETION && n.kind == NarrowKind::Beam
+            && matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk)
+            && pad.hand_pressed_ago <= 0.2 {
+            if let Some(entry) = climb_from_beam(n.stand(), facing, n.foot == 1, &guidance, &collision) {
+                pad.hand_pressed_ago = f32::INFINITY;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
+                continue;
             }
         }
         let n = &mut data.narrow;
@@ -1292,14 +1301,18 @@ pub fn update_narrow(
                 }
             }
             BeamState::ImpulseIn => {
-                if done {
+                // 0xF80560 can resume Main before the entry clip ends, once the 0.2 s timer expires.
+                if BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward && n.impulse_elapsed >= 0.2 {
+                    n.across = None;
+                    n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w));
+                } else if done {
                     let w = item(BEAM_IMPULSE_WAIT, 0, &[]);
                     n.play(BeamState::ImpulseWait, w);
                 }
             }
             BeamState::ImpulseWait => {
                 // 0xF80560: only forward input resumes walking; pilotis waits for an event.
-                if (BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward) || (!BEAM_COMPLETION && stick) {
+                if (BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward && n.impulse_elapsed >= 0.2) || (!BEAM_COMPLETION && stick) {
                     if BEAM_COMPLETION {
                         n.across = None;
                         n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w));

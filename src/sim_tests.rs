@@ -1408,6 +1408,49 @@ fn beam_impulsion_keeps_side_and_back_input_but_resumes_forward() {
 }
 
 #[test]
+fn beam_impulsion_resumes_after_timer_before_entry_clip_end() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
+    assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
+    let duration = s.data().narrow.action.unwrap().duration();
+    assert!(duration > 0.25, "fixture must distinguish the timer from clip completion");
+    s.pad(Vec3::X, 1.0, true, false);
+    s.run(0.18);
+    assert_eq!(s.data().narrow.state, BeamState::ImpulseIn, "forward stays gated before 0.2 s");
+    assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::Walk), "forward remains blocked after the deadline");
+    let x = s.body().feet.x;
+    s.run(0.1);
+    assert!(s.body().feet.x > x, "resumed walk must move the root");
+}
+
+#[test]
+fn beam_impulsion_jump_obeys_timer_during_entry_clip() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
+    assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
+    s.run(0.1); s.press_legs(); s.run(0.08);
+    assert_eq!(s.data().narrow.state, BeamState::ImpulseIn, "jump stays gated before 0.2 s");
+    assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::JumpOnPlace), "buffered jump must enter on the timer, before clip end");
+}
+
+#[test]
+fn beam_impulsion_deadline_resets_on_reentry() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    for _ in 0..2 {
+        s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
+        assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
+        s.pad(Vec3::X, 1.0, true, false); s.run(0.18);
+        assert_eq!(s.data().narrow.state, BeamState::ImpulseIn);
+        assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::Walk));
+        s.pad(Vec3::ZERO, 0.0, false, false);
+        assert!(s.run_until(1.0, |s| s.data().narrow.state == BeamState::Wait));
+    }
+}
+
+#[test]
 fn beam_step_off_travels_instead_of_teleporting_to_ground() {
     use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
     let point = Vec3::new(77.5, 4.0, 70.0);
