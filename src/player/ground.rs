@@ -477,7 +477,13 @@ pub fn update_ground(
                     entry.foot = g.blend.foot;
                     entry.action = Some(super::jump_blend::ActionBlend::new(super::move_blend::ACT_GROUND_LOCOMOTION, g.blend.foot, &g.blend.weights));
                 }
+                let phase = g.blend.phase;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(entry));
+                if super::narrow::BEAM_COMPLETION {
+                    // The incoming locomotion action carries on (0xF7AAA0 mode 1): keep its phase, not item start.
+                    let n = &mut data.narrow;
+                    n.t = phase * n.action.map(|a| a.duration()).unwrap_or(0.0);
+                }
                 continue;
             }
         }
