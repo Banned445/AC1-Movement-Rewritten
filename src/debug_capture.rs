@@ -136,7 +136,8 @@ impl Plugin for DebugCapturePlugin {
                 _ => Scenario::Roofs,
             };
             app.insert_resource(sc)
-                .add_systems(PostStartup, place)
+                // Map initialization resets the player; scripted placement must run afterward.
+                .add_systems(PostStartup, place.after(crate::map_menu::initialize))
                 .add_systems(PreUpdate, autopilot.after(crate::input::read_pad));
         }
         if std::env::var("AC_TESTPOSE").is_ok() {

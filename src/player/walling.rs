@@ -61,6 +61,22 @@ pub enum WallingSubState {
     VerticalEnd = 6,
 }
 
+#[cfg(test)]
+mod beam_warp_tests {
+    use super::*;
+
+    #[test]
+    fn beam_wall_run_reaches_contact_at_130_ms_then_keeps_root_motion() {
+        let mut w = HumanWallingData::default();
+        let target = Vec3::new(0.0, 1.0, -0.8);
+        w.enter(WallingEntry { contact: target, normal: Vec3::Z, from: Vec3::ZERO, warp_duration: Some(0.13) });
+        assert!(w.root_at(0.0).length() < 1e-6);
+        assert!(w.root_at(0.13).distance(target) < 1e-5);
+        assert!(w.root_at(0.14).distance(w.root_at(0.13)) < 0.1);
+        assert!(w.root_at(0.3).y > target.y);
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct WallingEntry {
     /// Warp target of the entry (0xE18390 output): 0.5·h out from the wall, h above the feet.
@@ -68,6 +84,8 @@ pub struct WallingEntry {
     /// Outward wall normal.
     pub normal: Vec3,
     pub from: Vec3,
+    /// Beam event 15 uses a 0.13 s warp (0xB263B0); ground entries use the action length.
+    pub warp_duration: Option<f32>,
 }
 
 #[derive(Debug, Default)]
@@ -84,6 +102,7 @@ pub struct HumanWallingData {
     pub seq: u32,
     /// HumanWallingData+0x14.
     pub start_height: f32,
+    warp_duration: Option<f32>,
 }
 
 fn single(id: u32, item: usize) -> Option<ActionBlend> {
@@ -109,10 +128,12 @@ impl HumanWallingData {
         self.normal = e.normal;
         self.start_height = e.from.y;
         self.play(WallingSubState::EntryA, single(ENTRY_A, 0), None, e.from, Some(e.contact));
+        self.warp_duration = e.warp_duration;
     }
 
     fn play(&mut self, sub: WallingSubState, a: Option<ActionBlend>, next: Option<ActionBlend>, from: Vec3, to: Option<Vec3>) {
         self.sub_state = sub;
+        self.warp_duration = None;
         self.action = a;
         self.action_next = next;
         self.t = 0.0;
@@ -147,8 +168,9 @@ impl HumanWallingData {
             };
             a + b
         };
-        let end = self.from + disp_at(total);
-        self.from + disp_at(t) + (self.to - end) * (t / total).min(1.0)
+        let warp = self.warp_duration.unwrap_or(total).max(1e-4);
+        let end = self.from + disp_at(warp);
+        self.from + disp_at(t) + (self.to - end) * (t / warp).min(1.0)
     }
 
     /// The action playing now and its phase (for the animator).

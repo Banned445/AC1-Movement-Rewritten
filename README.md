@@ -77,7 +77,7 @@ slice imports a small section of the original environment.
 | Ledges: hang, shimmy, corners, pull-up, drops | Mostly working. Hand spacing after a shimmy is a placeholder |
 | Climbing on walls, climb jumps | Working, with placeholders in hold choice and some jump paths |
 | Wall runs | Working |
-| Beams: walking, 90° turns, pull-down to a hang, corner hops, bends | Mostly working. Falling off a beam is missing |
+| Beams: walking, 90° turns, pull-down, corner hops, bends, support loss and climb starts | Mostly working. Entry and step-off use locomotion; bends steer gradually and hop landings move. Native timing and obstacle target selection still need comparison |
 | Ladders | Mostly working. The ladder turn and the hang's side jump are missing |
 | Swing bars | Working |
 | Animation: blending, transitions, foot and hand IK | Partial. Transitions into the ground run are skipped for now, which is the main source of choppy switches |
