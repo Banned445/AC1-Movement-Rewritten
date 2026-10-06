@@ -175,10 +175,15 @@ mod completion_tests {
         let mut g = GuidanceWorld::default();
         g.edges.push(crate::guidance::GuidanceEdge { p0: Vec3::X * -20.0, p1: Vec3::X * 20.0,
             n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::Beam });
-        assert!(detect_beam(Vec3::ZERO, Vec3::X, &g).is_some());
-        assert!(detect_beam(Vec3::ZERO, Vec3::Z, &g).is_some());
-        assert!(detect_beam(Vec3::Z * 3.0, Vec3::X, &g).is_none());
-        assert!(detect_beam(Vec3::Y * 0.6, Vec3::X, &g).is_none());
+        assert!(detect_beam(Vec3::ZERO, Vec3::X, None, &g).is_some());
+        assert!(detect_beam(Vec3::ZERO, Vec3::Z, None, &g).is_some());
+        assert!(detect_beam(Vec3::Z * 3.0, Vec3::X, None, &g).is_none());
+        assert!(detect_beam(Vec3::Y * 0.6, Vec3::X, None, &g).is_none());
+        // A crossing beam nearer the root must not take over the current support.
+        let current = (Vec3::new(-20.0, 0.0, 0.3), Vec3::new(20.0, 0.0, 0.3));
+        g.edges.push(crate::guidance::GuidanceEdge { p0: current.0, p1: current.1, n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::Beam });
+        assert_eq!(detect_beam(Vec3::ZERO, Vec3::X, None, &g), Some((Vec3::X * -20.0, Vec3::X * 20.0)));
+        assert_eq!(detect_beam(Vec3::ZERO, Vec3::X, Some(current), &g), Some(current));
     }
 }
 
@@ -785,7 +790,9 @@ fn clip_segment(a: Vec3, b: Vec3, c: Vec3, axes: [Vec3; 3], half: [f32; 3]) -> O
 }
 
 /// Current-segment passes of 0xF753A0: 60° cone, rotated 90°, then the ±1 m box without a cone.
-fn detect_beam(root: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3)> {
+fn detect_beam(root: Vec3, forward: Vec3, current: Option<(Vec3, Vec3)>, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3)> {
+    // The current segment wins whenever it passes: a nearer crossing or branching beam must not take over the support.
+    let is_current = |p0: Vec3, p1: Vec3| current.is_some_and(|(c0, c1)| (p0 == c0 && p1 == c1) || (p0 == c1 && p1 == c0));
     for (f, along, side, cone) in [(forward, 2.0, 0.5, 0.5), (super::right_of(forward), 2.0, 0.5, 0.5), (forward, 1.0, 1.0, 0.0)] {
         let right = super::right_of(f);
         let mut best: Option<(f32, Vec3, Vec3)> = None;
@@ -797,6 +804,7 @@ fn detect_beam(root: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<(V
             let (a, b) = (e.p0.lerp(e.p1, lo), e.p0.lerp(e.p1, hi));
             let d = b - a;
             let point = a + d * ((root - a).dot(d) / d.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            if is_current(e.p0, e.p1) { return Some((e.p0, e.p1)); }
             let distance = point.distance_squared(root);
             if best.is_none_or(|best| distance < best.0) { best = Some((distance, e.p0, e.p1)); }
         }
@@ -954,7 +962,7 @@ pub fn update_narrow(
         if BEAM_COMPLETION && n.kind == NarrowKind::Beam
             && !matches!(n.state, BeamState::Entry | BeamState::Reception | BeamState::HopStart | BeamState::Hop | BeamState::HopEnd | BeamState::StepOff)
         {
-            if let Some((p0, p1)) = detect_beam(body.feet, body.forward(), &guidance) {
+            if let Some((p0, p1)) = detect_beam(body.feet, body.forward(), Some((n.p0, n.p1)), &guidance) {
                 if (p0 == n.p0 && p1 == n.p1) || (p1 == n.p0 && p0 == n.p1) {
                     // The current support remains valid.
                 } else {
@@ -1063,7 +1071,8 @@ pub fn update_narrow(
         let can_jump = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::ImpulseWait | BeamState::PilotisWait)
             || (BEAM_COMPLETION && n.state == BeamState::ImpulseIn && impulse_ready)
             || (!BEAM_COMPLETION && n.state == BeamState::Stop);
-        // 0xF7A740 gates events 4 / 5 / 6 on the timer, independently of the entry clip.
+        // 0xF7A740 gates events 4 / 5 / 6 on the timer, independently of the entry clip. The jog stop accepts no
+        // event at all (`Main_CanHandleEvent` 0xF7FB60 returns 1 for sub-state +97, `PlayJogStop` 0xF6EE90).
         if jump && can_jump && (!BEAM_COMPLETION || !impulsion || impulse_ready) {
             let feet = n.stand();
             // event 4: a target in the stick direction → free-step jump (kind 1)
@@ -1165,7 +1174,7 @@ pub fn update_narrow(
                     let off = (body.feet - n.point(n.s)).with_y(0.0);
                     n.lateral = off - n.dir() * off.dot(n.dir());
                     if Vec2::new(body.feet.x - n.entry_from.x, body.feet.z - n.entry_from.z).length_squared() > 0.25
-                        || n.to_end() <= BEAM_END_STOP || moved.position.distance_squared(dest) > 1e-6 {
+                        || n.to_end() <= BEAM_END_STOP || moved.hit_wall {
                         if forward { n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w)); }
                         else { n.wait_state(); }
                     } else if done {
@@ -1386,7 +1395,7 @@ pub fn update_narrow(
                 let moved = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, dest - b.feet, true, dt) };
                 body.feet = moved.position;
                 body.heading = super::heading_of(facing);
-                if (n.step_off_to - body.feet).dot(facing) <= 0.0 || moved.position.distance_squared(dest) > 1e-6 {
+                if (n.step_off_to - body.feet).dot(facing) <= 0.0 || moved.hit_wall {
                     let foot = n.foot;
                     let phase = (n.t / dur).min(1.0);
                     let blocked = moved.hit_wall;
