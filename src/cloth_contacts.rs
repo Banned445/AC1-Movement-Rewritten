@@ -110,9 +110,33 @@ pub fn distribute_bounded(positions: &mut [Vec3], triangle: [usize; 3], pinned: 
     distribute(positions, triangle, pinned, weights, correction.clamp_length_max(limit * denominator / maximum));
 }
 
+/// PORT: one bounded separation constraint across both surfaces, respecting fixed vertices.
+pub fn separate_bounded(positions: &mut [Vec3], a: [usize; 3], b: [usize; 3], pinned: &[bool], aw: Vec3, bw: Vec3, correction: Vec3, limit: f32) {
+    let movable = |ids: [usize; 3], weights: Vec3| (0..3).any(|k| !pinned[ids[k]] && weights[k] > 1e-8);
+    let a_free = movable(a, aw);
+    let b_free = movable(b, bw);
+    // Keep the existing equal split when both sides move; transfer the fixed side's share.
+    let share = if a_free && b_free { 0.5 } else { 1.0 };
+    if a_free { distribute_bounded(positions, a, pinned, aw, correction * share, limit); }
+    if b_free { distribute_bounded(positions, b, pinned, bw, -correction * share, limit); }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn separation_uses_only_movable_surface_weights() {
+        for pinned in [[false; 6], [true, true, true, false, false, false], [false, false, false, true, true, true]] {
+            let mut p = vec![Vec3::ZERO; 6];
+            separate_bounded(&mut p, [0, 1, 2], [3, 4, 5], &pinned, Vec3::X, Vec3::splat(1.0 / 3.0), Vec3::Y * 0.008, 0.01);
+            let separation = p[0] - (p[3] + p[4] + p[5]) / 3.0;
+            assert!((separation.y - 0.008).abs() < 1e-6);
+            assert!((0..6).all(|i| !pinned[i] || p[i] == Vec3::ZERO));
+        }
+        let mut p = vec![Vec3::ZERO; 6];
+        separate_bounded(&mut p, [0, 1, 2], [3, 4, 5], &[false; 6], Vec3::X, Vec3::splat(1.0 / 3.0), Vec3::Y, 0.01);
+        assert!(p.iter().all(|v| v.length() <= 0.010001));
+    }
     #[test]
     fn detects_segment_crossing_triangle_with_all_vertices_outside() {
         let triangle = [Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0)];

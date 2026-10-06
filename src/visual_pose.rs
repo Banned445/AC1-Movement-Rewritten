@@ -5,6 +5,11 @@ use crate::assets::ac_formats::parse_skeleton;
 // PORT: opt-in until the complete modifier chain removes the observed jump-contact regression.
 pub const SKIRT_ROTATION_COPIES: bool = false;
 
+pub fn skirt_modifiers_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| (SKIRT_ROTATION_COPIES || std::env::var_os("AC_SKIRT_ROTATION_COPIES").is_some()) && std::env::var_os("AC_NO_SKIRT_ROTATION_COPIES").is_none())
+}
+
 #[derive(Clone, Debug)]
 pub struct SkirtCompression {
     pub target: usize,
@@ -188,9 +193,8 @@ fn copy_rotations(local: &mut [Transform], parents: &[Option<usize>], copies: &[
     }
 }
 
-pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut VisualRotationCopies)>, mut transforms: Query<&mut Transform>, mut enabled: Local<Option<bool>>) {
-    let enabled = *enabled.get_or_insert_with(|| (SKIRT_ROTATION_COPIES || std::env::var_os("AC_SKIRT_ROTATION_COPIES").is_some()) && std::env::var_os("AC_NO_SKIRT_ROTATION_COPIES").is_none());
-    if !enabled { return; }
+pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut VisualRotationCopies)>, mut transforms: Query<&mut Transform>) {
+    if !skirt_modifiers_enabled() { return; }
     if time.delta_secs() <= 0.0 { return; }
     for (player, mut rig) in &mut rigs {
         let (Ok(player_pose), Ok(root_pose)) = (transforms.get(player), transforms.get(rig.root)) else { continue; };
@@ -202,7 +206,7 @@ pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut Vis
         rig.previous_anchor = Some(anchor);
         let Some(mut local) = rig.joints.iter().map(|&joint| transforms.get(joint).ok().copied()).collect::<Option<Vec<_>>>() else { continue; };
         // Root's authored list is compression then look-at; native preserves owner-list order (0x4E6820).
-        // PORT: remaining hinge owners and native pose-slot blending are still unported.
+        // PORT: native pose-slot blending is still unported.
         compress_pose(&mut local, &rig.parents, &rig.compressions);
         look_at_pose(&mut local, &rig.parents, &rig.look_at);
         copy_rotations(&mut local, &rig.parents, &rig.copies);

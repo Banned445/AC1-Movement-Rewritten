@@ -424,8 +424,13 @@ fn fold_contacts(settings: &ClothSettings, positions: &mut [Vec3], previous: &[V
                 normal.dot(positions[edge_ids[j]] - c.point).total_cmp(&normal.dot(positions[edge_ids[k]] - c.point))).unwrap();
             let depth = (0.002 - normal.dot(positions[edge_ids[endpoint]] - c.point)).max(0.002);
             let mut endpoint_weights = Vec3::ZERO; endpoint_weights[endpoint] = 1.0;
-            crate::cloth_contacts::distribute_bounded(positions, edge_ids, &settings.pinned, endpoint_weights, normal * depth * 0.5, 0.01);
-            crate::cloth_contacts::distribute_bounded(positions, face_ids, &settings.pinned, c.weights, -normal * depth * 0.5, 0.01);
+            // PORT: stronger pinned-side separation is validated only with the complete skirt pose.
+            if crate::visual_pose::skirt_modifiers_enabled() {
+                crate::cloth_contacts::separate_bounded(positions, edge_ids, face_ids, &settings.pinned, endpoint_weights, c.weights, normal * depth, 0.01);
+            } else {
+                crate::cloth_contacts::distribute_bounded(positions, edge_ids, &settings.pinned, endpoint_weights, normal * depth * 0.5, 0.01);
+                crate::cloth_contacts::distribute_bounded(positions, face_ids, &settings.pinned, c.weights, -normal * depth * 0.5, 0.01);
+            }
         }
     }
     count

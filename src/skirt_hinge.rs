@@ -80,10 +80,18 @@ pub fn decode_hinges(data: &[u8]) -> Result<Vec<SkirtHinge>, String> {
 
 fn basis(m: Mat4, axis: usize) -> Vec3 { [m.x_axis, m.y_axis, m.z_axis][axis].truncate() }
 fn signed_projected_angle(a: Vec3, b: Vec3, axis: Vec3) -> f32 {
+    // 0x653FA2 / 0x653FCB: nearly axis-aligned directions have no measurable angle.
+    let a_axis = a.dot(axis);
+    let b_axis = b.dot(axis);
+    if (a_axis - 1.0).abs() <= 0.0005 || (b_axis - 1.0).abs() <= 0.0005 { return 0.0; }
     let Some(a) = (a - axis * a.dot(axis)).try_normalize() else { return 0.0; };
     let Some(b) = (b - axis * b.dot(axis)).try_normalize() else { return 0.0; };
     // Coordinate-equivalent signed angle to 0x653F00 / 0x55E570.
-    let angle = a.dot(b).clamp(-1.0, 1.0).acos();
+    let dot = a.dot(b);
+    // 0x55E4B8 / 0x55E4CB return endpoints before inspecting the cross-product sign.
+    if dot >= 1.0 { return 0.0; }
+    if dot <= -1.0 { return std::f32::consts::PI; }
+    let angle = dot.acos();
     if a.cross(b).dot(axis) < 0.0 { -angle } else { angle }
 }
 
@@ -120,6 +128,15 @@ impl HingeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn projected_angle_ignores_nearly_axis_aligned_directions() {
+        let near = Vec3::new(0.01, 0.0, 1.0).normalize();
+        assert_eq!(signed_projected_angle(near, Vec3::Y, Vec3::Z), 0.0);
+        assert_eq!(signed_projected_angle(Vec3::Y, near, Vec3::Z), 0.0);
+        let outside = Vec3::new(0.04, 0.0, 1.0).normalize();
+        assert!((signed_projected_angle(outside, Vec3::Y, Vec3::Z) - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        assert_eq!(signed_projected_angle(Vec3::X, -Vec3::X, Vec3::Z), std::f32::consts::PI);
+    }
     fn hinge() -> SkirtHinge {
         SkirtHinge { target: 1, force_reference: None, constraint_reference: None,
             inertia: 0.2, damping: 0.5, force: Vec3::ZERO, environment_strength: 0.0,
