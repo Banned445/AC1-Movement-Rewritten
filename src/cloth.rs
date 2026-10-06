@@ -4,12 +4,14 @@ use bevy::prelude::*;
 
 // PORT: final render contacts cover edge-pass penetration and frames without a solver step (RE/09 §8.3).
 const CLOTH_RENDER_CONTACT_GUARD: bool = true;
+const CLOTH_SURFACE_CONTACT_GUARD: bool = true;
 
 #[derive(Clone)]
 pub struct ClothSettings {
     pub pinned: Vec<bool>,
     pub pull: Vec<f32>,
     pub edges: Vec<[usize; 2]>,
+    pub triangles: Vec<[usize; 3]>,
     pub damping: f32,
     pub upward_damping: f32,
     pub gravity: f32,
@@ -242,10 +244,12 @@ pub fn decode_settings(mesh: &[u8], entity: &[u8], compiled: &[[f32; 3]]) -> Res
             || !(0.0..=1.0).contains(&damping) || !(0.0..=1.0).contains(&upward_damping)
             || !(0.0..=1.0).contains(&pull_min) || !(0.0..=1.0).contains(&pull_max) { return None; }
         let mut edges = Vec::new();
+        let mut triangles = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (tri, &mask) in indices.chunks_exact(6).zip(masks) {
             let v: Vec<usize> = tri.chunks_exact(2).map(|b| u16::from_le_bytes(b.try_into().unwrap()) as usize).collect();
             if v.iter().any(|&i| i >= n) { return None; }
+            triangles.push([to_render[v[0]], to_render[v[1]], to_render[v[2]]]);
             for k in 0..3 {
                 if mask & (1 << k) == 0 { continue; }
                 let (a, b) = (to_render[v[k]], to_render[v[(k + 1) % 3]]);
@@ -253,7 +257,7 @@ pub fn decode_settings(mesh: &[u8], entity: &[u8], compiled: &[[f32; 3]]) -> Res
                 if seen.insert(key) { edges.push([a, b]); }
             }
         }
-        Some(ClothSettings { pinned, pull, edges, damping, upward_damping, gravity, iterations, vertex_radius, colliders: Vec::new() })
+        Some(ClothSettings { pinned, pull, edges, triangles, damping, upward_damping, gravity, iterations, vertex_radius, colliders: Vec::new() })
     };
     decode().ok_or_else(|| "unsupported or inconsistent character cloth layout".into())
 }
@@ -281,6 +285,7 @@ pub struct ClothState {
     anchor: Option<Vec3>,
     contact_before: (usize, f32),
     contact_after: (usize, f32),
+    surface_guard: Option<bool>,
 }
 
 fn contact_report(settings: &ClothSettings, positions: &[Vec3], capsules: &[ClothCollider]) -> (usize, f32) {
@@ -320,6 +325,74 @@ fn escape_overlapping_capsules(position: Vec3, target: Vec3, rest: Vec3, radius:
         }
     }
     best
+}
+
+fn surface_contacts(settings: &ClothSettings, positions: &mut [Vec3], targets: &[Vec3], capsules: &[ClothCollider], apply: bool) -> usize {
+    let mut count = 0;
+    for &triangle in &settings.triangles {
+        if triangle.iter().all(|&i| settings.pinned[i]) { continue; }
+        for capsule in capsules {
+            if capsule.mode == 2 { continue; }
+            let vertices = triangle.map(|i| positions[i]);
+            let c = crate::cloth_contacts::segment_triangle(capsule.local_start, capsule.local_end, vertices);
+            let radius = capsule.radius + (0..3).map(|k| settings.vertex_radius[triangle[k]] * c.weights[k]).sum::<f32>();
+            let distance = c.point.distance(c.axis);
+            if distance >= radius - 0.001 { continue; }
+            count += 1;
+            if !apply { continue; }
+            let target: Vec3 = (0..3).map(|k| targets[triangle[k]] * c.weights[k]).sum();
+            let normal = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]).normalize_or_zero();
+            let outward = target - capsule.closest(target);
+            let normal = if normal.dot(outward) < 0.0 { -normal } else { normal };
+            let direction = (c.point - c.axis).try_normalize().unwrap_or_else(|| outward.try_normalize().unwrap_or(normal));
+            crate::cloth_contacts::distribute_bounded(positions, triangle, &settings.pinned, c.weights, direction * (radius - distance), 0.02);
+        }
+    }
+    count
+}
+
+fn fold_contacts(settings: &ClothSettings, positions: &mut [Vec3], previous: &[Vec3], apply: bool) -> usize {
+    let mut count = 0;
+    for (i, &a) in settings.triangles.iter().enumerate() {
+        for &b in &settings.triangles[i + 1..] {
+            if a.iter().any(|v| b.contains(v)) { continue; }
+            if a.iter().chain(&b).all(|&v| settings.pinned[v]) { continue; }
+            let av = a.map(|v| positions[v]);
+            let bv = b.map(|v| positions[v]);
+            let amin = av[0].min(av[1]).min(av[2]) - Vec3::splat(0.002);
+            let amax = av[0].max(av[1]).max(av[2]) + Vec3::splat(0.002);
+            let bmin = bv[0].min(bv[1]).min(bv[2]);
+            let bmax = bv[0].max(bv[1]).max(bv[2]);
+            if amin.cmpgt(bmax).any() || bmin.cmpgt(amax).any() { continue; }
+            let crossing = [(a, b, av, bv), (b, a, bv, av)].into_iter().find_map(|(edge_ids, face_ids, edge_vertices, face_vertices)| {
+                (0..3).find_map(|k| {
+                    let c = crate::cloth_contacts::segment_triangle(edge_vertices[k], edge_vertices[(k + 1) % 3], face_vertices);
+                    if c.point.distance_squared(c.axis) > 1e-10 { return None; }
+                    let edge = edge_vertices[(k + 1) % 3] - edge_vertices[k];
+                    if edge.length_squared() <= 1e-12 { return None; }
+                    let t = ((c.axis - edge_vertices[k]).dot(edge) / edge.length_squared()).clamp(0.0, 1.0);
+                    let mut weights = Vec3::ZERO; weights[k] = 1.0 - t; weights[(k + 1) % 3] = t;
+                    Some((c, weights, edge_ids, face_ids, face_vertices))
+                })
+            });
+            let Some((c, weights, edge_ids, face_ids, face_vertices)) = crossing else { continue; };
+            count += 1;
+            if !apply { continue; }
+            let Some(mut normal) = (face_vertices[1] - face_vertices[0]).cross(face_vertices[2] - face_vertices[0]).try_normalize() else { continue; };
+            let old_a: Vec3 = (0..3).map(|k| previous[edge_ids[k]] * weights[k]).sum();
+            let old_b: Vec3 = (0..3).map(|k| previous[face_ids[k]] * c.weights[k]).sum();
+            if normal.dot(old_a - old_b) < 0.0 { normal = -normal; }
+            // PORT: move the penetrating endpoint, not only the intersection point.
+            // A small offset at the intersection can leave the same edge crossing the face.
+            let endpoint = (0..3).filter(|&k| weights[k] > 0.0).min_by(|&j, &k|
+                normal.dot(positions[edge_ids[j]] - c.point).total_cmp(&normal.dot(positions[edge_ids[k]] - c.point))).unwrap();
+            let depth = (0.002 - normal.dot(positions[edge_ids[endpoint]] - c.point)).max(0.002);
+            let mut endpoint_weights = Vec3::ZERO; endpoint_weights[endpoint] = 1.0;
+            crate::cloth_contacts::distribute_bounded(positions, edge_ids, &settings.pinned, endpoint_weights, normal * depth * 0.5, 0.01);
+            crate::cloth_contacts::distribute_bounded(positions, face_ids, &settings.pinned, c.weights, -normal * depth * 0.5, 0.01);
+        }
+    }
+    count
 }
 
 impl ClothState {
@@ -396,6 +469,31 @@ impl ClothState {
                 self.previous[i] += *position - before;
             }
         }
+        let surface_guard = *self.surface_guard.get_or_insert_with(|| CLOTH_SURFACE_CONTACT_GUARD && std::env::var_os("AC_CLOTH_NO_SURFACE_GUARD").is_none());
+        if surface_guard && (dt > 0.0 || reset) {
+            let before = self.current.clone();
+            let initial_folds = fold_contacts(settings, &mut self.current, &self.previous, false);
+            let mut best_body = surface_contacts(settings, &mut self.current, targets, capsules, false);
+            let mut best_folds = initial_folds;
+            let mut best = before.clone();
+            for _ in 0..8 {
+                surface_contacts(settings, &mut self.current, targets, capsules, true);
+                fold_contacts(settings, &mut self.current, &self.previous, true);
+                for (i, p) in self.current.iter_mut().enumerate() {
+                    if !settings.pinned[i] { *p = escape_overlapping_capsules(*p, targets[i], rigid_rest[i], settings.vertex_radius[i], capsules); }
+                }
+                let body = surface_contacts(settings, &mut self.current, targets, capsules, false);
+                let folds = fold_contacts(settings, &mut self.current, &self.previous, false);
+                // PORT: retain only a pass that improves contacts without adding fold crossings.
+                // Pinned cloth and overlapping leg volumes can make all constraints incompatible.
+                if folds <= initial_folds && (body < best_body || (body == best_body && folds < best_folds)) {
+                    best.clone_from(&self.current); best_body = body; best_folds = folds;
+                }
+                if body == 0 && folds == 0 { break; }
+            }
+            self.current = best;
+            for (i, p) in self.current.iter().enumerate() { self.previous[i] += *p - before[i]; }
+        }
         self.contact_after = contact_report(settings, &self.current, capsules);
         &self.current
     }
@@ -427,6 +525,10 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
         if report {
             eprintln!("cloth t={:.2} contacts>1mm: {} -> {}; max depth: {:.4} -> {:.4} m", time.elapsed_secs(),
                 cloth.state.contact_before.0, cloth.state.contact_after.0, cloth.state.contact_before.1, cloth.state.contact_after.1);
+            let mut positions = cloth.state.current.clone();
+            let body = surface_contacts(&settings, &mut positions, &targets, &capsules, false);
+            let folds = fold_contacts(&settings, &mut positions, &cloth.state.previous, false);
+            eprintln!("cloth surfaces: {body} triangle/capsule contacts; {folds} non-adjacent face crossings");
         }
         let Some(mut mesh) = meshes.get_mut(&cloth.mesh) else { continue; };
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -441,7 +543,7 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
 mod tests {
     use super::*;
     fn settings() -> ClothSettings {
-        ClothSettings { pinned: vec![true, false, false], pull: vec![1.0, 0.015, 0.015], edges: vec![[0, 1], [1, 2]], damping: 0.1, upward_damping: 0.75, gravity: -9.8, iterations: 3, vertex_radius: vec![0.01; 3], colliders: Vec::new() }
+        ClothSettings { pinned: vec![true, false, false], pull: vec![1.0, 0.015, 0.015], edges: vec![[0, 1], [1, 2]], triangles: Vec::new(), damping: 0.1, upward_damping: 0.75, gravity: -9.8, iterations: 3, vertex_radius: vec![0.01; 3], colliders: Vec::new() }
     }
     #[test]
     fn cloth_follows_pins_with_inertia_and_resets_on_teleport() {
@@ -573,5 +675,40 @@ mod tests {
         let escaped = escape_overlapping_capsules(Vec3::ZERO, Vec3::Z * 0.3, Vec3::Z * 0.3, 0.01, &capsules);
         assert!(escaped.is_finite() && escaped.length() < 0.15);
         assert!(capsules.iter().all(|c| c.penetration(escaped, 0.01) <= 1.1e-5));
+    }
+    #[test]
+    fn surface_guard_separates_triangle_interiors_without_moving_pins() {
+        let mut settings = settings();
+        settings.pinned = vec![false; 3];
+        settings.triangles = vec![[0, 1, 2]];
+        let targets = vec![Vec3::new(-0.3, 0.0, -0.3), Vec3::new(0.3, 0.0, -0.3), Vec3::new(0.0, 0.0, 0.3)];
+        let capsule = ClothCollider { bone_id: 0, local_start: Vec3::ZERO, local_end: Vec3::ZERO, radius: 0.1, mode: 1, threshold: 0.0 };
+        let mut positions = targets.clone();
+        assert_eq!(surface_contacts(&settings, &mut positions, &targets, std::slice::from_ref(&capsule), false), 1);
+        for _ in 0..32 { surface_contacts(&settings, &mut positions, &targets, std::slice::from_ref(&capsule), true); }
+        assert_eq!(surface_contacts(&settings, &mut positions, &targets, std::slice::from_ref(&capsule), false), 0);
+        settings.pinned[0] = true;
+        positions = targets.clone();
+        surface_contacts(&settings, &mut positions, &targets, std::slice::from_ref(&capsule), true);
+        assert_eq!(positions[0], targets[0]);
+        assert!(positions.iter().zip(&targets).all(|(p,t)| p.distance(*t) <= 0.02001));
+    }
+    #[test]
+    fn fold_guard_detects_crossings_and_excludes_connected_faces() {
+        let mut settings = settings();
+        settings.pinned = vec![false; 6];
+        settings.triangles = vec![[0, 1, 2], [3, 4, 5]];
+        let mut p = vec![Vec3::new(-0.2, 0.0, -0.2), Vec3::new(0.2, 0.0, -0.2), Vec3::new(0.0, 0.0, 0.2),
+            Vec3::new(0.0, -0.1, -0.1), Vec3::new(0.0, 0.1, -0.1), Vec3::new(0.0, 0.0, 0.1)];
+        let previous = p.clone();
+        assert_eq!(fold_contacts(&settings, &mut p, &previous, false), 1);
+        settings.pinned[0] = true;
+        fold_contacts(&settings, &mut p, &previous, true);
+        assert_eq!(p[0], previous[0]);
+        assert!(p.iter().all(|p| p.is_finite()));
+        for _ in 0..32 { fold_contacts(&settings, &mut p, &previous, true); }
+        assert_eq!(fold_contacts(&settings, &mut p, &previous, false), 0);
+        settings.triangles[1] = [0, 4, 5];
+        assert_eq!(fold_contacts(&settings, &mut p, &previous, false), 0);
     }
 }
