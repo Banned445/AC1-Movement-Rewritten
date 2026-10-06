@@ -519,10 +519,15 @@ pub fn find_pilotis(pos: Vec3, support: Vec3, dir: Vec3, from_air: bool, guidanc
         let d = q - support;
         d.dot(r).abs() <= 0.6 && (fmin..=fmax).contains(&d.dot(f)) && d.y.abs() <= 0.5
     };
+    // PORT: conservative bounds rejection for the static guidance search; exact point/cone tests follow.
+    let centre = support + f * ((fmin + fmax) * 0.5);
+    let extent = r.abs() * 0.6 + f.abs() * ((fmax - fmin) * 0.5) + Vec3::Y * 0.5 + Vec3::splat(0.0001);
     let edges: Vec<_> = guidance
         .edges
         .iter()
-        .filter(|e| e.subtype == GuidanceSubType::LedgeGrab && in_box(e.closest_point(support)))
+        .filter(|e| e.subtype == GuidanceSubType::LedgeGrab
+            && (!collision.native_query_culling || (e.p0.min(e.p1).cmple(centre + extent).all() && e.p0.max(e.p1).cmpge(centre - extent).all()))
+            && in_box(e.closest_point(support)))
         .collect();
     // sub_B1C550: the nearest edge whose outward normal is within 45° of `d`, within `max` of `from`
     let find = |from: Vec3, d: Vec3, max: f32| -> Option<Vec3> {

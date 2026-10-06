@@ -1536,6 +1536,161 @@ fn landing_on_a_bar_with_nothing_ahead_settles_into_the_hang() {
 // ---------------------------------------------------------------- ladders (RE/05 §4.1)
 
 #[test]
+fn native_masyaf_roof_stands_and_walks_on_source_collision() {
+    let Some((c, g, spawn)) = crate::native_map::simulation_fixture() else { return; };
+    let mut s = Sim::new_raw(spawn, 0.0);
+    s.app.insert_resource(c).insert_resource(g);
+    s.app.update();
+    s.run(1.0);
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    assert!((s.body().feet.y - spawn.y).abs() < 0.05);
+    s.pad(Vec3::X, 0.5, false, false);
+    s.run(0.5);
+    assert!(s.body().feet.x > spawn.x + 0.1, "{:?}", s.body().feet);
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+}
+
+#[test]
+fn native_freerun_culling_preserves_queries_targets_and_motion() {
+    let Some((mut c,g,spawn)) = crate::native_map::village_simulation_fixture() else { return; };
+    let rotation = Quat::from_rotation_y(0.63);
+    let axes = [rotation * Vec3::X,Vec3::Y,rotation * Vec3::Z];
+    for offset in [Vec3::ZERO,Vec3::new(-10.0,0.0,5.0),Vec3::new(10.0,4.0,-5.0),Vec3::new(-20.0,8.0,10.0)] {
+        let p = spawn + offset;
+        let mut baseline = None;
+        for enabled in [false,true] {
+            c.native_query_culling = enabled;
+            let queries = (c.floor_height_below(p+Vec3::Y,10.0),c.point_inside(p),c.capsule_fits(p),
+                c.capsule_cast_free(p,1.8,0.35,Vec3::new(1.0,0.4,-1.0)),
+                c.obb_free(p+Vec3::Y,axes,Vec3::new(0.3,0.5,0.2)),
+                c.obb_lowest(p+Vec3::Y,axes,Vec3::new(0.3,0.5,0.2),1),
+                c.sphere_free_distance(p+Vec3::Y,Vec3::NEG_X,0.1,2.0),
+                c.camera_distance(p+Vec3::Y,Vec3::Z,6.0));
+            if let Some(expected) = baseline { assert_eq!(queries,expected,"query at {p:?}"); }
+            else { baseline = Some(queries); }
+        }
+        for direction in [Vec3::NEG_X,Vec3::Z] {
+            c.native_query_culling = false;
+            let baseline = crate::player::targets::find_jump_target(p,direction,&g,&c).map(|t|format!("{t:?}"));
+            c.native_query_culling = true;
+            let result = crate::player::targets::find_jump_target(p,direction,&g,&c).map(|t|format!("{t:?}"));
+            assert_eq!(result,baseline,"jump target at {p:?}, {direction:?}");
+        }
+    }
+    // The same walk → fresh Legs press → freerun sequence that reproduces the hitch.
+    let mut baseline = Vec::new();
+    for enabled in [false,true] {
+        let Some((mut c,g,spawn)) = crate::native_map::village_simulation_fixture() else { return; };
+        c.native_query_culling = enabled;
+        let mut s = Sim::new_raw(spawn,crate::player::heading_of(Vec3::NEG_X));
+        s.app.insert_resource(c).insert_resource(g);s.app.update();
+        for frame in 0..240 {
+            s.pad(Vec3::NEG_X,1.0,frame>=120,frame>=120);
+            if frame==120 { s.press_legs(); }
+            s.run(1.0/60.0);
+            let state = (s.body().feet,s.loco().current);
+            assert!(state.0.is_finite());
+            if enabled { assert_eq!(state,baseline[frame],"freerun frame {frame}"); }
+            else { baseline.push(state); }
+        }
+        assert!(s.body().feet.x<spawn.x-10.0,"freerun did not advance: {:?}",s.body().feet);
+    }
+}
+
+#[test]
+#[ignore = "manual native-map CPU profile; requires the local game install"]
+fn profile_native_freerun_transition() {
+    let Some((c,g,spawn)) = crate::native_map::village_simulation_fixture() else { return; };
+    let mut s = Sim::new_raw(spawn,crate::player::heading_of(Vec3::NEG_X));
+    s.app.insert_resource(c).insert_resource(g);s.app.update();
+    for (name, high, legs) in [("walk",false,false),("freerun",true,true)] {
+        s.pad(Vec3::NEG_X,1.0,high,legs);
+        if legs { s.press_legs(); }
+        let mut times = Vec::new();
+        for _ in 0..120 {
+            let start = std::time::Instant::now();s.run(1.0/60.0);
+            let elapsed = start.elapsed().as_secs_f64()*1000.0;
+            if elapsed > 10.0 { eprintln!("slow {name} frame {}: {elapsed:.3} ms", times.len()); }
+            times.push(elapsed);
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!("{name}: CPU frame median {:.3} ms, p95 {:.3} ms, max {:.3} ms; {:?} {:?}",times[60],times[114],times[119],s.loco().current,s.body().feet);
+    }
+    let c = s.app.world().resource::<crate::collision::CollisionWorld>();
+    let p = spawn + Vec3::Y;
+    let g = s.app.world().resource::<crate::guidance::GuidanceWorld>();
+    let start = std::time::Instant::now();
+    std::hint::black_box(crate::player::targets::find_jump_target(spawn,Vec3::NEG_X,g,c));
+    eprintln!("jump target: {:.3} ms",start.elapsed().as_secs_f64()*1000.0);
+    let start = std::time::Instant::now();
+    std::hint::black_box(crate::player::walling::wall_ahead(spawn,Vec3::NEG_X,c));
+    eprintln!("wall ahead: {:.3} ms",start.elapsed().as_secs_f64()*1000.0);
+    for name in ["capsule_fits","obb_free","obb_lowest","capsule_cast"] {
+        let start = std::time::Instant::now();
+        for _ in 0..100 { match name {
+            "capsule_fits" => { std::hint::black_box(c.capsule_fits(p)); },
+            "obb_free" => { std::hint::black_box(c.obb_free(p,[Vec3::X,Vec3::Y,Vec3::Z],Vec3::splat(0.3))); },
+            "obb_lowest" => { std::hint::black_box(c.obb_lowest(p,[Vec3::X,Vec3::Y,Vec3::Z],Vec3::splat(0.3),1)); },
+            _ => { std::hint::black_box(c.capsule_cast_free(p,1.8,0.4,Vec3::NEG_X)); },
+        } }
+        eprintln!("{name}: {:.3} ms/query",start.elapsed().as_secs_f64()*10.0);
+    }
+}
+
+#[test]
+fn native_masyaf_village_walks_along_a_source_street() {
+    let Some((c,g,spawn)) = crate::native_map::village_simulation_fixture() else { return; };
+    let mut s = Sim::new_raw(spawn,crate::player::heading_of(Vec3::NEG_X));
+    s.app.insert_resource(c).insert_resource(g);
+    s.app.update();
+    s.run(1.0);
+    assert_eq!(s.loco().current,ActorContextId::Ground);
+    s.pad(Vec3::NEG_X,0.6,false,false);
+    s.run(4.0);
+    assert!(s.body().feet.x<spawn.x-1.5,"{:?}",s.body().feet);
+    assert_eq!(s.loco().current,ActorContextId::Ground);
+    assert!((s.body().feet.y-spawn.y).abs()<1.0,"street support: {:?}",s.body().feet);
+}
+
+#[test]
+fn native_masyaf_village_ladder_connects_street_to_roof() {
+    let Some((c,g,_)) = crate::native_map::village_simulation_fixture() else { return; };
+    let target = Vec3::new(8.22,34.64,41.62);
+    let edge = g.edges.iter().filter(|e|e.subtype==crate::guidance::GuidanceSubType::Ladder)
+        .min_by(|a,b|a.p0.min(a.p1).distance_squared(target).total_cmp(&b.p0.min(b.p1).distance_squared(target))).unwrap();
+    let (base,top) = if edge.p0.y<edge.p1.y {(edge.p0,edge.p1)} else {(edge.p1,edge.p0)};
+    let n = Vec3::new(edge.n1.x,0.0,edge.n1.z).normalize();
+    let mut feet = base+n*0.8;
+    feet.y = c.floor_height_below(feet+Vec3::Y*0.2,0.6).expect("native ground at ladder base");
+    let expected_roof = c.floor_height_below(top-n*0.5+Vec3::Y*0.2,2.0).expect("native roof above the ladder");
+    let mut s = Sim::new_raw(feet,crate::player::heading_of(-n));
+    s.app.insert_resource(c).insert_resource(g);
+    s.app.update();s.pad(-n,1.0,false,false);
+    assert!(s.run_until(3.0,|s|s.loco().current==ActorContextId::Ladder),"no native ladder entry");
+    assert!(s.run_until(30.0,|s|s.loco().current==ActorContextId::Ground),"no exit: {:?} {:?}",s.data().ladder.phase,s.body().feet);
+    s.pad(-n,0.0,false,false);s.run(2.0);
+    assert_eq!(s.loco().current,ActorContextId::Ground);
+    assert!((s.body().feet.y-expected_roof).abs()<0.1,"source roof {expected_roof}, feet {:?}",s.body().feet);
+}
+
+#[test]
+fn native_masyaf_authored_ladder_mounts_and_climbs() {
+    let Some((c, g, _)) = crate::native_map::simulation_fixture() else { return; };
+    let edge = g.edges.iter().find(|e| e.subtype == crate::guidance::GuidanceSubType::Ladder).unwrap();
+    let base = if edge.p0.y < edge.p1.y { edge.p0 } else { edge.p1 };
+    let n = Vec3::new(edge.n1.x, 0.0, edge.n1.z).normalize();
+    let mut feet = base + n * 0.8;
+    feet.y = c.floor_height_below(feet + Vec3::Y * 0.2, 0.6).expect("source ladder bottom must have roof support");
+    let mut s = Sim::new_raw(feet, crate::player::heading_of(-n));
+    s.app.insert_resource(c).insert_resource(g);
+    s.app.update();
+    s.pad(-n, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "never mounted source ladder: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.run_until(8.0, |s| s.data().ladder.height > 1.0), "did not climb source ladder");
+    assert!(s.body().feet.is_finite());
+}
+
+#[test]
 fn walk_to_a_ladder_climb_it_and_step_onto_the_top() {
     use crate::player::ladder::{LadderPhase, CLIMB_UP, ENTER_GROUND, EXIT_TOP};
     // the ladder at x 50 on the 5 m wall face z 63.5 (normal -Z); walk at it along +Z

@@ -58,7 +58,9 @@ pub fn read_pad(
     gamepads: Query<&Gamepad>,
     rig: Res<CameraRig>,
     mut pad: ResMut<PadInput>,
+    menu: Option<Res<crate::map_menu::MapMenu>>,
 ) {
+    if menu.is_some_and(|m| m.open) { *pad = crate::map_menu::neutral_pad(); return; }
     let mut stick = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) {
         stick.y += 1.0;

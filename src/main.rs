@@ -26,6 +26,9 @@ mod recorder;
 #[cfg(test)]
 mod sim_tests;
 mod tuning;
+mod triangles;
+mod native_map;
+mod map_menu;
 
 use bevy::prelude::*;
 
@@ -64,6 +67,7 @@ fn main() {
         .init_resource::<collision::CollisionWorld>()
         .add_plugins((
             level::LevelPlugin,
+            map_menu::MapMenuPlugin,
             guidance::GuidancePlugin,
             input::InputPlugin,
             camera::CameraPlugin,
