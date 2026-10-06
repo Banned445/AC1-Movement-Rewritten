@@ -251,6 +251,11 @@ fn character_attachments_and_cloth_constraints_from_install() {
     assert!(m.visual_compressions.iter().all(|c| c.target >= m.skeleton.len() && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
     assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
     assert_eq!(cloth.pinned.len(), 146);
+    let part = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap();
+    assert_eq!(part.weights.len(), 146);
+    assert!(part.weights.iter().flatten().any(|w| (w * 255.0 - (w * 255.0).round()).abs() > 0.01), "cloth must retain source float weights, not normalized compiled bytes");
+    assert!(part.weights.iter().all(|w| (w.iter().sum::<f32>() - 1.0).abs() < 0.0001));
+    assert!(part.joints.iter().flatten().all(|&i| (i as usize) < part.skin_joints.len()));
     assert_eq!(cloth.pinned.iter().filter(|&&p| p).count(), 44);
     assert_eq!(cloth.iterations, 3);
     assert!((cloth.damping - 0.1).abs() < 1e-5);

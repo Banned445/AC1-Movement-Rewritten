@@ -311,7 +311,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     let mut normal_textures = HashMap::new();
     let mut parts = Vec::new();
     for (name, m) in parsed {
-        let positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| { let b = to_bevy(p); [b[0], b[1] - min_z, b[2]] }).collect();
+        let mut positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| { let b = to_bevy(p); [b[0], b[1] - min_z, b[2]] }).collect();
         let normals: Vec<[f32; 3]> = m.normals.iter().map(|&n| to_bevy(n)).collect();
         let tangents: Vec<[f32; 4]> = m.tangents.iter().zip(&m.binormals).zip(&normals).map(|((&t, &b), &n)| {
             let t = bevy::prelude::Vec3::from_array(to_bevy(t)).normalize_or_zero();
@@ -429,6 +429,15 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
             }
         }
         let cloth = cloth_settings.remove(&name);
+        if let Some(settings) = &cloth {
+            if settings.source_palette.iter().flatten().any(|&bone| bone as usize >= m.bones.len()) {
+                return Err(format!("{name}: invalid source cloth bone"));
+            }
+            let rebase = rebases.get(&name).map(bevy::prelude::Mat4::from_cols_array).unwrap_or(bevy::prelude::Mat4::IDENTITY);
+            positions = settings.source_positions.iter().map(|&p| (conversion * rebase).transform_point3(p).to_array()).collect();
+            joints.clone_from(&settings.source_palette);
+            weights.clone_from(&settings.source_weights);
+        }
         parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, skin_joints, inverse_bindposes, cloth });
     }
     Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, min_z, source: format!("{} / Rank 9", path.display()) })
