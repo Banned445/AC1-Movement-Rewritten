@@ -116,6 +116,10 @@ pub struct VisualRotationCopies {
     pub copies: Vec<(usize, usize)>,
     pub compressions: Vec<SkirtCompression>,
     pub look_at: Vec<SkirtLookAt>,
+    pub hinges: Vec<crate::skirt_hinge::SkirtHinge>,
+    pub hinge_states: Vec<crate::skirt_hinge::HingeState>,
+    pub root: Entity,
+    pub previous_anchor: Option<Vec3>,
 }
 
 fn world_pose(local: &[Transform], parents: &[Option<usize>]) -> Vec<Mat4> {
@@ -184,16 +188,47 @@ fn copy_rotations(local: &mut [Transform], parents: &[Option<usize>], copies: &[
     }
 }
 
-pub fn update_rotation_copies(rigs: Query<&VisualRotationCopies>, mut transforms: Query<&mut Transform>, mut enabled: Local<Option<bool>>) {
+pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut VisualRotationCopies)>, mut transforms: Query<&mut Transform>, mut enabled: Local<Option<bool>>) {
     let enabled = *enabled.get_or_insert_with(|| (SKIRT_ROTATION_COPIES || std::env::var_os("AC_SKIRT_ROTATION_COPIES").is_some()) && std::env::var_os("AC_NO_SKIRT_ROTATION_COPIES").is_none());
     if !enabled { return; }
-    for rig in &rigs {
+    if time.delta_secs() <= 0.0 { return; }
+    for (player, mut rig) in &mut rigs {
+        let (Ok(player_pose), Ok(root_pose)) = (transforms.get(player), transforms.get(rig.root)) else { continue; };
+        let frame = player_pose.to_matrix() * root_pose.to_matrix();
+        let gravity_frame = root_pose.rotation;
+        let anchor = frame.w_axis.truncate();
+        // PORT: bounded reset on teleports/long stalls in place of native frame-id continuity.
+        let reset = time.delta_secs() > 0.1 || rig.previous_anchor.is_none_or(|old| old.distance_squared(anchor) > 4.0);
+        rig.previous_anchor = Some(anchor);
         let Some(mut local) = rig.joints.iter().map(|&joint| transforms.get(joint).ok().copied()).collect::<Option<Vec<_>>>() else { continue; };
         // Root's authored list is compression then look-at; native preserves owner-list order (0x4E6820).
         // PORT: remaining hinge owners and native pose-slot blending are still unported.
         compress_pose(&mut local, &rig.parents, &rig.compressions);
         look_at_pose(&mut local, &rig.parents, &rig.look_at);
         copy_rotations(&mut local, &rig.parents, &rig.copies);
+        let mut last_target = None;
+        for i in 0..rig.hinges.len() {
+            let h = &rig.hinges[i];
+            let world: Vec<_> = world_pose(&local, &rig.parents).into_iter().map(|m| frame * m).collect();
+            let parent = rig.parents[h.target].map_or(frame, |p| world[p]);
+            let base = parent * h.rest.to_matrix();
+            let owner = world[h.target];
+            let force = h.force_reference.map_or(gravity_frame * h.force, |r| world[r].transform_vector3(h.force));
+            let reference = h.constraint_reference.map(|r| world[r].transform_vector3(h.reference_direction));
+            let target = h.target;
+            let h = h.clone();
+            // PORT: environmental force sampling (0x5C8A60) is unavailable in the greybox.
+            let solved = rig.hinge_states[i].solve(&h, base, owner, force, reference, Vec3::ZERO, time.delta_secs(), reset);
+            // 0x697C80 composes later hinges as current * inverse(base) * solved.
+            let applied = if last_target == Some(target) { owner * base.inverse() * solved } else { solved };
+            let (_, rotation, translation) = (parent.inverse() * applied).to_scale_rotation_translation();
+            local[target].translation = translation;
+            local[target].rotation = rotation.normalize();
+            last_target = Some(target);
+        }
+        for h in &rig.hinges {
+            if let Ok(mut transform) = transforms.get_mut(rig.joints[h.target]) { *transform = local[h.target]; }
+        }
         for c in &rig.compressions {
             if let Ok(mut transform) = transforms.get_mut(rig.joints[c.target]) { *transform = local[c.target]; }
         }

@@ -19,6 +19,7 @@ mod model;
 mod cloth;
 mod cloth_contacts;
 mod visual_pose;
+mod skirt_hinge;
 mod player;
 mod proxy;
 mod recorder;

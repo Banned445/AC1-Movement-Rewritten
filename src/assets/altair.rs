@@ -53,6 +53,7 @@ pub struct AltairModel {
     pub visual_rotation_copies: Vec<(usize, usize)>,
     pub visual_compressions: Vec<crate::visual_pose::SkirtCompression>,
     pub visual_look_at: Vec<crate::visual_pose::SkirtLookAt>,
+    pub visual_hinges: Vec<crate::skirt_hinge::SkirtHinge>,
     /// Lowest vertex z in model space (feet), used to put the feet at y = 0.
     pub min_z: f32,
     pub source: String,
@@ -253,6 +254,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     let mut rotation_ids = Vec::new();
     let mut visual_compressions = Vec::new();
     let mut visual_look_at = Vec::new();
+    let mut visual_hinges = Vec::new();
     if CHARACTER_VISUAL_FIXES {
         // SkeletonComponent reads primary + secondary resources (0x4E4E30, RE/09 §7).
         // PORT: retain secondary local rest poses; expressions and hood-bone dynamics are not ported.
@@ -263,6 +265,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                     rotation_ids = crate::visual_pose::decode_rotation_copies(&r.payload)?;
                     visual_compressions = crate::visual_pose::decode_compressions(&r.payload)?;
                     visual_look_at = crate::visual_pose::decode_look_at(&r.payload)?;
+                    visual_hinges = crate::skirt_hinge::decode_hinges(&r.payload)?;
                 }
             }
         }
@@ -287,6 +290,13 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         if m.target < skeleton.len() || skeleton.iter().chain(&visual_bones).nth(m.target).and_then(|b| b.parent).is_none() {
             return Err("skirt look-at target lacks a secondary parent".into());
         }
+    }
+    for h in &mut visual_hinges {
+        h.target = *joint_of.get(&(h.target as u32)).ok_or("skirt hinge target absent from rig")? as usize;
+        for reference in [&mut h.force_reference, &mut h.constraint_reference] {
+            if let Some(id) = *reference { *reference = Some(*joint_of.get(&(id as u32)).ok_or("skirt hinge reference absent from rig")? as usize); }
+        }
+        if h.target < skeleton.len() { return Err("skirt hinge targets a movement joint".into()); }
     }
     if cloth_settings.values().flat_map(|s| &s.colliders).any(|c| !skeleton.iter().any(|b| b.bone_id == c.bone_id)) {
         return Err("cloth collider bone absent from visual rig".into());
@@ -421,7 +431,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         let cloth = cloth_settings.remove(&name);
         parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, skin_joints, inverse_bindposes, cloth });
     }
-    Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, min_z, source: format!("{} / Rank 9", path.display()) })
+    Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, min_z, source: format!("{} / Rank 9", path.display()) })
 }
 
 /// Add only new descendants, aliasing shared BoneIDs to existing animated joints (RE/09 §7).

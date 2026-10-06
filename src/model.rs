@@ -110,6 +110,10 @@ fn attach_altair(
             copies: model.visual_rotation_copies.clone(),
             compressions: model.visual_compressions.clone(),
             look_at: model.visual_look_at.clone(),
+            hinges: model.visual_hinges.clone(),
+            hinge_states: vec![crate::skirt_hinge::HingeState::default(); model.visual_hinges.len()],
+            root,
+            previous_anchor: None,
         });
     }
     let inv: Vec<Mat4> = global.iter().map(|g| g.inverse()).collect();

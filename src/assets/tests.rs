@@ -245,6 +245,8 @@ fn character_attachments_and_cloth_constraints_from_install() {
     assert_eq!(m.visual_rotation_copies.len(), 2);
     assert_eq!(m.visual_compressions.len(), 1);
     assert_eq!(m.visual_look_at.len(), 1);
+    assert_eq!(m.visual_hinges.len(), 16);
+    assert!(m.visual_hinges.iter().all(|h| h.target >= m.skeleton.len() && h.min <= h.max && h.rest.rotation.is_finite()));
     assert!(m.visual_look_at.iter().all(|m| m.target >= 90 && m.aim < 90));
     assert!(m.visual_compressions.iter().all(|c| c.target >= m.skeleton.len() && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
     assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
@@ -311,4 +313,17 @@ fn skirt_rotation_references_are_resolved_and_malformed_sources_rejected() {
     invalid[marker + 16..marker + 20].copy_from_slice(&f32::NAN.to_le_bytes());
     assert!(crate::visual_pose::decode_look_at(&invalid).is_err());
     assert!(crate::visual_pose::decode_look_at(&payload[..marker + 39]).is_err());
+    let hinges = crate::skirt_hinge::decode_hinges(payload).unwrap();
+    assert_eq!(hinges.len(), 16);
+    assert_eq!(hinges[0].target, 1689260203);
+    assert_eq!((hinges[0].axis, hinges[0].direction), (2, 0));
+    assert_eq!(hinges[0].force, bevy::prelude::Vec3::new(0.0, 0.0, -50.0));
+    assert_eq!(hinges[0].constraint_reference, Some(1971262097));
+    assert_eq!(hinges[0].target, hinges[1].target);
+    assert!(hinges[1].constraint_reference.is_none());
+    let marker = payload.windows(4).position(|b| b == crc32("HingeBoneModifier").to_le_bytes()).unwrap();
+    let mut invalid = payload.clone();
+    invalid[marker + 10..marker + 14].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(crate::skirt_hinge::decode_hinges(&invalid).is_err());
+    assert!(crate::skirt_hinge::decode_hinges(&payload[..marker + 70]).is_err());
 }
