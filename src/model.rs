@@ -6,7 +6,7 @@ use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension, TextureDataOrder};
 
 use crate::assets::altair::load_altair;
 use crate::assets::ac_formats::CHARACTER_VISUAL_FIXES;
@@ -35,6 +35,7 @@ pub struct ModelPlugin;
 
 impl Plugin for ModelPlugin {
     fn build(&self, app: &mut App) {
+        crate::character_material::install(app);
         app.init_resource::<ModelStatus>().add_systems(PostStartup, attach_altair)
             .add_systems(Update, crate::visual_pose::update_rotation_copies.after(crate::anim::apply_clip))
             .add_systems(PostUpdate, crate::cloth::update_cloth.after(bevy::transform::TransformSystems::Propagate));
@@ -53,6 +54,7 @@ fn attach_altair(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut character_materials: ResMut<Assets<crate::character_material::CharacterSurface>>,
     mut images: ResMut<Assets<Image>>,
     mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
     mut status: ResMut<ModelStatus>,
@@ -148,6 +150,29 @@ fn attach_altair(
         cull_mode: None,
         ..default()
     });
+    // Separate handles retain linear data sampling even when skin uses its diffuse map as a mask.
+    let mut material_handles = std::collections::HashMap::new();
+    for (id, t) in &model.material_textures {
+        let mut image = Image::new_uninit(Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
+            TextureDimension::D2, TextureFormat::Rgba8Unorm, RenderAssetUsages::RENDER_WORLD);
+        image.texture_descriptor.mip_level_count = t.mips.len() as u32;
+        image.data = Some(t.mips.concat());
+        let ramp = model.parts.iter().flat_map(|p| &p.materials).any(|m| m.ramp == Some(*id));
+        let mode = if ramp { ImageAddressMode::ClampToEdge } else { ImageAddressMode::Repeat };
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor { address_mode_u: mode, address_mode_v: mode, ..ImageSamplerDescriptor::linear() });
+        material_handles.insert(*id, images.add(image));
+    }
+    let mut cube_handles = std::collections::HashMap::new();
+    for (id, t) in &model.cube_textures {
+        let mut image = Image::new_uninit(Extent3d { width: t.size, height: t.size, depth_or_array_layers: 6 },
+            TextureDimension::D2, TextureFormat::Rgba8Unorm, RenderAssetUsages::RENDER_WORLD);
+        image.texture_descriptor.mip_level_count = t.mips.len() as u32;
+        image.data = Some(t.mips.concat());
+        image.data_order = TextureDataOrder::MipMajor;
+        image.texture_view_descriptor = Some(TextureViewDescriptor { dimension: Some(TextureViewDimension::Cube), ..default() });
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
+        cube_handles.insert(*id, images.add(image));
+    }
 
     // ---------------------------------------------------------------- meshes
     let mut tris = 0;
@@ -156,7 +181,7 @@ fn attach_altair(
             (bindposes.add(SkinnedMeshInverseBindposes::from(part.inverse_bindposes.iter().map(Mat4::from_cols_array).collect::<Vec<_>>())),
              part.skin_joints.iter().map(|&j| visual_joints[j]).collect::<Vec<_>>())
         } else { (inv_handle.clone(), joints.clone()) };
-        for ((idx, tex), normal) in part.sections.iter().zip(&part.normal_maps) {
+        for ((((idx, tex), normal), authored), inside) in part.sections.iter().zip(&part.normal_maps).zip(&part.materials).zip(&part.inside_materials) {
             tris += idx.len() / 3;
             let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, part.positions.clone());
@@ -186,7 +211,23 @@ fn attach_altair(
                 None => untextured.clone(),
             };
             let mesh_handle = meshes.add(mesh);
-            let mut ec = commands.spawn((Mesh3d(mesh_handle.clone()), MeshMaterial3d(mat), Transform::default(), Name::new(part.name.clone())));
+            let mut ec = commands.spawn((Mesh3d(mesh_handle.clone()), Transform::default(), Name::new(part.name.clone())));
+            if crate::character_material::enabled() {
+                let mut base = materials.get(&mat).expect("inserted character material").clone();
+                if authored.style().expect("validated template") == 4 { base.alpha_mode = AlphaMode::Opaque; }
+                if inside.is_some() { base.cull_mode = Some(bevy::render::render_resource::Face::Back); }
+                base.base_color_texture = authored.diffuse_map.and_then(|id| tex_handles.get(&id)).cloned();
+                base.normal_map_texture = authored.normal_map.and_then(|id| tex_handles.get(&id)).cloned();
+                let extension = crate::character_material::CharacterLayers {
+                    controls: crate::character_material::controls(authored),
+                    specular_map: authored.specular_map.and_then(|id| material_handles.get(&id)).cloned(),
+                    ramp: authored.ramp.and_then(|id| material_handles.get(&id)).cloned(),
+                    multiply_map: authored.multiply_map.and_then(|id| material_handles.get(&id)).cloned(),
+                    eye_cube: authored.eye_cube.and_then(|id| cube_handles.get(&id)).cloned(),
+                };
+                let material = character_materials.add(crate::character_material::CharacterSurface { base, extension });
+                ec.insert(MeshMaterial3d(material));
+            } else { ec.insert(MeshMaterial3d(mat)); }
             if let Some(settings) = &part.cloth {
                 ec.insert(crate::cloth::CharacterCloth {
                     settings: settings.clone(), rest: part.positions.iter().map(|p| Vec3::from_array(*p)).collect(),
@@ -195,13 +236,41 @@ fn attach_altair(
                     joints: part_joints.clone(), collider_joints: settings.colliders.iter().map(|c| {
                         let index = model.skeleton.iter().position(|b| b.bone_id == c.bone_id).expect("validated cloth bone");
                         joints[index]
-                    }).collect(), mesh: mesh_handle, player, state: default(),
+                    }).collect(), mesh: mesh_handle.clone(), player, state: default(),
                 });
             } else if skinned {
                 ec.insert(SkinnedMesh { inverse_bindposes: part_inv.clone(), joints: part_joints.clone() });
             }
             let child = ec.id();
             commands.entity(player).add_child(child);
+            if crate::character_material::enabled() {
+                if let Some(inside) = inside {
+                    // The authored inside material has its own diffuse/normal/specular controls.
+                    // PORT: a second culled draw replaces native inside-material dispatch (RE/09 §9).
+                    let base = StandardMaterial {
+                        base_color_texture: inside.diffuse_map.and_then(|id| tex_handles.get(&id)).cloned(),
+                        normal_map_texture: inside.normal_map.and_then(|id| tex_handles.get(&id)).cloned(),
+                        flip_normal_map_y: true, double_sided: true,
+                        cull_mode: Some(bevy::render::render_resource::Face::Front),
+                        alpha_mode: AlphaMode::Mask(0.5), ..default()
+                    };
+                    let extension = crate::character_material::CharacterLayers {
+                        controls: crate::character_material::controls(inside),
+                        specular_map: inside.specular_map.and_then(|id| material_handles.get(&id)).cloned(),
+                        ramp: inside.ramp.and_then(|id| material_handles.get(&id)).cloned(),
+                        multiply_map: inside.multiply_map.and_then(|id| material_handles.get(&id)).cloned(),
+                        eye_cube: None,
+                    };
+                    let material = character_materials.add(crate::character_material::CharacterSurface { base, extension });
+                    let mut back = commands.spawn((Mesh3d(mesh_handle.clone()), MeshMaterial3d(material), Transform::default(), Name::new(format!("{} inside", part.name))));
+                    // Both draws share the simulated cloth mesh; do not run a second solver.
+                    if skinned && part.cloth.is_none() {
+                        back.insert(SkinnedMesh { inverse_bindposes: part_inv.clone(), joints: part_joints.clone() });
+                    }
+                    let child = back.id();
+                    commands.entity(player).add_child(child);
+                }
+            }
         }
     }
     for mut v in &mut placeholders {

@@ -81,7 +81,7 @@ slice imports a small section of the original environment.
 | Ladders | Mostly working. The ladder turn and the hang's side jump are missing |
 | Swing bars | Working |
 | Animation: blending, transitions, foot and hand IK | Partial. Transitions into the ground run are skipped for now, which is the main source of choppy switches |
-| Character appearance | All 15 Rank 9 parts load, including the face, lower robe and sheathed equipment, with shared throwing-knife textures. Missing parts report a load error. Robe dispatch follows the native fixed step per update; leg intersections and occasional folds remain. Weapon offsets, hood/face dynamics and native material fidelity are unfinished |
+| Character appearance | All 15 Rank 9 parts load, including the face, lower robe and sheathed equipment. Authored material parameters, specular masks, cloth/skin/metal ramps, eye reflection and separate inside-cloth materials load from the install. Character template lighting has a comparison switch; original-game shader parity remains unverified. Robe folds, exact weapon offsets and facial expressions remain unfinished |
 | Not started | Crouch, crowds, swimming, hay and kiosk hiding, slope slides, combat |
 
 ## Tests
@@ -91,6 +91,12 @@ cargo test --release
 ```
 
 Tests that need game data skip themselves when the game isn't found.
+
+`AC_CHARACTER_MATERIAL_LAYERS=0` compares the previous character PBR materials. The default character shader
+uses authored specular power/color/factor, cloth rim layers, skin masks, lighting ramps and eye reflection.
+Bevy still supplies light units, ambient light, shadows, exposure and fog; native environment permutations,
+sampler/color-space fidelity and a matched original-game comparison remain unfinished. The inside-cloth draw
+shares its mesh with the outer draw, including the simulated robe; it does not add a second cloth solver.
 
 For robe comparisons, `AC_CLOTH_NATIVE_DISPATCH=0` restores the previous accumulated 30 Hz schedule.
 The default passes one 0.033333 s step per active frame, with entity motion sampled over the same interval.

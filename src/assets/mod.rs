@@ -6,6 +6,7 @@ pub mod body_parts;
 pub mod ac_anim;
 pub mod ac_formats;
 pub mod altair;
+pub mod character_material;
 pub mod anims;
 pub mod forge;
 pub mod world;

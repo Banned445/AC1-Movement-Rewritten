@@ -16,6 +16,7 @@ mod input;
 mod layers;
 mod level;
 mod model;
+mod character_material;
 mod cloth;
 mod cloth_contacts;
 mod visual_pose;

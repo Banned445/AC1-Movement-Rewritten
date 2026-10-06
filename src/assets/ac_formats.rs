@@ -292,7 +292,7 @@ fn rgb565(c: u16) -> [u8; 3] {
     [(r * 255 / 31) as u8, (g * 255 / 63) as u8, (b * 255 / 31) as u8]
 }
 
-fn decode_bc(src: &[u8], w: u32, h: u32, bc3: bool) -> Vec<u8> {
+pub(super) fn decode_bc(src: &[u8], w: u32, h: u32, bc3: bool) -> Vec<u8> {
     let (w, h) = (w as usize, h as usize);
     let mut out = vec![0u8; w * h * 4];
     let bw = w.div_ceil(4);

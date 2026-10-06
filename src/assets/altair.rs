@@ -6,6 +6,7 @@ use std::path::Path;
 
 use super::ac_formats::{parse_mesh, parse_skeleton, parse_texture, resolve_materials, AcMesh, AcTexture, SkelBone, CHARACTER_VISUAL_FIXES};
 use super::forge::{crc32, Forge, Resource};
+use super::character_material::{CharacterMaterial, CubeTexture, Parameter, parse_gradient, parse_eye_cube};
 
 /// Body parts that make up the Rank 9 outfit (resource names in the archive).
 pub const PARTS: &[&str] = &[
@@ -38,6 +39,8 @@ pub struct PartMesh {
     pub sections: Vec<(Vec<u32>, Option<u32>)>,
     /// Normal texture for each section, in the same order (RE/09 §4.2, §6).
     pub normal_maps: Vec<Option<u32>>,
+    pub materials: Vec<CharacterMaterial>,
+    pub inside_materials: Vec<Option<CharacterMaterial>>,
     /// Mesh palette entries into the combined visual rig (RE/09 §7).
     pub skin_joints: Vec<usize>,
     pub inverse_bindposes: Vec<[f32; 16]>,
@@ -48,6 +51,8 @@ pub struct AltairModel {
     pub parts: Vec<PartMesh>,
     pub textures: HashMap<u32, AcTexture>,
     pub normal_textures: HashMap<u32, AcTexture>,
+    pub material_textures: HashMap<u32, AcTexture>,
+    pub cube_textures: HashMap<u32, CubeTexture>,
     /// Altaïr's skeleton (UCMA_Altair), game skeleton space.
     pub skeleton: Vec<SkelBone>,
     /// Additional visual descendants; parent indices address main + visual bones.
@@ -136,8 +141,18 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         let shared = forge.find("Game Bootstrap Settings").cloned().ok_or("shared character materials missing")?;
         let shared = forge.resources(&shared).map_err(|e| e.to_string())?;
         let ids: std::collections::HashSet<_> = res.iter().map(|r| r.id).collect();
-        let classes = ["Material", "TextureSet", "TextureMapSpec", "TextureMap"].map(crc32);
+        let classes = ["Material", "TextureSet", "TextureMapSpec", "TextureMap", "TextureGradient"].map(crc32);
         res.extend(shared.into_iter().filter(|r| classes.contains(&r.class_hash) && !ids.contains(&r.id)));
+        // Shared shader maps (ramps, eye reflection, white multiply map) live in Game Fix.
+        // PORT: cache bounded resource classes instead of the engine's resource manager (RE/09 §9).
+        static SHADER_RESOURCES: std::sync::OnceLock<Result<Vec<Resource>, String>> = std::sync::OnceLock::new();
+        let shader_resources = SHADER_RESOURCES.get_or_init(|| {
+            let entry = forge.find("Game Fix").cloned().ok_or("character shader dependencies missing")?;
+            Ok(forge.resources(&entry).map_err(|e| e.to_string())?.into_iter()
+                .filter(|r| classes[1..].contains(&r.class_hash)).collect())
+        }).as_ref().map_err(Clone::clone)?;
+        let ids: std::collections::HashSet<_> = res.iter().map(|r| r.id).collect();
+        res.extend(shader_resources.iter().filter(|r| !ids.contains(&r.id)).cloned());
     }
     let by_id: HashMap<u32, &Resource> = res.iter().map(|r| (r.id, r)).collect();
     let class = |name: &str| crc32(name);
@@ -188,6 +203,39 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
             frontier = next;
         }
         None
+    };
+
+    let resolve_map = |binding: Parameter, material_set: u32| -> Option<u32> {
+        let Parameter::Map { mode, channel, set, map } = binding else { return None };
+        let id = match mode {
+            0 | 1 => {
+                let set = by_id.get(&if mode == 0 { material_set } else { set })?;
+                let at = 8 + channel as usize * 4;
+                u32::from_le_bytes(set.payload.get(at..at + 4)?.try_into().ok()?)
+            }
+            2 => map,
+            _ => return None,
+        };
+        let r = by_id.get(&id)?;
+        if r.class_hash == c_tex || r.class_hash == crc32("TextureGradient") { return Some(id); }
+        if r.class_hash != crc32("TextureMapSpec") { return None; }
+        // TextureMapSpec__Deserialize 0xA15F70, its trailing typed TextureMap ref (§9).
+        let at = r.payload.len().checked_sub(4)?;
+        let id = u32::from_le_bytes(r.payload[at..].try_into().ok()?);
+        by_id.get(&id).filter(|r| r.class_hash == c_tex).map(|_| id)
+    };
+    let profile_of = |resource: &Resource| -> Result<CharacterMaterial, String> {
+        let mut material = CharacterMaterial::parse(&resource.payload).map_err(|e| format!("{}: {e}", resource.name))?;
+        let style = material.style()?;
+        let binding = |names: &[&str]| names.iter().find_map(|n| material.parameters.get(&crc32(n)).copied());
+        material.specular_map = binding(&["SpecularTexture", "SpecularMap"]).and_then(|p| resolve_map(p, material.texture_set));
+        material.multiply_map = binding(&["MultiplyTexture", "MultiplyMap"]).and_then(|p| resolve_map(p, material.texture_set));
+        material.eye_cube = binding(&["CubeMap"]).and_then(|p| resolve_map(p, material.texture_set));
+        material.diffuse_map = binding(&["DiffuseTexture", "DiffuseMap"]).and_then(|p| resolve_map(p, material.texture_set));
+        material.normal_map = binding(&["NormalTexture", "NormalMap"]).and_then(|p| resolve_map(p, material.texture_set));
+        // Authored template defaults (archive observations; RE/09 §9).
+        material.ramp = if style == 4 { None } else { Some(match style { 2 => 329254216, 3 => 439311685, _ => 433482686 }) };
+        Ok(material)
     };
 
     // Cloth uses the compiled topology with decoded soft-body constraints (RE/09 §8).
@@ -331,6 +379,8 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
 
     let mut textures = HashMap::new();
     let mut normal_textures = HashMap::new();
+    let mut material_textures = HashMap::new();
+    let mut cube_textures = HashMap::new();
     let mut parts = Vec::new();
     for (name, m) in parsed {
         let mut positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| { let b = to_bevy(p); [b[0], b[1] - min_z, b[2]] }).collect();
@@ -354,6 +404,8 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         let flip = agree < 0;
         let mut sections = Vec::new();
         let mut normal_maps = Vec::new();
+        let mut materials = Vec::new();
+        let mut inside_materials = Vec::new();
         for s in &m.submeshes {
             let range = s.istart as usize..(s.istart + 3 * s.tris) as usize;
             let mut idx: Vec<u32> = m.indices[range].iter().map(|&i| i as u32).collect();
@@ -380,6 +432,40 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
                 }
             }
             normal_maps.push(normal.filter(|t| normal_textures.contains_key(t)));
+            let id = s.material.ok_or_else(|| format!("{name}: missing material"))?;
+            let mut resource = *by_id.get(overrides.get(&id).unwrap_or(&id)).ok_or("character material missing")?;
+            if let Some(base) = resource.name.strip_suffix("_Empty") {
+                resource = find(base, c_mat).ok_or("character material override missing")?;
+            }
+            let material = profile_of(resource)?;
+            let inside = material.inside_material.map(|id| {
+                profile_of(by_id.get(&id).ok_or("inside cloth material missing")?)
+            }).transpose()?;
+            for profile in std::iter::once(&material).chain(inside.iter()) {
+                for id in [profile.specular_map, profile.multiply_map, profile.ramp].into_iter().flatten() {
+                    if let std::collections::hash_map::Entry::Vacant(e) = material_textures.entry(id) {
+                        let r = by_id.get(&id).ok_or_else(|| format!("character shader texture {id} missing"))?;
+                        let t = parse_gradient(&r.payload).or_else(|| parse_texture(&r.payload)).ok_or_else(|| format!("{}: shader texture could not be decoded", r.name))?;
+                        e.insert(t);
+                    }
+                }
+                if let Some(id) = profile.eye_cube {
+                    if let std::collections::hash_map::Entry::Vacant(e) = cube_textures.entry(id) {
+                        let r = by_id.get(&id).ok_or("eye reflection texture missing")?;
+                        e.insert(parse_eye_cube(&r.payload).ok_or("eye reflection cube could not be decoded")?);
+                    }
+                }
+                for (id, target) in [(profile.diffuse_map, &mut textures), (profile.normal_map, &mut normal_textures)] {
+                    if let Some(id) = id {
+                        if let std::collections::hash_map::Entry::Vacant(e) = target.entry(id) {
+                            let r = by_id.get(&id).ok_or("character layer texture missing")?;
+                            e.insert(parse_texture(&r.payload).ok_or("character layer texture could not be decoded")?);
+                        }
+                    }
+                }
+            }
+            materials.push(material);
+            inside_materials.push(inside);
         }
         // skin: palette-local bone → mesh bone → BoneID → skeleton joint; bones the body skeleton
         // lacks (face, tags) fall back to the part's attach bone (or the root)
@@ -460,9 +546,9 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
             joints.clone_from(&settings.source_palette);
             weights.clone_from(&settings.source_weights);
         }
-        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, skin_joints, inverse_bindposes, cloth });
+        parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, materials, inside_materials, skin_joints, inverse_bindposes, cloth });
     }
-    Ok(AltairModel { parts, textures, normal_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, min_z, source: format!("{} / Rank 9", path.display()) })
+    Ok(AltairModel { parts, textures, normal_textures, material_textures, cube_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, min_z, source: format!("{} / Rank 9", path.display()) })
 }
 
 /// Add only new descendants, aliasing shared BoneIDs to existing animated joints (RE/09 §7).

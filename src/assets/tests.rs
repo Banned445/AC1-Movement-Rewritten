@@ -108,6 +108,36 @@ fn altair_atlas_and_normal_maps_from_install() {
 }
 
 #[test]
+fn character_authored_materials_and_shader_dependencies_from_install() {
+    if !install_present() { eprintln!("skipped: game install not found"); return; }
+    let model = load_altair(&game_dir()).expect("load character materials");
+    let mut styles = std::collections::HashSet::new();
+    for part in &model.parts {
+        assert_eq!(part.sections.len(), part.materials.len());
+        assert_eq!(part.sections.len(), part.inside_materials.len());
+        for m in part.materials.iter().chain(part.inside_materials.iter().flatten()) {
+            let style = m.style().unwrap();
+            styles.insert(style);
+            if style != 1 && style != 4 { assert!(m.specular_map.is_some(), "{}: specular map missing", part.name); }
+            for id in [m.specular_map, m.multiply_map, m.ramp].into_iter().flatten() {
+                assert!(model.material_textures.contains_key(&id));
+            }
+            if style == 4 { assert!(m.eye_cube.is_some_and(|id| model.cube_textures.contains_key(&id))); }
+        }
+    }
+    assert_eq!(styles, [0, 1, 2, 3, 4].into_iter().collect());
+    let cloth = model.parts.iter().flat_map(|p| &p.materials).find(|m| m.template == 433482562 && m.scalar("SpecularPower", 0.0) == 2.0).unwrap();
+    assert!((cloth.scalar("SpecularFactor", 0.0) - 4.675857).abs() < 1e-5);
+    let skin = model.parts.iter().flat_map(|p| &p.materials).find(|m| m.template == 433482821).unwrap();
+    assert!((skin.scalar("SpecularPower", 0.0) - 1.415).abs() < 1e-5);
+    for cube in model.cube_textures.values() {
+        assert_eq!(cube.size, 32);
+        assert_eq!(cube.mips.len(), 6);
+        for (m, bytes) in cube.mips.iter().enumerate() { assert_eq!(bytes.len(), ((32u32 >> m).max(1).pow(2) * 4 * 6) as usize); }
+    }
+}
+
+#[test]
 fn anim_event_tracks_decode_from_the_install() {
     use super::ac_anim::{decode_events, EventKind};
     if !install_present() {
