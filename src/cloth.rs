@@ -7,6 +7,9 @@ const CLOTH_RENDER_CONTACT_GUARD: bool = false;
 // PORT: discrete surface contacts supplement native vertex contacts (RE/09 §8.4).
 const CLOTH_SURFACE_CONTACT_GUARD: bool = false;
 const CLOTH_NATIVE_TIMING: bool = true;
+// Visible cloth component dispatches once per frame with this literal timestep (0x5B55B0 / 0x577220).
+const CLOTH_NATIVE_DISPATCH: bool = true;
+const NATIVE_CLOTH_STEP: f32 = 0.033333;
 
 #[derive(Clone)]
 pub struct ClothSettings {
@@ -333,6 +336,7 @@ pub struct CharacterCloth {
 
 #[derive(Default)]
 pub struct ClothState {
+    native_dispatch: Option<bool>,
     current: Vec<Vec3>,
     previous: Vec<Vec3>,
     lengths_squared: Vec<f32>,
@@ -461,16 +465,20 @@ fn fold_contacts(settings: &ClothSettings, positions: &mut [Vec3], previous: &[V
 }
 
 impl ClothState {
+    fn native_dispatch(&mut self) -> bool {
+        *self.native_dispatch.get_or_insert_with(|| std::env::var("AC_CLOTH_NATIVE_DISPATCH").map_or(CLOTH_NATIVE_DISPATCH, |v| v != "0"))
+    }
     fn sample_entity_motion(&mut self, anchor: Vec3, rotation: Quat, dt: f32) {
+        let dispatch = self.native_dispatch();
         let reset = self.motion_anchor.is_none_or(|old| old.distance_squared(anchor) > 4.0);
         let steps = ((self.accumulator + dt.clamp(0.0, 0.1)) * 30.0).floor();
-        if !reset && steps < 1.0 { return; }
+        if !reset && ((!dispatch && steps < 1.0) || dt <= 0.0) { return; }
         if reset {
             self.motion = Vec3::ZERO;
         } else if dt > 0.0 {
             // 0x5B4F00 samples entity motion once per component update using 0.033333 s.
-            // PORT: aggregate across our fixed ticks; native dispatch cadence remains unverified.
-            let interval = steps / 30.0;
+            // PORT: the legacy comparison path aggregates motion across accumulated 30 Hz ticks.
+            let interval = if dispatch { NATIVE_CLOTH_STEP } else { steps / 30.0 };
             let velocity = (anchor - self.motion_anchor.unwrap()) / interval;
             let turn = self.orientation.map_or(0.0, |old| turn_motion(old, rotation, interval));
             self.motion = Vec3::new(velocity.length(), turn, velocity.y);
@@ -480,9 +488,10 @@ impl ClothState {
     }
 
     pub fn advance(&mut self, settings: &ClothSettings, targets: &[Vec3], rigid_rest: &[Vec3], capsules: &[ClothCollider], anchor: Vec3, dt: f32) -> &[Vec3] {
-        // Native component updates with 1/30 s (0x577276; RE/09 §8.5).
-        // PORT: accumulated render time, bounded catch-up and teleport reset replace engine scheduling.
-        let step = if CLOTH_NATIVE_TIMING { 1.0 / 30.0 } else { 1.0 / 60.0 };
+        // Native component passes literal 0.033333 s once per dispatch (0x577220; RE/09 §8.11).
+        // PORT: legacy comparison uses accumulated render time and bounded catch-up.
+        let dispatch = self.native_dispatch();
+        let step = if dispatch { NATIVE_CLOTH_STEP } else if CLOTH_NATIVE_TIMING { 1.0 / 30.0 } else { 1.0 / 60.0 };
         let reset = self.current.len() != targets.len() || self.anchor.is_none_or(|p| p.distance_squared(anchor) > 4.0);
         self.anchor = Some(anchor);
         if reset {
@@ -492,7 +501,10 @@ impl ClothState {
             self.accumulator = 0.0;
             self.action_pull = 0.0;
         }
-        self.accumulator += dt.clamp(0.0, 0.1);
+        // 0x5B55B0 frame guard → 0x577220: one dispatch, independent of accumulated render dt.
+        // PORT: visible Bevy update replaces the native task/LOD dispatch; teleport reset above remains.
+        if dispatch { self.accumulator = if dt > 0.0 { step } else { 0.0 }; }
+        else { self.accumulator += dt.clamp(0.0, 0.1); }
         while self.accumulator >= step {
             self.accumulator -= step;
             if CLOTH_NATIVE_TIMING {
@@ -663,7 +675,7 @@ mod tests {
     fn component_motion_accumulates_translation_and_turn_between_ticks() {
         let cfg = settings();
         let rest = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
-        let mut state = ClothState::default();
+        let mut state = ClothState { native_dispatch: Some(false), ..default() };
         state.sample_entity_motion(Vec3::ZERO, Quat::IDENTITY, 0.0);
         for frame in 1..=120 {
             let t = frame as f32 / 60.0;
@@ -683,7 +695,7 @@ mod tests {
         cfg.edges.clear();
         let rest = vec![Vec3::ZERO, Vec3::X * 0.02, Vec3::X * 0.03];
         let capsule = ClothCollider { bone_id: 0, local_start: -Vec3::Y, local_end: Vec3::Y, radius: 0.1, mode: 1, threshold: 0.0 };
-        let mut state = ClothState::default();
+        let mut state = ClothState { native_dispatch: Some(false), ..default() };
         state.advance(&cfg, &rest, &rest, std::slice::from_ref(&capsule), Vec3::ZERO, 0.0);
         let previous = state.previous.clone();
         assert_eq!(state.advance(&cfg, &rest, &rest, std::slice::from_ref(&capsule), Vec3::ZERO, 1.0 / 120.0), rest);
@@ -692,6 +704,37 @@ mod tests {
     }
     fn settings() -> ClothSettings {
         ClothSettings { source_positions: Vec::new(), source_weights: Vec::new(), source_palette: Vec::new(), pinned: vec![true, false, false], pull: vec![1.0, 0.015, 0.015], edges: vec![[0, 1], [1, 2]], triangles: Vec::new(), damping: 0.1, upward_damping: 0.75, gravity: -9.8, iterations: 3, vertex_radius: vec![0.01; 3], colliders: Vec::new(), pull_motion: Vec2::ZERO, pull_decay: 0.99, upward_motion: Vec2::new(0.0, 1.0), action_settings: Vec::new(), action_strength: 1.0 }
+    }
+
+    #[test]
+    fn component_dispatches_one_native_step_for_each_positive_frame() {
+        let mut cfg = settings();
+        cfg.edges.clear(); cfg.pull.fill(0.0); cfg.damping = 0.0; cfg.upward_damping = 0.0;
+        let rest = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
+        let mut a = ClothState { native_dispatch: Some(true), ..default() };
+        let mut b = ClothState { native_dispatch: Some(true), ..default() };
+        a.advance(&cfg,&rest,&rest,&[],Vec3::ZERO,0.0);
+        b.advance(&cfg,&rest,&rest,&[],Vec3::ZERO,0.0);
+        for _ in 0..4 {
+            a.advance(&cfg,&rest,&rest,&[],Vec3::ZERO,1.0/120.0);
+            b.advance(&cfg,&rest,&rest,&[],Vec3::ZERO,0.1);
+            assert_eq!(a.current,b.current,"one dispatch even for a long frame; no catch-up batch");
+        }
+        assert!(a.current[1].y < -0.05,"short positive frames still solve");
+        let previous = a.previous.clone(); let current = a.current.clone();
+        a.advance(&cfg,&rest,&rest,&[],Vec3::ZERO,0.0);
+        assert_eq!(a.current,current); assert_eq!(a.previous,previous);
+    }
+
+    #[test]
+    fn component_dispatch_samples_each_frame_using_native_interval() {
+        let mut state = ClothState { native_dispatch: Some(true), ..default() };
+        state.sample_entity_motion(Vec3::ZERO,Quat::IDENTITY,0.0);
+        state.sample_entity_motion(Vec3::X*0.1,Quat::from_rotation_y(0.1),1.0/120.0);
+        assert!((state.motion.x-0.1/NATIVE_CLOTH_STEP).abs()<1e-5);
+        assert!((state.motion.y-turn_motion(Quat::IDENTITY,Quat::from_rotation_y(0.1),NATIVE_CLOTH_STEP)).abs()<1e-5);
+        state.sample_entity_motion(Vec3::X*0.2,Quat::from_rotation_y(0.2),0.1);
+        assert!((state.motion.x-0.1/NATIVE_CLOTH_STEP).abs()<1e-5);
     }
     #[test]
     fn cloth_follows_pins_with_inertia_and_resets_on_teleport() {
@@ -712,11 +755,11 @@ mod tests {
         assert_eq!(state.advance(&settings, &targets, &targets, &[], anchor, 0.0), targets);
     }
     #[test]
-    fn cloth_is_stable_across_render_frame_rates() {
+    fn legacy_accumulated_cloth_is_stable_across_render_frame_rates() {
         let settings = settings();
         let targets = vec![Vec3::ZERO, Vec3::new(0.5, -0.2, 0.0), Vec3::new(1.0, -0.4, 0.0)];
-        let mut a = ClothState::default();
-        let mut b = ClothState::default();
+        let mut a = ClothState { native_dispatch: Some(false), ..default() };
+        let mut b = ClothState { native_dispatch: Some(false), ..default() };
         for _ in 0..120 { a.advance(&settings, &targets, &targets, &[], Vec3::ZERO, 1.0 / 60.0); }
         for _ in 0..240 { b.advance(&settings, &targets, &targets, &[], Vec3::ZERO, 1.0 / 120.0); }
         for (a, b) in a.current.iter().zip(b.current.iter()) { assert!(a.distance(*b) < 1e-4); }

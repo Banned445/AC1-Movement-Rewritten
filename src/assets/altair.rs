@@ -22,6 +22,8 @@ pub const PARTS: &[&str] = &[
     "UCMA_Altair_Knife_Belt",
 ];
 
+pub const EXTRA_PARTS: &[&str] = &["Universal_Head_Obj_Clean", "UCMA_Altair_Cloth", "ARCM_Altair_Sword_D", "UCMA_Altair_Dagger"];
+
 pub struct PartMesh {
     pub name: String,
     /// Bevy space (Y-up, feet at y = 0, facing -Z), metres.
@@ -127,7 +129,16 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     let path = game_dir.join("DataPC.forge");
     let mut forge = Forge::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let entry = forge.find("Rank 9").cloned().ok_or("file 'Rank 9' not found in DataPC.forge")?;
-    let res = forge.resources(&entry).map_err(|e| e.to_string())?;
+    let mut res = forge.resources(&entry).map_err(|e| e.to_string())?;
+    if CHARACTER_VISUAL_FIXES {
+        // Rank 9's throwing knives reference shared materials/textures in this file (RE/09 §8.12).
+        // PORT: bounded archive dependency loading rather than the native resource manager.
+        let shared = forge.find("Game Bootstrap Settings").cloned().ok_or("shared character materials missing")?;
+        let shared = forge.resources(&shared).map_err(|e| e.to_string())?;
+        let ids: std::collections::HashSet<_> = res.iter().map(|r| r.id).collect();
+        let classes = ["Material", "TextureSet", "TextureMapSpec", "TextureMap"].map(crc32);
+        res.extend(shared.into_iter().filter(|r| classes.contains(&r.class_hash) && !ids.contains(&r.id)));
+    }
     let by_id: HashMap<u32, &Resource> = res.iter().map(|r| (r.id, r)).collect();
     let class = |name: &str| crc32(name);
     let (c_mesh, c_mat, c_set, c_tex) = (class("Mesh"), class("Material"), class("TextureSet"), class("TextureMap"));
@@ -183,11 +194,18 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     // parse parts (game space)
     let mut parsed: Vec<(String, AcMesh)> = Vec::new();
     let mut cloth_settings = HashMap::new();
-    let extra_parts: &[&str] = if CHARACTER_VISUAL_FIXES { &["Universal_Head_Obj_Clean", "UCMA_Altair_Cloth", "ARCM_Altair_Sword_D", "UCMA_Altair_Dagger"] } else { &[] };
+    let extra_parts: &[&str] = if CHARACTER_VISUAL_FIXES { EXTRA_PARTS } else { &[] };
     let names = PARTS.iter().chain(extra_parts).copied();
     for name in names {
-        let Some(r) = find(name, c_mesh) else { continue };
-        let Some(mut m) = parse_mesh(&r.payload) else { continue };
+        // PORT: require the complete Rank 9 appearance instead of silently dropping a part.
+        let Some(r) = find(name, c_mesh) else {
+            if CHARACTER_VISUAL_FIXES { return Err(format!("character mesh missing: {name}")); }
+            continue;
+        };
+        let Some(mut m) = parse_mesh(&r.payload) else {
+            if CHARACTER_VISUAL_FIXES { return Err(format!("character mesh could not be decoded: {name}")); }
+            continue;
+        };
         if name == "UCMA_Altair_Cloth" && CHARACTER_VISUAL_FIXES {
             let entity = find("UCMA_Altair_Rank_9", crc32("Entity")).ok_or("cloth entity missing")?;
             let mut settings = crate::cloth::decode_settings(&r.payload, &entity.payload, &m.positions)?;
@@ -199,7 +217,11 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         }
         if m.bones.is_empty() {
             // Authored attachment tags (Human__sub_B11020 0xB11020, RE/09 §8).
-            let bone_id = match name { "ARCM_Altair_Sword_D" => 0x3A83_5926, "UCMA_Altair_Dagger" => 0x685E_46B6, _ => continue };
+            let bone_id = match name {
+                "ARCM_Altair_Sword_D" => 0x3A83_5926, "UCMA_Altair_Dagger" => 0x685E_46B6,
+                _ if CHARACTER_VISUAL_FIXES => return Err(format!("character mesh has no skin frame: {name}")),
+                _ => continue,
+            };
             m.bones.push(super::ac_formats::MeshBone { bone_id, inv_bind: bevy::prelude::Mat4::IDENTITY.to_cols_array() });
             for sub in &mut m.submeshes { sub.palette = vec![0]; }
         }

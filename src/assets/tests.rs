@@ -48,6 +48,20 @@ fn altair_model_loads_from_install() {
         return;
     }
     let m = load_altair(&game_dir()).expect("load Altaïr");
+    let names: std::collections::HashSet<_> = m.parts.iter().map(|p| p.name.as_str()).collect();
+    let required = super::altair::PARTS.iter().chain(super::altair::EXTRA_PARTS).copied().collect::<std::collections::HashSet<_>>();
+    assert_eq!(names, required, "the full Rank 9 appearance must load");
+    for part in &m.parts {
+        assert!(!part.positions.is_empty(), "{}: empty mesh", part.name);
+        for len in [part.normals.len(), part.tangents.len(), part.uvs.len(), part.joints.len(), part.weights.len()] {
+            assert_eq!(len, part.positions.len(), "{}: incomplete vertex stream", part.name);
+        }
+        for (indices, texture) in &part.sections {
+            assert_eq!(indices.len() % 3, 0, "{}: incomplete triangle", part.name);
+            assert!(indices.iter().all(|&i| (i as usize) < part.positions.len()), "{}: invalid triangle", part.name);
+            assert!(texture.is_some_and(|id| m.textures.contains_key(&id)), "{}: missing diffuse texture", part.name);
+        }
+    }
     let body = m.parts.iter().find(|p| p.name == "UCMA_Altair_Body_C").expect("body part");
     assert_eq!(body.positions.len(), 3128);
     let tris: usize = body.sections.iter().map(|s| s.0.len() / 3).sum();

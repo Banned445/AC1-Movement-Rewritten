@@ -81,6 +81,7 @@ slice imports a small section of the original environment.
 | Ladders | Mostly working. The ladder turn and the hang's side jump are missing |
 | Swing bars | Working |
 | Animation: blending, transitions, foot and hand IK | Partial. Transitions into the ground run are skipped for now, which is the main source of choppy switches |
+| Character appearance | All 15 Rank 9 parts load, including the face, lower robe and sheathed equipment, with shared throwing-knife textures. Missing parts report a load error. Robe dispatch follows the native fixed step per update; leg intersections and occasional folds remain. Weapon offsets, hood/face dynamics and native material fidelity are unfinished |
 | Not started | Crouch, crowds, swimming, hay and kiosk hiding, slope slides, combat |
 
 ## Tests
@@ -90,6 +91,12 @@ cargo test --release
 ```
 
 Tests that need game data skip themselves when the game isn't found.
+
+For robe comparisons, `AC_CLOTH_NATIVE_DISPATCH=0` restores the previous accumulated 30 Hz schedule.
+The default passes one 0.033333 s step per active frame, with entity motion sampled over the same interval.
+Native task/LOD scheduling is still unported, so this is not a guarantee of identical behaviour at every frame rate.
+`AC_CLOTH_DIAGNOSTICS=1` reports target lag, edge stretch and contact counts. The full secondary skirt modifier
+chain remains experimental (`AC_SKIRT_ROTATION_COPIES=1`); it is disabled by default.
 
 To reproduce the native-map walk-to-freerun transition, set `AC_NATIVE_MAP=masyaf-village` and
 `AC_AUTOPILOT=native-freerun`. It walks from the map spawn and presses Legs in high profile after two seconds.
