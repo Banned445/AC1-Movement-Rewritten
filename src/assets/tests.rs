@@ -244,6 +244,8 @@ fn character_attachments_and_cloth_constraints_from_install() {
     let cloth = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap().cloth.as_ref().expect("cloth settings");
     assert_eq!(m.visual_rotation_copies.len(), 2);
     assert_eq!(m.visual_compressions.len(), 1);
+    assert_eq!(m.visual_look_at.len(), 1);
+    assert!(m.visual_look_at.iter().all(|m| m.target >= 90 && m.aim < 90));
     assert!(m.visual_compressions.iter().all(|c| c.target >= m.skeleton.len() && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
     assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
     assert_eq!(cloth.pinned.len(), 146);
@@ -297,4 +299,16 @@ fn skirt_rotation_references_are_resolved_and_malformed_sources_rejected() {
     invalid[marker + 28..marker + 32].copy_from_slice(&1.0f32.to_le_bytes());
     assert!(crate::visual_pose::decode_compressions(&invalid).is_err());
     assert!(crate::visual_pose::decode_compressions(&payload[..marker + 93]).is_err());
+    let look_at = crate::visual_pose::decode_look_at(payload).unwrap();
+    assert_eq!(look_at.len(), 1);
+    assert_eq!(look_at[0].target, 1206536969);
+    assert_eq!(look_at[0].aim, 3738240529);
+    let marker = payload.windows(4).position(|b| b == crc32("LookAtBoneModifier").to_le_bytes()).unwrap();
+    let mut invalid = payload.clone();
+    invalid[marker + 36..marker + 40].copy_from_slice(&5u32.to_le_bytes());
+    assert!(crate::visual_pose::decode_look_at(&invalid).is_err());
+    invalid = payload.clone();
+    invalid[marker + 16..marker + 20].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(crate::visual_pose::decode_look_at(&invalid).is_err());
+    assert!(crate::visual_pose::decode_look_at(&payload[..marker + 39]).is_err());
 }

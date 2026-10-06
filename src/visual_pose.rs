@@ -15,6 +15,40 @@ pub struct SkirtCompression {
     pub rotation: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct SkirtLookAt {
+    pub target: usize,
+    pub aim: usize,
+}
+
+/// Rank 9's null-reference, zero-offset, Z/Y look-at (0x648B90).
+pub fn decode_look_at(data: &[u8]) -> Result<Vec<SkirtLookAt>, String> {
+    let bones = parse_skeleton(data);
+    let word = |p: usize| data.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let reference = |p| {
+        if data.get(p) != Some(&2) { return None; }
+        let id = word(p + 1)?;
+        bones.iter().find(|b| b.object_id == id).map(|b| b.bone_id as usize)
+    };
+    let class = crate::assets::forge::crc32("LookAtBoneModifier");
+    let mut result = Vec::new();
+    for p in 5..data.len().saturating_sub(4) {
+        if data[p - 5] != 0 || word(p) != Some(class) { continue; }
+        let decode = || {
+            let b = p + 4;
+            let target = reference(b)?;
+            // PORT: reject other layouts rather than inventing fallback/axis conventions.
+            if data.get(b + 5) != Some(&1) || data.get(b + 6) != Some(&3) { return None; }
+            let aim = reference(b + 7)?;
+            if target == aim || (0..4).any(|k| word(b + 12 + k * 4) != Some(0))
+                || word(b + 28) != Some(2) || word(b + 32) != Some(1) { return None; }
+            Some(SkirtLookAt { target, aim })
+        };
+        result.push(decode().ok_or("unsupported skirt look-at layout")?);
+    }
+    Ok(result)
+}
+
 /// Rank 9 CompressBoneModifier (0x6C4B50): external references and identity offsets.
 pub fn decode_compressions(data: &[u8]) -> Result<Vec<SkirtCompression>, String> {
     let bones = parse_skeleton(data);
@@ -81,6 +115,7 @@ pub struct VisualRotationCopies {
     pub parents: Vec<Option<usize>>,
     pub copies: Vec<(usize, usize)>,
     pub compressions: Vec<SkirtCompression>,
+    pub look_at: Vec<SkirtLookAt>,
 }
 
 fn world_pose(local: &[Transform], parents: &[Option<usize>]) -> Vec<Mat4> {
@@ -119,6 +154,23 @@ fn compress_pose(local: &mut [Transform], parents: &[Option<usize>], compression
     }
 }
 
+fn look_at_pose(local: &mut [Transform], parents: &[Option<usize>], modifiers: &[SkirtLookAt]) {
+    for m in modifiers {
+        let world = world_pose(local, parents);
+        let owner = world[m.target];
+        let Some(direction) = (world[m.aim].w_axis - owner.w_axis).truncate().try_normalize() else { continue; };
+        // 0x648E94 uses the owner's current Z row when it has a parent.
+        let reference = owner.z_axis.truncate();
+        let Some(side) = reference.cross(direction).try_normalize() else { continue; };
+        let up = direction.cross(side);
+        // Native axes 2/1: side, corrected up, aim (0x649093-0x649098).
+        let rotation = Quat::from_mat3(&Mat3::from_cols(side, up, direction));
+        let parent = parents[m.target].map_or(Quat::IDENTITY, |p| world[p].to_scale_rotation_translation().1);
+        // PORT: keep the preceding pose for coincident/parallel directions instead of a singular frame.
+        local[m.target].rotation = (parent.inverse() * rotation).normalize();
+    }
+}
+
 fn copy_rotations(local: &mut [Transform], parents: &[Option<usize>], copies: &[(usize, usize)]) {
     // Native matrix copy retains owner position (0x5FEA10); convert to parent-local rotation.
     let mut world = vec![Mat4::IDENTITY; local.len()];
@@ -137,11 +189,16 @@ pub fn update_rotation_copies(rigs: Query<&VisualRotationCopies>, mut transforms
     if !enabled { return; }
     for rig in &rigs {
         let Some(mut local) = rig.joints.iter().map(|&joint| transforms.get(joint).ok().copied()).collect::<Option<Vec<_>>>() else { continue; };
-        // PORT: evaluate the root compression before copies; complete native scheduling remains open.
+        // Root's authored list is compression then look-at; native preserves owner-list order (0x4E6820).
+        // PORT: remaining hinge owners and native pose-slot blending are still unported.
         compress_pose(&mut local, &rig.parents, &rig.compressions);
+        look_at_pose(&mut local, &rig.parents, &rig.look_at);
         copy_rotations(&mut local, &rig.parents, &rig.copies);
         for c in &rig.compressions {
             if let Ok(mut transform) = transforms.get_mut(rig.joints[c.target]) { *transform = local[c.target]; }
+        }
+        for m in &rig.look_at {
+            if let Ok(mut transform) = transforms.get_mut(rig.joints[m.target]) { transform.rotation = local[m.target].rotation; }
         }
         for &(target, _) in &rig.copies {
             if let Ok(mut transform) = transforms.get_mut(rig.joints[target]) { transform.rotation = local[target].rotation; }
@@ -152,6 +209,32 @@ pub fn update_rotation_copies(rigs: Query<&VisualRotationCopies>, mut transforms
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn look_at_uses_owner_reference_preserves_position_and_primary_pose() {
+        let mut local = vec![Transform::from_xyz(3.0, 1.0, 0.0).with_rotation(Quat::from_rotation_z(0.4)),
+            Transform::from_xyz(0.0, 2.0, 0.0), Transform::from_xyz(0.0, 0.5, 0.0).with_rotation(Quat::from_rotation_x(0.7))];
+        let parents = [None, Some(0), Some(0)];
+        let before = local.clone();
+        let old_world = world_pose(&local, &parents);
+        look_at_pose(&mut local, &parents, &[SkirtLookAt { target: 2, aim: 1 }]);
+        assert_eq!(local[..2], before[..2]);
+        assert_eq!(local[2].translation, before[2].translation);
+        let world = world_pose(&local, &parents);
+        let direction = (world[1].w_axis - world[2].w_axis).truncate().normalize();
+        assert!(world[2].z_axis.truncate().distance(direction) < 1e-5);
+        assert!(world[2].w_axis.distance(old_world[2].w_axis) < 1e-5);
+        let side = old_world[2].z_axis.truncate().cross(direction).normalize();
+        assert!(world[2].x_axis.truncate().distance(side) < 1e-5);
+        assert!((world[2].determinant() - 1.0).abs() < 1e-5);
+    }
+    #[test]
+    fn look_at_degenerate_directions_retain_preceding_pose() {
+        let mut local = vec![Transform::IDENTITY, Transform::IDENTITY, Transform::from_xyz(0.0, 0.0, 1.0)];
+        let parents = [None, Some(0), Some(0)];
+        let before = local.clone();
+        look_at_pose(&mut local, &parents, &[SkirtLookAt { target: 1, aim: 0 }, SkirtLookAt { target: 1, aim: 2 }]);
+        assert_eq!(local, before);
+    }
     #[test]
     fn compression_blends_world_frames_and_preserves_primary_joints() {
         let mut local = vec![Transform::from_xyz(4.0, 2.0, 0.0).with_rotation(Quat::from_rotation_z(0.4)),
