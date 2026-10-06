@@ -7,6 +7,8 @@ const CLOTH_RENDER_CONTACT_GUARD: bool = true;
 // PORT: discrete surface contacts supplement native vertex contacts (RE/09 §8.4).
 const CLOTH_SURFACE_CONTACT_GUARD: bool = true;
 const CLOTH_NATIVE_TIMING: bool = true;
+// PORT: interpolate fixed steps and keep presentation contacts out of solver history (RE/09 §8.9).
+const CLOTH_MOTION_STABILITY: bool = true;
 
 #[derive(Clone)]
 pub struct ClothSettings {
@@ -313,12 +315,15 @@ pub struct CharacterCloth {
 pub struct ClothState {
     current: Vec<Vec3>,
     previous: Vec<Vec3>,
+    rendered: Vec<Vec3>,
+    render_targets: Vec<Vec3>,
     lengths_squared: Vec<f32>,
     accumulator: f32,
     anchor: Option<Vec3>,
     contact_before: (usize, f32),
     contact_after: (usize, f32),
     surface_guard: Option<bool>,
+    stable_motion: Option<bool>,
     motion: Vec3,
     orientation: Option<Quat>,
     action_pull: f32,
@@ -436,12 +441,31 @@ fn fold_contacts(settings: &ClothSettings, positions: &mut [Vec3], previous: &[V
     count
 }
 
+fn bound_motion(settings: &ClothSettings, positions: &mut [Vec3], targets: &[Vec3]) {
+    // PORT: 18 cm of relative sway; retain a coherent offset field instead of stretched spikes.
+    // Native pose/action inputs are incomplete. Shape takes priority over incompatible contacts.
+    for (i, p) in positions.iter_mut().enumerate() {
+        *p = if settings.pinned[i] || !p.is_finite() { targets[i] }
+            else { targets[i] + (*p - targets[i]).clamp_length_max(0.18) };
+    }
+    let mut blend = 1.0f32;
+    for &[a, b] in &settings.edges {
+        let difference = (positions[a] - targets[a]) - (positions[b] - targets[b]);
+        let slack = targets[a].distance(targets[b]) * 0.5;
+        if difference.length() > slack { blend = blend.min(slack / difference.length()); }
+    }
+    for (p, &target) in positions.iter_mut().zip(targets) { *p = target + (*p - target) * blend; }
+}
+
 impl ClothState {
     pub fn advance(&mut self, settings: &ClothSettings, targets: &[Vec3], rigid_rest: &[Vec3], capsules: &[ClothCollider], anchor: Vec3, dt: f32) -> &[Vec3] {
         // Native component updates with 1/30 s (0x577276; RE/09 §8.5).
         // PORT: accumulated render time, bounded catch-up and teleport reset replace engine scheduling.
         let step = if CLOTH_NATIVE_TIMING { 1.0 / 30.0 } else { 1.0 / 60.0 };
         let reset = self.current.len() != targets.len() || self.anchor.is_none_or(|p| p.distance_squared(anchor) > 4.0);
+        let stable = *self.stable_motion.get_or_insert_with(|| CLOTH_MOTION_STABILITY && std::env::var_os("AC_CLOTH_LEGACY_MOTION").is_none());
+        if stable && !reset && dt <= 0.0 { return &self.rendered; }
+        let last_render = if stable && !reset { Some(self.rendered.clone()) } else { None };
         self.anchor = Some(anchor);
         if reset {
             self.current = targets.to_vec();
@@ -499,9 +523,26 @@ impl ClothState {
                     }
                 }
             }
+            if stable {
+                let before = self.current.clone();
+                bound_motion(settings, &mut self.current, targets);
+                for (i, p) in self.current.iter().enumerate() {
+                    self.previous[i] += *p - before[i];
+                    self.previous[i] = *p - (*p - self.previous[i]).clamp_length_max(0.09);
+                }
+            }
         }
         // Pins follow the skeleton even on render frames with no simulation step.
         for (i, &target) in targets.iter().enumerate() { if settings.pinned[i] { self.current[i] = target; } }
+        if stable {
+            let alpha = (self.accumulator / step).clamp(0.0, 1.0);
+            self.rendered.clone_from(&self.current);
+            for (i, position) in self.rendered.iter_mut().enumerate() {
+                if !settings.pinned[i] { *position = self.previous[i].lerp(*position, alpha); }
+            }
+            // Guard a separate output buffer; the 30 Hz solver retains its own positions/history.
+            std::mem::swap(&mut self.current, &mut self.rendered);
+        }
         self.contact_before = contact_report(settings, &self.current, capsules);
         if CLOTH_RENDER_CONTACT_GUARD && (dt > 0.0 || reset) {
             for (i, position) in self.current.iter_mut().enumerate() {
@@ -520,7 +561,7 @@ impl ClothState {
                 }
                 *position = escape_overlapping_capsules(*position, targets[i], rigid_rest[i], settings.vertex_radius[i], capsules);
                 // PORT: presentation correction must not inject an extra Verlet velocity.
-                self.previous[i] += *position - before;
+                if !stable { self.previous[i] += *position - before; }
             }
         }
         let surface_guard = *self.surface_guard.get_or_insert_with(|| CLOTH_SURFACE_CONTACT_GUARD && std::env::var_os("AC_CLOTH_NO_SURFACE_GUARD").is_none());
@@ -546,10 +587,28 @@ impl ClothState {
                 if body == 0 && folds == 0 { break; }
             }
             self.current = best;
-            for (i, p) in self.current.iter().enumerate() { self.previous[i] += *p - before[i]; }
+            if !stable { for (i, p) in self.current.iter().enumerate() { self.previous[i] += *p - before[i]; } }
+        }
+        if stable {
+            bound_motion(settings, &mut self.current, targets);
+            if let Some(mut last) = last_render.filter(|old| old.len() == targets.len() && self.render_targets.len() == targets.len()) {
+                // PORT: bound relative sway to 2 m/s while still following the moving character.
+                for (i, p) in last.iter_mut().enumerate() { *p += targets[i] - self.render_targets[i]; }
+                bound_motion(settings, &mut last, targets);
+                let travel = self.current.iter().zip(&last).map(|(p, old)| p.distance(*old)).fold(0.0f32, f32::max);
+                let blend = if travel > 1e-8 { (2.0 * dt.clamp(0.0, 0.1) / travel).min(1.0) } else { 1.0 };
+                for (i, (p, old)) in self.current.iter_mut().zip(last).enumerate() {
+                    *p = if settings.pinned[i] { targets[i] } else { old.lerp(*p, blend) };
+                }
+            }
+            self.render_targets.clear();
+            self.render_targets.extend_from_slice(targets);
         }
         self.contact_after = contact_report(settings, &self.current, capsules);
-        &self.current
+        if stable {
+            std::mem::swap(&mut self.current, &mut self.rendered);
+            &self.rendered
+        } else { &self.current }
     }
 }
 
@@ -595,10 +654,13 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
         if report {
             eprintln!("cloth t={:.2} contacts>1mm: {} -> {}; max depth: {:.4} -> {:.4} m", time.elapsed_secs(),
                 cloth.state.contact_before.0, cloth.state.contact_after.0, cloth.state.contact_before.1, cloth.state.contact_after.1);
-            let mut positions = cloth.state.current.clone();
+            let mut positions = if cloth.state.stable_motion == Some(true) { cloth.state.rendered.clone() } else { cloth.state.current.clone() };
             let body = surface_contacts(&settings, &mut positions, &targets, &capsules, false);
             let folds = fold_contacts(&settings, &mut positions, &cloth.state.previous, false);
             eprintln!("cloth surfaces: {body} triangle/capsule contacts; {folds} non-adjacent face crossings");
+            let lag = positions.iter().zip(&targets).map(|(p, t)| p.distance(*t)).fold(0.0f32, f32::max);
+            let stretch = settings.edges.iter().map(|[a, b]| positions[*a].distance(positions[*b]) / targets[*a].distance(targets[*b]).max(0.001)).fold(1.0f32, f32::max);
+            eprintln!("cloth shape: max target lag {lag:.4} m; max animated-edge stretch {stretch:.2}x");
         }
         let Some(mut mesh) = meshes.get_mut(&cloth.mesh) else { continue; };
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -614,6 +676,82 @@ mod tests {
     use super::*;
     fn settings() -> ClothSettings {
         ClothSettings { pinned: vec![true, false, false], pull: vec![1.0, 0.015, 0.015], edges: vec![[0, 1], [1, 2]], triangles: Vec::new(), damping: 0.1, upward_damping: 0.75, gravity: -9.8, iterations: 3, vertex_radius: vec![0.01; 3], colliders: Vec::new(), pull_motion: Vec2::ZERO, pull_decay: 0.99, upward_motion: Vec2::new(0.0, 1.0), action_settings: Vec::new(), action_strength: 1.0 }
+    }
+    #[test]
+    fn moving_render_contacts_do_not_feed_the_fixed_step_solver() {
+        let mut cfg = settings();
+        cfg.edges.clear();
+        cfg.gravity = 0.0;
+        let rest = vec![Vec3::Y, Vec3::X * 0.02, -Vec3::Y * 0.5];
+        let mut state = ClothState { stable_motion: Some(true), ..default() };
+        state.advance(&cfg, &rest, &rest, &[], Vec3::ZERO, 0.0);
+        let simulated = state.current.clone();
+        let history = state.previous.clone();
+        for frame in 0..7 {
+            let capsule = ClothCollider { bone_id: 0, local_start: Vec3::X * frame as f32 * 0.01 - Vec3::Y,
+                local_end: Vec3::X * frame as f32 * 0.01 + Vec3::Y, radius: 0.2, mode: 1, threshold: 0.0 };
+            let rendered = state.advance(&cfg, &rest, &rest, std::slice::from_ref(&capsule), Vec3::ZERO, 1.0 / 240.0);
+            assert!(rendered[1].distance(rest[1]) > 0.001, "moving contact affects presentation");
+            assert_eq!(state.current, simulated, "no solver step has occurred");
+            assert_eq!(state.previous, history, "contact cannot inject solver velocity");
+        }
+        let rendered = state.rendered.clone();
+        assert_eq!(state.advance(&cfg, &rest, &rest, &[], Vec3::ZERO, 0.0), rendered, "pause retains corrected output");
+    }
+    #[test]
+    fn free_vertices_interpolate_between_fixed_steps_while_pins_follow() {
+        let mut cfg = settings();
+        cfg.edges.clear(); cfg.gravity = 0.0; cfg.damping = 0.0; cfg.pull.fill(0.0);
+        let rest = vec![Vec3::Y, Vec3::ZERO, Vec3::ZERO];
+        let mut state = ClothState { stable_motion: Some(true), ..default() };
+        state.advance(&cfg, &rest, &rest, &[], Vec3::ZERO, 0.0);
+        state.previous[1] = -Vec3::X * 0.02;
+        let first = state.advance(&cfg, &rest, &rest, &[], Vec3::ZERO, 1.0 / 30.0)[1];
+        let mut targets = rest.clone(); targets[0] += Vec3::X;
+        let middle = state.advance(&cfg, &targets, &rest, &[], Vec3::ZERO, 1.0 / 60.0).to_vec();
+        assert!(first.length() < 1e-6);
+        assert!((middle[1].x - 0.01).abs() < 1e-6);
+        assert_eq!(middle[0], targets[0]);
+        let next = state.advance(&cfg, &targets, &rest, &[], Vec3::ZERO, 1.0 / 60.0)[1];
+        assert!((next.x - 0.02).abs() < 1e-6);
+    }
+    #[test]
+    fn shape_bound_removes_stretched_spikes_and_nonfinite_free_points() {
+        let cfg = settings();
+        let targets = vec![Vec3::ZERO, -Vec3::Y * 0.2, -Vec3::Y * 0.4];
+        let mut p = vec![Vec3::X, targets[1] + Vec3::X * 10.0, Vec3::splat(f32::NAN)];
+        bound_motion(&cfg, &mut p, &targets);
+        assert_eq!(p[0], targets[0]);
+        for (p, t) in p.iter().zip(&targets) { assert!(p.is_finite() && p.distance(*t) <= 0.180001); }
+        for [a, b] in cfg.edges { assert!(p[a].distance(p[b]) <= 1.50001 * targets[a].distance(targets[b])); }
+    }
+    #[test]
+    fn moving_cloth_remains_coherent_through_turns_jumps_and_variable_frames() {
+        let cfg = settings();
+        let rest = vec![Vec3::Y * 0.3, Vec3::X * 0.15, Vec3::new(0.2, -0.3, 0.0)];
+        for hz in [30.0, 60.0, 144.0, 240.0] {
+            let mut state = ClothState { stable_motion: Some(true), ..default() };
+            let mut time = 0.0f32;
+            let mut old_offsets: Option<Vec<Vec3>> = None;
+            for frame in 0..600 {
+                let dt = (if frame % 17 == 0 { 1.7 } else { 1.0 }) / hz;
+                time += dt;
+                let anchor = Vec3::new(time * 6.0, (time * 4.0).sin().max(0.0), 0.0);
+                let rotation = Quat::from_rotation_y(time * 8.0);
+                let targets: Vec<_> = rest.iter().map(|p| anchor + rotation * *p).collect();
+                let capsule = ClothCollider { bone_id: 0, local_start: anchor - Vec3::Y * 0.5,
+                    local_end: anchor + Vec3::Y * 0.5, radius: 0.2, mode: 1, threshold: 0.0 };
+                let p = state.advance(&cfg, &targets, &targets, std::slice::from_ref(&capsule), anchor, dt);
+                assert_eq!(p[0], targets[0]);
+                let offsets: Vec<_> = p.iter().zip(&targets).map(|(p, t)| *p - *t).collect();
+                assert!(offsets.iter().all(|p| p.is_finite() && p.length() <= 0.18001));
+                for &[a, b] in &cfg.edges { assert!(p[a].distance(p[b]) <= 1.5001 * targets[a].distance(targets[b])); }
+                if let Some(old) = old_offsets {
+                    assert!(offsets.iter().zip(old).all(|(p, old)| p.distance(old) <= 2.0 * dt + 1e-4), "relative sway must not jump at {hz} Hz");
+                }
+                old_offsets = Some(offsets);
+            }
+        }
     }
     #[test]
     fn cloth_follows_pins_with_inertia_and_resets_on_teleport() {
@@ -731,7 +869,7 @@ mod tests {
         let mut settings = settings();
         settings.edges.clear();
         let rest = vec![Vec3::Y, Vec3::X * 0.16, Vec3::new(0.16, -0.5, 0.0)];
-        let mut state = ClothState::default();
+        let mut state = ClothState { stable_motion: Some(false), ..default() };
         state.advance(&settings, &rest, &rest, &[], Vec3::ZERO, 0.0);
         for frame in 0..480 {
             let t = frame as f32 / 240.0;
@@ -755,7 +893,7 @@ mod tests {
         settings.pinned = vec![true, false, true];
         let rest = vec![Vec3::ZERO, Vec3::X * 0.05, Vec3::X * 0.1];
         let capsule = ClothCollider { bone_id: 0, local_start: -Vec3::Y, local_end: Vec3::Y, radius: 0.2, mode: 1, threshold: 0.0 };
-        let mut state = ClothState::default();
+        let mut state = ClothState { stable_motion: Some(false), ..default() };
         for _ in 0..120 {
             let p = state.advance(&settings, &rest, &rest, std::slice::from_ref(&capsule), Vec3::ZERO, 1.0 / 60.0);
             assert_eq!(p[0], rest[0]);
