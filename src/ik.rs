@@ -200,6 +200,7 @@ pub struct LimbIk {
     /// The standing foot IK (`IKGroundBiped`): left and right foot, and the pelvis drop (m, ≤ 0).
     pub ground: [GroundFoot; 2],
     pub pelvis: f32,
+    pub stick: StickToGround,
     /// Joint indices of each chain (resolved once from the rig).
     chains: Option<[[usize; 3]; 4]>,
 }
@@ -211,11 +212,14 @@ impl LimbIk {
     }
 }
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IkSet;
+
 pub struct IkPlugin;
 
 impl Plugin for IkPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (add_limb_ik, solve_limbs).chain().after(crate::anim::apply_clip));
+        app.add_systems(Update, (add_limb_ik, solve_limbs.in_set(IkSet)).chain().after(crate::anim::apply_clip));
         if std::env::var_os("AC_IK_LOG").is_some() {
             app.add_systems(PostUpdate, log_ik_error.after(bevy::transform::TransformSystems::Propagate));
         }
@@ -268,9 +272,10 @@ pub struct GroundFoot {
     dur: f32,
     /// Ankle height where the fade started (+56 fade in, +88 fade out).
     from: f32,
-    /// The ankle height on the ground under the foot (+40), and the smoothed one used while running.
+    /// The ankle height on the ground under the foot (+40).
     pub target: f32,
-    cur: f32,
+    /// FootIK +0x168: reset to zero (0x42FDD0); no writer found (RE/15 §6.3).
+    x: f32,
     /// The ankle height handed to the leg solve this frame.
     pub goal: f32,
 }
@@ -300,10 +305,7 @@ impl GroundFoot {
             if self.t >= self.dur {
                 (self.t, self.dur) = (0.0, 0.0);
                 self.state = match self.state {
-                    1 => {
-                        self.cur = self.target;
-                        2
-                    }
+                    1 => 2,
                     3 => 0,
                     s => s,
                 };
@@ -312,15 +314,68 @@ impl GroundFoot {
         let s = if self.dur > 0.0 { self.t / self.dur } else { 1.0 };
         self.goal = match self.state {
             1 => self.from + (self.target - self.from) * s,
-            // running: the ankle follows the ground under it, smoothed (sub_42E7E0 rate 2; PORT: exponential)
-            2 => {
-                self.cur += (self.target - self.cur) * (1.0 - (-2.0 * dt).exp());
-                self.cur
-            }
+            // FootIK__GoalHeight 0x42EFC0: x is not the previous goal and is never written here.
+            2 => if self.x.abs() <= 0.0005 { self.target } else { move_toward(self.x, self.target, 2.0, dt) },
             3 => self.from + (anim - self.from) * s,
             _ => return None,
         };
         Some(self.goal)
+    }
+}
+
+/// Math__MoveToward 0x42E7E0: a constant-speed step, capped at the remaining distance.
+fn move_toward(x: f32, target: f32, rate: f32, dt: f32) -> f32 {
+    x + (target - x).clamp(-rate * dt, rate * dt)
+}
+
+/// IKGroundBiped +1508/+1512, enabled by default by ctor 0x430D30 (RE/15 §6.2–6.3).
+#[derive(Clone, Copy, Debug)]
+pub struct StickToGround {
+    pub active: bool,
+    pub offset: f32,
+    pub rate: f32,
+}
+
+impl Default for StickToGround {
+    fn default() -> Self {
+        Self { active: false, offset: 0.0, rate: 1.5 }
+    }
+}
+
+impl StickToGround {
+    /// IKGroundBiped__SmoothStickToGround 0x42F350. Positive residuals on slopes are ignored.
+    fn advance(&mut self, residual: f32, normal_y: Option<f32>, dt: f32) -> f32 {
+        let qualifies = residual.abs() >= 0.03 && (residual <= 0.0 || normal_y.is_none_or(|y| y >= 0.95));
+        if !self.active {
+            if !qualifies { return 0.0; }
+            self.active = true;
+            self.offset = move_toward(residual, 0.0, self.rate, dt).clamp(-1.0, 1.0);
+        } else {
+            if qualifies { self.offset += residual; }
+            self.offset = move_toward(self.offset, 0.0, self.rate, dt);
+            if self.offset.abs() <= 0.0005 {
+                self.active = false;
+                self.rate = 1.5;
+                return 0.0;
+            }
+            self.rate += 10.0 * dt;
+            self.offset = self.offset.clamp(-1.0, 1.0);
+        }
+        self.offset
+    }
+
+    fn update(&mut self, body: &mut Body, ground: &[GroundFoot; 2], dt: f32) -> f32 {
+        // PostIntegrate 0x57D693: consume even when IK is gated off; never replay an old residual.
+        let residual = std::mem::take(&mut body.stick_residual);
+        let normal_y = body.stick_normal_y.take();
+        // IKGroundBiped__Update 0x432B2F / 0x43303E: layer 28 bypasses this update.
+        if body.proxy.layer == crate::layers::HOLLYWOOD_MODE { return 0.0; }
+        if !crate::tuning::GAME_SMOOTHING || body.velocity.length() <= 0.001 || ground.iter().any(|f| f.state != 0) {
+            self.active = false;
+            self.offset = 0.0;
+            return 0.0;
+        }
+        self.advance(residual, normal_y, dt)
     }
 }
 
@@ -352,11 +407,16 @@ fn ground_foot_target(ankle: Vec3, collision: &crate::collision::CollisionWorld)
 fn solve_limbs(
     time: Res<Time>,
     collision: Option<Res<crate::collision::CollisionWorld>>,
-    mut q: Query<(&Rig, &Body, &LimbTargets, &mut LimbIk, Option<&crate::anim::AnimPlayer>)>,
+    mut q: Query<(Entity, &Rig, &mut Body, &LimbTargets, &mut LimbIk, Option<&crate::anim::AnimPlayer>)>,
     mut joints: Query<&mut Transform>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
-    for (rig, body, targets, mut ik, player) in &mut q {
+    for (entity, rig, mut body, targets, mut ik, player) in &mut q {
+        let ground = ik.ground;
+        let stick_offset = ik.stick.update(&mut body, &ground, time.delta_secs());
+        if let Ok(mut transform) = joints.get_mut(entity) {
+            transform.translation.y += stick_offset;
+        }
         let contacts = player.map(|p| p.contacts).unwrap_or_default();
         if ik.chains.is_none() {
             let find = |id: u32| rig.bone_ids.iter().position(|b| *b == id);
@@ -380,7 +440,7 @@ fn solve_limbs(
         }
 
         // ---------------------------------------------------------------- world pose of the rig (animated)
-        let player = Iso { rot: body.tilt * Quat::from_rotation_y(body.heading), pos: body.feet };
+        let player = Iso { rot: body.tilt * Quat::from_rotation_y(body.heading), pos: body.feet + Vec3::Y * stick_offset };
         let Ok(root_t) = joints.get(rig.root).copied() else { continue };
         let root = player.mul(&root_t);
         let mut global: Vec<Iso> = Vec::with_capacity(rig.joints.len());
@@ -689,6 +749,159 @@ pub fn log_ik_error(q: Query<(&Rig, &LimbIk, &LimbTargets)>, globals: Query<&Glo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_toward_steps_at_constant_speed_without_overshoot() {
+        assert_eq!(move_toward(0.0, 1.0, 2.0, 0.1), 0.2);
+        assert_eq!(move_toward(1.0, 0.0, 2.0, 0.1), 0.8);
+        assert_eq!(move_toward(0.0, 0.1, 2.0, 0.1), 0.1);
+        assert_eq!(move_toward(0.0, -0.1, 2.0, 0.1), -0.1);
+        assert_eq!(move_toward(0.4, 0.4, 2.0, 0.1), 0.4);
+        assert_eq!(move_toward(0.4, 1.0, 2.0, 0.0), 0.4);
+    }
+
+    #[test]
+    fn running_ankle_uses_the_unwritten_value_instead_of_the_previous_goal() {
+        let mut foot = GroundFoot { state: 2, target: 0.3, goal: -0.4, ..Default::default() };
+        assert_eq!(foot.advance(0.1, 1.0 / 60.0), Some(0.3));
+        foot.target = -0.2;
+        assert_eq!(foot.advance(0.1, 1.0 / 60.0), Some(-0.2));
+        assert_eq!(foot.x, 0.0, "advance must not write FootIK+0x168");
+        // Exercise the native fallback branch, even though no game writer was found.
+        foot.x = 0.4;
+        assert_eq!(foot.advance(0.1, 0.1), Some(0.2));
+        assert_eq!(foot.x, 0.4, "goal is not fed back into x");
+        foot.x = 0.0005;
+        assert_eq!(foot.advance(0.1, 0.1), Some(-0.2));
+    }
+
+    #[test]
+    fn stick_step_up_decays_at_the_native_accelerating_rate_and_resets() {
+        let mut stick = StickToGround::default();
+        assert_eq!(stick.advance(-0.3, Some(1.0), 0.0), -0.3);
+        assert!(stick.active);
+        let dt = 1.0 / 60.0;
+        let mut expected = -0.3f32;
+        let mut rate = 1.5;
+        let mut frames = 0;
+        while stick.active {
+            expected = (expected + rate * dt).min(0.0);
+            let offset = stick.advance(0.0, None, dt);
+            if expected.abs() <= 0.0005 {
+                assert_eq!(offset, 0.0);
+                assert!(!stick.active);
+            } else {
+                rate += 10.0 * dt;
+                assert!((offset - expected).abs() < 1e-6);
+                assert!((stick.rate - rate).abs() < 1e-6);
+            }
+            frames += 1;
+            assert!(frames < 30, "must finish the decay");
+        }
+        assert!(stick.offset.abs() <= 0.0005);
+        assert_eq!(stick.rate, 1.5);
+        assert!((stick.advance(-0.3, Some(1.0), dt) - (-0.3 + 1.5 * dt)).abs() < 1e-6);
+        assert_eq!(stick.rate, 1.5, "entry does not accelerate until the active branch");
+    }
+
+    #[test]
+    fn stick_slope_skip_is_directional_and_keeps_an_existing_decay() {
+        let mut stick = StickToGround::default();
+        assert_eq!(stick.advance(0.3, Some(0.94), 0.0), 0.0);
+        assert!(!stick.active);
+        assert_eq!(stick.advance(-0.3, Some(0.94), 0.0), -0.3);
+        assert!((stick.advance(0.3, Some(0.94), 0.01) + 0.285).abs() < 1e-6);
+        for normal in [Some(0.95), None] {
+            let mut stick = StickToGround::default();
+            assert_eq!(stick.advance(0.3, normal, 0.0), 0.3);
+        }
+    }
+
+    #[test]
+    fn stick_thresholds_accumulation_and_clamp_match_the_native_branches() {
+        let mut stick = StickToGround::default();
+        assert_eq!(stick.advance(-0.0299, None, 0.0), 0.0);
+        assert_eq!(stick.advance(-0.03, None, 0.0), -0.03);
+        assert_eq!(stick.advance(-0.03, None, 0.0), -0.06);
+        assert_eq!(stick.advance(-0.02, None, 0.0), -0.06, "small residual is ignored");
+        assert_eq!(stick.advance(-2.0, None, 0.0), -1.0);
+        let mut stick = StickToGround::default();
+        assert_eq!(stick.advance(2.0, None, 0.0), 1.0);
+        stick.offset = 0.0005;
+        assert_eq!(stick.advance(0.0, None, 0.0), 0.0);
+        assert!(!stick.active);
+        assert_eq!(stick.rate, 1.5);
+    }
+
+    #[test]
+    fn stick_consumes_residuals_once_and_obeys_layer_speed_and_foot_gates() {
+        let mut body = Body { feet: Vec3::Y * 0.3, velocity: Vec3::X, stick_residual: -0.3,
+            stick_normal_y: Some(1.0), ..Default::default() };
+        let ground = [GroundFoot::default(); 2];
+        let mut stick = StickToGround::default();
+        assert_eq!(stick.update(&mut body, &ground, 0.0), -0.3);
+        assert_eq!(body.stick_residual, 0.0);
+        assert_eq!(body.stick_normal_y, None);
+        assert_eq!(body.feet.y, 0.3, "visual smoothing must not move the controller");
+        assert_eq!(stick.update(&mut body, &ground, 0.0), -0.3, "residual is not accumulated again");
+        body.proxy.layer = crate::layers::HOLLYWOOD_MODE;
+        body.stick_residual = -0.3;
+        assert_eq!(stick.update(&mut body, &ground, 0.0), 0.0);
+        assert_eq!(body.stick_residual, 0.0);
+        assert_eq!(stick.offset, -0.3, "Hollywood bypass leaves the IK state untouched");
+        body.proxy.layer = crate::layers::MAIN_CHARACTER;
+        body.velocity = Vec3::X * 0.001;
+        assert_eq!(stick.update(&mut body, &ground, 0.0), 0.0);
+        assert!(!stick.active);
+        assert_eq!(stick.offset, 0.0);
+        body.velocity = Vec3::X;
+        for f in 0..2 {
+            for state in 1..=3 {
+                let mut ground = ground;
+                ground[f].state = state;
+                body.stick_residual = -0.3;
+                assert_eq!(stick.update(&mut body, &ground, 0.0), 0.0);
+                assert!(!stick.active);
+                assert_eq!(stick.offset, 0.0);
+                assert_eq!(body.stick_residual, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn solve_applies_stick_offset_to_player_transform_and_ik_world_pose() {
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f32(0.01));
+        app.insert_resource(time).add_systems(Update, solve_limbs);
+        let root = app.world_mut().spawn(Transform::default()).id();
+        let mut joints = Vec::new();
+        let mut bone_ids = Vec::new();
+        let mut parents = Vec::new();
+        for (a, b, c) in LIMB_CHAINS {
+            let start = joints.len();
+            for (i, id) in [a, b, c].into_iter().enumerate() {
+                joints.push(app.world_mut().spawn(Transform::from_xyz(0.0, 0.2, 0.0)).id());
+                bone_ids.push(id);
+                parents.push(if i == 0 { None } else { Some(start + i - 1) });
+            }
+        }
+        let rig = Rig { root, rest: vec![Transform::default(); joints.len()], joints, bone_ids, parents };
+        let entity = app.world_mut().spawn((rig,
+            Body { feet: Vec3::Y * 0.3, velocity: Vec3::X, stick_residual: -0.3,
+                stick_normal_y: Some(1.0), ..Default::default() },
+            LimbTargets { hands: Some((Vec3::Y, Vec3::Y)), ..Default::default() },
+            LimbIk::default(), Transform::from_xyz(0.0, 0.3, 0.0))).id();
+        app.update();
+        let world = app.world();
+        let ik = world.get::<LimbIk>(entity).unwrap();
+        assert!((ik.stick.offset + 0.285).abs() < 1e-6);
+        assert!((world.get::<Transform>(entity).unwrap().translation.y - 0.015).abs() < 1e-6);
+        assert_eq!(world.get::<Body>(entity).unwrap().feet.y, 0.3);
+        let expected_contact = contact_of(0, Vec3::Y * (0.015 + 0.6), Vec3::ZERO);
+        assert!((ik.limbs[0].anim_from - expected_contact).length() < 1e-6,
+            "IK must start from the same smoothed world root as the visual");
+    }
 
     /// Forward kinematics of the solved chain must reach the target.
     fn check(a: Vec3, b: Vec3, c: Vec3, t: Vec3) -> f32 {

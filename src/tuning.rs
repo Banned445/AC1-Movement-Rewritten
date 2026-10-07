@@ -6,6 +6,9 @@
 //!
 //! Coordinate note: the game is Z-up, Bevy is Y-up. "Height" below means game Z = Bevy Y.
 
+/// PORT comparison switch for the RE/15 §6.3 visual-root and camera pass; the ankle bug fix is unconditional.
+pub const GAME_SMOOTHING: bool = true;
+
 // ---------------------------------------------------------------- input (RE/01 §6)
 /// Stick dead-zone; speed = (|stick| - 0.35) / 0.65.  GoAssassinActionInterpreter 0xEE65A0
 pub const STICK_DEADZONE: f32 = 0.35;
