@@ -23,6 +23,8 @@ pub struct PadInput {
     pub speed01: f32,
     pub high_profile: bool,
     pub legs_held: bool,
+    /// Empty-hand held (pad button 3): falling grab, 0xEDBAF0 -> 0xE102D0.
+    pub hand_held: bool,
     /// Seconds since Legs was last pressed (jump buffer, 0.3 s).
     pub legs_pressed_ago: f32,
     /// Seconds since the empty-hand button (pad button 3) was last pressed.
@@ -82,6 +84,7 @@ pub fn read_pad(
     let mut legs = keys.pressed(KeyCode::Space);
     let mut legs_just = keys.just_pressed(KeyCode::Space);
     let mut hand_just = keys.just_pressed(KeyCode::KeyE);
+    let mut hand = keys.pressed(KeyCode::KeyE);
 
     for gp in &gamepads {
         let s = gp.left_stick();
@@ -92,6 +95,7 @@ pub fn read_pad(
         legs |= gp.pressed(GamepadButton::South);
         legs_just |= gp.just_pressed(GamepadButton::South);
         hand_just |= gp.just_pressed(GamepadButton::East);
+        hand |= gp.pressed(GamepadButton::East);
     }
 
     let mag = stick.length().min(1.0);
@@ -105,6 +109,7 @@ pub fn read_pad(
     pad.speed01 = if mag <= STICK_DEADZONE { 0.0 } else { ((mag - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)).clamp(0.0, 1.0) };
     pad.high_profile = high;
     pad.legs_held = legs;
+    pad.hand_held = hand;
     if legs_just {
         pad.legs_pressed_ago = 0.0;
     } else {

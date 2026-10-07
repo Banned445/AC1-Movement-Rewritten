@@ -744,22 +744,24 @@ fn choose_clip(
                     } else if p.fall_entry && p.play_overlay(&lib, ACT_FALL) {
                         // the falling blend is an upper-body action (channel 1, BodyPartTemplate_Human): it plays on
                         // the partial slot while the full-body slot holds the entry's last frame; grasp weights only
-                        // while the grab input (Legs) is held
+                        // while the grab input (empty hand, pad button 3) is held.
+                        // PORT: native timer/ability gates and overlay exit scheduling (0xE0C301)
+                        // remain simplified; zero weights reset grasp immediately on release.
                         let facing = body.forward();
-                        let want = if pad.legs_held { if pad.speed01 > 0.0 { pad.dir } else { facing } } else { Vec3::ZERO };
+                        let want = if (if crate::tuning::GAME_FALLS { pad.hand_held } else { pad.legs_held }) && data.air.apex_reached && data.air.apex_y - body.feet.y > 0.3 { if pad.magnitude > 0.35 { pad.dir } else { facing } } else { Vec3::ZERO };
                         let k = (dt * 7.0).min(1.0);
                         let gd = p.grasp_dir;
-                        p.grasp_dir = gd + (want - gd) * k;
+                        p.grasp_dir = if crate::tuning::GAME_FALLS && want == Vec3::ZERO { Vec3::ZERO } else { gd + (want - gd) * k };
                         let w = fall_grasp_weights(p.grasp_dir, facing);
                         p.set_overlay_weights(&w);
                         continue;
                     } else {
                         // no body-part data (or no entry clip): the falling blend on the full body
                         let facing = body.forward();
-                        let want = if pad.legs_held { if pad.speed01 > 0.0 { pad.dir } else { facing } } else { Vec3::ZERO };
+                        let want = if (if crate::tuning::GAME_FALLS { pad.hand_held } else { pad.legs_held }) && data.air.apex_reached && data.air.apex_y - body.feet.y > 0.3 { if pad.magnitude > 0.35 { pad.dir } else { facing } } else { Vec3::ZERO };
                         let k = (dt * 7.0).min(1.0);
                         let gd = p.grasp_dir;
-                        p.grasp_dir = gd + (want - gd) * k;
+                        p.grasp_dir = if crate::tuning::GAME_FALLS && want == Vec3::ZERO { Vec3::ZERO } else { gd + (want - gd) * k };
                         let w = fall_grasp_weights(p.grasp_dir, facing);
                         let r = action(&lib, &[ACT_FALL], true, 0, Some(0.15), Some("fall"));
                         if let Some(mut r) = r {

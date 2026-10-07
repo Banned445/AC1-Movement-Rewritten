@@ -8,6 +8,8 @@
 
 /// PORT comparison switch for the RE/15 §6.3 visual-root and camera pass; the ankle bug fix is unconditional.
 pub const GAME_SMOOTHING: bool = true;
+/// PORT comparison switch for the verified fall scalar/input corrections.
+pub const GAME_FALLS: bool = true;
 
 // ---------------------------------------------------------------- input (RE/01 §6)
 /// Stick dead-zone; speed = (|stick| - 0.35) / 0.65.  GoAssassinActionInterpreter 0xEE65A0
@@ -53,7 +55,8 @@ pub const DRIFT_MAX: f32 = 5.0;
 pub const ARRIVAL_TOLERANCE: f32 = 0.01;
 /// Over-drop rule: if the target is > 5 m below (3 m for Leap of Faith) aim 5 m down, then free-fall. 0xB1B8C0
 pub const OVERDROP: f32 = 5.0;
-/// Landing damage by fall height (from apex): heavy > 6.3 m, fatal > 7.0 m. ComputeLandingType 0xE00FE0
+/// Non-player constructor defaults (0xE0FE80); player enables the fixed table (0xED6280).
+/// Retained only for the GAME_FALLS comparison path.
 pub const FALL_HEAVY: f32 = 6.3;
 pub const FALL_FATAL: f32 = 7.0;
 /// Total drop > 3 m plays the damage / damage-roll landing + camera shake (drop − 3)/7, else the soft/hard

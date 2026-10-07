@@ -209,7 +209,7 @@ fn chained_free_run_crosses_several_roofs() {
 }
 
 #[test]
-fn eight_metre_drop_is_fatal_and_respawns() {
+fn eight_metre_drop_is_safe_for_the_player() {
     // tower at (-12, 14), 5x5, h 8: run off its +X edge at 65 deg (a drop > 5 m straight ahead would ledge-stop,
     // 0xEE8899; at 65 deg it is not a front edge)
     let mut s = Sim::new(Vec3::new(-11.0, 8.0, 12.0), -std::f32::consts::FRAC_PI_2);
@@ -219,13 +219,14 @@ fn eight_metre_drop_is_fatal_and_respawns() {
     s.pad(Vec3::X, 0.0, false, false);
     s.run(0.2);
     let l = s.ground().last_landing.expect("landed");
-    assert_eq!(l.kind, LandingType::Fatal, "{l:?}");
-    assert!((s.body().feet - SPAWN).length() < 3.0, "respawned near spawn: {:?}", s.body().feet);
+    assert_eq!(l.kind, LandingType::Safe, "{l:?}");
+    assert_eq!(l.damage, 0);
+    assert!(s.body().feet.x < -5.0, "unexpected respawn: {:?}", s.body().feet);
 }
 
 #[test]
 fn six_metre_drop_rolls_without_heavy_damage() {
-    // 6 m is below the 6.3 m heavy threshold but above the 3 m roll threshold
+    // Player fixed table (0xED6280 / 0xE00FE0): 6 m is Safe; total drop >3 selects a roll.
     let mut s = Sim::new(Vec3::new(-11.0, 6.0, 2.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::new(0.4226, 0.0, 0.9063), 1.0, true, false); // at 65 deg: no ledge stop
     s.run(4.0);
@@ -1986,11 +1987,12 @@ fn a_jump_off_a_ladder_into_it_is_refused_and_a_side_push_is_turned() {
 }
 
 #[test]
-fn falling_past_a_ladder_with_legs_held_catches_it() {
+fn falling_past_a_ladder_with_empty_hand_held_catches_it() {
     use crate::player::ladder::{LadderPhase, CATCH_AIR, WAIT};
     // FindLadderCatch 0xE04100 (grab held): the catch height rounded down to 0.5 m, the catch action, then the low wait
     let mut s = Sim::new(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
-    s.pad(Vec3::ZERO, 0.0, false, true);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
     assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ladder), "no catch: {:?} {:?}", s.loco().current, s.body().feet);
     let l = &s.data().ladder;
     assert_eq!(l.phase, Some(LadderPhase::Entry));
@@ -2004,9 +2006,9 @@ fn falling_past_a_ladder_with_legs_held_catches_it() {
 }
 
 #[test]
-fn falling_past_a_ladder_without_legs_does_not_catch_it() {
+fn falling_past_a_ladder_with_only_legs_does_not_catch_it() {
     let mut s = Sim::new(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
-    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.pad(Vec3::ZERO, 0.0, false, true);
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "never landed");
     assert!(s.saw_air);
 }
@@ -2298,7 +2300,7 @@ fn a_jump_that_clips_a_higher_roof_lip_steps_onto_it() {
 }
 
 #[test]
-fn a_free_jump_keeps_its_speed_and_falls_on_smoothly() {
+fn a_free_jump_enters_the_native_five_metre_drift_cap() {
     // sprint off the 6 m block with nothing to land on
     let mut s = Sim::new(Vec3::new(-12.5, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, true, true);
@@ -2309,7 +2311,8 @@ fn a_free_jump_keeps_its_speed_and_falls_on_smoothly() {
         s.run(1.0 / 60.0 + 1e-4);
         let h = hspeed(prev, s.body().feet);
         if let Some(l) = last_h {
-            assert!((h - l).abs() < 0.6, "horizontal speed jumped {l:.2} -> {h:.2} at {:?} ({:?})", s.body().feet, s.data().air.mode);
+            // 0xE0F643 clamps excess drift immediately; no eased seam is present.
+            if h > 0.1 { assert!(h <= l + 0.6, "unexpected acceleration {l:.2} -> {h:.2}"); }
         }
         last_h = Some(h);
         prev = s.body().feet;
@@ -2906,4 +2909,31 @@ fn the_climb_reaches_up_past_missing_holds() {
     s.pad(Vec3::Z, 0.0, false, false);
     assert!(s.run_until(3.0, |s| s.data().climb.reach.is_none() && s.data().climb.moving.is_none()), "never arrived");
     assert!((s.data().climb.foot_l.y - 2.4).abs() < 0.05);
+}
+
+#[test]
+fn flat_fall_height_scenarios_reach_the_expected_player_bands() {
+    // Deliberately away from edges: >=9 m rag-fall is an edge/reception rule, not a flat-fall height rule.
+    for (height,kind,damage) in [(1.0,LandingType::Safe,0),(3.0,LandingType::Safe,0),
+        (5.0,LandingType::Safe,0),(9.0,LandingType::SmallDamage,10),(13.0,LandingType::HeavyDamage,40),
+        (21.0,LandingType::Fatal,200)] {
+        let mut s = Sim::new(Vec3::new(-30.0,height,-30.0),0.0);
+        assert!(s.run_until(5.0, |s| s.ground().last_landing.is_some()), "no landing at {height}");
+        let l=s.ground().last_landing.unwrap();
+        assert_eq!((l.kind,l.damage),(kind,damage),"height {height}: {l:?}");
+        if kind==LandingType::Fatal {
+            // PORT: immediate respawn remains until articulated fatal landing/desynchronisation exists.
+            s.run(0.1);
+            assert!((s.body().feet-SPAWN).length()<1.0);
+        }
+    }
+}
+
+#[test]
+fn an_ordinary_ballistic_fall_enters_hay_without_ground_damage() {
+    let mut s=Sim::new(Vec3::new(37.5,13.0,26.0),0.0);
+    assert!(s.run_until(4.0, |s| s.loco().current==ActorContextId::HayStack));
+    assert_eq!(s.data().hay.action.map(|a|a.id),Some(crate::player::hay::HAYSTACK_FROM_AIR));
+    assert!(s.ground().last_landing.is_none());
+    assert!(s.run_until(3.0, |s| s.data().hay.phase==crate::player::hay::HayPhase::Waiting));
 }

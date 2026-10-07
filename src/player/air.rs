@@ -7,7 +7,7 @@
 //! 0.01 m (0xE07D00).
 //! Real physics only for: the over-drop tail (target > 5 m below → aim 5 m down, then free fall with
 //! g = 9.8, horizontal steering ≤ 15 m/s) and plain falls (drift decays 4 m/s², ≤ 5 m/s).
-//! Landing: fall height measured from the apex; heavy > 6.3 m, fatal > 7.0 m (0xE00FE0);
+//! Landing: fall height measured from the apex; player fixed damage table (0xED6280 / 0xE00FE0);
 //! landing action by drop / distance / speed bucket, total drop > 3 m → damage or damage-roll + camera
 //! shake (0xE05940, `jump_blend::landing`).
 
@@ -27,8 +27,7 @@ use crate::tuning::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LandingType {
     Safe = 0,
-    #[allow(dead_code)]
-    SmallDamage = 1, // threshold defaults to FLT_MAX in the game → never triggers
+    SmallDamage = 1,
     HeavyDamage = 2,
     Fatal = 3,
 }
@@ -36,6 +35,8 @@ pub enum LandingType {
 #[derive(Clone, Copy, Debug)]
 pub struct Landing {
     pub kind: LandingType,
+    /// LandingEvent+16 (0xE04E40). PORT: native health/protection component is not yet integrated.
+    pub damage: u32,
     /// Fall height from the apex (m).
     pub fall_height: f32,
     /// Total drop from the jump/fall start (m).
@@ -102,7 +103,7 @@ pub enum FallOrigin {
 /// What the switching context asks InAir to do (TransitionSetupDataToInAir, RE/01 §4.2).
 #[derive(Clone, Copy, Debug)]
 pub enum InAirEntry {
-    /// `speed_param` becomes the speed ratio HumanInAir+0x16C (hypothesis: the ground speed parameter);
+    /// PORT: `speed_param` seeds the entry; 0xEDBAF0 updates the live air ratio on subsequent updates;
     /// `foot_left` = the leading foot (byte+60 bits 2–3 of the playing item, or sub_B18850).
     JumpToTarget { from: Vec3, target: JumpTarget, speed_param: f32, foot_left: bool },
     FreeJump { from: Vec3, dir: Vec3, speed_param: f32 },
@@ -166,8 +167,9 @@ pub struct HumanInAirData {
     /// Jump target type flags (+0x290).
     pub target_flags: u32,
     pub prev_y: f32,
-    /// HumanInAir+0x16C: speed ratio for the landing / reception choice (hypothesis: the ground speed
-    /// parameter at takeoff; its writer is not traced, the ctor sets 0).
+    /// PORT adapter: entry velocity is applied by the body-owning system before the skipped update.
+    pub entry_velocity: Option<Vec3>,
+    /// HumanInAir+0x16C: live air-control speed ratio (0xEDBAF0 -> 0xE102B0).
     pub speed_ratio: f32,
     /// Takeoff and flight items of the current jump (+0x1A4 / +0x1A8 and the weight arrays +0x1BC..).
     pub takeoff: Option<ActionBlend>,
@@ -198,6 +200,7 @@ impl HumanInAirData {
         self.fall_t = 0.0;
         self.flat_horizontal = false;
         self.drop = None;
+        self.entry_velocity = None;
         match entry {
             InAirEntry::JumpToTarget { from, target, speed_param, foot_left } => {
                 self.speed_ratio = speed_param;
@@ -294,7 +297,10 @@ impl HumanInAirData {
                 }
                 self.flat_horizontal = true;
             }
-            InAirEntry::Fall { from, origin, speed_param, .. } => {
+            InAirEntry::Fall { from, velocity, origin, speed_param } => {
+                self.entry_velocity = Some(velocity);
+                self.takeoff = None;
+                self.flight = None;
                 self.speed_ratio = speed_param;
                 self.start_y = from.y;
                 self.start = from;
@@ -380,8 +386,8 @@ fn jump_disp_clips(air: &HumanInAirData, t: f32, t1: f32, duration: f32) -> [f32
     }
 }
 
-fn classify_landing(apex_y: f32, start_y: f32, land_y: f32) -> Landing {
-    let fall_height = (apex_y - land_y).max(0.0);
+fn classify_landing(apex_y: f32, apex_reached: bool, start_y: f32, land_y: f32) -> Landing {
+    let fall_height = if apex_reached { (apex_y - land_y).max(0.0) } else { 0.0 };
     let total_drop = (start_y - land_y).max(0.0);
     let kind = if fall_height > FALL_FATAL {
         LandingType::Fatal
@@ -390,11 +396,15 @@ fn classify_landing(apex_y: f32, start_y: f32, land_y: f32) -> Landing {
     } else {
         LandingType::Safe
     };
-    Landing { kind, fall_height, total_drop, roll: total_drop > ROLL_DROP && kind != LandingType::Fatal, action: None }
+    // PORT: the native CanSurviveDamage/protection overrides (0xE00FE0) require the missing
+    // synchronization/damage component. This returns the verified base table, not final health outcomes.
+    let (kind, damage) = if GAME_FALLS { super::falls::landing_damage(fall_height) } else { (kind, if kind == LandingType::Fatal { 200 } else if kind == LandingType::HeavyDamage { 10 } else { 0 }) };
+    Landing { kind, damage, fall_height, total_drop, roll: total_drop > ROLL_DROP && kind != LandingType::Fatal, action: None }
 }
 
 /// CheckAirCatch 0xE0BB70 / FindLedgeCatch 0xE0A990: look for an edge in the hand box at the reach
 /// height, facing the character within 70°.
+/// PORT: approximate feet-height probes; native hand-bone pairs and origin/release clearance are not represented.
 fn find_air_catch(feet: Vec3, facing: Vec3, guidance: &GuidanceWorld) -> Option<GuidanceHit> {
     for reach in [CATCH_REACH_WALL, CATCH_REACH_LEDGE] {
         let p = feet + Vec3::Y * reach + facing * 0.3;
@@ -435,6 +445,7 @@ pub fn update_air(
             continue;
         }
         if loco.just_switched {
+            if let Some(v) = data.air.entry_velocity.take() { body.velocity = v; }
             loco.just_switched = false;
             // the controller keeps integrating the take-off velocity; the jump's path shifts with it so the
             // linear correction (0xE0DEF0) still ends on the target
@@ -449,6 +460,14 @@ pub fn update_air(
         }
         let air = &mut data.air;
         air.time_in_air += dt;
+        if GAME_FALLS {
+            air.speed_ratio = super::falls::speed_ratio(&pad, body.forward());
+            // Record current feet before integration, on the first descending update (0xE0DFC7 / 0xE0DD15).
+            if !air.apex_reached && body.velocity.y < -0.001 {
+                air.apex_reached = true;
+                air.apex_y = body.feet.y;
+            }
+        }
 
         let mut landed_at: Option<f32> = None;
         // landed by arriving on a jump target (0xE07D00) rather than by ground contact (0xE05200)
@@ -578,20 +597,30 @@ pub fn update_air(
                 match steer_to {
                     Some(p) => {
                         // steer horizontally onto the real target, ≤ 15 m/s (0xE0DEF0 / 0xE00730)
-                        let fall_left = (body.feet.y - p.y).max(0.01);
-                        let t_left = (2.0 * fall_left / GRAVITY).sqrt().max(dt);
-                        let want = Vec3::new(p.x - body.feet.x, 0.0, p.z - body.feet.z) / t_left;
-                        h = want.clamp_length_max(FREEFALL_MAX_HORIZONTAL);
+                        if GAME_FALLS {
+                            let t_left = super::falls::time_to_height(body.feet.y, p.y, body.velocity.y);
+                            if t_left > 0.0 {
+                                // PORT: Body stores m/s and integrates variable dt; native tail stores m/frame.
+                                let target = Vec3::new(p.x, body.feet.y, p.z);
+                                h += super::falls::correction(body.feet, target, h, t_left, dt);
+                            }
+                            h = h.clamp_length_max(FREEFALL_MAX_HORIZONTAL);
+                        } else {
+                            let t_left = (2.0 * (body.feet.y - p.y).max(0.01) / GRAVITY).sqrt().max(dt);
+                            h = (Vec3::new(p.x - body.feet.x, 0.0, p.z - body.feet.z) / t_left).clamp_length_max(FREEFALL_MAX_HORIZONTAL);
+                        }
                     }
                     None => {
-                        // non-target drift: decays 4 m/s², capped 5 m/s (0x19BA434/438)
+                        // Non-target drift 0xE0F643–0xE0F707, constants 0x19BA434/438.
+                        // 0x4F8C40: decay only without controller contacts. PORT: use the proxy manifold
+                        // as the native contact-list adapter.
                         // PORT: a fall entered faster than the cap (a free jump at sprint speed, 6.3 m/s) decays onto it
                         // at the same 4 m/s² instead of being clamped in one frame (a visible lurch). The game reaches
                         // this path from its own entries only (LIVE: horizontal speed of a sprint off an edge).
                         let len = h.length();
                         let new_len = (len - DRIFT_DECEL * dt).max(0.0);
                         let new_len = if len > DRIFT_MAX { new_len.max(DRIFT_MAX) } else { new_len.min(DRIFT_MAX) };
-                        h = if len > 1e-4 { h * (new_len / len) } else { Vec3::ZERO };
+                        h = if GAME_FALLS { super::falls::drift(h, dt, !body.proxy.manifold.is_empty()) } else if len > 1e-4 { h * (new_len / len) } else { Vec3::ZERO };
                     }
                 }
                 body.velocity.x = h.x;
@@ -625,10 +654,21 @@ pub fn update_air(
                 if r.hit_ceiling && body.velocity.y > 0.0 {
                     body.velocity.y = 0.0;
                 }
-                if narrow_on.is_some() {
+                if GAME_FALLS && narrow_on.is_none() {
+                    // 0xE05490 checks hay before ordinary landing. PORT: greybox AABB top crossing replaces
+                    // native controller contacts with type-3, subtype-8/9 entities; side entry is not reconstructed.
+                    hay_on = guidance.haystacks.iter().find(|stack| {
+                        let next = body.feet;
+                        let previous = next - body.velocity * dt;
+                        body.velocity.y < 0.0 && previous.y >= stack.max.y && next.y <= stack.max.y
+                            && next.x >= stack.min.x && next.x <= stack.max.x
+                            && next.z >= stack.min.z && next.z <= stack.max.z
+                    }).map(|stack| super::hay::HayStackEntry { stack: *stack, faith: false, from: body.feet, speed: body.velocity.length() });
+                }
+                if narrow_on.is_some() || hay_on.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 {
                     landed_at = Some(body.feet.y);
-                } else if pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 {
+                } else if if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
                     // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
                     // in reach
                     if let Some(e) = super::ladder::find_ladder_catch(body.feet, body.forward(), true, &guidance, &collision) {
@@ -645,7 +685,7 @@ pub fn update_air(
         }
 
         // apex tracking: first frame vertical velocity < -0.001 (RE/04 §1)
-        if !air.apex_reached && body.feet.y - air.prev_y < -0.001 * dt {
+        if !GAME_FALLS && !air.apex_reached && body.feet.y - air.prev_y < -0.001 * dt {
             air.apex_reached = true;
             air.apex_y = air.prev_y;
         }
@@ -687,22 +727,24 @@ pub fn update_air(
             switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
         } else if let Some(y) = landed_at {
             body.grounded = true;
+            let impact_velocity = body.velocity;
             body.velocity.y = 0.0;
-            let mut landing = classify_landing(air.apex_y, air.start_y, y);
+            let mut landing = classify_landing(air.apex_y, air.apex_reached, air.start_y, y);
             landing.action = Some(if on_target && matches!(air.target_flags, 1 | 0x10000) {
                 // free-step reception: the flight's weights, normal / `_fast` by +0x16C (0xE07D00).
                 // PORT: the game continues in NarrowObject (on the edge); the port stays in Ground.
                 let fw = air.flight.map(|f| f.weights().to_vec()).unwrap_or_default();
                 let id = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
-                ActionBlend::new(id, 0, &jump_blend::reception_weights(&fw, 0.0))
+                ActionBlend::new(id, 0, &jump_blend::reception_weights(&fw, air.speed_ratio))
             } else {
                 // ground landing (0xE05940): drop and horizontal distance from the jump/fall start; the
-                // "stick forward" test (wanted move within 75°) uses the pad direction vs the facing
+                // forward/straight test uses the trajectory pitch, not the pad (0xE05B64).
                 let horiz = Vec2::new(body.feet.x - air.start.x, body.feet.z - air.start.z).length();
-                let stick_forward = pad.speed01 > 0.0 && pad.dir.dot(body.forward()) >= 75f32.to_radians().cos();
+                let stick_forward = if GAME_FALLS { super::falls::forward_landing(impact_velocity) } else { pad.speed01 > 0.0 && pad.dir.dot(body.forward()) >= 75f32.to_radians().cos() };
                 let (id, w) = jump_blend::landing(air.start_y - y, horiz, stick_forward, air.speed_ratio, air.foot_left);
                 ActionBlend::new(id, 0, &w)
             });
+            landing.roll = landing.action.is_some_and(|a| a.id == jump_blend::LAND_DAMAGE_ROLL);
             air.mode = AirMode::Idle;
             // A free-step arrival continues in NarrowObject (0xE07D00: SubState 6 → Movement); its Movement state
             // tries a pilotis first (`TryPilotisFreeStep` 0xE50190), then a beam (`TryMountBeam` 0xE52AD0), and
@@ -723,5 +765,29 @@ pub fn update_air(
             }
             switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: Some(landing) });
         }
+    }
+}
+
+#[cfg(test)]
+mod fall_tests {
+    use super::*;
+    #[test]
+    fn fall_entry_clears_previous_flight_and_keeps_all_native_origins() {
+        for origin in [FallOrigin::Ground,FallOrigin::Climb,FallOrigin::HangWall,FallOrigin::HangFree] {
+            let mut air=HumanInAirData::default();
+            air.flight=Some(ActionBlend::new(1,0,&[1.0]));
+            air.apex_reached=true;
+            let from=Vec3::new(2.0,10.0,4.0); let velocity=Vec3::new(3.0,2.0,0.0);
+            air.enter(InAirEntry::Fall{from,velocity,origin,speed_param:0.5});
+            assert_eq!(air.fall_origin,origin);
+            assert_eq!(air.entry_velocity,Some(velocity));
+            assert!(!air.apex_reached && air.flight.is_none() && air.takeoff.is_none());
+            assert_eq!(air.apex_y,from.y);
+        }
+    }
+    #[test]
+    fn fall_height_is_zero_until_the_apex_flag() {
+        assert_eq!(classify_landing(25.0,false,25.0,0.0).kind,LandingType::Safe);
+        assert_eq!(classify_landing(25.0,true,25.0,0.0).kind,LandingType::Fatal);
     }
 }
