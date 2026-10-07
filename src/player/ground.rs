@@ -97,8 +97,6 @@ pub struct HumanGroundData {
     pub face_next: Option<f32>,
     /// Side of the turn in progress (+1 / -1, 0 = none): the 180 deg tie-break.
     pub turn_sign: f32,
-    /// Stick-to-ground residual of the last frame (controller +384, 0x57D240): how far the support was from the feet.
-    pub snap_residual: f32,
 }
 
 /// `HumanGround__LookDown_Enter` 0xD9FC80: `xx_l_ledge_lookdown_{front,left,right}_foot{l,r}` (by the leading foot)
@@ -676,9 +674,13 @@ pub fn update_ground(
         // `Human__ShouldFallOffSupport` 0xB23CB0): no contact flatter than 45° and no floor 0.8 m below, i.e. the
         // capsule's rounded bottom has rolled off the rim (its centre ≈ r·sin 45° = 0.28 m past the edge). The edge-line
         // ground loss (`ground_loss`, 0xD87720) is gated by GroundData+760, which only the fight's grabbed reaction sets.
+        body.stick_residual = 0.0;
+        body.stick_normal_y = None;
         match collision.ground_support(body.feet) {
             Some(s) => {
-                g.snap_residual = body.feet.y - s.y;
+                let residual = body.feet.y - s.y;
+                body.stick_residual = if residual.abs() <= 0.0005 { 0.0 } else { residual };
+                body.stick_normal_y = Some(s.normal_y);
                 body.feet.y = s.y;
                 body.grounded = true;
             }

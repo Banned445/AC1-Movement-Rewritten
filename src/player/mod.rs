@@ -71,6 +71,9 @@ pub struct Body {
     pub proxy: crate::proxy::ProxyState,
     pub velocity: Vec3,
     pub grounded: bool,
+    /// CharacterController +384: pre-snap feet height minus support (0x57D240), consumed by IK.
+    pub stick_residual: f32,
+    pub stick_normal_y: Option<f32>,
 }
 
 impl Body {
