@@ -126,6 +126,8 @@ pub struct ItemPlay {
     pub action: u32,
     /// The item's outgoing transitions (the transition lookup `sub_725950` reads the playing item's).
     pub transitions: Vec<crate::assets::ac_actions::ActTransition>,
+    /// The item word (+60, RE/13 §7.6): 0x20 = locked.
+    pub word: u16,
 }
 
 impl AnimLibrary {
@@ -149,7 +151,7 @@ impl AnimLibrary {
                         l.1 = 1.0;
                     }
                 }
-                ItemPlay { layers, blend: it.blend, root_motion: it.displacement == DisplacementMode::FromAnim, action: id, transitions: it.transitions.clone() }
+                ItemPlay { layers, blend: it.blend, root_motion: it.displacement == DisplacementMode::FromAnim, action: id, transitions: it.transitions.clone(), word: it.flags }
             })
             .filter(|i| !i.layers.is_empty())
             .collect();
@@ -437,7 +439,7 @@ pub fn uses_root_motion(name: &str) -> bool {
 }
 
 fn single(name: &str) -> Vec<ItemPlay> {
-    vec![ItemPlay { layers: vec![(name.to_string(), 1.0)], blend: named_blend(CROSSFADE), root_motion: uses_root_motion(name), action: 0, transitions: Vec::new() }]
+    vec![ItemPlay { layers: vec![(name.to_string(), 1.0)], blend: named_blend(CROSSFADE), root_motion: uses_root_motion(name), action: 0, transitions: Vec::new(), word: 0 }]
 }
 
 fn looped(clip: &str, fade: f32) -> Request {
@@ -954,6 +956,14 @@ fn choose_clip(
         if same {
             continue;
         }
+        // debug: the game never leaves a locked item (word 0x20) for a new action before it ends (RE/13 §7.6)
+        if std::env::var_os("AC_ANIM_LOG").is_some() {
+            if let Some(it) = p.items.get(p.item).filter(|it| it.word & 0x20 != 0 && p.clip.is_some()) {
+                if p.phase < 0.98 {
+                    info!("anim left locked {:#010x} at phase {:.2} for {} ({:?})", it.action, p.phase, req.key, loco.current);
+                }
+            }
+        }
         // the game's transition into the requested action (sub_725950); named clips keep the port's fade
         let mut items = req.items;
         let new_action = items.first().map(|i| i.action).unwrap_or(0);
@@ -1397,7 +1407,7 @@ mod tests {
         let lib = AnimLibrary { graph, ..Default::default() };
         let item = |action: u32| {
             let it = &lib.graph.actions[&action].items[0];
-            ItemPlay { layers: Vec::new(), blend: it.blend, root_motion: false, action, transitions: it.transitions.clone() }
+            ItemPlay { layers: Vec::new(), blend: it.blend, root_motion: false, action, transitions: it.transitions.clone(), word: it.flags }
         };
         // 1. the playing item's transition to the requested action: high wait (0x00D8258E) → fight wait (0x00FD645B)
         //    goes through `xx_h_wait_hipm_footr_tr_xx_h_light_wait_footr` (0x1D504306)

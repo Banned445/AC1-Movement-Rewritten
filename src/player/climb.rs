@@ -1128,6 +1128,12 @@ pub fn update_climb(
             d.look = None;
             continue;
         }
+        // a locked end action (a reach's `_c`, word 0x20) holds the next move until it has played:
+        // `HumanClimb__CanStartGridMove` 0xDE7FA0, `CanStartReachMove` 0xDE8020 and `WantsLedgeContext` 0xDE8070 all
+        // refuse while the playing item is locked
+        if d.settle.is_some_and(|(id, _)| super::anim_gate::item_word(id, 0).is_some_and(|w| w & 0x20 != 0)) {
+            continue;
+        }
         let dir = quantize(pad.dir, facing);
         // ChooseMove 0xDFDE90 step 2: a ladder at the side (TryLadder 0xDF10C0) before any grid move
         if let Some(mut e) = side_ladder(&guidance, body.feet, facing, dir) {
