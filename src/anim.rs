@@ -572,6 +572,20 @@ const ACT_FALL: u32 = 0x1F0C_22C2;
 /// The ground waits (HumanGround), [low, high profile] × [left, right foot ahead]: `xx_{l,h}_wait_hipm_foot{l,r}`.
 const ACT_WAIT: [[u32; 2]; 2] = crate::player::ground_tree::WAITS;
 
+/// The item after `it` in its looping action, with `it`'s layer weights (None: a one-item action, or a named clip).
+fn next_loop_item(lib: &AnimLibrary, it: &ItemPlay) -> Option<ItemPlay> {
+    let all = lib.action_items(it.action).filter(|a| a.len() > 1)?;
+    let k = all.iter().position(|x| x.layers.first().map(|l| &l.0) == it.layers.first().map(|l| &l.0))?;
+    let mut next = all[(k + 1) % all.len()].clone();
+    if next.layers.len() == it.layers.len() {
+        for (l, w) in next.layers.iter_mut().zip(it.layers.iter()) {
+            l.1 = w.1;
+        }
+    }
+    next.root_motion = it.root_motion;
+    Some(next)
+}
+
 /// One item of a graph action with the sim's weights, if all its clips are loaded. Root motion is off:
 /// the sim already moves the body along it.
 fn sim_item(lib: &AnimLibrary, b: &crate::player::jump_blend::ActionBlend) -> Option<ItemPlay> {
@@ -1204,6 +1218,16 @@ pub fn apply_clip(
             let ad = items.get(*ai).map(|it| lib.item_duration(it)).unwrap_or(1.0).max(1e-3);
             let n = *aph + dt / ad;
             *aph = if *alooping { n.fract() } else { n.min(1.0) };
+            // a looping A goes on to its next item. The simulation feeds a slot only its current item (the ground
+            // locomotion's foot cycle): the action's next item follows with the same weights (they live on the slot,
+            // `sub_725B30`), instead of the item restarting on itself (footr's end is footl's start)
+            if *alooping && n >= 1.0 {
+                if items.len() > 1 {
+                    *ai = (*ai + 1) % items.len();
+                } else if let Some(next) = items.first().and_then(|it| next_loop_item(&lib, it)) {
+                    items[0] = next;
+                }
+            }
         }
         p.fade = (p.fade + dt / p.fade_time.max(0.01)).min(1.0);
         let weight = blend_weight(&p.blend, p.fade);

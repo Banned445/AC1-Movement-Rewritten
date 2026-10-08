@@ -19,6 +19,98 @@ fn game_fix() -> Vec<super::forge::Resource> {
     f.resources(&e).unwrap()
 }
 
+/// Per-frame rotation jumps inside clips (`PROBE_PAT` name filter, `PROBE_DEG` threshold, default 40): samples each
+/// bone's rotation track at 240 Hz and reports the largest step and where it is, to tell authored snaps from decode
+/// faults.
+#[test]
+#[ignore]
+fn probe_clip_rotation_jumps() {
+    let pat: Vec<String> = std::env::var("PROBE_PAT").unwrap_or("climb".into()).split('|').map(String::from).collect();
+    let th: f32 = std::env::var("PROBE_DEG").ok().and_then(|v| v.parse().ok()).unwrap_or(40.0);
+    let mut hits = 0;
+    for r in game_fix().iter().filter(|r| r.class_hash == CLASS_ANIMATION && pat.iter().any(|p| r.name.contains(p.as_str()))) {
+        let Ok(a) = decode(&r.payload) else { continue };
+        let (rot, _) = bone_tracks(&a);
+        for (bone, keys) in &rot {
+            let keys: Vec<(f32, Quat)> = keys.iter().map(|(t, q)| (*t, Quat::from_array(*q).normalize())).collect();
+            if keys.len() < 2 { continue; }
+            let n = (a.duration * 240.0).ceil().max(2.0) as usize;
+            let mut prev = sample_rot(&keys, 0.0);
+            let (mut worst, mut at) = (0.0f32, 0.0f32);
+            for i in 1..=n {
+                let t = a.duration * i as f32 / n as f32;
+                let q = sample_rot(&keys, t);
+                let d = prev.angle_between(q).to_degrees();
+                if d > worst { (worst, at) = (d, t); }
+                prev = q;
+            }
+            if worst > th {
+                hits += 1;
+                // the two keys around the jump, and whether they flip hemisphere
+                let k = keys.iter().position(|k| k.0 >= at).unwrap_or(keys.len() - 1).max(1);
+                let (a0, a1) = (keys[k - 1], keys[k]);
+                println!("{} bone {bone:08x}: {worst:.1} deg/step at t {at:.3} / {:.3}; keys {:.3} {:?} -> {:.3} {:?} dot {:.3}", r.name, a.duration, a0.0, a0.1, a1.0, a1.1, a0.1.dot(a1.1));
+            }
+        }
+    }
+    println!("{hits} jumps over {th} deg per 1/240 s");
+}
+
+/// The seam between two clips: the largest bone rotation between A's end and B's start (`PROBE_SEAMS`
+/// "a>b,c>d"; append `@0` to A to take its start instead).
+#[test]
+#[ignore]
+fn probe_clip_seams() {
+    let res = game_fix();
+    let pairs = std::env::var("PROBE_SEAMS").unwrap_or_default();
+    let pose = |name: &str, end: bool| -> Option<HashMap<u32, Quat>> {
+        let r = res.iter().find(|r| r.class_hash == CLASS_ANIMATION && r.name == name)?;
+        let a = decode(&r.payload).ok()?;
+        let (rot, _) = bone_tracks(&a);
+        Some(rot.iter().filter(|(_, k)| !k.is_empty()).map(|(b, k)| {
+            let keys: Vec<(f32, Quat)> = k.iter().map(|(t, q)| (*t, Quat::from_array(*q).normalize())).collect();
+            (*b, sample_rot(&keys, if end { a.duration } else { 0.0 }))
+        }).collect())
+    };
+    for pair in pairs.split(',').filter(|p| !p.is_empty()) {
+        let (a, b) = pair.split_once('>').unwrap();
+        let (a, a_end) = a.strip_suffix("@0").map_or((a, true), |a| (a, false));
+        let (Some(pa), Some(pb)) = (pose(a, a_end), pose(b, false)) else { println!("{pair}: missing"); continue };
+        let mut d: Vec<(f32, u32)> = pa.iter().filter_map(|(k, q)| pb.get(k).map(|r| (q.angle_between(*r).to_degrees(), *k))).collect();
+        d.sort_by(|x, y| y.0.total_cmp(&x.0));
+        println!("{pair}: {:?}", d.iter().take(12).map(|(a, b)| format!("{b:08x} {a:.1}")).collect::<Vec<_>>());
+    }
+}
+
+/// Where in clip A the pose is closest to clip B's start (`PROBE_SCAN` "b:a1|a2,..."): the phase with the smallest
+/// worst-bone angle.
+#[test]
+#[ignore]
+fn probe_clip_seam_scan() {
+    let res = game_fix();
+    let tracks = |name: &str| -> Option<(f32, Vec<(u32, Vec<(f32, Quat)>)>)> {
+        let r = res.iter().find(|r| r.class_hash == CLASS_ANIMATION && r.name == name)?;
+        let a = decode(&r.payload).ok()?;
+        let (rot, _) = bone_tracks(&a);
+        Some((a.duration, rot.iter().filter(|(_, k)| !k.is_empty()).map(|(b, k)| (*b, k.iter().map(|(t, q)| (*t, Quat::from_array(*q).normalize())).collect())).collect()))
+    };
+    for spec in std::env::var("PROBE_SCAN").unwrap_or_default().split(',').filter(|p| !p.is_empty()) {
+        let (b, list) = spec.split_once(':').unwrap();
+        let Some((_, tb)) = tracks(b) else { println!("{b}: missing"); continue };
+        let pb: HashMap<u32, Quat> = tb.iter().map(|(k, keys)| (*k, sample_rot(keys, 0.0))).collect();
+        for a in list.split('|') {
+            let Some((dur, ta)) = tracks(a) else { println!("{a}: missing"); continue };
+            let mut best = (f32::MAX, 0.0);
+            for i in 0..=100 {
+                let t = dur * i as f32 / 100.0;
+                let worst = ta.iter().filter_map(|(k, keys)| pb.get(k).map(|q| sample_rot(keys, t).angle_between(*q).to_degrees())).fold(0.0, f32::max);
+                if worst < best.0 { best = (worst, i as f32 / 100.0); }
+            }
+            println!("{b} from {a}: best phase {:.2} worst bone {:.1} deg", best.1, best.0);
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn probe_list_clips() {

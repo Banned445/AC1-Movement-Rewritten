@@ -1077,7 +1077,7 @@ pub fn update_ground(
                 }
                 if GAME_GROUND_TREE && g.oneshot.is_none() {
                     let mut heading = body.heading;
-                    g.after_oneshot(os.blend, pad.speed01 > 0.0, stick_turn, &mut heading);
+                    g.after_oneshot(os.blend, mv_speed > 0.0, stick_turn, &mut heading);
                     body.heading = heading;
                 }
             }

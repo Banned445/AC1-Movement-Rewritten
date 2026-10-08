@@ -489,6 +489,9 @@ pub fn update_ladder(
                 // the step in progress finishes first
                 let stepping = matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done;
                 if !stepping {
+                    // the next step's foot. The game picks the exits, release and jump by the lower foot instead
+                    // (`Human__GetLowerFoot` 0xB188F0 in `HumanLadder__PlayExit` 0xE254C0): at every step seam and in the
+                    // waits that is this foot (the exit `climb_up_X_tr_…` starts where step X starts)
                     if phase != LadderPhase::Wait {
                         l.foot ^= 1;
                     }
