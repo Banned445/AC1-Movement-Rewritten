@@ -112,7 +112,8 @@ fn attach_altair(
         commands.entity(visual_joints[b.parent.expect("anchored visual bone")]).add_child(e);
         visual_joints.push(e);
     }
-    if !model.visual_rotation_copies.is_empty() || !model.visual_compressions.is_empty() || !model.visual_look_at.is_empty() {
+    if !model.visual_authored.is_empty() {
+        let parents: Vec<_> = model.skeleton.iter().chain(&model.visual_bones).map(|b| b.parent).collect();
         commands.entity(player).insert(crate::visual_pose::VisualRotationCopies {
             joints: visual_joints.clone(),
             rest: model.skeleton.iter().chain(&model.visual_bones).map(|b| Transform {
@@ -126,6 +127,11 @@ fn attach_altair(
             look_at: model.visual_look_at.clone(),
             hinges: model.visual_hinges.clone(),
             hinge_states: vec![crate::skirt_hinge::HingeState::default(); model.visual_hinges.len()],
+            rolls: model.visual_rolls.clone(),
+            springs: model.visual_springs.clone(),
+            spring_states: vec![Default::default(); model.visual_springs.len()],
+            order: crate::visual_pose::evaluation_order(&parents, &model.visual_authored),
+            held: Vec::new(),
             root,
             previous_anchor: None,
         });

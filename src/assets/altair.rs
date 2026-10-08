@@ -61,6 +61,10 @@ pub struct AltairModel {
     pub visual_compressions: Vec<crate::visual_pose::SkirtCompression>,
     pub visual_look_at: Vec<crate::visual_pose::SkirtLookAt>,
     pub visual_hinges: Vec<crate::skirt_hinge::SkirtHinge>,
+    pub visual_rolls: Vec<crate::visual_pose::RollModifier>,
+    pub visual_springs: Vec<crate::visual_pose::SpringBox>,
+    /// Every modifier with its owner joint, in authored order per resource (evaluation order is derived from it).
+    pub visual_authored: Vec<(crate::visual_pose::Modifier, usize)>,
     /// SkeletonComponent force config +316 (enabled → scale), the hinges' environment input (RE/09 §8.16).
     pub skeleton_force: Option<f32>,
     /// Lowest vertex z in model space (feet), used to put the feet at y = 0.
@@ -327,19 +331,48 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     let mut visual_compressions = Vec::new();
     let mut visual_look_at = Vec::new();
     let mut visual_hinges = Vec::new();
+    let mut visual_rolls = Vec::new();
+    let mut visual_springs = Vec::new();
+    let mut authored_ids = Vec::new();
     if CHARACTER_VISUAL_FIXES {
-        // SkeletonComponent reads primary + secondary resources (0x4E4E30, RE/09 §7).
-        // PORT: retain secondary local rest poses; expressions and hood-bone dynamics are not ported.
-        for name in ["UCMA_Altair_Head", "UCMA_Altair_Skirt", "Human_Hood", "UCMA_Sword_Tag"] {
-            if let Some(r) = find(name, crc32("Skeleton")) {
-                merge_visual_bones(&skeleton, &mut visual_bones, &parse_skeleton(&r.payload))?;
-                // Authored secondary lists include hood and sword-tag modifiers (RE/09 §8.13).
-                rotation_ids.extend(crate::visual_pose::decode_rotation_copies(&r.payload)?);
-                visual_compressions.extend(crate::visual_pose::decode_compressions(&r.payload)?);
-                let equipment = name == "Human_Hood" || name == "UCMA_Sword_Tag";
-                visual_look_at.extend(crate::visual_pose::decode_look_at(&r.payload)?.into_iter().map(|mut m| { m.equipment = equipment; m }));
-                visual_hinges.extend(crate::skirt_hinge::decode_hinges(&r.payload)?.into_iter().map(|mut h| { h.equipment = equipment; h }));
+        use crate::visual_pose::{Group, Modifier};
+        // SkeletonComponent reads primary + secondary resources (0x4E4E30, RE/09 §7). The player runs every authored
+        // modifier of all of them (56 in Rank 9, RE/09 §8.16): the main skeleton's own list included.
+        for (name, group) in [("UCMA_Altair_Head", Group::Skirt), ("UCMA_Altair_Skirt", Group::Skirt), ("Human_Hood", Group::Equipment),
+            ("UCMA_Sword_Tag", Group::Equipment), ("UCMA_Altair", Group::Body)] {
+            let Some(r) = find(name, crc32("Skeleton")) else { continue };
+            if group != Group::Body { merge_visual_bones(&skeleton, &mut visual_bones, &parse_skeleton(&r.payload))?; }
+            let at = |class: &str| crate::visual_pose::record_offsets(&r.payload, class);
+            let mut records: Vec<(usize, Modifier, u32)> = Vec::new();
+            for ((owner, source), p) in crate::visual_pose::decode_rotation_copies(&r.payload)?.into_iter().zip(at("RotationPasteModifier")) {
+                records.push((p, Modifier::Copy(rotation_ids.len()), owner));
+                rotation_ids.push((owner, source));
             }
+            for (mut c, p) in crate::visual_pose::decode_compressions(&r.payload)?.into_iter().zip(at("CompressBoneModifier")) {
+                c.group = group;
+                records.push((p, Modifier::Compress(visual_compressions.len()), c.target as u32));
+                visual_compressions.push(c);
+            }
+            for (mut m, p) in crate::visual_pose::decode_look_at(&r.payload)?.into_iter().zip(at("LookAtBoneModifier")) {
+                m.group = group;
+                records.push((p, Modifier::LookAt(visual_look_at.len()), m.target as u32));
+                visual_look_at.push(m);
+            }
+            for (mut h, p) in crate::skirt_hinge::decode_hinges(&r.payload)?.into_iter().zip(at("HingeBoneModifier")) {
+                h.group = group;
+                records.push((p, Modifier::Hinge(visual_hinges.len()), h.target as u32));
+                visual_hinges.push(h);
+            }
+            for (m, p) in crate::visual_pose::decode_rolls(&r.payload)?.into_iter().zip(at("RollBoneModifier")) {
+                records.push((p, Modifier::Roll(visual_rolls.len()), m.target as u32));
+                visual_rolls.push(m);
+            }
+            for (m, p) in crate::visual_pose::decode_spring_boxes(&r.payload)?.into_iter().zip(at("SpringBoxModifier")) {
+                records.push((p, Modifier::Spring(visual_springs.len()), m.target as u32));
+                visual_springs.push(m);
+            }
+            records.sort_by_key(|r| r.0);
+            authored_ids.extend(records.into_iter().map(|(_, m, owner)| (m, owner)));
         }
     }
     let skeleton_force = find("UCMA_Altair_Rank_9", crc32("Entity")).and_then(|e| crate::visual_pose::decode_skeleton_force(&e.payload));
@@ -350,26 +383,39 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         if target < skeleton.len() { return Err("skirt rotation copy targets a movement joint"); }
         Ok((target, source))
     }).collect::<Result<_, &str>>()?;
+    let body = crate::visual_pose::Group::Body;
     for c in &mut visual_compressions {
         c.target = *joint_of.get(&(c.target as u32)).ok_or("skirt compression target absent from rig")? as usize;
         for source in &mut c.sources {
             *source = *joint_of.get(&(*source as u32)).ok_or("skirt compression source absent from rig")? as usize;
         }
-        if c.target < skeleton.len() { return Err("skirt compression targets a movement joint".into()); }
+        // Only the main skeleton's own list writes movement joints, after IK as in the game (0x503F00).
+        if c.target < skeleton.len() && c.group != body { return Err("skirt compression targets a movement joint".into()); }
     }
+    for m in &mut visual_rolls {
+        m.target = *joint_of.get(&(m.target as u32)).ok_or("roll-bone target absent from rig")? as usize;
+        m.source = *joint_of.get(&(m.source as u32)).ok_or("roll-bone source absent from rig")? as usize;
+    }
+    for m in &mut visual_springs {
+        m.target = *joint_of.get(&(m.target as u32)).ok_or("spring-box target absent from rig")? as usize;
+        if skeleton.iter().chain(&visual_bones).nth(m.target).and_then(|b| b.parent).is_none() { return Err("spring box lacks a parent".into()); }
+    }
+    let visual_authored = authored_ids.into_iter().map(|(m, id)| Ok((m, *joint_of.get(&id).ok_or("modifier owner absent from rig")? as usize)))
+        .collect::<Result<Vec<_>, String>>()?;
     for m in &mut visual_look_at {
         m.target = *joint_of.get(&(m.target as u32)).ok_or("skirt look-at target absent from rig")? as usize;
         m.aim = *joint_of.get(&(m.aim as u32)).ok_or("skirt look-at aim absent from rig")? as usize;
-        if m.target < skeleton.len() || skeleton.iter().chain(&visual_bones).nth(m.target).and_then(|b| b.parent).is_none() {
+        if (m.target < skeleton.len() && m.group != body) || skeleton.iter().chain(&visual_bones).nth(m.target).and_then(|b| b.parent).is_none() {
             return Err("skirt look-at target lacks a secondary parent".into());
         }
     }
     for h in &mut visual_hinges {
         h.target = *joint_of.get(&(h.target as u32)).ok_or("skirt hinge target absent from rig")? as usize;
-        for reference in [&mut h.force_reference, &mut h.constraint_reference] {
+        let references = std::iter::once(&mut h.force_reference).chain(h.constraints.iter_mut().map(|c| &mut c.reference));
+        for reference in references {
             if let Some(id) = *reference { *reference = Some(*joint_of.get(&(id as u32)).ok_or("skirt hinge reference absent from rig")? as usize); }
         }
-        if h.target < skeleton.len() { return Err("skirt hinge targets a movement joint".into()); }
+        if h.target < skeleton.len() && h.group != body { return Err("skirt hinge targets a movement joint".into()); }
     }
     if cloth_settings.values().flat_map(|s| &s.colliders).any(|c| !skeleton.iter().any(|b| b.bone_id == c.bone_id)) {
         return Err("cloth collider bone absent from visual rig".into());
@@ -551,7 +597,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         }
         parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, materials, inside_materials, skin_joints, inverse_bindposes, cloth });
     }
-    Ok(AltairModel { parts, textures, normal_textures, material_textures, cube_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, skeleton_force, min_z, source: format!("{} / Rank 9", path.display()) })
+    Ok(AltairModel { parts, textures, normal_textures, material_textures, cube_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, visual_rolls, visual_springs, visual_authored, skeleton_force, min_z, source: format!("{} / Rank 9", path.display()) })
 }
 
 /// Add only new descendants, aliasing shared BoneIDs to existing animated joints (RE/09 §7).
