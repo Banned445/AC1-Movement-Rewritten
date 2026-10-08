@@ -360,11 +360,13 @@ impl HumanGroundData {
             // Sprint (0xD990A0). A released stick then leaves Move for Idle at once (0xD7ED30).
             TreeState::Landing if ended.id == jump_blend::RECEPTION_FREESTEP[0] || ended.id == jump_blend::RECEPTION_FREESTEP[1] => {
                 // PORT: the game continues a free-step reception in NarrowObject; its exits lead to the same waits and
-                // locomotion
+                // locomotion. The exit into the locomotion (`freestep_entry_tr_{l_walk, h_jog, h_sprint_impultion}`)
+                // plays at the band of the profile and Sprint, as the landings do (layout 5, the three-clip pair):
+                // live 2026-10-08 the high-profile run played the jog (797 ms) and free run the sprint (516 / 532 ms).
                 if stick {
-                    self.speed_param = self.speed_param.max(if high { 0.5 } else { 0.25 });
+                    self.speed_param = if !high { 0.25 } else if !self.sprint { 0.5 } else { 1.0 };
                     self.blend.speed_param = self.speed_param;
-                    self.enter_move(ended, 1);
+                    self.enter_move(ended, 5);
                 } else {
                     self.enter_wait(ended, high);
                 }

@@ -3389,3 +3389,26 @@ fn the_empty_hand_press_starts_a_climb_and_holding_legs_does_not() {
     s.press_hand();
     assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::Climb), "the empty hand did not climb");
 }
+
+#[test]
+fn the_free_step_exit_runs_at_the_free_run_band() {
+    // the free-step reception's exit into the locomotion (`freestep_entry_tr_{l_walk, h_jog, h_sprint_impultion}`):
+    // live 2026-10-08 the high-profile run played the jog clip (797 ms) and free run the sprint impulsion (516 / 532 ms)
+    let exit = [0x0D99_71FB, 0x0D99_71FC];
+    for free_run in [true, false] {
+        let mut s = Sim::new(Vec3::new(7.0, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
+        s.pad(Vec3::X, 1.0, true, true);
+        assert!(s.run_until(4.0, |s| s.saw_air), "never jumped");
+        s.pad(Vec3::X, 1.0, true, free_run);
+        assert!(
+            s.run_until(4.0, |s| s.ground().tr.is_some_and(|t| exit.contains(&t.action.id))),
+            "no free-step exit (free run {free_run})"
+        );
+        let w = s.ground().tr.unwrap().action.weights().to_vec();
+        if free_run {
+            assert!(w[2] > 0.99, "free run did not play the sprint impulsion: {w:?}");
+        } else {
+            assert!(w[1] > 0.99, "the run did not play the jog: {w:?}");
+        }
+    }
+}
