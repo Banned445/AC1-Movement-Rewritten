@@ -1107,20 +1107,26 @@ pub fn update_climb(
                 d.settle = None;
             }
         }
-        if pad.jump_buffered() {
-            pad.consume_jump();
+        // the interpreter's climb state (`GoAssassinActionInterpreter__ClimbState` 0xEE5EB0, RE/03 7.12): the
+        // empty-hand buffer releases (event 4 -> `HumanClimb__EnterState7_A`; StartRelease 0xDE96A0 -> InAir,
+        // FallOrigin_Climb) ...
+        if pad.hand_buffered() {
+            pad.consume_hand();
             limbs.hands = None;
             limbs.feet = None;
-            let back = pad.high_profile && pad.speed01 > 0.0 && matches!(quantize(pad.dir, facing), 2 | 3 | 8 | 9);
-            let entry = if back {
-                // back eject (TryBackEject 0xDF2F50) — hypothesis: high profile + Legs + stick away
-                InAirEntry::FreeJump { from: body.feet, dir: n, speed_param: 0.5, foot_left: true }
-            } else {
-                // release (StartRelease 0xDE96A0 → InAir, FallOrigin_Climb)
-                InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Climb, speed_param: 0.0 }
-            };
-            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Climb, speed_param: 0.0 }));
             continue;
+        }
+        // ... and high profile with the Legs buffer jumps off (event 2, the ledge rule; verified live)
+        if pad.high_profile && pad.jump_buffered() {
+            if let Some(jd) = super::targets::jump_off_wall_dir((pad.speed01 > 0.0).then_some(pad.dir), n) {
+                pad.consume_jump();
+                limbs.hands = None;
+                limbs.feet = None;
+                let entry = super::targets::jump_off_wall_entry(body.feet, jd, &guidance, &collision);
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+                continue;
+            }
         }
         if pad.speed01 <= 0.0 {
             // no stick: the pose's wait action (0xDF4410, blend 0.5)

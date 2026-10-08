@@ -557,8 +557,9 @@ fn free_hang_shimmy_ends_with_the_outer_corner() {
 
 #[test]
 fn let_go_from_a_hang_falls_and_lands() {
+    // the empty-hand button lets go (interpreter ledge state 0xEEBFD0: +0x1129 buffer -> event 4)
     let mut s = hang_on_balcony();
-    s.press_legs();
+    s.press_hand();
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "did not let go");
     assert_eq!(s.data().air.fall_origin, air::FallOrigin::HangFree);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
@@ -3293,3 +3294,38 @@ fn a_running_jump_without_a_target_matches_the_live_game() {
     assert!((4.4..5.4).contains(&d), "distance {d}");
 }
 
+#[test]
+fn legs_in_high_profile_jumps_straight_off_a_ledge_and_low_profile_legs_does_nothing() {
+    // GoAssassinActionInterpreter__LedgeState 0xEEC89F (event 2): high profile + the Legs buffer; with the stick in the
+    // dead zone the jump goes straight away from the wall. Without high profile Legs does nothing (verified live).
+    let mut s = hang_on_balcony();
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.press_legs();
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "low-profile Legs let go");
+    let n = s.data().ledge.normal;
+    let start = s.body().feet;
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.press_legs();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "high profile + Legs did not jump");
+    s.run(0.3);
+    let moved = (s.body().feet - start).with_y(0.0);
+    assert!(moved.normalize_or_zero().dot(Vec3::new(n.x, 0.0, n.z).normalize()) > 0.9, "not away from the wall: {moved:?} n {n:?}");
+}
+
+#[test]
+fn the_jump_off_a_wall_follows_the_stick_and_refuses_into_the_wall() {
+    use crate::player::targets::jump_off_wall_dir;
+    let away = Vec3::Z;
+    assert!((jump_off_wall_dir(None, away).unwrap() - Vec3::Z).length() < 1e-5);
+    // 60 degrees round: kept
+    let d60 = Vec3::new(60f32.to_radians().sin(), 0.0, 60f32.to_radians().cos());
+    assert!((jump_off_wall_dir(Some(d60), away).unwrap() - d60).length() < 1e-4);
+    // 120 degrees round: turned to 89 degrees
+    let d120 = Vec3::new(120f32.to_radians().sin(), 0.0, 120f32.to_radians().cos());
+    let j = jump_off_wall_dir(Some(d120), away).unwrap();
+    assert!((away.angle_between(j).to_degrees() - 89.0).abs() < 0.1, "{j:?}");
+    assert!(j.x > 0.0, "turned to the wrong side");
+    // into the wall: refused
+    assert!(jump_off_wall_dir(Some(-Vec3::Z), away).is_none());
+}
