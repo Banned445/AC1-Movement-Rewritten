@@ -633,13 +633,18 @@ pub fn update_ground(
         }
 
         // ---------------------------------------------------------------- input → wanted motion
+        // The interpreter's wall slide (`GoAssassinActionInterpreter` 0xEE6B16 → 0xEDD7C0): a stick pushed into a
+        // wall turns along it; pushed within 45 deg of straight into it, the wanted speed is 0 and the run stop allowed.
+        // It changes what the interpreter hands the Ground (SetMoveDir / SetDestSpeedRatio); the raw stick keeps the
+        // other requests.
+        let (mv_dir, mv_speed) = if GAME_GROUND_TREE { wall_slide(&body, pad.dir, pad.speed01) } else { (pad.dir, pad.speed01) };
         // HG+1532: the signed angle from the current heading to the wanted one (Movement_PreUpdate 0xD97E30).
-        let stick_turn = if pad.speed01 > 0.0 { angle_diff(heading_of(pad.dir), body.heading) } else { 0.0 };
+        let stick_turn = if mv_speed > 0.0 { angle_diff(heading_of(mv_dir), body.heading) } else { 0.0 };
         // A transition into the locomotion (the Move state's transition path) keeps steering and the other requests
         // live. A released stick leaves it like any Move: `HumanGround__Move_CanRunStop` 0xD7EC90 (high profile, the
         // run stop allowed, and the playing action is the locomotion, the skid-turn exits legacy 96 / 97, or past 0.33 s)
         // or else `HumanGround__Move_CanStop` 0xD7ED30 (the playing action is not the locomotion): the wait at once.
-        if GAME_GROUND_TREE && pad.speed01 <= 0.0 {
+        if GAME_GROUND_TREE && mv_speed <= 0.0 {
             if let Some(t) = g.tr.filter(|t| !t.to_wait) {
                 let elapsed = t.phase * t.action.duration();
                 let can_run_stop = g.high_profile && g.speed_param > BAND_WALK && !super::anim_gate::locked(&t.action)
@@ -664,7 +669,7 @@ pub fn update_ground(
         // (`sub_501760`). That includes the free-step reception (PORT: the game continues it in NarrowObject); its
         // authored exits (`freestep_entry_tr_*`, entered with a cut) start from its last frame.
         let gated = !GAME_GROUND_TREE || g.owner == TreeState::Other;
-        if pad.speed01 > 0.0
+        if mv_speed > 0.0
             && gated
             && g.ledge_stop.is_none()
             && g.collide.is_none()
@@ -674,33 +679,39 @@ pub fn update_ground(
             g.oneshot_next = None;
             g.owner = TreeState::Other;
         }
-        if pad.speed01 > 0.0 && g.tr.is_some_and(|t| t.to_wait && super::anim_gate::allows_mode_exit(&t.action, true, pad.high_profile)) {
+        if mv_speed > 0.0 && g.tr.is_some_and(|t| t.to_wait && super::anim_gate::allows_mode_exit(&t.action, true, pad.high_profile)) {
             g.tr = None;
         }
         // The skid turn (state 24) is left for Move as soon as the stick asks to move within 120 deg again, or when it
         // completes (`HumanGround__Guard_RunTurnToMove` 0xD85390); its locked item does not hold it.
-        if GAME_GROUND_TREE && g.owner == TreeState::RunTurn && pad.speed01 > 0.0 && stick_turn.abs() <= RUN_TURN_ANGLE {
+        if GAME_GROUND_TREE && g.owner == TreeState::RunTurn && mv_speed > 0.0 && stick_turn.abs() <= RUN_TURN_ANGLE {
             if let Some(os) = g.oneshot.take() {
                 g.owner = TreeState::Other;
                 g.run_turn_exit(os.blend, false, &mut body.heading);
             }
         }
         let busy = g.oneshot.is_some() || g.tr.is_some_and(|t| t.to_wait);
-        let moving = pad.speed01 > 0.0 && !busy;
+        let moving = mv_speed > 0.0 && !busy;
         let prev_high = g.high_profile;
         g.high_profile = pad.high_profile;
         g.sprint = pad.high_profile && pad.legs_held; // sprint = high profile + legs (RE/01 §6.2)
         g.sub_state = if !GAME_GROUND_EXTRAS && g.sprint { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
 
         // turn attenuation (interpreter 0xEE65A0): beyond 45° slow down; forced to 1 in low profile
-        let want_heading = if moving { heading_of(pad.dir) } else { body.heading };
+        let want_heading = if moving { heading_of(mv_dir) } else { body.heading };
         let off = angle_diff(want_heading, body.heading).abs();
         let atten_target = if !g.high_profile || off <= TURN_ATTEN_START {
             1.0
         } else {
             (1.0 - (off - TURN_ATTEN_START) / TURN_ATTEN_RANGE).max(TURN_ATTEN_FLOOR)
         };
-        g.turn_atten = if atten_target > g.turn_atten {
+        g.turn_atten = if GAME_GROUND_TREE {
+            // exactly as the interpreter steps +4304 (0xEE6A34): at or below 1 − k it rises at 5/s up to 1, above it
+            // falls at 10/s down to 0.1, so it hunts around the target instead of settling on it; low profile forces 1
+            let k = ((off.min(std::f32::consts::FRAC_PI_2) - TURN_ATTEN_START) / TURN_ATTEN_RANGE).max(0.0);
+            let a = if g.turn_atten <= 1.0 - k { (g.turn_atten + TURN_ATTEN_UP_RATE * dt).min(1.0) } else { (g.turn_atten - TURN_ATTEN_DOWN_RATE * dt).max(TURN_ATTEN_FLOOR) };
+            if g.high_profile { a } else { 1.0 }
+        } else if atten_target > g.turn_atten {
             (g.turn_atten + TURN_ATTEN_UP_RATE * dt).min(atten_target)
         } else {
             (g.turn_atten - TURN_ATTEN_DOWN_RATE * dt).max(atten_target)
@@ -716,7 +727,7 @@ pub fn update_ground(
         };
         // the target follows the stick even while a landing action plays (MoveBlend's transition path keeps
         // ramping toward it, 0xDA0810)
-        let target = if pad.speed01 > 0.0 { (base + STICK_SPAN * pad.speed01 * g.turn_atten).min(1.0) } else { 0.0 };
+        let target = if mv_speed > 0.0 { (base + STICK_SPAN * mv_speed * g.turn_atten).min(1.0) } else { 0.0 };
         // stick released (desired mode HG+0x5D8 = 0): the game leaves the Move state instead of decelerating
         // (the curve at HG+0x63C only runs while still moving toward a slower band):
         // - jog or faster (HG+0x5DC, speed > 0.25) → RunStop 0xD98E30 (guard 0xD7EC90): the run-stop action by the
@@ -725,7 +736,7 @@ pub fn update_ground(
         // Stick released while a landing / reception plays: its transition leads into the wait, not into the
         // locomotion (the action's exits, RE/13), so no run stop follows it. Before, the speed kept from the jump
         // started a run stop once the landing ended: a second slide after the landing.
-        if pad.speed01 <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_some_and(|o| !jump_blend::RUN_STOP.contains(&o.blend.id) && !jump_blend::RUN_STOP_TO_WAIT.contains(&o.blend.id)) {
+        if mv_speed <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_some_and(|o| !jump_blend::RUN_STOP.contains(&o.blend.id) && !jump_blend::RUN_STOP_TO_WAIT.contains(&o.blend.id)) {
             g.speed_param = 0.0;
             g.blend.speed_param = 0.0;
         }
@@ -741,7 +752,7 @@ pub fn update_ground(
         if reversed && g.high_profile && g.speed_param > 0.25 && g.oneshot.is_none() && tr_allows_stop {
             g.start_run_stop();
         }
-        if pad.speed01 <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_none() && g.tr.is_none() {
+        if mv_speed <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_none() && g.tr.is_none() {
             if GAME_GROUND_TREE {
                 // Idle from Move (0xD8B220): the wait of the locomotion item's exit foot (its word, 0xD86760)
                 let word = super::anim_gate::item_word(super::move_blend::ACT_GROUND_LOCOMOTION, g.blend.foot);
@@ -764,7 +775,7 @@ pub fn update_ground(
         // current profile HG+1500 low). The turn action from the table at 0x1A2C120 by side, [from, to] profile and
         // leading foot, blending its 90 / 180 deg clips by (|a| - 90 deg) / 90 deg; the clip's root yaw turns the body.
         if moving && !busy && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none() && off > std::f32::consts::FRAC_PI_2 && (g.speed_param <= 0.0 || (!prev_high && g.speed_param <= BAND_WALK)) {
-            let left = pad.dir.dot(super::right_of(body.forward())) < 0.0;
+            let left = mv_dir.dot(super::right_of(body.forward())) < 0.0;
             // the player's EntityDescriptorType is Main (entity+168 & 7 == 1): `Pivot_Enter` 0xDA6150 then sets the
             // destination profile HG+1504 to the current one HG+1500, so the player only plays the low → low and
             // high → high turns
@@ -839,7 +850,12 @@ pub fn update_ground(
             if d.abs() > 170f32.to_radians() && g.turn_sign != 0.0 && d.signum() != g.turn_sign {
                 d += g.turn_sign * std::f32::consts::TAU;
             }
-            let step = PLAYER_TURN_RATE * dt;
+            // the player's rates are set every frame by the interpreter (IHumanGround vt952 / vt956 → HG+1752 / +1756,
+            // 0xEE6D3F–0xEE6D91): 1.5 / 4.0 rad/s, with Legs held 0.975 / 2.6 (0.375 / 3.0 in the vt1196 state, not
+            // reached by the port). The angle band HG+1760 / +1764 stays 0 for the player (ctor 0xDB2D5F; only NPC goals
+            // set it), so `RotateTowards` 0xD94F30 always turns at the max rate
+            let rate = if GAME_GROUND_TREE { if pad.legs_held { PLAYER_TURN_RATE_LEGS } else { PLAYER_TURN_RATE_GAME } } else { PLAYER_TURN_RATE };
+            let step = rate * dt;
             let turn = d.clamp(-step, step);
             g.turn_sign = if d.abs() > 1e-3 { turn.signum() } else { 0.0 };
             body.heading = wrap_angle(body.heading + turn);
@@ -1159,6 +1175,40 @@ pub fn update_ground(
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             }
         }
+    }
+}
+
+/// `GoAssassinActionInterpreter` wall slide (0xEDD7C0). Only with the stick-to-ground residual within 0.2 m: the
+/// controller contact whose normal faces the stick most directly, within 90 deg (`sub_4F8EA0`, contact mask 4; PORT:
+/// contacts steeper than 45 deg), at least 0.55 m above the feet. Its flat normal n against the stick d: within 135 deg
+/// of n the stick turns along the wall; beyond, d is turned straight into the wall and the wanted speed is 0 (result
+/// 2: SetDestSpeedRatio(0) and the run stop allowed).
+pub fn wall_slide(body: &Body, dir: Vec3, speed01: f32) -> (Vec3, f32) {
+    let d = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+    if speed01 <= 0.0 || d == Vec3::ZERO || body.stick_residual.abs() > 0.2 {
+        return (dir, speed01);
+    }
+    let mut best: Option<(f32, Vec3)> = None;
+    for c in &body.proxy.manifold {
+        if c.normal.y.abs() >= std::f32::consts::FRAC_1_SQRT_2 || c.pos.y < body.feet.y + 0.55 {
+            continue;
+        }
+        let a = (-d).dot(c.normal).clamp(-1.0, 1.0).acos();
+        if a <= std::f32::consts::FRAC_PI_2 && best.is_none_or(|(b, _)| a < b) {
+            best = Some((a, c.normal));
+        }
+    }
+    let Some((_, normal)) = best else { return (dir, speed01) };
+    let n = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
+    if n == Vec3::ZERO {
+        return (dir, speed01);
+    }
+    let into = n.dot(d).clamp(-1.0, 1.0).acos();
+    if into <= std::f32::consts::PI - std::f32::consts::FRAC_PI_4 {
+        let t = (d - n * d.dot(n)).normalize_or_zero();
+        if t != Vec3::ZERO { (t, speed01) } else { (dir, speed01) }
+    } else {
+        (-n, 0.0)
     }
 }
 

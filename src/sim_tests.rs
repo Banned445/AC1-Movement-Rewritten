@@ -3170,3 +3170,40 @@ fn moving_again_after_a_run_stop_plays_its_exit() {
     assert!(s.run_until(1.0, |s| s.ground().tr.is_some_and(|t| RUN_STOP_EXIT.contains(&t.action.id))), "no run-stop exit");
     assert!((s.ground().speed_param - 0.5).abs() < 0.05);
 }
+
+// ---------------------------------------------------------------- turning (RE/02 §4.3)
+
+#[test]
+fn the_player_turns_at_the_interpreters_rate() {
+    // walking, then the stick 60 deg to the side: 4.0 rad/s (0xEE6D5D), 2.6 rad/s with Legs held
+    for (legs, rate) in [(false, 4.0f32), (true, 2.6)] {
+        let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+        s.pad(Vec3::NEG_Z, 1.0, false, legs);
+        s.run(1.5);
+        let h0 = s.body().heading;
+        s.pad(Vec3::new(-0.866, 0.0, -0.5), 1.0, false, legs);
+        s.run(0.1);
+        let turned = crate::player::ground::heading_delta(s.body().heading, h0).abs();
+        assert!((turned - rate * 0.1).abs() < 0.05, "legs {legs}: turned {turned} rad in 0.1 s, want {}", rate * 0.1);
+    }
+}
+
+#[test]
+fn running_at_a_wall_slides_along_it_and_head_on_stops() {
+    // wall x -7..7, z -8.3..-7.7, h 2.4 (the trace_wall_at_an_angle wall)
+    let mut s = Sim::new(Vec3::new(-5.0, 0.0, -6.0), 0.0);
+    s.pad(Vec3::new(0.866, 0.0, -0.5), 1.0, true, false);
+    s.run(2.0);
+    // 60 deg off head-on: the stick is turned along the wall (0xEDD7C0), so the body faces along it and keeps going
+    // (within 45 deg of head-on it would stop)
+    let f = s.body().forward();
+    assert!(f.x > 0.9, "faces along the wall: {f:?}");
+    assert!(s.ground().speed_param > 0.4, "keeps running: {}", s.ground().speed_param);
+    // straight into it: the wanted speed is 0
+    let mut s = Sim::new(Vec3::new(0.0, 0.0, -4.0), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(2.0);
+    assert!(s.ground().speed_param == 0.0, "stops at the wall: {}", s.ground().speed_param);
+    assert!(s.body().forward().z < -0.95);
+}
+

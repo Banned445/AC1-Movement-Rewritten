@@ -49,6 +49,12 @@ pub const STICK_SPAN: f32 = 0.25;
 /// Player turn rate (rad/s): min 270°/s, max 360°/s; thresholds are 0 so effectively 360°/s.
 /// HumanGround__UpdateHeading 0xD95290 → RotateTowards 0xD94F30
 pub const PLAYER_TURN_RATE: f32 = std::f32::consts::TAU;
+/// The rates the player's interpreter writes every frame (GoAssassinActionInterpreter__ProcessGroundMovement
+/// 0xEE6D3F–0xEE6D91, IHumanGround vt952 / vt956 = HG+1752 / +1756): max 4.0 rad/s, 2.6 with Legs held. With the angle
+/// band left at 0 the max is always the rate (RE/02 §4.3). The 270 / 360 deg/s above is 0xD671C0's one-time default,
+/// overwritten every frame (GAME_GROUND_TREE comparison only).
+pub const PLAYER_TURN_RATE_GAME: f32 = 4.0;
+pub const PLAYER_TURN_RATE_LEGS: f32 = 2.6;
 
 /// Ground loss → InAir fall types by fall height 1 / 2 / 8 m and horizontal speed 2.5 m/s. 0xD8C380
 pub const FALL_TYPE_HEIGHTS: [f32; 3] = [1.0, 2.0, 8.0];
