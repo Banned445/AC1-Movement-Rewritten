@@ -157,7 +157,7 @@ fn closest_points(world: &CollisionWorld, layer: u8, p: Vec3, lift: f32, height:
 
 /// The linear cast of the shape from `p` by `disp` (0x57B200 with the cast collector), hits sorted by fraction
 /// (sub_FE4FC0). Each hit carries the fraction and the distance along its normal (−disp·n × fraction, 0x579870).
-/// PORT: conservative advancement against each box; boxes the shape already touches at the start are left to the
+/// PORT: conservative advancement against each convex box/triangle; shapes already touching at the start are left to the
 /// closest-point query.
 fn linear_cast(world: &CollisionWorld, layer: u8, p: Vec3, disp: Vec3, lift: f32, height: f32) -> Vec<Contact> {
     let len = disp.length();
@@ -175,14 +175,23 @@ fn linear_cast(world: &CollisionWorld, layer: u8, p: Vec3, disp: Vec3, lift: f32
         if c.dist <= 0.0 {
             continue;
         }
-        let mut hit = false;
+        // If the budget expires, retain the last conservative fraction instead of declaring the path clear.
+        let mut hit = true;
         for _ in 0..40 {
             if c.dist <= 1e-4 {
                 hit = true;
                 break;
             }
-            t += c.dist / len;
+            // The closest normal defines a supporting plane of this convex collider. Advance to that plane,
+            // not by total motion length: tangential motion must not slow convergence at shallow incidence.
+            let closing_speed = -disp.dot(c.normal);
+            if closing_speed <= 0.0 {
+                hit = false;
+                break;
+            }
+            t += c.dist / closing_speed;
             if t > 1.0 {
+                hit = false;
                 break;
             }
             c = closest(world, i, p + disp * t, lift, height);
@@ -617,6 +626,39 @@ mod tests {
             v = nv;
         }
         (p, v)
+    }
+
+    #[test]
+    fn review_shallow_incidence_cast_detects_the_wall() {
+        let w = boxes(&[(Vec3::new(0.451, -2.0, -50.0), Vec3::new(1.451, 4.0, 50.0))]);
+        let disp = Vec3::new(0.102, 0.0, 0.75);
+        let hits = linear_cast(&w, 0, Vec3::ZERO, disp, 0.0, CAPSULE_HEIGHT);
+        assert_eq!(hits.len(), 1, "capsule crosses the wall at 0.101 / 0.102 but cast returned {hits:?}");
+        assert!((hits[0].fraction - 0.101 / 0.102).abs() < 0.002, "{hits:?}");
+        assert!(hits[0].normal.dot(Vec3::NEG_X) > 0.999);
+    }
+
+    #[test]
+    fn review_shallow_incidence_cast_detects_a_triangle() {
+        let tri = crate::triangles::Triangle::new([
+            Vec3::new(0.451, -10.0, -10.0),
+            Vec3::new(0.451, 10.0, -10.0),
+            Vec3::new(0.451, 0.0, 10.0),
+        ], crate::layers::STATIC).unwrap();
+        let w = CollisionWorld { triangles: vec![tri], ..Default::default() };
+        let hits = linear_cast(&w, 0, Vec3::ZERO, Vec3::new(0.102, 0.0, 0.75), 0.0, CAPSULE_HEIGHT);
+        assert_eq!(hits.len(), 1, "shallow triangle crossing was missed: {hits:?}");
+        assert!((hits[0].fraction - 0.101 / 0.102).abs() < 0.002, "{hits:?}");
+        assert!(hits[0].normal.dot(Vec3::NEG_X) > 0.999);
+    }
+
+    #[test]
+    fn review_cast_clear_paths_and_layers_remain_clear() {
+        let w = boxes(&[(Vec3::new(0.451, -2.0, -50.0), Vec3::new(1.451, 4.0, 50.0))]);
+        for disp in [Vec3::new(0.1, 0.0, 0.75), Vec3::new(-0.102, 0.0, 0.75), Vec3::new(0.0, 0.0, 0.75)] {
+            assert!(linear_cast(&w, 0, Vec3::ZERO, disp, 0.0, CAPSULE_HEIGHT).is_empty(), "false contact for {disp:?}");
+        }
+        assert!(linear_cast(&w, crate::layers::MAIN_CHARACTER_NO_STATIC, Vec3::ZERO, Vec3::new(0.102, 0.0, 0.75), 0.0, CAPSULE_HEIGHT).is_empty());
     }
 
     #[test]
