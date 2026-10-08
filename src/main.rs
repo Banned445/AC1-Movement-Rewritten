@@ -30,6 +30,7 @@ mod tuning;
 mod triangles;
 mod native_map;
 mod map_menu;
+mod wind;
 
 use bevy::prelude::*;
 
@@ -80,6 +81,7 @@ fn main() {
             debug_capture::DebugCapturePlugin,
             debug_capture::ShotsPlugin,
             recorder::RecorderPlugin,
+            wind::WindPlugin,
         ))
         .run();
 }

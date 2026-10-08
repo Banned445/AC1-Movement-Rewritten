@@ -2,8 +2,9 @@
 use bevy::prelude::*;
 use crate::assets::ac_formats::parse_skeleton;
 
-// PORT: secondary skirt dynamics remain opt-in pending native pose/LOD validation.
-pub const SKIRT_ROTATION_COPIES: bool = false;
+// The player's skeleton runs its authored modifiers in gameplay (LOD 5, +332 bit 0x10; RE/09 §8.16).
+// AC_NO_SKIRT_ROTATION_COPIES=1 compares the old rest-pose skirt.
+pub const SKIRT_ROTATION_COPIES: bool = true;
 // Authored hood/sword-tag modifiers, independently fenced from the skirt (RE/09 §8.13).
 const CHARACTER_EQUIPMENT_DYNAMICS: bool = true;
 
@@ -124,9 +125,28 @@ pub fn decode_rotation_copies(data: &[u8]) -> Result<Vec<(u32, u32)>, String> {
     Ok(copies)
 }
 
+/// The SkeletonComponent's embedded force config (SkeletonComponent__Read 0x4E4E30 → ForceConfig__Read 0x5C6B20):
+/// Some(scale) when enabled. PORT: located by its class marker inside the component.
+pub fn decode_skeleton_force(entity: &[u8]) -> Option<f32> {
+    let word = |p: usize| entity.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let component = (4..entity.len().saturating_sub(4)).find(|&p| word(p) == Some(crate::assets::forge::crc32("SkeletonComponent")))?;
+    let mut configs = (component..(component + 400).min(entity.len().saturating_sub(4))).filter(|&p| word(p) == Some((-403070396i32) as u32));
+    let p = configs.next()?;
+    if configs.next().is_some() || entity.get(p + 9..p + 11)? != [0, 0] { return None; }
+    let scale = word(p + 5).map(f32::from_bits).filter(|v| v.is_finite())?;
+    (*entity.get(p + 4)? == 1).then_some(scale)
+}
+
 #[derive(Component)]
 pub struct VisualRotationCopies {
     pub joints: Vec<Entity>,
+    /// Authored local rest of every joint; secondary joints restart from it each frame (0x4E0650).
+    pub rest: Vec<Transform>,
+    /// Movement joints come first; the animator owns them.
+    pub primary: usize,
+    pub force_scale: Option<f32>,
+    /// The previous frame's environment sample at bone 0 (0x4E7550 stores it after the modifiers).
+    pub environment: Vec3,
     pub parents: Vec<Option<usize>>,
     pub copies: Vec<(usize, usize)>,
     pub compressions: Vec<SkirtCompression>,
@@ -204,7 +224,7 @@ fn copy_rotations(local: &mut [Transform], parents: &[Option<usize>], copies: &[
     }
 }
 
-pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut VisualRotationCopies)>, mut transforms: Query<&mut Transform>) {
+pub fn update_rotation_copies(time: Res<Time>, wind: Res<crate::wind::WindField>, mut rigs: Query<(Entity, &mut VisualRotationCopies)>, mut transforms: Query<&mut Transform>) {
     let skirt = skirt_modifiers_enabled();
     let equipment = equipment_modifiers_enabled();
     if !skirt && !equipment { return; }
@@ -217,6 +237,11 @@ pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut Vis
         // PORT: bounded reset on teleports/long stalls in place of native frame-id continuity.
         let reset = time.delta_secs() > 0.1 || rig.previous_anchor.is_none_or(|old| old.distance_squared(anchor) > 4.0);
         rig.previous_anchor = Some(anchor);
+        // SkeletonComponent__BeginFrame 0x4E0650 copies the authored base pose into the live pose every frame,
+        // so modifiers never read their own previous output.
+        for i in rig.primary..rig.joints.len() {
+            if let Ok(mut transform) = transforms.get_mut(rig.joints[i]) { *transform = rig.rest[i]; }
+        }
         let Some(mut local) = rig.joints.iter().map(|&joint| transforms.get(joint).ok().copied()).collect::<Option<Vec<_>>>() else { continue; };
         // Root's authored list is compression then look-at; native preserves owner-list order (0x4E6820).
         // PORT: native pose-slot blending is still unported.
@@ -236,8 +261,8 @@ pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut Vis
             let reference = h.constraint_reference.map(|r| world[r].transform_vector3(h.reference_direction));
             let target = h.target;
             let h = h.clone();
-            // PORT: environmental force sampling (0x5C8A60) is unavailable in the greybox.
-            let solved = rig.hinge_states[i].solve(&h, base, owner, force, reference, Vec3::ZERO, time.delta_secs(), reset);
+            let environment = rig.environment;
+            let solved = rig.hinge_states[i].solve(&h, base, owner, force, reference, environment, time.delta_secs(), reset);
             // 0x697C80 composes later hinges as current * inverse(base) * solved.
             let applied = if last_target == Some(target) { owner * base.inverse() * solved } else { solved };
             let (_, rotation, translation) = (parent.inverse() * applied).to_scale_rotation_translation();
@@ -245,6 +270,9 @@ pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut Vis
             local[target].rotation = rotation.normalize();
             last_target = Some(target);
         }
+        // SkeletonComponent__UpdateSecondary 0x4E7550: sample at global bone 0 (0x4E1CA0) after the modifiers.
+        let root = frame * world_pose(&local, &rig.parents)[0];
+        rig.environment = rig.force_scale.map_or(Vec3::ZERO, |scale| wind.sample(root.w_axis.truncate(), scale));
         for h in &rig.hinges {
             if !(if h.equipment { equipment } else { skirt }) { continue; }
             if let Ok(mut transform) = transforms.get_mut(rig.joints[h.target]) { *transform = local[h.target]; }
@@ -266,6 +294,21 @@ pub fn update_rotation_copies(time: Res<Time>, mut rigs: Query<(Entity, &mut Vis
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skeleton_force_config_rejects_truncation_and_disabled_configs() {
+        let mut data = vec![0u8; 8];
+        data.extend(crate::assets::forge::crc32("SkeletonComponent").to_le_bytes());
+        data.extend([0u8; 12]);
+        data.extend(((-403070396i32) as u32).to_le_bytes());
+        data.push(1);
+        data.extend(1.0f32.to_le_bytes());
+        data.extend([0, 0, 1]);
+        assert_eq!(decode_skeleton_force(&data), Some(1.0));
+        let p = data.len() - 8;
+        data[p] = 0;
+        assert_eq!(decode_skeleton_force(&data), None, "a disabled config samples nothing");
+        assert_eq!(decode_skeleton_force(&data[..data.len() - 5]), None);
+    }
     #[test]
     fn look_at_uses_owner_reference_preserves_position_and_primary_pose() {
         let mut local = vec![Transform::from_xyz(3.0, 1.0, 0.0).with_rotation(Quat::from_rotation_z(0.4)),

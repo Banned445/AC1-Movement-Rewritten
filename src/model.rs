@@ -115,6 +115,11 @@ fn attach_altair(
     if !model.visual_rotation_copies.is_empty() || !model.visual_compressions.is_empty() || !model.visual_look_at.is_empty() {
         commands.entity(player).insert(crate::visual_pose::VisualRotationCopies {
             joints: visual_joints.clone(),
+            rest: model.skeleton.iter().chain(&model.visual_bones).map(|b| Transform {
+                translation: Vec3::from_array(b.local_pos), rotation: Quat::from_array(b.local_rot).normalize(), scale: Vec3::ONE }).collect(),
+            primary: model.skeleton.len(),
+            force_scale: model.skeleton_force,
+            environment: Vec3::ZERO,
             parents: model.skeleton.iter().chain(&model.visual_bones).map(|b| b.parent).collect(),
             copies: model.visual_rotation_copies.clone(),
             compressions: model.visual_compressions.clone(),
