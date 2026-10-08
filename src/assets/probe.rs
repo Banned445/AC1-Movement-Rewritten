@@ -192,7 +192,27 @@ fn probe_dump_jump_clips() {
     out += "pub struct ClipRoot {\n    pub name: &'static str,\n    pub duration: f32,\n    pub disp: [[f32; 3]; 9],\n    pub yaw: [f32; 9],\n}\n\n";
     out += "/// (action id, items: clip names per item in slot order).\npub const ACTIONS: &[(u32, &[&[&str]])] = &[\n";
     let mut clips: Vec<String> = Vec::new();
-    for id in crate::player::jump_blend::DUMPED_ACTIONS.iter().chain(crate::player::ledge_moves::DUMPED_ACTIONS.iter()).chain(crate::player::walling::DUMPED_ACTIONS.iter()).chain(crate::player::narrow::DUMPED_ACTIONS.iter()).chain(crate::player::collide::DUMPED_ACTIONS.iter()).chain(crate::player::passover::DUMPED_ACTIONS.iter()).chain(crate::player::swing::DUMPED_ACTIONS.iter()).chain(crate::player::ladder::DUMPED_ACTIONS.iter()).chain(crate::player::climb::DUMPED_ACTIONS.iter()).chain(crate::player::ground::LOOK_DOWN.iter()).chain(crate::player::ground::PIVOT_ACTIONS.iter()) {
+    let mut ids: Vec<u32> = crate::player::jump_blend::DUMPED_ACTIONS.iter().chain(crate::player::ledge_moves::DUMPED_ACTIONS.iter()).chain(crate::player::walling::DUMPED_ACTIONS.iter()).chain(crate::player::narrow::DUMPED_ACTIONS.iter()).chain(crate::player::collide::DUMPED_ACTIONS.iter()).chain(crate::player::passover::DUMPED_ACTIONS.iter()).chain(crate::player::swing::DUMPED_ACTIONS.iter()).chain(crate::player::ladder::DUMPED_ACTIONS.iter()).chain(crate::player::climb::DUMPED_ACTIONS.iter()).chain(crate::player::ground::LOOK_DOWN.iter()).chain(crate::player::ground::PIVOT_ACTIONS.iter()).chain(crate::player::ground_tree::DUMPED_ACTIONS.iter()).copied().collect();
+    // The authored transitions into the ground locomotion and the waits (item transitions whose destination is one of
+    // them, `sub_5B98B0`): the simulation runs MoveBlend's transition path on their transition actions (RE/02 §4.6), so
+    // those actions are dumped too (closure: a transition action can itself lead on).
+    let mut transitions: Vec<(u32, usize, u32, u32, u32, u32)> = Vec::new();
+    let mut k = 0;
+    while k < ids.len() {
+        let src = graph.actions.get(&ids[k]).unwrap_or_else(|| panic!("action {:#x} missing", ids[k])).id;
+        let items: Vec<_> = graph.actions[&ids[k]].items.iter().map(|it| it.transitions.clone()).collect();
+        for (i, trs) in items.iter().enumerate() {
+            for t in trs.iter().filter(|t| crate::player::ground_tree::GROUND_DESTINATIONS.contains(&t.action_b) && t.action_a != 0) {
+                let Some(ta) = graph.actions.get(&t.action_a) else { continue };
+                transitions.push((src, i, ta.id, t.u_a, t.action_b, t.u_b));
+                if !ids.contains(&ta.id) {
+                    ids.push(ta.id);
+                }
+            }
+        }
+        k += 1;
+    }
+    for id in ids.iter() {
         let a = graph.actions.get(id).unwrap_or_else(|| panic!("action {id:#x} missing"));
         out += &format!("    ({id:#010x}, &[\n");
         for it in &a.items {
@@ -201,6 +221,10 @@ fn probe_dump_jump_clips() {
             clips.extend(ns);
         }
         out += "    ]),\n";
+    }
+    out += "];\n\n/// Item transitions into the ground locomotion / waits: (action, item, transition action, its item u_a,\n/// destination action, destination item u_b) (ActionTransition +4/+8/+12/+16, `AnimSlot__SetAction` 0x727F70).\npub const GROUND_TRANSITIONS: &[(u32, usize, u32, u32, u32, u32)] = &[\n";
+    for (src, i, ta, ua, tb, ub) in &transitions {
+        out += &format!("    ({src:#010x}, {i}, {ta:#010x}, {ua}, {tb:#010x}, {ub}),\n");
     }
     out += "];\n\npub const CLIPS: &[ClipRoot] = &[\n";
     clips.sort();
@@ -438,6 +462,36 @@ fn probe_clip_yaw() {
             let dp = pos.get(&TRACK_DISPLACEMENT).map(|k| sample_vec(k, t)).unwrap_or(Vec3::ZERO);
             let bone = |id: u32| model.skeleton.iter().position(|b| b.bone_id == id).map(|i| yaw(g[i].0));
             println!("t={t:5.2} disp=({:5.2},{:5.2}) disp_yaw={:?} ref_yaw={:?} hips_yaw={:?}", dp.x, dp.y, dr, bone(0x2c52_cbb0), bone(0xded1_0611));
+        }
+    }
+}
+
+/// Resolve action ids (resource ids or Action+8 request ids, `PROBE_IDS` hex or `PROBE_DEC` decimal) and print
+/// their items, clip durations, item words and every transition with its two u32 fields.
+#[test]
+#[ignore]
+fn probe_resolve_actions() {
+    use super::ac_actions::{ActionGraph, CLASS_ACTION_BLOCK};
+    let res = game_fix();
+    let mut graph = ActionGraph::default();
+    for r in res.iter().filter(|r| r.class_hash == CLASS_ACTION_BLOCK) {
+        graph.add_block(&r.name, &r.payload).unwrap();
+    }
+    let names: HashMap<u32, &str> = res.iter().filter(|r| r.class_hash == CLASS_ANIMATION).map(|r| (r.id, r.name.as_str())).collect();
+    let dur: HashMap<u32, f32> = res.iter().filter(|r| r.class_hash == CLASS_ANIMATION).filter_map(|r| decode(&r.payload).ok().map(|a| (r.id, a.duration))).collect();
+    let mut ids: Vec<u32> = std::env::var("PROBE_IDS").unwrap_or_default().split(',').filter_map(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()).collect();
+    ids.extend(std::env::var("PROBE_DEC").unwrap_or_default().split(',').filter_map(|s| s.trim().parse::<u32>().ok()));
+    for id in ids {
+        let Some(a) = graph.actions.get(&id) else { println!("{id} ({id:#x}): not found"); continue };
+        println!("{id} ({id:#x}) -> action {:#010x} request {} [{}] repeat {} flags {:#x} channel {:#x}", a.id, a.request_id, a.block, a.repeat, a.flags, a.channel);
+        if let Some(t) = a.in_transition { println!("    in  {t:x?}"); }
+        if let Some(t) = a.out_transition { println!("    out {t:x?}"); }
+        for (k, it) in a.items.iter().enumerate() {
+            let clips: Vec<String> = it.animations.iter().map(|x| format!("{}({:.3})", names.get(x).copied().unwrap_or("?"), dur.get(x).copied().unwrap_or(-1.0))).collect();
+            println!("  item {k} {:#010x} word {:#06x} w {:?} {:?}", it.id, it.flags, it.weights, clips);
+            for t in &it.transitions {
+                println!("      tr a {:#010x} u_a {} -> b {:#010x} u_b {} blend_a {} {:.3} blend_b {} {:.3}", t.action_a, t.u_a, t.action_b, t.u_b, t.blend_a.kind, t.blend_a.time, t.blend_b.kind, t.blend_b.time);
+            }
         }
     }
 }

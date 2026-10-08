@@ -106,6 +106,30 @@ pub struct HumanGroundData {
     pub crouch_hide_hint: bool,
     /// Input timer +4408, reset every frame Legs is held (0xEEE08C).
     pub legs_released_ago: f32,
+    /// The transition action playing in front of the locomotion or the wait (MoveBlend's transition path, RE/02 §4.6).
+    pub tr: Option<super::ground_tree::MoveTransition>,
+    pub tr_seq: u32,
+    /// The Movement state that owns the playing one-shot (its update decides what follows it, RE/02 §4.6).
+    pub owner: TreeState,
+    /// HG+688 (0x2B0): the pivot's turn angle, read by the turn start's layouts 2 / 3.
+    pub pivot_turn: f32,
+}
+
+/// The Movement child states that end a one-shot by their own rules (`HumanGround__Movement_Update` 0xDAD1C0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TreeState {
+    #[default]
+    Other,
+    /// State 21 (entry mode 9, `HumanGround__Landing_Update` 0xDA8F50).
+    Landing,
+    /// State 22 (entry mode 10, `HumanGround__DamageLanding_Update` 0xDA8FC0).
+    DamageLanding,
+    /// State 18 (`HumanGround__RunStop_Update` 0xDA8D70).
+    RunStop,
+    /// State 24, the skid turn (`HumanGround__RunTurn_Update` 0xDA90A0).
+    RunTurn,
+    /// State 25 (`HumanGround__Pivot_Update` 0xDA9120).
+    Pivot,
 }
 
 /// `HumanGround__LookDown_Enter` 0xD9FC80: `xx_l_ledge_lookdown_{front,left,right}_foot{l,r}` (by the leading foot)
@@ -187,6 +211,218 @@ impl HumanGroundData {
     pub fn play_oneshot(&mut self, b: ActionBlend) {
         self.landing_seq = self.landing_seq.wrapping_add(1);
         self.oneshot = Some(GroundOneShot { blend: b, t: 0.0, duration: b.duration(), applied: [0.0; 3], h0: None });
+        self.owner = TreeState::Other;
+    }
+
+    fn next_tr_seq(&mut self) -> u32 {
+        self.tr_seq = self.tr_seq.wrapping_add(1);
+        self.tr_seq
+    }
+
+    /// RunStop (state 18, `HumanGround__RunStop_Enter` 0xD98E30): the stop action of the leading foot (table 0x1A2C074 =
+    /// legacy 86 / 87), weighted by the speed it stopped from. MoveBlend does not run while it plays.
+    pub fn start_run_stop(&mut self) {
+        let foot = (self.blend.foot != 0) as usize;
+        if let Some(b) = jump_blend::action_items(jump_blend::RUN_STOP[foot]).map(|_| ActionBlend::new(jump_blend::RUN_STOP[foot], 0, &jump_blend::run_stop_weights(self.speed_param))) {
+            self.play_oneshot(b);
+            self.oneshot_next = None;
+            self.tr = None;
+            self.owner = TreeState::RunStop;
+            self.speed_param = 0.0;
+            self.blend.speed_param = 0.0;
+        }
+    }
+
+    /// The transition action `action` (its item `item`) in front of the locomotion, handing over to locomotion item
+    /// `dest`. `prev`: the weights the slot holds (the item that was playing), kept when the transition has as many
+    /// clips (the slot's single weight array, `sub_725B30`).
+    fn start_transition(&mut self, action: u32, item: usize, dest: usize, layout: u8, prev: &[f32], from: Option<(u32, usize)>) -> bool {
+        let Some(items) = jump_blend::action_items(action) else { return false };
+        let n = items.get(item).map(|c| c.len()).unwrap_or(0);
+        if n == 0 {
+            return false;
+        }
+        let mut w: Vec<f32> = if prev.len() == n { prev.to_vec() } else { (0..n).map(|k| if k == 0 { 1.0 } else { 0.0 }).collect() };
+        // the layout's weights from the first frame (the exe sets them in the same update that plays the action)
+        if let Some(lw) = super::ground_tree::transition_weights(layout, self.speed_param, self.pivot_turn, &w) {
+            w = (0..n).map(|k| lw.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0)).collect();
+        }
+        let seq = self.next_tr_seq();
+        self.tr = Some(super::ground_tree::MoveTransition::new(ActionBlend::new(action, item, &w), layout, dest, from, seq));
+        true
+    }
+
+    /// `HumanGround__Move_EnterBody` 0xD94A60 entered from `from` without a start: the locomotion through the item's
+    /// authored transition (the graph's lookup, `sub_5B98B0`), with the given MoveBlend layout. Without one the
+    /// locomotion starts at once on the exit foot of the item (`HumanGround__PickLocomotionFoot` 0xD86760).
+    fn enter_move(&mut self, from: ActionBlend, layout: u8) {
+        use super::ground_tree::{authored_transition, pick_locomotion_foot};
+        match authored_transition(from.id, from.item, super::move_blend::ACT_GROUND_LOCOMOTION) {
+            Some((ta, ua, ub)) if self.start_transition(ta, ua, ub, layout, from.weights(), Some((from.id, from.item))) => {}
+            _ => {
+                self.tr = None;
+                self.blend.foot = pick_locomotion_foot(super::anim_gate::word(&from), self.blend.foot).min(1);
+                self.blend.phase = 0.0;
+            }
+        }
+    }
+
+    /// Idle entered from `from` (`HumanGround__Idle_Enter` 0xDA6AB0): the wait of the profile, through the item's authored
+    /// transition into it when there is one (its root motion still moves the body); the foot follows that wait.
+    fn enter_wait(&mut self, from: ActionBlend, high: bool) {
+        self.speed_param = 0.0;
+        self.blend.speed_param = 0.0;
+        self.tr = None;
+        let waits = super::ground_tree::WAITS[high as usize];
+        let found = super::jump_clips::GROUND_TRANSITIONS.iter().find(|t| t.0 == from.id && t.1 == from.item && waits.contains(&t.4));
+        if let Some(&(_, _, ta, ua, dest, _)) = found {
+            if self.start_transition(ta, ua as usize, 0, 0, from.weights(), Some((from.id, from.item))) {
+                if let Some(t) = self.tr.as_mut() {
+                    t.to_wait = true;
+                }
+                self.blend.foot = (dest == waits[1]) as usize;
+            }
+        }
+    }
+
+    /// `HumanGround__PlayStartMove` 0xD98990 (Idle → Move): the locomotion entered through the start transition of the
+    /// profile and leading foot (0.2 s AROLLBROLL from B only), weights walk (low) / jog (high), the speed parameter
+    /// set to 0.25 / 0.5 and layout 7. A left foot ahead hands over to locomotion item 1.
+    pub fn play_start_move(&mut self) {
+        let foot = (self.blend.foot != 0) as usize;
+        let id = START_MOVE[self.high_profile as usize][foot];
+        if jump_blend::action_items(id).is_none() {
+            return;
+        }
+        let w: &[f32] = if self.high_profile { &[0.0, 0.0, 1.0, 0.0] } else { &[0.0, 1.0, 0.0, 0.0] };
+        self.speed_param = if self.high_profile { 0.5 } else { 0.25 };
+        self.blend.speed_param = self.speed_param;
+        if !GAME_GROUND_TREE {
+            self.play_oneshot(ActionBlend::new(id, 0, w));
+            return;
+        }
+        let seq = self.next_tr_seq();
+        let mut t = super::ground_tree::MoveTransition::new(ActionBlend::new(id, 0, w), 7, 1 - foot, None, seq);
+        t.blend_in = Some(crate::assets::ac_actions::ActBlend { kind: 1, disp_src: 2, time: 0.2, ..crate::assets::ac_actions::ActBlend::DEFAULT });
+        self.tr = Some(t);
+    }
+
+    /// RunTurn → Move (`HumanGround__PlayRunTurnExitMove` 0xD8F2B0), s := 0.5. Still turned (more than 120 deg): the
+    /// heading is turned round (the skid-turn clip turned the skeleton, not the root) and the turn's own exit plays
+    /// (legacy 96 / 97); otherwise the run stop's exit (93 after the left-foot turn, 92 after the right) with a 0.2 s
+    /// ASTOPBROLL.
+    pub fn run_turn_exit(&mut self, turn_item: ActionBlend, turned: bool, heading: &mut f32) {
+        use super::ground_tree::{RUN_STOP_EXIT, RUN_TURN, RUN_TURN_EXIT};
+        let footl = turn_item.id == RUN_TURN[0];
+        self.speed_param = 0.5;
+        self.blend.speed_param = 0.5;
+        let (action, dest) = if turned {
+            *heading = wrap_angle(*heading + std::f32::consts::PI);
+            if footl { (RUN_TURN_EXIT[0], 0) } else { (RUN_TURN_EXIT[1], 1) }
+        } else if footl {
+            (RUN_STOP_EXIT[1], 0)
+        } else {
+            (RUN_STOP_EXIT[0], 1)
+        };
+        if self.start_transition(action, 0, dest, 1, &[], Some((turn_item.id, turn_item.item))) && !turned {
+            if let Some(t) = self.tr.as_mut() {
+                t.blend_in = Some(crate::assets::ac_actions::ActBlend { kind: 2, time: 0.2, ..crate::assets::ac_actions::ActBlend::DEFAULT });
+            }
+        }
+    }
+
+    /// What follows a ground one-shot that ends, by the Movement state that owns it (RE/02 §4.6). `stick`: a move is
+    /// wanted (HG+1496 ≠ 0); `turn`: HG+1532.
+    pub fn after_oneshot(&mut self, ended: ActionBlend, stick: bool, turn: f32, heading: &mut f32) {
+        use super::ground_tree::{pick_locomotion_foot, LANDINGS_TO_WAIT, LANDING_DAMAGE, RUN_STOP_EXIT, RUN_TURN};
+        let owner = std::mem::take(&mut self.owner);
+        let high = self.high_profile;
+        if std::env::var_os("AC_TREE_LOG").is_some() {
+            info!("ground tree: {:#010x} ended, owner {owner:?}, stick {stick}, turn {:.0} deg, high {high}", ended.id, turn.to_degrees());
+        }
+        match owner {
+            // state 21 (0xDA8F50): when the landing completes, the landings that end in the wait go to Idle (high
+            // profile, 0xDA26C0); the others enter Move with layout 6 and s 0.25 / 0.5 / 1.0 by the wanted profile and
+            // Sprint (0xD990A0). A released stick then leaves Move for Idle at once (0xD7ED30).
+            TreeState::Landing if ended.id == jump_blend::RECEPTION_FREESTEP[0] || ended.id == jump_blend::RECEPTION_FREESTEP[1] => {
+                // PORT: the game continues a free-step reception in NarrowObject; its exits lead to the same waits and
+                // locomotion
+                if stick {
+                    self.speed_param = self.speed_param.max(if high { 0.5 } else { 0.25 });
+                    self.blend.speed_param = self.speed_param;
+                    self.enter_move(ended, 1);
+                } else {
+                    self.enter_wait(ended, high);
+                }
+            }
+            TreeState::Landing if LANDINGS_TO_WAIT.contains(&ended.id) => self.enter_wait(ended, high),
+            TreeState::Landing if stick => {
+                self.speed_param = if !high { 0.25 } else if !self.sprint { 0.5 } else { 1.0 };
+                self.blend.speed_param = self.speed_param;
+                self.enter_move(ended, 6);
+            }
+            // state 22 (0xDA8FC0): Idle (0xDA77F0) or Move with s 0.25 / 0.5 by profile and layout 1 (0xD7F210)
+            TreeState::DamageLanding if stick => {
+                self.speed_param = if high { 0.5 } else { 0.25 };
+                self.blend.speed_param = self.speed_param;
+                self.enter_move(ended, 1);
+            }
+            TreeState::DamageLanding => {
+                let _ = LANDING_DAMAGE;
+                self.enter_wait(ended, high);
+            }
+            // state 18 (0xDA8D70): the item ended with the stick more than 120 deg away → the skid turn (state 24,
+            // 0xD8B8E0, the turn of the exit foot); else Idle (0xDA7710) or Move through legacy 92 / 93 with s 0.5
+            // (0xD8B3F0: the left-foot stop hands over to item 1)
+            TreeState::RunStop if stick && turn.abs() > crate::tuning::RUN_TURN_ANGLE => {
+                let foot = pick_locomotion_foot(super::anim_gate::word(&ended), self.blend.foot).min(1);
+                if jump_blend::action_items(RUN_TURN[foot]).is_some() {
+                    self.play_oneshot(ActionBlend::new(RUN_TURN[foot], 0, &[1.0]));
+                    self.owner = TreeState::RunTurn;
+                }
+            }
+            TreeState::RunStop if stick => {
+                let footl = ended.id == jump_blend::RUN_STOP[0];
+                self.speed_param = 0.5;
+                self.blend.speed_param = 0.5;
+                let (action, dest) = if footl { (RUN_STOP_EXIT[0], 1) } else { (RUN_STOP_EXIT[1], 0) };
+                self.start_transition(action, 0, dest, 1, &[], Some((ended.id, ended.item)));
+            }
+            // state 24 completed (0xDA90A0)
+            TreeState::RunTurn if stick => self.run_turn_exit(ended, turn.abs() > crate::tuning::RUN_TURN_ANGLE, heading),
+            TreeState::RunTurn => {
+                // 0xD8F210: the heading turned round, Idle
+                *heading = wrap_angle(*heading + std::f32::consts::PI);
+                self.enter_wait(ended, high);
+            }
+            // state 25 (0xDA9120) → `HumanGround__PlayTurnStartMove` 0xD99710: the locomotion through the pivot's
+            // authored transition; high profile: layout 2, s 0.5; low: layout 3, s 0.25 (0.5 with the high profile
+            // wanted, at the faster rate). The pivot's root yaw has already turned the body (the exe catches CurHeading
+            // up by HG+688 here).
+            TreeState::Pivot if stick => {
+                let layout = if high { 2 } else { 3 };
+                self.speed_param = if high { 0.5 } else { 0.25 };
+                self.blend.speed_param = self.speed_param;
+                self.enter_move(ended, layout);
+            }
+            TreeState::Pivot | TreeState::RunStop | TreeState::Landing => self.enter_wait(ended, high),
+            // the other one-shots (climb / ledge / hay exits, lean exits …): the item's authored transition into the
+            // locomotion with the default layout, PORT s ≥ 0.25 / 0.5 (TransitionSetupDataToMovement modes 3 / 4, the
+            // exits' own setups are not traced), or into the wait
+            // (the ledge stop's end action hands back to Movement when it ends, `Locomotion_Update` 0xDAF2D0)
+            TreeState::Other if self.ledge_stop.is_none_or(|l| l.ending) && self.collide.is_none() && self.look_down.is_none() => {
+                if stick {
+                    if super::ground_tree::authored_transition(ended.id, ended.item, super::move_blend::ACT_GROUND_LOCOMOTION).is_some() {
+                        self.speed_param = self.speed_param.max(if high { 0.5 } else { 0.25 });
+                        self.blend.speed_param = self.speed_param;
+                        self.enter_move(ended, 1);
+                    }
+                } else {
+                    self.enter_wait(ended, high);
+                }
+            }
+            TreeState::Other => {}
+        }
     }
 
     /// `TransitionSetupDataToMovement::Apply` (0xC80310), simplified.
@@ -198,6 +434,13 @@ impl HumanGroundData {
         self.extra = None;
         self.crouch = None;
         self.oneshot_next = None;
+        self.tr = None;
+        // entry mode 9 (landing) / 10 (heavy landing) put Movement in states 21 / 22 (`Movement_EnterBody` 0xD92C40)
+        self.owner = match landing.and_then(|l| l.action) {
+            Some(a) if a.id == jump_blend::LAND_DAMAGE || a.id == jump_blend::LAND_DAMAGE_ROLL => TreeState::DamageLanding,
+            Some(_) => TreeState::Landing,
+            None => TreeState::Other,
+        };
         if landing.is_none() {
             // PORT: entries without a landing (pull-up, beam / ladder / pass-over exits …) start standing. The game's
             // OnEnterInit 0xDA7D20 leaves HG+0x5E8 alone, but those contexts drive the parameter themselves; the port's
@@ -376,28 +619,58 @@ pub fn update_ground(
         }
 
         // ---------------------------------------------------------------- input → wanted motion
-        // the start item is the locomotion action itself (entered through a transition): steering and the other
-        // requests stay live while it plays; a released stick ends it
-        let starting = g.oneshot.is_some_and(|o| is_start(o.blend.id));
-        if starting && pad.speed01 <= 0.0 {
-            g.oneshot = None;
+        // HG+1532: the signed angle from the current heading to the wanted one (Movement_PreUpdate 0xD97E30).
+        let stick_turn = if pad.speed01 > 0.0 { angle_diff(heading_of(pad.dir), body.heading) } else { 0.0 };
+        // A transition into the locomotion (the Move state's transition path) keeps steering and the other requests
+        // live. A released stick leaves it like any Move: `HumanGround__Move_CanRunStop` 0xD7EC90 (high profile, the
+        // run stop allowed, and the playing action is the locomotion, the skid-turn exits legacy 96 / 97, or past 0.33 s)
+        // or else `HumanGround__Move_CanStop` 0xD7ED30 (the playing action is not the locomotion): the wait at once.
+        if GAME_GROUND_TREE && pad.speed01 <= 0.0 {
+            if let Some(t) = g.tr.filter(|t| !t.to_wait) {
+                let elapsed = t.phase * t.action.duration();
+                let can_run_stop = g.high_profile && g.speed_param > BAND_WALK && !super::anim_gate::locked(&t.action)
+                    && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || elapsed > 0.33);
+                g.tr = None;
+                if can_run_stop {
+                    g.start_run_stop();
+                } else {
+                    g.speed_param = 0.0;
+                    g.blend.speed_param = 0.0;
+                }
+            }
         }
-        let starting = starting && pad.speed01 > 0.0;
         // The anim gate of Idle → Move (0xD84AC0) and of the pivot (0xD84B10): the playing item has ended, or its word
         // allows leaving it for moving in this profile and it is not locked (`HumanGround__AnimAllowsModeExit`
         // 0xD80010, `anim_gate`). A one-shot that allows it is left at once for the locomotion (its transition blends,
         // RE/13 §7); locked ones (landings, run stops, pivots) play out. Not in the ground's own sub-states (the ledge
-        // stop, sub-state 38; the obstacle collision, 5): they leave by their own rules.
-        if !starting
-            && pad.speed01 > 0.0
+        // stop, sub-state 38; the obstacle collision, 5): they leave by their own rules. A transition into the wait is
+        // Idle's: the same gate leaves it for the start.
+        // The landing states (21, 22) and the skid turn (24) have no such gate: they leave when the action completes
+        // (`sub_501760`). That includes the free-step reception (PORT: the game continues it in NarrowObject); its
+        // authored exits (`freestep_entry_tr_*`, entered with a cut) start from its last frame.
+        let gated = !GAME_GROUND_TREE || g.owner == TreeState::Other;
+        if pad.speed01 > 0.0
+            && gated
             && g.ledge_stop.is_none()
             && g.collide.is_none()
             && g.oneshot.is_some_and(|o| super::anim_gate::allows_mode_exit(&o.blend, true, pad.high_profile))
         {
             g.oneshot = None;
             g.oneshot_next = None;
+            g.owner = TreeState::Other;
         }
-        let busy = g.oneshot.is_some() && !starting;
+        if pad.speed01 > 0.0 && g.tr.is_some_and(|t| t.to_wait && super::anim_gate::allows_mode_exit(&t.action, true, pad.high_profile)) {
+            g.tr = None;
+        }
+        // The skid turn (state 24) is left for Move as soon as the stick asks to move within 120 deg again, or when it
+        // completes (`HumanGround__Guard_RunTurnToMove` 0xD85390); its locked item does not hold it.
+        if GAME_GROUND_TREE && g.owner == TreeState::RunTurn && pad.speed01 > 0.0 && stick_turn.abs() <= RUN_TURN_ANGLE {
+            if let Some(os) = g.oneshot.take() {
+                g.owner = TreeState::Other;
+                g.run_turn_exit(os.blend, false, &mut body.heading);
+            }
+        }
+        let busy = g.oneshot.is_some() || g.tr.is_some_and(|t| t.to_wait);
         let moving = pad.speed01 > 0.0 && !busy;
         let prev_high = g.high_profile;
         g.high_profile = pad.high_profile;
@@ -446,20 +719,18 @@ pub fn update_ground(
         // facing (dot < -0.7071); 0 otherwise. Its guard (0xD7EC90) also needs the high profile (HG+1500). So
         // pulling the stick back at a run skids (run stop), and the Idle that follows pivots (state 25): the skid turn.
         let reversed = pad.speed01 > 0.0 && pad.dir.dot(body.forward()) < -std::f32::consts::FRAC_1_SQRT_2;
-        if reversed && g.high_profile && g.speed_param > 0.25 && g.oneshot.is_none() {
-            let foot = (g.blend.foot != 0) as usize;
-            if let Some(b) = jump_blend::action_items(jump_blend::RUN_STOP[foot]).map(|_| ActionBlend::new(jump_blend::RUN_STOP[foot], 0, &jump_blend::run_stop_weights(g.speed_param))) {
-                g.play_oneshot(b);
-                g.oneshot_next = None;
-                g.speed_param = 0.0;
-                g.blend.speed_param = 0.0;
-            }
+        // in front of the locomotion the guard also accepts the skid-turn exits (legacy 96 / 97) and any transition
+        // past 0.33 s that is not locked (0xD7EC90)
+        let tr_allows_stop = g.tr.is_none_or(|t| !t.to_wait && !super::anim_gate::locked(&t.action)
+            && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || t.phase * t.action.duration() > 0.33));
+        if reversed && g.high_profile && g.speed_param > 0.25 && g.oneshot.is_none() && tr_allows_stop {
+            g.start_run_stop();
         }
-        if pad.speed01 <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_none() {
+        if pad.speed01 <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_none() && g.tr.is_none() {
             if g.speed_param > 0.25 {
-                let foot = (g.blend.foot != 0) as usize;
-                if let Some(b) = jump_blend::action_items(jump_blend::RUN_STOP[foot]).map(|_| ActionBlend::new(jump_blend::RUN_STOP[foot], 0, &jump_blend::run_stop_weights(g.speed_param))) {
-                    g.play_oneshot(b);
+                g.start_run_stop();
+                if !GAME_GROUND_TREE && g.oneshot.is_some() {
+                    let foot = (g.blend.foot != 0) as usize;
                     g.oneshot_next = jump_blend::action_items(jump_blend::RUN_STOP_TO_WAIT[foot]).map(|_| ActionBlend::new(jump_blend::RUN_STOP_TO_WAIT[foot], 0, &[1.0]));
                 }
             }
@@ -474,10 +745,18 @@ pub fn update_ground(
         // leading foot, blending its 90 / 180 deg clips by (|a| - 90 deg) / 90 deg; the clip's root yaw turns the body.
         if moving && !busy && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none() && off > std::f32::consts::FRAC_PI_2 && (g.speed_param <= 0.0 || (!prev_high && g.speed_param <= BAND_WALK)) {
             let left = pad.dir.dot(super::right_of(body.forward())) < 0.0;
-            let id = PIVOT[(!left) as usize][prev_high as usize][g.high_profile as usize][(g.blend.foot != 0) as usize];
+            // the player's EntityDescriptorType is Main (entity+168 & 7 == 1): `Pivot_Enter` 0xDA6150 then sets the
+            // destination profile HG+1504 to the current one HG+1500, so the player only plays the low → low and
+            // high → high turns
+            let to_high = if GAME_GROUND_TREE { prev_high } else { g.high_profile };
+            let id = PIVOT[(!left) as usize][prev_high as usize][to_high as usize][(g.blend.foot != 0) as usize];
             let w = ((off - std::f32::consts::FRAC_PI_2) / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
             if jump_blend::action_items(id).is_some() {
                 g.play_oneshot(ActionBlend::new(id, 0, &[1.0 - w, w]));
+                g.tr = None;
+                g.owner = TreeState::Pivot;
+                // HG+688 := HG+1532 (`HumanGround__Pivot_Enter` 0xDA6150), read by the turn start's layouts
+                g.pivot_turn = stick_turn;
                 g.speed_param = 0.0;
                 g.blend.speed_param = 0.0;
                 body.velocity = Vec3::ZERO;
@@ -494,22 +773,36 @@ pub fn update_ground(
             && edge_report_drop(body.feet, body.forward(), EDGE_HALT_REACH, EDGE_HALT_COS, 2.0, &guidance, &collision)
                 .is_some_and(|(_, n, d)| (d <= LEDGE_STOP_DROP || g.ledge_stop_lock.is_some()) && pad.dir.dot(Vec3::new(n.x, 0.0, n.z).normalize_or_zero()) > EDGE_HALT_COS);
         // start from standing (Idle → Move, 0xD84AC0 → `HumanGround__PlayStartMove` 0xD98990)
-        if moving && !busy && !starting && !edge_halt && g.oneshot.is_none() && g.speed_param <= 0.0 && g.collide.is_none() && g.ledge_stop.is_none() && g.ledge_stop_lock.is_none() {
-            let id = START_MOVE[g.high_profile as usize][(g.blend.foot != 0) as usize];
-            if jump_blend::action_items(id).is_some() {
-                g.play_oneshot(ActionBlend::new(id, 0, if g.high_profile { &[0.0, 0.0, 1.0, 0.0] } else { &[0.0, 1.0, 0.0, 0.0] }));
-                g.speed_param = if g.high_profile { 0.5 } else { 0.25 };
-                g.blend.speed_param = g.speed_param;
-            }
+        if moving && !busy && !edge_halt && g.oneshot.is_none() && g.tr.is_none() && g.speed_param <= 0.0 && g.collide.is_none() && g.ledge_stop.is_none() && g.ledge_stop_lock.is_none() {
+            g.play_start_move();
         }
 
         // speed parameter, lean/bank and blend weights (MoveBlend 0xDA0810). The heading snapshot is the
-        // heading before this frame's turn (HG+0x600, Movement_PreUpdate 0xD97E30).
+        // heading before this frame's turn (HG+0x600, Movement_PreUpdate 0xD97E30). While a transition action plays in
+        // front of the locomotion, the transition path runs instead (0xDA09B3): the speed parameter is steered into the
+        // layout's band at 1/s and the transition's clips are weighted (`ground_tree`).
         g.blend.speed_param = g.speed_param;
-        g.blend.update_speed(target, dt);
+        if let Some(t) = g.tr.filter(|t| !t.to_wait) {
+            let goal = super::ground_tree::transition_target(t.layout, target, g.speed_param, g.sprint);
+            g.blend.speed_param = super::ground_tree::transition_speed(g.speed_param, goal, dt);
+            if matches!(t.layout, 0 | 5 | 6 | 7) {
+                g.blend.settle = 1.0;
+            }
+        } else {
+            g.blend.update_speed(target, dt);
+        }
         g.blend.update_angles(body.heading, moving.then_some(want_heading), g.crowd_avoid.take().map(heading_of), false, dt);
-        g.blend.update_weights(target, dt);
-        g.speed_param = g.blend.speed_param;
+        if g.tr.is_none() {
+            g.blend.update_weights(target, dt);
+        }
+        // MoveBlend is the Move state's (11): the run stop (18), the landings (21, 22), the skid turn (24) and the
+        // pivot (25) do not run it, so the parameter keeps what their exits set (0xDA8C80 is the only caller)
+        let tree_owned = GAME_GROUND_TREE && g.oneshot.is_some() && g.owner != TreeState::Other;
+        if !tree_owned {
+            g.speed_param = g.blend.speed_param;
+        } else {
+            g.blend.speed_param = g.speed_param;
+        }
         // the run stop (state 18) does not run MoveBlend: the parameter stays 0 while it plays
         if g.oneshot.is_some_and(|o| jump_blend::RUN_STOP.contains(&o.blend.id) || jump_blend::RUN_STOP_TO_WAIT.contains(&o.blend.id)) {
             g.speed_param = 0.0;
@@ -518,7 +811,7 @@ pub fn update_ground(
 
         // heading: rotate toward wanted at the player turn rate (0xD95290), unless the playing item turns the body
         // itself (0x10)
-        if moving && !g.oneshot.is_some_and(|o| super::anim_gate::anim_turns(&o.blend)) {
+        if moving && !g.oneshot.is_some_and(|o| super::anim_gate::anim_turns(&o.blend)) && !g.tr.is_some_and(|t| super::anim_gate::anim_turns(&t.action)) {
             let mut d = angle_diff(want_heading, body.heading);
             // PORT: near 180 deg the shorter way flips sign with tiny stick changes, so the character turned back
             // and forth (jitter when reversing). Keep the side a turn already started on (RotateTowards 0xD94F30's
@@ -746,10 +1039,38 @@ pub fn update_ground(
                         g.play_oneshot(b);
                     }
                 }
+                if GAME_GROUND_TREE && g.oneshot.is_none() {
+                    let mut heading = body.heading;
+                    g.after_oneshot(os.blend, pad.speed01 > 0.0, stick_turn, &mut heading);
+                    body.heading = heading;
+                }
             }
             let f0 = Vec3::new(-h0.sin(), 0.0, -h0.cos());
             let right = super::right_of(f0);
             let delta = right * step[0] + f0 * step[1];
+            (delta, delta.length() / dt.max(1e-4))
+        } else if let Some(mut t) = g.tr {
+            // the transition action's root motion (FROMANIM), in the current heading: the code turns the body while it
+            // plays unless its item word has 0x10 (then its root yaw does)
+            let (d, yaw, ended) = t.advance(g.speed_param, g.pivot_turn, dt);
+            if yaw.abs() > 1e-6 {
+                body.heading = wrap_angle(body.heading + yaw);
+            }
+            let f0 = body.forward();
+            let delta = super::right_of(f0) * d[0] + f0 * d[1];
+            g.tr = if ended {
+                if !t.to_wait {
+                    // the locomotion item the transition hands over to (ActionTransition +16), from its start; on the
+                    // item's last frame MoveBlend already runs its locomotion path (0xDA09BD), so the weights are this
+                    // frame's
+                    g.blend.foot = t.dest_item.min(1);
+                    g.blend.phase = 0.0;
+                    g.blend.update_weights(target, 0.0);
+                }
+                None
+            } else {
+                Some(t)
+            };
             (delta, delta.length() / dt.max(1e-4))
         } else {
             let speed = if g.speed_param > 0.0 { g.blend.advance(dt) } else { 0.0 };
@@ -761,6 +1082,7 @@ pub fn update_ground(
         // 0.16 m with a drop of more than 2 m and its normal within 70 deg of the facing (and of the stick) zeroes the
         // wanted speed: the walk halts at the edge without a clip (drops of 2–5 m; deeper ones get the ledge stop).
         let held = g.oneshot.is_none()
+            && g.tr.is_none()
             && (edge_halt
                 || (g.ledge_stop_lock.is_some() && edge_report_drop(body.feet, forward, LEDGE_STOP_REACH, FRONT_COS, LEDGE_STOP_DROP, &guidance, &collision).is_some()));
         let (delta, speed) = if held {

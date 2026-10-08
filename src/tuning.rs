@@ -14,6 +14,12 @@ pub const GAME_FALLS: bool = true;
 pub const AIR_CATCHES: bool = true;
 /// PORT comparison switch for the verified Ground extras state/contact rules (RE/02 §9).
 pub const GAME_GROUND_EXTRAS: bool = true;
+/// PORT comparison switch for the ground state tree's re-entry into the locomotion: Movement states 18 / 21 / 22 /
+/// 24 / 25, the start, and MoveBlend's transition path with the authored transition actions (RE/02 §4.6).
+pub const GAME_GROUND_TREE: bool = true;
+/// The skid turn's angle: the run stop turns into it, and it is left for Move within it (|HG+1532| ≤ 2.0943952,
+/// `HumanGround__RunStop_Update` 0xDA8D70, `HumanGround__Guard_RunTurnToMove` 0xD85390).
+pub const RUN_TURN_ANGLE: f32 = 2.094_395_2;
 
 // ---------------------------------------------------------------- input (RE/01 §6)
 /// Stick dead-zone; speed = (|stick| - 0.35) / 0.65.  GoAssassinActionInterpreter 0xEE65A0

@@ -283,6 +283,9 @@ pub struct AnimPlayer {
     /// Phase set by the simulation (the ground step cycle, `MoveBlend`): the player shows it instead of
     /// advancing its own clock.
     sim_phase: Option<f32>,
+    /// The destination of the ground transition action playing and the blend to hand over with (its blend B);
+    /// destination 0 = the wait.
+    pending_b: Option<(u32, ActBlend)>,
     /// A partial-body action playing over the full-body one (a channel of slot group 1).
     pub overlay: Option<Overlay>,
 }
@@ -407,6 +410,9 @@ struct Request {
     token: u64,
     fade: f32,
     hold: bool,
+    /// The blend into the requested action when the simulation knows it (a ground transition action: the authored
+    /// item transition's blend A, or the code's explicit one); `None`: the graph's lookup (`sub_725950`).
+    blend: Option<ActBlend>,
 }
 
 const CROSSFADE: f32 = 0.2;
@@ -432,11 +438,11 @@ fn single(name: &str) -> Vec<ItemPlay> {
 }
 
 fn looped(clip: &str, fade: f32) -> Request {
-    Request { key: clip.into(), items: single(clip), sim: false, looping: true, fit: None, token: 0, fade, hold: false }
+    Request { key: clip.into(), items: single(clip), sim: false, looping: true, fit: None, token: 0, fade, hold: false, blend: None }
 }
 
 fn once(clip: String, token: u64, fit: Option<f32>, fade: f32) -> Request {
-    Request { items: single(&clip), key: clip, sim: false, looping: false, fit, token, fade, hold: false }
+    Request { items: single(&clip), key: clip, sim: false, looping: false, fit, token, fade, hold: false, blend: None }
 }
 
 /// A graph action (by the id the exe uses). Falls back to `fallback` (a clip name) if the action or its
@@ -451,7 +457,7 @@ fn action(lib: &AnimLibrary, ids: &[u32], looping: bool, token: u64, fade: Optio
     }
     let fade = fade.unwrap_or(items[0].blend.time.max(0.05));
     let key = ids.iter().map(|i| format!("act_{i:08x}")).collect::<Vec<_>>().join("+");
-    Some(Request { key, items, sim: false, looping, fit: None, token, fade, hold: false })
+    Some(Request { key, items, sim: false, looping, fit: None, token, fade, hold: false, blend: None })
 }
 
 /// PORT: a named clip (outside the graph) enters as the default transition does (A frozen, B playing, linear)
@@ -557,15 +563,9 @@ const ACT_CATCH_WALL: [u32; 2] = [0x1F0C_0C23, 0x1F0C_0C2D];
 const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
 /// Falling (6-way grasp blend).
 const ACT_FALL: u32 = 0x1F0C_22C2;
-/// PORT (stand-in until the ground state tree with MoveBlend's transition path, RE/12 §1): the game also plays an
-/// authored transition action in front of the ground locomotion, and MoveBlend's start / transition blend layouts
-/// (HG+0x724, 0xDA08C0) keep speed and foot phase in step with it. The port has no such path yet, so these
-/// transitions are left out and the switch uses the default transition. Set to `true` once that path is ported;
-/// nothing else depends on this switch.
-const GROUND_LOCOMOTION_TRANSITIONS: bool = false;
 
 /// The ground waits (HumanGround), [low, high profile] × [left, right foot ahead]: `xx_{l,h}_wait_hipm_foot{l,r}`.
-const ACT_WAIT: [[u32; 2]; 2] = [[0x00D8_243F, 0x00D8_24C5], [0x00D8_2508, 0x00D8_258E]];
+const ACT_WAIT: [[u32; 2]; 2] = crate::player::ground_tree::WAITS;
 
 /// One item of a graph action with the sim's weights, if all its clips are loaded. Root motion is off:
 /// the sim already moves the body along it.
@@ -590,7 +590,7 @@ fn sim_request(p: &mut AnimPlayer, lib: &AnimLibrary, b: &crate::player::jump_bl
         p.set_sim_item(it);
         return None;
     }
-    Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false })
+    Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false, blend: None })
 }
 
 /// Both items (footl, footr) of the ground locomotion action with all 17 clips loaded.
@@ -652,6 +652,33 @@ fn choose_clip(
                 p.sim_phase = Some((l.t / l.action.duration().max(1e-4)).fract());
                 sim_request(&mut p, &lib, &l.action, 1_600_000 + g.pose_seq as u64, 0.3)
             }
+            // a transition action in front of the locomotion or the wait (`ground_tree`, MoveBlend's transition path):
+            // the sim's weights and phase; entered with the authored item transition's blend A (or the code's explicit
+            // blend); its blend B is kept for the hand-over to the destination
+            ActorContextId::Ground if g.tr.is_some_and(|t| sim_item(&lib, &t.action).is_some()) => {
+                let t = g.tr.unwrap();
+                p.sim_phase = Some(t.phase);
+                let token = 1_100_000 + t.seq as u64;
+                let key = format!("act_{:08x}", t.action.id);
+                let it = sim_item(&lib, &t.action).unwrap();
+                if p.clip.as_deref() == Some(key.as_str()) && p.token == token {
+                    p.set_sim_item(it);
+                    continue;
+                }
+                // the same transition action can lead to several destinations (e.g. the skid turn's exit into the
+                // locomotion and into a fight action): the one into the locomotion, or into a wait
+                let wanted = |b: u32| if t.to_wait { ACT_WAIT.iter().flatten().any(|w| *w == b) } else { b == ACT_GROUND_LOCOMOTION };
+                let authored = t.from.and_then(|(a, i)| lib.graph.actions.get(&a).and_then(|a| a.items.get(i)))
+                    .and_then(|it| it.transitions.iter().find(|tr| tr.action_a == t.action.id && wanted(tr.action_b)).copied());
+                let cur = p.items.get(p.item.min(p.items.len().max(1) - 1)).filter(|_| p.clip.is_some()).cloned();
+                let blend_a = t.blend_in.or(authored.map(|a| a.blend_a)).unwrap_or_else(|| game_transition(&lib, cur.as_ref(), t.action.id).map(|tr| tr.blend_a).unwrap_or_default());
+                // PORT (hypothesis): a transition the code passes explicitly (start, run stop / skid-turn exits) hands over
+                // with a cut, as the authored ones do (their clips are made to meet the destination's first frame)
+                let dest = authored.map(|a| a.action_b).unwrap_or(if t.to_wait { 0 } else { ACT_GROUND_LOCOMOTION });
+                let blend_b = authored.map(|a| a.blend_b).unwrap_or_default();
+                p.pending_b = Some((dest, blend_b));
+                Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade: 0.0, hold: false, blend: Some(blend_a) })
+            }
             // (a landing without its action, e.g. the clips are missing: nothing extra plays; the one-shot branch above
             // shows the game's landing action)
             ActorContextId::Ground if g.landing_seq != p.seen_landing => {
@@ -672,7 +699,7 @@ fn choose_clip(
                     p.set_sim_item(it);
                     continue;
                 }
-                Some(Request { key, items: vec![it], sim: true, looping: true, fit: None, token: 0, fade: CROSSFADE, hold: false })
+                Some(Request { key, items: vec![it], sim: true, looping: true, fit: None, token: 0, fade: CROSSFADE, hold: false, blend: None })
             }
             // standing: the game's wait action of the leading foot (MoveBlend foot: 0 = left ahead), entered through the
             // graph's transition like every action (RE/13 §7)
@@ -930,21 +957,31 @@ fn choose_clip(
         let cur_item = p.items.get(p.item.min(p.items.len().max(1) - 1)).filter(|_| p.clip.is_some()).cloned();
         let mut loop_from = 0;
         let mut sim_from = 0;
-        let blend = if new_action != 0 {
+        // the hand-over from a ground transition action (`ground_tree`) to its destination uses the transition's blend B
+        // (dest 0 = whichever wait); any other request drops it
+        let pending = if req.blend.is_some() {
+            None
+        } else {
+            p.pending_b.take().filter(|(d, _)| *d == new_action || (*d == 0 && ACT_WAIT.iter().flatten().any(|w| *w == new_action)))
+        };
+        let blend = if let Some(b) = req.blend {
+            b
+        } else if let Some((_, b)) = pending {
+            b
+        } else if new_action != 0 {
             match game_transition(&lib, cur_item.as_ref(), new_action) {
                 Some(t) => {
                     // a transition action plays first, blended in with blend A; the requested action follows it with
                     // blend B (the slot queues both, SetAction 0x727F70). Also in front of a standing loop the simulation
                     // times (the beam / ladder / pilotis waits, Action +28 = 0): the transition plays on its own clock
                     // without root motion, then the simulation's phase takes over.
-                    // Not in front of the ground locomotion: while a transition plays the game's MoveBlend runs its own
-                    // path (the start / transition blend layouts, HG+0x724, 0xDA08C0, not ported) that keeps the speed
-                    // and the foot phase in step with it; without it a walk transition ran at run speed and the cycle
-                    // then jumped to another foot. Nor in front of the simulation's one-shot moves, whose timing the body
+                    // Not in front of the ground locomotion: there the simulation plays the transition action itself
+                    // (`ground_tree`, MoveBlend's transition path keeps the speed and the foot in step with it) and hands
+                    // over with the transition's blend B above; one it does not model is replaced by the default
+                    // transition (PORT, below). Nor in front of the simulation's one-shot moves, whose timing the body
                     // follows.
                     let standing_loop = req.sim && !req.looping && lib.graph.actions.get(&new_action).is_some_and(|a| a.repeat == 0);
-                    let ground_locomotion = req.sim && req.looping && GROUND_LOCOMOTION_TRANSITIONS;
-                    let queued = !req.sim || standing_loop || ground_locomotion;
+                    let queued = !req.sim || standing_loop;
                     let skipped = t.action_a != 0 && !queued;
                     if t.action_a != 0 && queued {
                         if let Some(mut ti) = lib.action_items(t.action_a) {
@@ -985,7 +1022,7 @@ fn choose_clip(
         }
         if std::env::var_os("AC_ANIM_LOG").is_some() {
             let layers: Vec<String> = items.iter().map(|i| i.layers.iter().map(|(n, w)| format!("{n}*{w:.2}")).collect::<Vec<_>>().join("+")).collect();
-            info!("anim t={:.2} {:?} -> {} [{}] blend {} {:.2}s", time.elapsed_secs(), loco.current, req.key, layers.join(" | "), p.blend.kind, if p.prev.is_some() { p.fade_time } else { 0.0 });
+            info!("anim t={:.2} {:?} -> {} [{}] blend {} {:.2}s pending {:x?}", time.elapsed_secs(), loco.current, req.key, layers.join(" | "), p.blend.kind, if p.prev.is_some() { p.fade_time } else { 0.0 }, p.pending_b.map(|x| x.0));
         }
         p.clip = Some(req.key);
         p.items = items;
@@ -1003,6 +1040,8 @@ fn choose_clip(
 /// is a cut. A keeps playing for the AROLLB* types and is frozen otherwise; the length is the blend time, at most
 /// what is left of A with the clamp flag.
 fn start_blend(p: &mut AnimPlayer, b: ActBlend, had: bool, a_state: Option<(Vec<ItemPlay>, usize, f32, bool)>, lib: &AnimLibrary) {
+    // a blend still running when this one starts (its own A and B are on screen together)
+    let was_fading = p.fade < 1.0 && p.prev.is_some();
     p.blend = b;
     p.a_roll = None;
     if b.kind == 0 || b.time <= 0.0 || !had {
@@ -1024,7 +1063,10 @@ fn start_blend(p: &mut AnimPlayer, b: ActBlend, had: bool, a_state: Option<(Vec<
         }
     }
     p.fade_time = time.max(0.01);
-    if matches!(b.kind, 1 | 3) {
+    // A keeps playing for the AROLLB* types. PORT: when the switch comes while another blend is still fading, the game's
+    // A is that whole blend node (both its children keep running); the port has one level, so it freezes the pose on
+    // screen instead of rolling only the newest item (which snapped the half-blended pose onto that item)
+    if matches!(b.kind, 1 | 3) && !was_fading {
         p.a_roll = a_state.filter(|(items, _, _, _)| !items.is_empty());
     }
 }
@@ -1214,7 +1256,6 @@ pub fn apply_clip(
         let empty = Vec::new();
         let prev_pose = prev.as_ref().filter(|v| v.len() == cur.len()).unwrap_or(&empty);
         let mut shown = std::mem::take(&mut p.last_pose);
-        shown.clear();
         let mut base: Vec<(Quat, Vec3)> = (0..rig.joints.len())
             .map(|i| {
                 let (rot, pos) = cur[i];
@@ -1230,6 +1271,14 @@ pub fn apply_clip(
         if p.overlay.as_ref().is_some_and(|o| o.ending && o.weight <= 0.0) {
             p.overlay = None;
         }
+        // debug: `AC_POP_LOG=<degrees>` reports a frame where a joint turns more than that (a pop at a switch)
+        if let Some(th) = std::env::var("AC_POP_LOG").ok().and_then(|v| v.parse::<f32>().ok()) {
+            let worst = shown.iter().zip(&base).enumerate().map(|(i, (a, b))| (i, a.0.angle_between(b.0).to_degrees())).fold((0, 0.0f32), |m, x| if x.1 > m.1 { x } else { m });
+            if shown.len() == base.len() && worst.1 > th {
+                info!("pop {:.1} deg joint {} (bone {:08x}) clip {:?} item {} phase {:.3} fade {:.2}", worst.1, worst.0, rig.bone_ids[worst.0], p.clip, p.item, p.phase, p.fade);
+            }
+        }
+        shown.clear();
         for (i, e) in rig.joints.iter().enumerate() {
             let (rot, pos) = base[i];
             shown.push((rot, pos));

@@ -1141,6 +1141,9 @@ fn running_jump_onto_a_beam_uses_incidental_reception_when_target_ray_is_blocked
     use crate::player::narrow::{BeamEntryMode, BeamState, NarrowKind};
     // platform B (x 78..82, top 4) → the free beam x 84.5..90.5 at z 70
     let mut s = Sim::new(Vec3::new(79.0, 4.0, 70.0), -std::f32::consts::FRAC_PI_2);
+    // standing with the right foot ahead: the start (0xD98990) hands over to the left-foot locomotion item, and the
+    // edge jump takes off from the left foot, whose flight meets the beam before the target ray clears
+    s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().ground.blend.foot = 1;
     s.pad(Vec3::X, 1.0, true, true);
     assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never reached the beam: {:?} {:?}", s.loco().current, s.body().feet);
     let n = &s.data().narrow;
@@ -1721,7 +1724,8 @@ fn native_masyaf_roof_stands_and_walks_on_source_collision() {
     s.run(1.0);
     assert_eq!(s.loco().current, ActorContextId::Ground);
     assert!((s.body().feet.y - spawn.y).abs() < 0.05);
-    s.pad(Vec3::X, 0.5, false, false);
+    // full stick: a light one starts into the slow walk (layout 7), which barely moves in 0.5 s
+    s.pad(Vec3::X, 1.0, false, false);
     s.run(0.5);
     assert!(s.body().feet.x > spawn.x + 0.1, "{:?}", s.body().feet);
     assert_eq!(s.loco().current, ActorContextId::Ground);
@@ -1822,7 +1826,7 @@ fn native_masyaf_village_walks_along_a_source_street() {
     s.app.update();
     s.run(1.0);
     assert_eq!(s.loco().current,ActorContextId::Ground);
-    s.pad(Vec3::NEG_X,0.6,false,false);
+    s.pad(Vec3::NEG_X,1.0,false,false);
     s.run(4.0);
     assert!(s.body().feet.x<spawn.x-1.5,"{:?}",s.body().feet);
     assert_eq!(s.loco().current,ActorContextId::Ground);
@@ -2226,7 +2230,8 @@ fn landing_with_the_stick_released_plays_no_run_stop() {
     }
     assert_eq!(s.ground().speed_param, 0.0);
     // only the reception's own root motion moved the feet
-    assert!(s.body().feet.x - landed_x < 0.8, "slid on after the landing: {} -> {}", landed_x, s.body().feet.x);
+    // the free-step reception (0.5 m) and its authored transition into the wait (0.3 m, `freestep_entry_tr_l_wait`)
+    assert!(s.body().feet.x - landed_x < 0.95, "slid on after the landing: {} -> {}", landed_x, s.body().feet.x);
 }
 
 #[test]
@@ -2432,8 +2437,9 @@ fn reversing_from_standing_pivots_with_the_turn_clip() {
 }
 
 #[test]
-fn reversing_at_a_run_skids_then_pivots() {
-    use crate::player::ground::PIVOT_ACTIONS;
+fn reversing_at_a_run_skids_into_the_run_turn() {
+    use crate::player::ground::TreeState;
+    use crate::player::ground_tree::{RUN_TURN, RUN_TURN_EXIT};
     use crate::player::jump_blend::RUN_STOP;
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
     s.pad(Vec3::NEG_Z, 1.0, true, false);
@@ -2441,9 +2447,15 @@ fn reversing_at_a_run_skids_then_pivots() {
     s.pad(Vec3::Z, 1.0, true, false);
     s.run(1.0 / 60.0 + 1e-4);
     assert!(s.ground().oneshot.is_some_and(|o| RUN_STOP.contains(&o.blend.id)), "no skid (run stop) on pulling back");
-    assert!(s.run_until(1.5, |s| s.ground().oneshot.is_some_and(|o| PIVOT_ACTIONS.contains(&o.blend.id))), "no pivot after the skid");
-    assert!(s.run_until(1.0, |s| s.ground().oneshot.is_none_or(|o| !PIVOT_ACTIONS.contains(&o.blend.id))));
+    // the stop ends with the stick still more than 120 deg away: the skid turn (state 24, legacy 94 / 95), not a pivot
+    assert!(s.run_until(1.0, |s| s.ground().oneshot.is_some_and(|o| RUN_TURN.contains(&o.blend.id))), "no run turn after the skid");
+    assert_eq!(s.ground().owner, TreeState::RunTurn);
+    // completed while still turned: the heading turns round and the turn's own exit (legacy 96 / 97) leads into the run
+    assert!(s.run_until(1.0, |s| s.ground().tr.is_some_and(|t| RUN_TURN_EXIT.contains(&t.action.id))), "no run-turn exit");
     assert!(s.body().forward().dot(Vec3::Z) > 0.95, "faces the stick: {:?}", s.body().forward());
+    let z = s.body().feet.z;
+    s.run(1.0);
+    assert!(s.body().feet.z > z + 1.5, "runs off the other way: {} -> {}", z, s.body().feet.z);
 }
 
 #[test]
@@ -2463,18 +2475,40 @@ fn starting_from_standing_plays_the_start_item() {
     s.run(0.2);
     s.pad(Vec3::NEG_Z, 1.0, false, false);
     s.run(1.0 / 60.0 + 1e-4);
-    let os = s.ground().oneshot.expect("no start item");
-    assert!(START_MOVE[0].contains(&os.blend.id), "low-profile start: {:#x}", os.blend.id);
+    // `HumanGround__PlayStartMove` 0xD98990: the start transition in front of the locomotion, layout 7
+    let t = s.ground().tr.expect("no start transition");
+    assert!(START_MOVE[0].contains(&t.action.id), "low-profile start: {:#x}", t.action.id);
+    assert_eq!(t.layout, 7);
     assert!((s.ground().speed_param - 0.25).abs() < 0.02, "walk band at once: {}", s.ground().speed_param);
     // steering stays live during it
     s.pad(Vec3::new(-0.5, 0.0, -1.0), 1.0, false, false);
     let h = s.body().heading;
     s.run(0.1);
     assert!((s.body().heading - h).abs() > 0.1, "turned while starting");
-    // releasing the stick ends it
+    // it hands over to the locomotion item of the other foot when it ends
+    assert!(s.run_until(1.0, |s| s.ground().tr.is_none()), "start never ended");
+    assert!(s.ground().speed_param > 0.0);
+    // releasing the stick during a start ends it (Move_CanStop: the playing action is not the locomotion)
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.run(0.2);
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    s.run(0.1);
     s.pad(Vec3::ZERO, 0.0, false, false);
     s.run(1.0 / 60.0 + 1e-4);
-    assert!(s.ground().oneshot.is_none_or(|o| !START_MOVE.iter().flatten().any(|&i| i == o.blend.id)));
+    assert!(s.ground().tr.is_none() && s.ground().speed_param == 0.0);
+}
+
+#[test]
+fn a_light_stick_starts_into_the_slow_walk() {
+    // the player (EntityDescriptorType Main) gets no [0.25, 0.5] clamp on the transition path: layout 7 steers the
+    // speed parameter to the light stick's target and weights the slow-walk start (0xDA09B3)
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.run(0.2);
+    s.pad(Vec3::NEG_Z, 0.5, false, false);
+    s.run(0.5);
+    let t = s.ground().tr.expect("start still playing");
+    assert!(t.action.weights()[0] > 0.5, "slow-walk start dominates: {:?}", t.action.weights());
+    assert!(s.ground().speed_param < 0.15, "{}", s.ground().speed_param);
 }
 
 #[test]
@@ -3083,4 +3117,56 @@ fn ground_extras_registered_crowd_actor_drives_and_releases_lean() {
     assert!(s.ground().crowd_avoid.is_none(),"native vector consumed once by the blend");
     s.app.world_mut().despawn(actor);s.run(2.0);
     assert!(s.ground().blend.lean.abs()<0.001,"lean did not release: {}",s.ground().blend.lean);
+}
+
+
+// ---------------------------------------------------------------- ground tree re-entry (RE/02 §4.6)
+
+#[test]
+fn a_landing_hands_over_through_its_authored_transition() {
+    use crate::player::move_blend::ACT_GROUND_LOCOMOTION;
+    let mut s = Sim::new(Vec3::new(7.0, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, true, true);
+    assert!(s.run_until(4.0, |s| s.saw_air && s.loco().current == ActorContextId::Ground), "never landed");
+    let landing = s.ground().oneshot.expect("landing action").blend;
+    // the landing completes (state 21 has no early exit), then its item's transition action plays in front of the
+    // locomotion, steered by MoveBlend's transition path
+    assert!(s.run_until(1.0, |s| s.ground().tr.is_some()), "no transition after the landing");
+    let t = s.ground().tr.unwrap();
+    let authored = crate::player::ground_tree::authored_transition(landing.id, landing.item, ACT_GROUND_LOCOMOTION);
+    assert_eq!(authored.map(|a| a.0), Some(t.action.id), "not the landing's authored transition");
+    assert!(s.run_until(1.5, |s| s.ground().tr.is_none()), "transition never ended");
+    assert_eq!(s.ground().blend.foot, t.dest_item, "hands over to the transition's destination item");
+    assert!(s.ground().speed_param > 0.25);
+}
+
+#[test]
+fn a_pivot_hands_over_through_the_turn_start() {
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.run(0.2);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.ground().owner, crate::player::ground::TreeState::Pivot);
+    // `HumanGround__PlayTurnStartMove` 0xD99710: high profile → layout 2, s 0.5
+    assert!(s.run_until(1.0, |s| s.ground().tr.is_some()), "no turn start");
+    let t = s.ground().tr.unwrap();
+    assert_eq!(t.layout, 2);
+    assert!((s.ground().speed_param - 0.5).abs() < 0.02, "{}", s.ground().speed_param);
+    // a 180 deg turn weights the 180 clip pair
+    assert!(t.action.weights()[3] > 0.9, "{:?}", t.action.weights());
+}
+
+#[test]
+fn moving_again_after_a_run_stop_plays_its_exit() {
+    use crate::player::ground_tree::RUN_STOP_EXIT;
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(1.5);
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.ground().owner, crate::player::ground::TreeState::RunStop);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    // `HumanGround__PlayRunStopExitMove` 0xD8B3F0: legacy 92 / 93 into the locomotion, s := 0.5
+    assert!(s.run_until(1.0, |s| s.ground().tr.is_some_and(|t| RUN_STOP_EXIT.contains(&t.action.id))), "no run-stop exit");
+    assert!((s.ground().speed_param - 0.5).abs() < 0.05);
 }

@@ -17,6 +17,7 @@ pub mod crouch;
 pub mod crowd;
 pub mod ground;
 pub mod ground_extras;
+pub mod ground_tree;
 pub mod falls;
 pub mod hay;
 pub mod item_flags;
