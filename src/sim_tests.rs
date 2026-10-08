@@ -2912,6 +2912,43 @@ fn the_climb_reaches_up_past_missing_holds() {
 }
 
 #[test]
+fn review_fatal_landing_is_not_replayed_on_non_air_ground_entry() {
+    use crate::player::TransitionSetup;
+    let mut s = Sim::new(Vec3::new(-30.0, 21.0, -30.0), 0.0);
+    assert!(s.run_until(5.0, |s| s.ground().last_landing.is_some()));
+    assert_eq!(s.ground().last_landing.unwrap().kind, LandingType::Fatal);
+    s.run(0.1);
+    assert!((s.body().feet - SPAWN).length() < 1.0);
+
+    // Model a traversal exit without another landing. The historical fatal fall is still observable.
+    let destination = Vec3::new(-30.0, 0.0, -30.0);
+    s.app.world_mut().get_mut::<Body>(s.player).unwrap().feet = destination;
+    s.app.world_mut().get_mut::<Body>(s.player).unwrap().velocity = Vec3::ZERO;
+    s.app.world_mut().get_mut::<Locomotion>(s.player).unwrap().current = ActorContextId::Climb;
+    s.app.world_mut().resource_mut::<CameraRig>().shake = 0.0;
+    force(&mut s, TransitionSetup::ToMovement { landing: None });
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!((s.body().feet - destination).length() < 0.01, "stale fatal landing teleported to {:?}", s.body().feet);
+    assert_eq!(s.app.world().resource::<CameraRig>().shake, 0.0, "stale landing shook the camera");
+    assert_eq!(s.ground().last_landing.unwrap().kind, LandingType::Fatal);
+}
+
+#[test]
+fn review_nonfatal_landing_shake_is_consumed_once() {
+    use crate::player::TransitionSetup;
+    let mut s = Sim::new(Vec3::new(-30.0, 5.0, -30.0), 0.0);
+    assert!(s.run_until(5.0, |s| s.ground().last_landing.is_some()));
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(s.app.world().resource::<CameraRig>().shake > 0.0);
+    s.app.world_mut().resource_mut::<CameraRig>().shake = 0.0;
+    s.app.world_mut().get_mut::<Locomotion>(s.player).unwrap().current = ActorContextId::Ladder;
+    force(&mut s, TransitionSetup::ToMovement { landing: None });
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.app.world().resource::<CameraRig>().shake, 0.0, "stale nonfatal landing shook the camera");
+    assert!(s.ground().last_landing.is_some(), "keep landing history available to diagnostics");
+}
+
+#[test]
 fn flat_fall_height_scenarios_reach_the_expected_player_bands() {
     // Deliberately away from edges: >=9 m rag-fall is an edge/reception rule, not a flat-fall height rule.
     for (height,kind,damage) in [(1.0,LandingType::Safe,0),(3.0,LandingType::Safe,0),

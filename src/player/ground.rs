@@ -78,7 +78,10 @@ pub struct HumanGroundData {
     pub oneshot: Option<GroundOneShot>,
     /// Played when `oneshot` ends (the run stop's settle into the wait).
     pub oneshot_next: Option<ActionBlend>,
+    /// Landing history for diagnostics; activation effects are owned by `pending_landing`.
     pub last_landing: Option<Landing>,
+    /// Entry event, consumed once by the first Ground update and replaced on every entry.
+    pending_landing: Option<Landing>,
     /// Incremented on every landing (lets the animator play the landing clip once).
     pub landing_seq: u32,
     /// `HumanGround__UpdateMoveBlend` state: blend weights, timers, lean/bank, step cycle.
@@ -173,6 +176,7 @@ impl HumanGroundData {
 
     /// `TransitionSetupDataToMovement::Apply` (0xC80310), simplified.
     pub fn enter(&mut self, landing: Option<Landing>) {
+        self.pending_landing = landing;
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
         self.collide = None;
@@ -234,7 +238,7 @@ pub fn update_ground(
         if loco.just_switched {
             // AIActor::Update skips a context's first update after it was switched in.
             loco.just_switched = false;
-            if let Some(l) = g.last_landing {
+            if let Some(l) = g.pending_landing.take() {
                 // drop > 3 m: camera shake (drop − 3) / 7 (0xE05940)
                 if l.total_drop > 3.0 {
                     rig.shake = ((l.total_drop - 3.0) / 7.0).min(1.0);
