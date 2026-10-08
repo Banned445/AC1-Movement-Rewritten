@@ -69,6 +69,8 @@ pub struct LedgeEntry {
     pub entry_move: Option<LedgeMove>,
     /// Further moves played after `entry_move` (the pull-down's descent and reception).
     pub entry_rest: [Option<LedgeMove>; 2],
+    /// Caught from a fall (`HumanInAir__CheckAirCatch` 0xE0BB70): Some(long catch, a fall of 3 m or more).
+    pub catch: Option<bool>,
 }
 
 impl LedgeEntry {
@@ -83,8 +85,32 @@ impl LedgeEntry {
             sub_state,
             entry_move: None,
             entry_rest: [None, None],
+            catch: None,
         }
     }
+}
+
+/// The air catches (CheckAirCatch): ledge with the wall below (3-way angle blend), free hang; [< 3 m, >= 3 m].
+pub const ACT_CATCH_WALL: [u32; 2] = [0x1F0C_0C23, 0x1F0C_0C2D];
+pub const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
+/// Actions the clip generator dumps for the ledge (the catches, for their lengths).
+pub const DUMPED_ACTIONS: &[u32] = &[ACT_CATCH_WALL[0], ACT_CATCH_WALL[1], ACT_CATCH_FREE[0], ACT_CATCH_FREE[1]];
+
+/// How long a catch holds the hang: both items of the catch action are locked (word 0x0FE0), and
+/// `HumanLedge__Movement_ChooseAction` 0xDE29E0 starts no move while the playing item is locked. The wall catch
+/// takes its straight clips (PORT: the port's ledges are straight, as the animator plays them).
+pub fn catch_time(wall: bool, long: bool) -> f32 {
+    use super::jump_blend::{action_items, ActionBlend};
+    let id = if wall { ACT_CATCH_WALL[long as usize] } else { ACT_CATCH_FREE[long as usize] };
+    let Some(items) = action_items(id) else { return GRAB_TIME };
+    let t: f32 = (0..items.len())
+        .map(|i| {
+            let n = items[i].len();
+            let w: Vec<f32> = (0..n).map(|k| if k == 0 { 1.0 } else { 0.0 }).collect();
+            ActionBlend::new(id, i, &w).duration()
+        })
+        .sum();
+    if t > 0.0 { t } else { GRAB_TIME }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,6 +158,8 @@ pub struct HumanLedgeData {
     /// The hang type has been evaluated for this hang (it then changes only through moves: switches,
     /// corners, jumps — 0xDE1060).
     pub hang_set: bool,
+    /// The entry was an air catch (long or not): the grab lasts the catch action, set once the hang type is known.
+    pub catch: Option<bool>,
 }
 
 impl HumanLedgeData {
@@ -147,6 +175,7 @@ impl HumanLedgeData {
         self.moves.clear();
         self.mv = None;
         self.hang_set = false;
+        self.catch = e.catch.filter(|_| e.entry_move.is_none());
         self.after = Some(After::Hang);
         self.last_action = "grab";
         self.step_seq += 1;
@@ -394,6 +423,12 @@ pub fn update_ledge(
         if !d.hang_set {
             d.hang_type = hang_type_at(hand_mid(d), n, &collision);
             d.hang_set = true;
+        }
+        if let Some(long) = d.catch.take() {
+            let t = catch_time(d.hang_type == LedgeHangType::Wall, long);
+            if let Some(m) = d.moves.first_mut() {
+                m.duration = t;
+            }
         }
         // the pull-up clip carries the hands from the lip onto the top: no hand pinning (game: the
         // animation's contact tags release them)

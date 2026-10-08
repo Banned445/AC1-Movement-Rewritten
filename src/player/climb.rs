@@ -1159,6 +1159,7 @@ pub fn update_climb(
                         sub_state: LedgeSubState::TransitionInFromClimb,
                         entry_move: Some(mv),
                         entry_rest: [None, None],
+                        catch: None,
                     };
                     d.look = None;
                     d.last_action = "overhang";
@@ -1268,6 +1269,7 @@ pub fn update_climb(
                     sub_state: LedgeSubState::ParallelJump,
                     entry_move: Some(mv),
                     entry_rest: [tail, None],
+                    catch: None,
                 };
                 d.look = None;
                 d.last_action = "reach to a hang";
@@ -1297,6 +1299,7 @@ pub fn update_climb(
                     sub_state: LedgeSubState::Pullup,
                     entry_move: Some(knee),
                     entry_rest: [Some(stand), None],
+                    catch: None,
                 };
                 d.last_action = "climb out";
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));

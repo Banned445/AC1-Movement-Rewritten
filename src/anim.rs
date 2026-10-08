@@ -562,8 +562,8 @@ const ACT_VSTEP: [[u32; 8]; 2] = [
     [0x01A2_79B9, 0x01A2_79BA, 0x01A2_79BB, 0x01A2_79BC, 0x01A2_79BD, 0x01A2_79BE, 0x01A2_79BF, 0x01A2_79C0],
 ];
 /// Catches (CheckAirCatch): ledge with wall below (3-way angle blend), free hang; [< 3 m, ≥ 3 m].
-const ACT_CATCH_WALL: [u32; 2] = [0x1F0C_0C23, 0x1F0C_0C2D];
-const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
+const ACT_CATCH_WALL: [u32; 2] = crate::player::ledge::ACT_CATCH_WALL;
+const ACT_CATCH_FREE: [u32; 2] = crate::player::ledge::ACT_CATCH_FREE;
 /// Falling (6-way grasp blend).
 const ACT_FALL: u32 = 0x1F0C_22C2;
 
@@ -999,6 +999,9 @@ fn choose_clip(
                             ti.extend(items);
                             items = ti;
                         }
+                    }
+                    if skipped && std::env::var_os("AC_ANIM_LOG").is_some() {
+                        info!("anim skipped transition {:#010x} in front of {:#010x} ({:?})", t.action_a, new_action, loco.current);
                     }
                     if skipped {
                         // PORT: the transition action is skipped, so its blend A (often a cut into that clip) would cut

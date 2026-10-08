@@ -3207,3 +3207,12 @@ fn running_at_a_wall_slides_along_it_and_head_on_stops() {
     assert!(s.body().forward().z < -0.95);
 }
 
+
+#[test]
+fn an_air_catch_holds_the_hang_for_its_locked_catch_action() {
+    // both catch items are locked (0x0FE0); the ledge starts no move until the catch action has played
+    use crate::player::ledge::catch_time;
+    for (wall, long, t) in [(true, false, 0.667f32), (true, true, 0.934), (false, false, 0.867), (false, true, 0.667)] {
+        assert!((catch_time(wall, long) - t).abs() < 0.002, "wall {wall} long {long}: {}", catch_time(wall, long));
+    }
+}

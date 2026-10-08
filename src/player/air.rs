@@ -692,7 +692,7 @@ pub fn update_air(
                         ladder_on = Some(e);
                     } else if let Some(h) = find_air_catch(body.feet, body.forward(), &guidance) {
                         air.long_catch = air.apex_y - body.feet.y >= 3.0;
-                        hang_on = Some(LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception));
+                        hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception) });
                     }
                 }
             }
@@ -716,7 +716,7 @@ pub fn update_air(
                     // PORT: the pre-existing generic ledge adapter is outside this catch-geometry pass.
                     if let Some(h) = find_air_catch(body.feet, reach, &guidance) {
                         air.long_catch = fall_height >= 3.0;
-                        hang_on = Some(LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception));
+                        hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception) });
                     }
                 }
             }
