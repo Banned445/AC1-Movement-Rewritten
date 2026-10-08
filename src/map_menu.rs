@@ -151,6 +151,10 @@ fn reset_player(world: &mut World) {
         if world.entity(entity).contains::<crate::anim::AnimPlayer>() {
             world.entity_mut(entity).insert(crate::anim::AnimPlayer::default());
         }
+        // the limb goals, ground probes, pelvis drop and stick-to-ground offset belong to the old map
+        if world.entity(entity).contains::<crate::ik::LimbIk>() {
+            world.entity_mut(entity).insert(crate::ik::LimbIk::default());
+        }
     }
     *world.resource_mut::<crate::input::PadInput>() = neutral_pad();
     let mut rig = world.resource_mut::<crate::camera::CameraRig>();

@@ -3216,3 +3216,47 @@ fn an_air_catch_holds_the_hang_for_its_locked_catch_action() {
         assert!((catch_time(wall, long) - t).abs() < 0.002, "wall {wall} long {long}: {}", catch_time(wall, long));
     }
 }
+
+#[test]
+fn a_wall_free_hang_swings_onto_the_wall_before_it_pulls_up() {
+    // HumanLedge__Pullup_Start 0xDDBE80: the wall-free hang (free with a wall below) does not pull up; it plays
+    // `hangwallfree_tr_hangwall` into the wall hang, and the next push up is the wall pull-up. The free pull-up from
+    // there held the body a metre off the wall, legs in the air.
+    let mut s = hang_on_jump_up_wall();
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
+    assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Free);
+    let face_z = 41.7;
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ledge.mv.is_some()));
+    assert_eq!(s.data().ledge.mv.unwrap().seq[0].map(|a| a.id), Some(crate::player::ledge_moves::WALLFREE_TO_WALL));
+    let mut worst = 0.0f32;
+    let mut was_wall = false;
+    for _ in 0..240 {
+        s.run(1.0 / 60.0 + 1e-4);
+        worst = worst.max(face_z - s.body().feet.z);
+        was_wall |= s.data().ledge.hang_type == ledge::LedgeHangType::Wall;
+        if s.loco().current == ActorContextId::Ground {
+            break;
+        }
+    }
+    assert!(was_wall, "never switched to the wall hang");
+    assert!(worst <= 0.55, "the root left the wall by {worst} m");
+    assert!(s.loco().current == ActorContextId::Ground && (s.body().feet.y - 2.6).abs() < 0.05, "pull-up failed: {:?}", s.body().feet);
+}
+
+#[test]
+fn holding_legs_free_runs_and_a_tap_jumps_when_let_go() {
+    // GoAssassinActionInterpreter__ReadInput 0xEEDF80 fills the Legs buffer on the press; the running jump (0xEE817E)
+    // needs the buffer with Legs no longer held
+    let mut s = Sim::new(Vec3::new(-60.0, 0.0, -40.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, true, false);
+    s.run(1.0);
+    s.pad(Vec3::X, 1.0, true, true);
+    s.press_legs();
+    s.run(0.6);
+    assert_eq!(s.loco().current, ActorContextId::Ground, "a held press must not jump");
+    s.pad(Vec3::X, 1.0, true, false);
+    s.run(0.6);
+    s.press_legs();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "a tap jumps once let go");
+}

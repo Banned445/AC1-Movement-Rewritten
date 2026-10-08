@@ -409,13 +409,13 @@ fn ground_socket(c: &crate::collision::CollisionWorld, ankle: Vec3, knee: Vec3, 
 
 /// `FootIK__FindGroundSocket` 0x432940 with `FootIK__ProbeGroundCached` 0x432730: the ground ray (`FootIK__RayDown`
 /// 0x432570, from 0.5 m above the ankle, 1 m down, boxes and mesh faces) is cast again only when its 0.3-0.5 s timer has
-/// run out after a hit; in between the cached hit plane is used under the ankle's current x / z. The target is the hit
+/// run out after a hit (an expiry on the game clock `qword_1A1E7B0`, so it also runs out while moving: `solve_limbs`
+/// counts it down every frame); in between the cached hit plane is used under the ankle's current x / z. The target is the hit
 /// plus the ankle's animated height; refused when the knee would be less than 0.15 m above it. PORT: the ray's filter
 /// (dword_1934170) is not decoded; every static surface counts.
-fn cached_socket(c: &crate::collision::CollisionWorld, cache: &mut Option<(Vec3, Vec3, f32)>, rng: &mut u32, ankle: Vec3, knee: Vec3, ankle_height: f32, dt: f32) -> Option<f32> {
+fn cached_socket(c: &crate::collision::CollisionWorld, cache: &mut Option<(Vec3, Vec3, f32)>, rng: &mut u32, ankle: Vec3, knee: Vec3, ankle_height: f32) -> Option<f32> {
     let h = match cache.as_mut().filter(|e| e.2 > 0.0) {
-        Some((p, n, left)) => {
-            *left -= dt;
+        Some((p, n, _)) => {
             if (n.y - 1.0).abs() > 0.0005 && n.y.abs() > 1e-3 {
                 p.y - (n.x * (ankle.x - p.x) + n.z * (ankle.z - p.z)) / n.y
             } else {
@@ -457,7 +457,14 @@ fn solve_limbs(
     let dt = time.delta_secs().min(1.0 / 20.0);
     for (entity, rig, mut body, targets, mut ik, player) in &mut q {
         let ground = ik.ground;
+        // the ground probes' expiry runs on the game clock (0x432730), whatever the body does
+        for e in ik.ground_cache.iter_mut().flatten() {
+            e.2 -= time.delta_secs();
+        }
         let stick_offset = ik.stick.update(&mut body, &ground, time.delta_secs());
+        if std::env::var_os("AC_SINK_LOG").is_some() && (ik.pelvis < -0.1 || stick_offset.abs() > 0.1) {
+            info!("sink: t={:.2} pelvis {:.3} stick {:.3} feet y {:.3} grounded {}", time.elapsed_secs(), ik.pelvis, stick_offset, body.feet.y, body.grounded);
+        }
         if let Ok(mut transform) = joints.get_mut(entity) {
             transform.translation.y += stick_offset;
         }
@@ -549,7 +556,7 @@ fn solve_limbs(
                     } else {
                         let mut cache = ik.ground_cache;
                         let mut rng = ik.rng;
-                        let sockets: [Option<f32>; 2] = std::array::from_fn(|f| cached_socket(c, &mut cache[f], &mut rng, ankle[f], knee[f], ankle[f].y - body.feet.y, dt));
+                        let sockets: [Option<f32>; 2] = std::array::from_fn(|f| cached_socket(c, &mut cache[f], &mut rng, ankle[f], knee[f], ankle[f].y - body.feet.y));
                         (ik.ground_cache, ik.rng) = (cache, rng);
                         // the targets (or the animated ankles) against each other and the left one against the root
                         // (0x432F64); an animated ankle more than 0.5 m off its last pose with the feet 0.6 m apart also

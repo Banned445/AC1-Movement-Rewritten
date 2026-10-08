@@ -1025,13 +1025,15 @@ pub fn update_ground(
         }
 
         // ---------------------------------------------------------------- jump requests
-        // vt24 JumpToGuidanceTarget: high profile + jump buffer + stick > dead-zone (RE/01 §6.3).
-        // While free-running with Legs held the game also jumps when it reaches an edge
-        // (hypothesis from gameplay; modelled as: Legs held + no floor ahead).
+        // The interpreter's jump branch (0xEE817E): high profile, the Legs buffer (+0x1126: set on the press,
+        // `GoAssassinActionInterpreter__ReadInput` 0xEEDF80, cleared 0.3 s after it) **with Legs no longer held**, and
+        // the stick past the dead zone: a tap jumps when it is let go, holding Legs free-runs instead. While Legs is held
+        // the free run jumps at an edge (`v142`, 0xEE7DCE: an edge report within 0.25 m with a drop over 0.5 m, within
+        // 80° of the stick, Legs held or HG+588). PORT: the edge test is `edge_ahead` (no floor 0.6 m ahead).
         let forward = body.forward();
         let want_jump = g.high_profile
             && moving
-            && (pad.jump_buffered() || (pad.legs_held && edge_ahead(body.feet, forward, &collision)));
+            && ((pad.jump_buffered() && !pad.legs_held) || (pad.legs_held && edge_ahead(body.feet, forward, &collision)));
         if want_jump && !busy {
             pad.consume_jump();
             let entry = match find_jump_target(body.feet, if moving { pad.dir } else { forward }, &guidance, &collision) {
@@ -1329,6 +1331,9 @@ fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bo
     let wall = super::ledge::hang_type_at(point, n, collision) == super::ledge::LedgeHangType::Wall;
     let dz = point.y - feet.y;
     let j = if beam { super::ledge_moves::hang_jump_in_beam(dz, wall)? } else { super::ledge_moves::hang_jump_in(dz, wall)? };
+    if std::env::var_os("AC_ANIM_LOG").is_some() {
+        info!("straight target: hands {point:.2} n {n:.2} dz {dz:.2} wall {wall} -> out {:.2} down {:.2}", j.out, j.down);
+    }
     Some(JumpTarget { position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None, ladder: None })
 }
 

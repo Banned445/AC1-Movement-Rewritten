@@ -317,6 +317,10 @@ fn exit(seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, c: &LedgeCandidate,
         hand_r: hr,
         normal: c.normal,
     };
+    if std::env::var_os("AC_ANIM_LOG").is_some() {
+        let ne = mv.natural_end();
+        info!("walling exit: from {from:.2} to {to:.2} natural end {ne:.2} correction {:.2} over {:.2}s (edge {:.2}, h {:.2})", (to - ne).length(), durations.iter().sum::<f32>(), c.point, c.height);
+    }
     let mut e = LedgeEntry::at(c.point, c.normal, from, LedgeSubState::HangWallReception);
     e.hand_l = hl;
     e.hand_r = hr;

@@ -93,8 +93,8 @@ impl LedgeEntry {
 /// The air catches (CheckAirCatch): ledge with the wall below (3-way angle blend), free hang; [< 3 m, >= 3 m].
 pub const ACT_CATCH_WALL: [u32; 2] = [0x1F0C_0C23, 0x1F0C_0C2D];
 pub const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
-/// Actions the clip generator dumps for the ledge (the catches, for their lengths).
-pub const DUMPED_ACTIONS: &[u32] = &[ACT_CATCH_WALL[0], ACT_CATCH_WALL[1], ACT_CATCH_FREE[0], ACT_CATCH_FREE[1]];
+/// Actions the clip generator dumps for the ledge (the catches, for their lengths; the wall-free → wall switch).
+pub const DUMPED_ACTIONS: &[u32] = &[ACT_CATCH_WALL[0], ACT_CATCH_WALL[1], ACT_CATCH_FREE[0], ACT_CATCH_FREE[1], super::ledge_moves::WALLFREE_TO_WALL];
 
 /// How long a catch holds the hang: both items of the catch action are locked (word 0x0FE0), and
 /// `HumanLedge__Movement_ChooseAction` 0xDE29E0 starts no move while the playing item is locked. The wall catch
@@ -679,6 +679,12 @@ pub fn update_ledge(
                             ![0.05f32, 0.1, 0.15, 0.2].iter().any(|dy| collision.point_inside(q - Vec3::Y * *dy))
                         };
                         let one_hand = drops(right) || drops(-right);
+                        // the wall-free hang (Free with a wall below, LedgeHangType 2) does not pull up: Pullup_Start
+                        // 0xDDBE80 switches it to the wall hang first (`hangwallfree_tr_hangwall`)
+                        if d.hang_type == LedgeHangType::Free && wall_below_hands(mid, n, &collision) {
+                            start_move(d, ledge_moves::wallfree_to_wall_move(body.feet, d.hand_l, d.hand_r, n), "wall-free to wall hang");
+                            continue;
+                        }
                         let (mv, rest) = ledge_moves::pullup_move(d.hang_type, one_hand, body.feet, d.hand_l, d.hand_r, n, top_feet);
                         start_move(d, mv, if one_hand { "pull-up (one hand)" } else { "pull-up" });
                         d.queue = rest.into_iter().collect();
