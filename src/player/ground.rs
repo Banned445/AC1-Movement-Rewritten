@@ -191,8 +191,8 @@ impl HumanGroundData {
             self.landing_seq = self.landing_seq.wrapping_add(1);
             self.oneshot = l.action.map(|b| GroundOneShot { blend: b, t: 0.0, duration: b.duration(), applied: [0.0; 3], h0: None });
             // The speed parameter HG+0x5E8 is not reset by OnEnterInit 0xDA7D20, so the landing's exit
-            // into locomotion continues at the take-off speed. (hypothesis) heavy-damage landings stop.
-            if l.kind == LandingType::HeavyDamage {
+            // into locomotion continues at the retained ground speed. No native heavy-damage speed reset.
+            if !GAME_FALLS && l.kind == LandingType::HeavyDamage {
                 self.speed_param = 0.0;
             }
             self.last_landing = Some(l);
@@ -240,7 +240,7 @@ pub fn update_ground(
                     rig.shake = ((l.total_drop - 3.0) / 7.0).min(1.0);
                 }
                 if l.kind == LandingType::Fatal {
-                    // "desynchronisation": respawn
+                    // PORT: immediate respawn until native fatal ragdoll/Dead and desynchronisation are implemented.
                     body.feet = spawn.0;
                     body.velocity = Vec3::ZERO;
                 }
@@ -688,7 +688,7 @@ pub fn update_ground(
                 body.grounded = false;
                 // `HumanGround__TransitionToInAirOffSupport` 0xD8ADB0: InAir kind 3 (sub-state 3 keeps the current clip
                 // for its remaining length, 0xE00EF0, then the fall), no drop report, so no drop sub-state or drop steer.
-                // PORT: the animator still enters the fall through `walk_to_fall` / `run_to_fall` chosen by name.
+                // The animator completes the active item, then uses the upper-body falling blend (0xE00EF0).
                 let entry = InAirEntry::Fall { from: body.feet, velocity: body.velocity, origin: FallOrigin::Ground, speed_param: g.speed_param };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             }

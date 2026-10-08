@@ -60,12 +60,14 @@ pub struct InputFrame {
     pub cam_pitch: f32,
     /// The empty-hand button's age (12th field; older captures without it read as never pressed).
     pub hand_pressed_ago: f32,
+    /// Held empty-hand input (13th field); older captures did not record it.
+    pub hand_held: bool,
 }
 
 impl InputFrame {
     pub fn to_line(&self) -> String {
         format!(
-            "{} {:?} {:?} {:?} {:?} {:?} {} {} {:?} {:?} {:?} {:?}",
+            "{} {:?} {:?} {:?} {:?} {:?} {} {} {:?} {:?} {:?} {:?} {}",
             self.dt_nanos,
             self.dir.x,
             self.dir.y,
@@ -77,13 +79,14 @@ impl InputFrame {
             self.legs_pressed_ago,
             self.cam_yaw,
             self.cam_pitch,
-            self.hand_pressed_ago
+            self.hand_pressed_ago,
+            self.hand_held as u8
         )
     }
 
     pub fn parse(line: &str) -> Option<Self> {
         let t: Vec<&str> = line.split_whitespace().collect();
-        if t.len() != 11 && t.len() != 12 {
+        if !(11..=13).contains(&t.len()) {
             return None;
         }
         let f = |i: usize| t[i].parse::<f32>().ok();
@@ -97,7 +100,9 @@ impl InputFrame {
             legs_pressed_ago: f(8)?,
             cam_yaw: f(9)?,
             cam_pitch: f(10)?,
-            hand_pressed_ago: if t.len() == 12 { f(11)? } else { f32::INFINITY },
+            hand_pressed_ago: if t.len() >= 12 { f(11)? } else { f32::INFINITY },
+            // PORT: legacy captures used Legs for falling grab and have no empty-hand held field.
+            hand_held: if t.len() >= 13 { t[12] == "1" } else { t[7] == "1" },
         })
     }
 
@@ -109,6 +114,7 @@ impl InputFrame {
         pad.legs_held = self.legs_held;
         pad.legs_pressed_ago = self.legs_pressed_ago;
         pad.hand_pressed_ago = self.hand_pressed_ago;
+        pad.hand_held = self.hand_held;
     }
 }
 
@@ -170,6 +176,14 @@ impl Plugin for RecorderPlugin {
         app.init_resource::<Recorder>()
             .add_systems(Update, record_input.before(PlayerSet))
             .add_systems(PostUpdate, (record_state, save_bug).chain().after(bevy::transform::TransformSystems::Propagate));
+        // PORT: scripted greybox checks use real context updates and the ordinary F9 recorder.
+        if std::env::var_os("AC_REPLAY").is_none() {
+            if let Some(check) = FallCheck::from_env() {
+                app.insert_resource(check)
+                    .add_systems(PostStartup, place_fall_check.after(crate::map_menu::initialize))
+                    .add_systems(Update, drive_fall_check.before(record_input));
+            }
+        }
         if let Ok(dir) = std::env::var("AC_REPLAY") {
             let dir = std::path::PathBuf::from(dir);
             let Some(rec) = Recording::load(&dir) else {
@@ -180,9 +194,48 @@ impl Plugin for RecorderPlugin {
             let first = rec.frames.first().map(|f| f.dt_nanos).unwrap_or(0);
             app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(first)))
                 .insert_resource(Replay { dir, rec, next: 0 })
-                .add_systems(PostStartup, replay_place)
+                .add_systems(PostStartup, replay_place.after(crate::map_menu::initialize))
                 .add_systems(Update, replay_input.before(record_input))
                 .add_systems(Last, replay_advance);
+        }
+    }
+}
+
+/// PORT: validation fixtures only; no native rules or thresholds are defined here.
+/// AC_FALL_CHECK=1|3|5|9|13|fatal|hay|edge|runoff|ledge-release, with AC_BUG_AT for F9 capture.
+#[derive(Resource)]
+struct FallCheck { start: Vec3, heading: f32, mode: u8 }
+impl FallCheck {
+    fn from_env() -> Option<Self> {
+        let name=std::env::var("AC_FALL_CHECK").ok()?;
+        let (start,heading,mode)=match name.as_str() {
+            "edge" | "runoff" => (Vec3::new(-11.0,6.0,2.0),-std::f32::consts::FRAC_PI_2,if name=="edge" {1} else {2}),
+            "ledge-release" => (Vec3::new(12.0,0.0,40.6),std::f32::consts::PI,3),
+            "hay" => (Vec3::new(37.5,13.0,26.0),0.0,0),
+            "fatal" => (Vec3::new(-30.0,21.0,-30.0),0.0,0),
+            _ => { let h=name.parse::<f32>().ok()?; if !h.is_finite() || h<=0.0 { return None; }
+                (Vec3::new(-30.0,h,-30.0),0.0,0) }
+        };
+        Some(Self{start,heading,mode})
+    }
+}
+fn place_fall_check(check: Res<FallCheck>,mut q: Query<&mut Body,With<Player>>,mut rig: ResMut<CameraRig>) {
+    for mut b in &mut q { b.feet=check.start; b.heading=check.heading; }
+    rig.yaw=-1.1; rig.pitch=-0.25; rig.distance=8.0;
+}
+fn drive_fall_check(check: Res<FallCheck>,time: Res<Time>,mut pad: ResMut<PadInput>,
+    q: Query<&Locomotion,With<Player>>,mut released: Local<bool>) {
+    let t=time.elapsed_secs();
+    pad.dir=Vec3::ZERO; pad.magnitude=0.0; pad.speed01=0.0;
+    pad.high_profile=false; pad.legs_held=false; pad.hand_held=false;
+    if (check.mode==1 || check.mode==2) && (0.5..3.5).contains(&t) {
+        pad.dir=Vec3::new(0.422_618_3,0.0,0.906_307_8);
+        pad.magnitude=1.0; pad.speed01=1.0; pad.high_profile=check.mode==2;
+    } else if check.mode==3 {
+        if t<1.2 && q.single().is_ok_and(|l|l.current==crate::player::ActorContextId::Ground) {
+            pad.dir=Vec3::Z; pad.magnitude=1.0; pad.speed01=1.0; pad.high_profile=true; pad.legs_held=true;
+        } else if t>3.5 && !*released && q.single().is_ok_and(|l|l.current==crate::player::ActorContextId::Ledge) {
+            pad.legs_pressed_ago=0.0; *released=true;
         }
     }
 }
@@ -237,6 +290,7 @@ fn record_input(time: Res<Time>, pad: Res<PadInput>, rig: Res<CameraRig>, mut re
         cam_yaw: rig.yaw,
         cam_pitch: rig.pitch,
         hand_pressed_ago: pad.hand_pressed_ago,
+        hand_held: pad.hand_held,
     };
     rec.inputs.push(f);
 }
@@ -260,6 +314,9 @@ fn record_state(
     let mut s = gameplay_key(frame, loco, body);
     let _ = write!(s, " | t={:.3} dt={:.4} vel={} gnd={}", time.elapsed_secs(), time.delta_secs(), v3(body.velocity), body.grounded as u8);
     let _ = write!(s, " ground={:?}", data.ground.sub_state);
+    if let Some(l) = data.ground.last_landing {
+        let _ = write!(s, " landing={:?}/{} fall={:.3} drop={:.3}", l.kind, l.damage, l.fall_height, l.total_drop);
+    }
     match loco.current {
         crate::player::ActorContextId::Ledge => {
             let l = &data.ledge;
@@ -330,7 +387,7 @@ fn save_bug(
         return;
     }
     let (feet, heading) = rec.start.unwrap_or((Vec3::ZERO, 0.0));
-    let mut input = String::from("# ac_port recording v1: dt_nanos dir.x dir.y dir.z magnitude speed01 high legs legs_pressed_ago cam_yaw cam_pitch\n");
+    let mut input = String::from("# ac_port recording v1: dt_nanos dir.x dir.y dir.z magnitude speed01 high legs legs_pressed_ago cam_yaw cam_pitch hand_pressed_ago hand_held\n");
     let _ = writeln!(input, "start {:?} {:?} {:?} {:?}", feet.x, feet.y, feet.z, heading);
     for f in &rec.inputs {
         input.push_str(&f.to_line());
@@ -347,4 +404,19 @@ fn save_bug(
     }
     commands.spawn(Screenshot::primary_window()).observe(save_to_disk(dir.join("screenshot.png")));
     info!("bug saved: {} ({} frames of input)", dir.display(), rec.inputs.len());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recording_preserves_empty_hand_independently_of_legs() {
+        let f=InputFrame { dt_nanos:16666667,dir:Vec3::X,hand_held:true,hand_pressed_ago:0.0,..default() };
+        assert_eq!(InputFrame::parse(&f.to_line()),Some(f));
+        let mut pad=PadInput::default(); f.apply(&mut pad);
+        assert!(pad.hand_held && !pad.legs_held);
+        let legacy="16666667 0 0 -1 1 1 1 1 inf 0 -0.2";
+        assert!(InputFrame::parse(legacy).unwrap().hand_held);
+        assert!(InputFrame::parse(legacy).unwrap().hand_pressed_ago.is_infinite());
+    }
 }

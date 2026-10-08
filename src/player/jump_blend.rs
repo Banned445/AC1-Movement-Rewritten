@@ -493,4 +493,18 @@ mod tests {
         let (id, w) = landing(0.0, 0.0, false, 0.0, false);
         assert_eq!((id, w), (LAND_STRAIGHT_STOP, vec![1.0, 0.0]));
     }
+    #[test]
+    fn landing_roll_and_speed_bucket_boundaries_are_strict() {
+        // 0xE05940: drop >3; damage instead of roll at ratio <=0.2.
+        assert_ne!(landing(3.0,0.0,false,1.0,true).0,LAND_DAMAGE_ROLL);
+        assert_eq!(landing(3.0f32.next_up(),0.0,false,0.2,true).0,LAND_DAMAGE);
+        assert_eq!(landing(3.0f32.next_up(),0.0,false,0.2f32.next_up(),true).0,LAND_DAMAGE_ROLL);
+        for (ratio,bucket) in [(0.2f32.next_down(),0),(0.2,1),(0.5f32.next_down(),1),(0.5,2),(0.9f32.next_down(),2),(0.9,3)] {
+            assert_eq!(speed_bucket(ratio),bucket);
+        }
+        assert_eq!(landing(2.5,0.0,true,0.0,true).1,vec![0.0,1.0]);
+        assert_eq!(landing(0.0,5.0,true,0.0,true).1,vec![1.0,0.0]);
+        assert_eq!(landing(0.0,12.5,true,0.0,true).1,vec![0.0,1.0]);
+    }
+
 }

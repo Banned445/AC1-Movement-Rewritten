@@ -13,6 +13,7 @@ pub mod anim_gate;
 pub mod climb;
 pub mod collide;
 pub mod ground;
+pub mod falls;
 pub mod hay;
 pub mod item_flags;
 pub mod jump_blend;
