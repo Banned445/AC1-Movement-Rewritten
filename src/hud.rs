@@ -71,7 +71,7 @@ fn update_hud(
          profile: {}   legs: {}   stick {:.2} (speed01 {:.2})\n\
          air: {}   height {:.2} m\n\
          last landing: {}\n\n\
-         WASD move | RMB high profile | Space legs (hold with RMB = sprint/free-run; into a wall = climb/grab;\n\
+         WASD move | RMB high profile | Space legs (hold with RMB = sprint/free-run; into a wall = wall run; E at a wall = climb;\n\
          while hanging or climbing: E = let go, RMB+Space = jump off (stick steers); up at a top edge = pull up) | Alt slow\n\
          E empty hand (on a ladder: drop; RMB+Space = jump off; on a wall run: Space = push off)\n\
          LMB capture mouse | Esc release | G guidance edges | F9 save a bug report | F1 hide | F2 maps",

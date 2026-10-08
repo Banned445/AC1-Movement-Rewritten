@@ -263,7 +263,9 @@ const FACE_PZ: f32 = std::f32::consts::PI; // heading that faces +Z
 fn climb_tower_to_the_top_and_pull_up() {
     // tower face at z = 27 (normal -Z), roof at 9.6 m
     let mut s = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand(); // climbing from the ground: the empty-hand press (event 50, RE/02 4.7)
     assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb), "did not start climbing");
     assert_eq!(s.data().climb.entry_type, climb::ClimbEntryType::FromGround);
     let reached = s.run_until(30.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y > 9.5);
@@ -315,7 +317,8 @@ fn climb_start_from_the_ground_uses_the_leading_foot() {
     for (from, foot_right) in [(Vec3::new(-20.5, 0.0, 26.5), false), (Vec3::new(-20.5, 0.0, 26.5), true)] {
         let mut s = Sim::new(from, FACE_PZ);
         s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().ground.blend.foot = foot_right as usize;
-        s.pad(Vec3::Z, 1.0, true, true);
+        s.pad(Vec3::Z, 1.0, true, false);
+        s.press_hand();
         let mut lead = None;
         for _ in 0..60 {
             if s.loco().current == ActorContextId::Ground {
@@ -338,7 +341,9 @@ fn climb_start_from_the_ground_uses_the_leading_foot() {
 fn climb_is_blocked_by_missing_holds() {
     // column x = -18.0 has no holds between 2.9 and 4.3 m
     let mut s = Sim::new(Vec3::new(-18.0, 0.0, 26.5), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand(); // climbing from the ground: the empty-hand press (event 50, RE/02 4.7)
     assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb));
     s.run(8.0);
     assert_eq!(s.loco().current, ActorContextId::Climb);
@@ -357,7 +362,9 @@ fn climb_jumps_up_to_an_overhang_when_the_holds_run_out() {
     use crate::player::ledge_moves::MoveKind;
     // the tower's left gap (x -22.6..-21.4, 2.9..4.3 m) under a slab 1 m out from the face, top 3.5 m
     let mut s = Sim::new(Vec3::new(-22.0, 0.0, 26.5), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand(); // climbing from the ground: the empty-hand press (event 50, RE/02 4.7)
     assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb));
     s.pad(Vec3::Z, 1.0, true, false);
     assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ledge), "never jumped: {:?} {:?}", s.data().climb.last_action, s.body().feet);
@@ -411,7 +418,9 @@ fn climb_onto_holds_that_stick_out_becomes_a_free_hang() {
     // bands while the feet stay on the wall; once the body leans out 30° more than the hands' line the climb hangs
     // from the bay (TryTransitionToLedgeHang 0xDF4BA0)
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -11.4), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand(); // climbing from the ground: the empty-hand press (event 50, RE/02 4.7)
     assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
     // a light push (≤ 0.5): SHORT moves only, one side at a time
     s.pad(Vec3::Z, 0.45, true, false);
@@ -485,8 +494,12 @@ fn climb_moves_last_as_long_as_their_actions() {
 
 /// Jump-up wall: top edge 2.6 m, face z = 41.7 (normal -Z), x 8..16, pillar at x 15.5..16.5.
 fn hang_on_jump_up_wall() -> Sim {
+    // the standing straight jump: walk up to the wall, then high profile + Legs, still, facing it
     let mut s = Sim::new(Vec3::new(12.0, 0.0, 40.6), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 0.0, true, true);
+    s.run(0.35);
+    s.pad(Vec3::Z, 0.0, true, false);
     let hung = s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge);
     assert!(hung, "never hung: ctx {:?} feet {:?}", s.loco().current, s.body().feet);
     s.pad(Vec3::Z, 0.0, false, false);
@@ -696,9 +709,34 @@ fn hop_up_reaches_the_ledge_above_and_swings_into_a_free_hang() {
 }
 
 /// Walk into a wall (facing +Z) with high profile + Legs from `feet`; return once the straight jump started.
+
+/// Walk (high profile, no Legs) straight along `dir` until the body stops against something (or `max_s` runs out).
+/// The grab probes reach 0.75 m, so the wall-start tests first walk up to the wall, as a player does.
+fn walk_to_wall(s: &mut Sim, dir: Vec3, max_s: f32) {
+    s.pad(dir, 0.6, true, false);
+    let mut prev = s.body().feet;
+    let mut still = 0;
+    for _ in 0..(max_s * 60.0) as usize {
+        s.run(1.0 / 60.0 + 1e-4);
+        let f = s.body().feet;
+        still = if (f - prev).with_y(0.0).length() < 0.002 { still + 1 } else { 0 };
+        prev = f;
+        if still >= 6 {
+            break;
+        }
+    }
+}
+
 fn straight_jump_at(feet: Vec3) -> Sim {
+    // walk up to the wall, then high profile + Legs standing still (walking in with Legs held starts the wall run,
+    // 0xEE7E50)
     let mut s = Sim::new(feet, FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    // standing still: hold Legs (the stationary free run, event 43), then let go: the release jumps at the hand
+    // target (0xEE84CC)
+    s.pad(Vec3::Z, 0.0, true, true);
+    s.run(0.35);
+    s.pad(Vec3::Z, 0.0, true, false);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "never jumped: {:?}", s.body().feet);
     s.pad(Vec3::Z, 0.0, false, false);
     s
@@ -2946,7 +2984,9 @@ fn the_climb_reaches_up_past_missing_holds() {
     // ReachOtherSurfaceVertical 0xDF0050: wall V has no band at 3.0 m. With the hands on 2.4 m a short step up finds no
     // hold (a hard push would take the LONG grid move); the reach goes to feet 2.4 / hands 3.6.
     let mut s = Sim::new(Vec3::new(-116.0, 0.0, -11.4), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand(); // climbing from the ground: the empty-hand press (event 50, RE/02 4.7)
     assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed");
     s.pad(Vec3::Z, 0.45, true, false);
     assert!(s.run_until(10.0, |s| s.data().climb.reach.is_some()), "no reach: {} {:?}", s.data().climb.last_action, s.data().climb.foot_l);
@@ -3328,4 +3368,24 @@ fn the_jump_off_a_wall_follows_the_stick_and_refuses_into_the_wall() {
     assert!(j.x > 0.0, "turned to the wrong side");
     // into the wall: refused
     assert!(jump_off_wall_dir(Some(-Vec3::Z), away).is_none());
+}
+
+#[test]
+fn free_running_into_a_wall_starts_the_wall_run_without_a_press() {
+    // 0xEE7E50 (verified live): high profile, Legs held, the stick past the dead zone and within 60 degrees of the
+    // facing -> the walling guard and start; no fresh press needed
+    let mut s = Sim::new(Vec3::new(76.0, 0.0, 57.9), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?} {:?}", s.loco().current, s.body().feet);
+}
+
+#[test]
+fn the_empty_hand_press_starts_a_climb_and_holding_legs_does_not() {
+    // climbing from the ground is the empty-hand press (event 50, 0xEE7255); Legs held at a standstill does not climb
+    let mut s = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
+    s.pad(Vec3::Z, 0.0, false, true);
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ground, "low-profile Legs started something");
+    s.press_hand();
+    assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::Climb), "the empty hand did not climb");
 }

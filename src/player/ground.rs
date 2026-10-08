@@ -909,9 +909,15 @@ pub fn update_ground(
         // Input handler 0xEE65A0 (tested before the jumps and the grab): high profile, Legs pressed, the stick
         // pushed within 45° of the facing (> 0.35), ability Walling, and IHumanGround vt112 = event 49's guard
         // (0xDA54F0: the playing item allows a mode exit, then the wall test 0xE18390).
-        if g.high_profile && pad.jump_buffered() && moving && pad.dir.dot(body.forward()) >= 45f32.to_radians().cos() {
+        // Free running starts it without a press too (0xEE7E50, verified live): Legs held, the stick past the dead zone
+        // and within 60 degrees of the facing (`flt_1694AC8`), then the same guard (RE/02 4.7).
+        let pressed = pad.jump_buffered() && pad.dir.dot(body.forward()) >= 45f32.to_radians().cos();
+        let held = pad.legs_held && pad.magnitude > crate::tuning::STICK_DEADZONE && pad.dir.dot(body.forward()) >= 60f32.to_radians().cos();
+        if g.high_profile && moving && (pressed || held) {
             if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
-                pad.consume_jump();
+                if pressed {
+                    pad.consume_jump();
+                }
                 let from = body.feet;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
                 continue;
@@ -960,13 +966,26 @@ pub fn update_ground(
         }
 
         // ---------------------------------------------------------------- climb / grab requests
-        // interpreter vt736/740 (grab wall) and vt764/768 (climb start): high profile + Legs into a wall
+        // Climbing from the ground is the empty-hand press (0xEE7255: the Climb ability, `Pad__JustPressed(3)` ->
+        // IHumanGround vt840 = CanHandleEvent(50) -> vt844, event 50 -> the Climb context, fill 0xD83950; RE/02 4.7).
         let forward = body.forward();
-        if g.high_profile && pad.legs_held && moving {
+        if pad.hand_just_pressed() {
             // leading foot (Human__GetLeadingFoot 0xB18850): the playing locomotion item, footl = left ahead
-            if let Some(setup) = try_wall_grab(body.feet, forward, g.blend.foot != 0, &guidance, &collision) {
+            if let Some(entry) = climb_start_entry(body.feet, forward, g.blend.foot != 0, &guidance) {
+                pad.consume_hand();
+                switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
+                continue;
+            }
+        }
+        // The straight jump at a ledge while moving (event 68, IHumanGround vt736 guard 0xD84190 / vt740, sent from
+        // 0xEE88E9 under a probe flag and interpreter +0x112F, not fully decoded; the free-run target jump 0xEE7F7A is
+        // not ported either). PORT: high profile + Legs held, moving at the ledge; after the wall run above, so it only
+        // plays at walls the wall run refuses (below its 1.3 m ray). Standing still, the stationary free run's release
+        // jump (0xEE84CC, `ground_extras`) is the game's own path to a hand target.
+        if g.high_profile && pad.legs_held && moving {
+            if let Some(target) = straight_hand_target(body.feet, forward, &guidance, &collision, false) {
                 pad.consume_jump();
-                switch_context(&mut loco, &mut data, setup);
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from: body.feet, target, speed_param: 0.0, foot_left: true }));
                 continue;
             }
         }
@@ -1274,15 +1293,15 @@ pub fn ground_loss(feet: Vec3, velocity: Vec3, guidance: &GuidanceWorld, collisi
 /// 1. climb start: hand holds 1.8–2.4 m up and foot holds 1.2 m below them (vt764/768, FromGround);
 /// 2. a ledge with the hands 0.7–3.0 m up → the standing straight jump at it (0xB21DA0 bands: knee / waist
 ///    heights pull straight up onto the top, higher ones end hanging).
-fn try_wall_grab(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<TransitionSetup> {
-    // The game's probe (input handler 0xEE65A0 → IHuman vt132 / vt136): guidance within 0.75 m of the character's
-    // position (box height 0.45), front hemisphere (cone π about the facing). The edge must face the character.
+/// The climb start from the ground (event 50, guard `sub_D83920` -> `sub_B2E860` on the interpreter's hold reports).
+/// PORT: the reports are guidance probes in reach (0.75 m, front half): a hand hold 1.5 m or more above the feet at
+/// 1.8 / 2.4 m and foot holds two rows below it.
+fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &GuidanceWorld) -> Option<ClimbEntry> {
     let reach = |h: f32| {
         guidance
             .probe(feet + Vec3::Y * h, GRAB_PROBE_RADIUS, 0.225, Some(forward), std::f32::consts::FRAC_PI_2)
             .filter(|hit| (hit.point - feet).dot(forward) > 0.0)
     };
-    // 1. climb start
     for h in [1.8f32, 2.4] {
         if let Some(hand) = reach(h) {
             if hand.point.y - feet.y < 1.5 {
@@ -1290,7 +1309,7 @@ fn try_wall_grab(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &Guidanc
             }
             let foot = guidance.probe(hand.point - Vec3::Y * CLIMB_ROW * CLIMB_HAND_ROWS as f32, 0.2, 0.15, Some(forward), 0.785);
             if let Some(foot) = foot {
-                return Some(TransitionSetup::ToClimb(ClimbEntry {
+                return Some(ClimbEntry {
                     entry_type: ClimbEntryType::FromGround,
                     hand_l: hand.point,
                     hand_r: hand.point,
@@ -1300,14 +1319,11 @@ fn try_wall_grab(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &Guidanc
                     from_feet: feet,
                     foot_right,
                     action: None,
-                }));
+                });
             }
         }
     }
-    // 2. a ledge whose hands are 0.53–3.0 m above the feet (guard 0xD84190): the standing straight jump at it
-    //    (HumanGround 0xD85550 → Human__SetupJumpToHandTarget 0xB21DA0), band by the hand height
-    let target = straight_hand_target(feet, forward, guidance, collision, false)?;
-    Some(TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from: feet, target, speed_param: 0.0, foot_left: true }))
+    None
 }
 
 /// The hand target of a standing straight jump (0xB21DA0): a ledge in the 0.75 m grab probe whose hands are
