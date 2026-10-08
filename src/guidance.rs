@@ -5,6 +5,7 @@
 //! greybox level generates them from box tops (the "geometry fallback" described in RE/06 §8).
 
 use bevy::prelude::*;
+pub mod beam_contacts;
 
 /// `GuidanceObjectSubType` enum, values verbatim from the exe (desc 0x18E087C).
 #[allow(dead_code)]
@@ -182,14 +183,14 @@ impl GuidanceWorld {
 /// Rope edges (mask 50, BuildHoldGrid 0xDF6A40 → sub_11713A0).
 pub const MASK_CLIMB_HOLDS: u32 = 50;
 
-fn closest_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
+pub(crate) fn closest_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
     let d = b - a;
     let t = ((p - a).dot(d) / d.length_squared().max(1e-9)).clamp(0.0, 1.0);
     a + d * t
 }
 
 /// Cut segment a→b (local coordinates) to the box |x| ≤ half (Liang–Barsky); None when it misses.
-fn clip_segment(a: Vec3, b: Vec3, half: Vec3) -> Option<(Vec3, Vec3)> {
+pub(crate) fn clip_segment(a: Vec3, b: Vec3, half: Vec3) -> Option<(Vec3, Vec3)> {
     let d = b - a;
     let (mut t0, mut t1) = (0.0f32, 1.0f32);
     for k in 0..3 {

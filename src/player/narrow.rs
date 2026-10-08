@@ -315,6 +315,7 @@ pub struct HumanNarrowObjectData {
     warp_from: Vec3,
     warp_heading: (f32, f32),
     warp: f32,
+    warp_elapsed: f32,
     /// Pilotis wait lean (NarrowObject+372): −1 left … 1 right.
     pub lean: f32,
     /// Hand target found for the jump on the spot (beam +1840 ≠ 0x80000000).
@@ -355,6 +356,7 @@ impl HumanNarrowObjectData {
         self.hand_target = None;
         self.across = None;
         self.warp_from = e.from;
+        self.warp_elapsed = 0.0;
         self.warp_heading = (super::heading_of(e.facing), super::heading_of(self.facing()));
         match e.mode {
             BeamEntryMode::Ground => self.play(BeamState::Entry, if BEAM_COMPLETION { e.action.or_else(|| self.ground_step(false)) } else { item(BEAM_WAIT[0], 0, &[]) }),
@@ -377,6 +379,7 @@ impl HumanNarrowObjectData {
         self.pilotis_facing = Vec3::new(e.facing.x, 0.0, e.facing.z).normalize_or(Vec3::NEG_Z);
         self.entry_from = e.from;
         self.warp_from = e.from;
+        self.warp_elapsed = 0.0;
         self.foot = e.foot;
         self.lean = 0.0;
         self.hand_target = None;
@@ -393,6 +396,17 @@ impl HumanNarrowObjectData {
             PilotisEntryType::FromInAir => CATCH_WARP,
         };
         self.play(BeamState::PilotisIn, a);
+    }
+
+    /// RootInterp__Advance (0xE0BB70): independent of action item timing, including the entry frame.
+    pub fn advance_catch_root(&mut self, body: &mut Body, dt: f32) -> f32 {
+        self.warp_elapsed += dt;
+        let k = (self.warp_elapsed / self.warp.max(1e-3)).min(1.0);
+        body.feet = self.warp_from.lerp(self.stand(), k);
+        let (h0, h1) = self.warp_heading;
+        let dh = (h1-h0+std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)-std::f32::consts::PI;
+        body.heading = h0+dh*k;
+        k
     }
 
     fn play(&mut self, state: BeamState, a: Option<ActionBlend>) {
@@ -510,6 +524,27 @@ pub fn try_mount_beam(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Op
 /// the root goes to the closest point of the beam (sub_946AC0) when a capsule fits there (sub_116D960).
 /// Returns (p0, p1, point).
 pub fn beam_at(feet: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3, Vec3)> {
+    if crate::tuning::AIR_CATCHES {
+        let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
+        let r = super::right_of(f);
+        let centre = feet + Vec3::Y * 0.15;
+        let half = Vec3::new(0.55, 0.4, 0.35);
+        let local = |p: Vec3| { let d=p-centre; Vec3::new(d.dot(r),d.dot(f),d.y) };
+        let world = |p: Vec3| centre+r*p.x+f*p.y+Vec3::Y*p.z;
+        return crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs()*0.55+f.abs()*0.4+Vec3::Y*0.35)
+            .into_iter().filter_map(|beam| {
+                let (a,b)=crate::guidance::clip_segment(local(beam.p0),local(beam.p1),half)?;
+                let (a,b)=(world(a),world(b));
+                let flat=Vec3::new(b.x-a.x,0.0,b.z-a.z);
+                if flat.length()<=0.0005 {return None;}
+                let point=crate::guidance::closest_on_segment(a,b,feet);
+                let width=beam.width(point);
+                let axis=flat.normalize();
+                if !beam_catch_clear(point,axis,width,collision) {return None;}
+                let (p0,p1)=if axis.dot(f)>=0.0 {(beam.p0,beam.p1)} else {(beam.p1,beam.p0)};
+                Some((Vec2::new(point.x-feet.x,point.z-feet.z).length_squared(),(p0,p1,point)))
+            }).min_by(|a,b|a.0.total_cmp(&b.0)).map(|b|b.1);
+    }
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
     let r = super::right_of(f);
     let c = feet + Vec3::Y * 0.15;
@@ -534,6 +569,14 @@ pub fn beam_at(feet: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &C
         }
     }
     best.map(|b| b.1)
+}
+
+/// 0x116D960: two side drop rays and the query's horizontal cross-ray.
+pub fn beam_catch_clear(point: Vec3, axis: Vec3, width: f32, collision: &CollisionWorld) -> bool {
+    let side = super::right_of(axis) * (width + 0.2);
+    let layer=crate::layers::CHARACTER;
+    [-side,side].iter().all(|s|collision.ray_distance(point+*s+Vec3::Y*0.5,Vec3::NEG_Y,1.2,layer)-0.5>=0.5)
+        && collision.ray_distance(point-side+Vec3::Y*0.2,side,side.length()*2.0,layer)>=side.length()*2.0
 }
 
 /// The entry mode of a free-step arrival on a beam (`TryMountBeam` 0xE52AD0): with the stick (> 0.25) the
@@ -634,8 +677,12 @@ pub fn find_pilotis(pos: Vec3, support: Vec3, dir: Vec3, from_air: bool, guidanc
             .iter()
             .filter(|e| Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero().dot(d) >= 45f32.to_radians().cos())
             .map(|e| e.closest_point(from))
-            .filter(|q| Vec2::new(q.x - from.x, q.z - from.z).length() <= max && (q.y - from.y).abs() <= 0.5)
-            .min_by(|a, b| (*a - from).length().total_cmp(&(*b - from).length()))
+            .filter(|q| {
+                let flat=Vec3::new(q.x-from.x,0.0,q.z-from.z);
+                flat.length() < max && (q.y-from.y).abs() <= 0.5
+                    && (!crate::tuning::AIR_CATCHES || flat.normalize_or(d).dot(d)>=30f32.to_radians().cos())
+            })
+            .min_by(|a, b| Vec2::new(a.x-from.x,a.z-from.z).length_squared().total_cmp(&Vec2::new(b.x-from.x,b.z-from.z).length_squared()))
     };
     let back = find(support, -f, 0.3)?;
     let front = find(support, f, 1.3)?;
@@ -651,7 +698,7 @@ pub fn find_pilotis(pos: Vec3, support: Vec3, dir: Vec3, from_air: bool, guidanc
     clear_above(top, collision).then_some(top)
 }
 
-/// Clearance test of 0xB2B600 / 0xE0B890 (sub_B2A290 / sub_116D960): no solid within 0.4 m of the segment
+/// Pilotis clearance test of 0xB2B600 (sub_B2A290): no solid within 0.4 m of the segment
 /// 0.6–1.4 m above `p`.
 fn clear_above(p: Vec3, collision: &CollisionWorld) -> bool {
     if BEAM_COMPLETION {
@@ -791,22 +838,25 @@ fn clip_segment(a: Vec3, b: Vec3, c: Vec3, axes: [Vec3; 3], half: [f32; 3]) -> O
 
 /// Current-segment passes of 0xF753A0: 60° cone, rotated 90°, then the ±1 m box without a cone.
 fn detect_beam(root: Vec3, forward: Vec3, current: Option<(Vec3, Vec3)>, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3)> {
+    detect_beam_segments(root, forward, current, guidance.edges.iter().filter(|e|e.subtype==GuidanceSubType::Beam).map(|e|(e.p0,e.p1)))
+}
+
+fn detect_beam_segments(root:Vec3,forward:Vec3,current:Option<(Vec3,Vec3)>,segments:impl Iterator<Item=(Vec3,Vec3)>+Clone)->Option<(Vec3,Vec3)> {
     // The current segment wins whenever it passes: a nearer crossing or branching beam must not take over the support.
     let is_current = |p0: Vec3, p1: Vec3| current.is_some_and(|(c0, c1)| (p0 == c0 && p1 == c1) || (p0 == c1 && p1 == c0));
     for (f, along, side, cone) in [(forward, 2.0, 0.5, 0.5), (super::right_of(forward), 2.0, 0.5, 0.5), (forward, 1.0, 1.0, 0.0)] {
         let right = super::right_of(f);
         let mut best: Option<(f32, Vec3, Vec3)> = None;
-        for e in &guidance.edges {
-            if e.subtype != GuidanceSubType::Beam { continue; }
-            let axis = (e.p1 - e.p0).with_y(0.0).normalize_or_zero();
+        for (p0,p1) in segments.clone() {
+            let axis = (p1 - p0).with_y(0.0).normalize_or_zero();
             if axis == Vec3::ZERO || axis.dot(f).abs() < cone { continue; }
-            let Some((lo, hi)) = clip_segment(e.p0, e.p1, root, [right, f, Vec3::Y], [side, along, 0.5]) else { continue };
-            let (a, b) = (e.p0.lerp(e.p1, lo), e.p0.lerp(e.p1, hi));
+            let Some((lo, hi)) = clip_segment(p0, p1, root, [right, f, Vec3::Y], [side, along, 0.5]) else { continue };
+            let (a, b) = (p0.lerp(p1, lo), p0.lerp(p1, hi));
             let d = b - a;
             let point = a + d * ((root - a).dot(d) / d.length_squared().max(1e-6)).clamp(0.0, 1.0);
-            if is_current(e.p0, e.p1) { return Some((e.p0, e.p1)); }
+            if is_current(p0, p1) { return Some((p0, p1)); }
             let distance = point.distance_squared(root);
-            if best.is_none_or(|best| distance < best.0) { best = Some((distance, e.p0, e.p1)); }
+            if best.is_none_or(|best| distance < best.0) { best = Some((distance, p0, p1)); }
         }
         if let Some((_, p0, p1)) = best { return Some((p0, p1)); }
     }
@@ -962,7 +1012,12 @@ pub fn update_narrow(
         if BEAM_COMPLETION && n.kind == NarrowKind::Beam
             && !matches!(n.state, BeamState::Entry | BeamState::Reception | BeamState::HopStart | BeamState::Hop | BeamState::HopEnd | BeamState::StepOff)
         {
-            if let Some((p0, p1)) = detect_beam(body.feet, body.forward(), Some((n.p0, n.p1)), &guidance) {
+            // HumanGuidance's runtime report is also the support source after reception (0xC7EB30 / 0xF753A0).
+            let support = if crate::tuning::AIR_CATCHES {
+                let report=crate::guidance::beam_contacts::detect(&guidance,&collision,body.feet,Vec3::new(3.0,0.5,3.0));
+                detect_beam_segments(body.feet,body.forward(),Some((n.p0,n.p1)),report.iter().map(|b|(b.p0,b.p1)))
+            } else { detect_beam(body.feet,body.forward(),Some((n.p0,n.p1)),&guidance) };
+            if let Some((p0, p1)) = support {
                 if (p0 == n.p0 && p1 == n.p1) || (p1 == n.p0 && p0 == n.p1) {
                     // The current support remains valid.
                 } else {
@@ -1195,12 +1250,20 @@ pub fn update_narrow(
             BeamState::Reception | BeamState::PilotisIn => {
                 // the entry action plays while the root is interpolated onto the beam / top (sub_711130 /
                 // sub_7113F0); modes 3 / 7 turn onto the beam meanwhile
-                let k = (n.t / n.warp.max(1e-3)).min(1.0);
-                body.feet = n.warp_from.lerp(n.stand(), k);
-                let (h0, h1) = n.warp_heading;
-                let dh = (h1 - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
-                body.heading = h0 + dh * k;
+                let k = if crate::tuning::AIR_CATCHES { n.advance_catch_root(&mut body, dt) } else {
+                    n.warp_elapsed = n.t-dt;
+                    n.advance_catch_root(&mut body, dt)
+                };
                 if k >= 1.0 && done {
+                    if crate::tuning::AIR_CATCHES && n.state == BeamState::PilotisIn {
+                        if let Some(next) = n.action.and_then(|a| item(a.id, a.item + 1, &[])) {
+                            // 0xE52170 waits for the full entry action. Keep completed RootInterp independent.
+                            let excess = (n.t - dur).max(0.0);
+                            n.warp_from = n.stand(); n.warp = 0.0;
+                            n.play(BeamState::PilotisIn, Some(next)); n.t = excess;
+                            continue;
+                        }
+                    }
                     let walking = matches!(n.entry_mode, BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack) && n.kind == NarrowKind::Beam;
                     if walking && forward {
                         let w = item(BEAM_WALK, n.foot, &walk_w);
@@ -1449,5 +1512,32 @@ pub fn update_narrow(
                 switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod air_catch_tests {
+    use super::*;
+    use crate::collision::Aabb3;
+    #[test]
+    fn beam_side_drop_threshold_and_cross_ray() {
+        let mut world=CollisionWorld::default();let point=Vec3::Y*4.0;
+        assert!(beam_catch_clear(point,Vec3::X,0.2,&world));
+        world.boxes.push(Aabb3{min:Vec3::new(-1.0,0.0,0.35),max:Vec3::new(1.0,3.5001,0.6)});
+        assert!(!beam_catch_clear(point,Vec3::X,0.2,&world));
+        world.boxes[0].max.y=3.5; assert!(beam_catch_clear(point,Vec3::X,0.2,&world));
+        world.boxes[0]=Aabb3{min:Vec3::new(-0.1,4.1,-0.1),max:Vec3::new(0.1,4.3,0.1)};
+        assert!(!beam_catch_clear(point,Vec3::X,0.2,&world));
+    }
+    #[test]
+    fn catches_derived_beam_without_authored_beam_markup() {
+        let world=CollisionWorld::default();let mut guidance=GuidanceWorld::default();
+        for (z,n) in [(-0.2,Vec3::NEG_Z),(0.2,Vec3::Z)] {
+            guidance.edges.push(crate::guidance::GuidanceEdge{p0:Vec3::new(0.0,4.0,z),p1:Vec3::new(4.0,4.0,z),n0:Vec3::Y,n1:n,subtype:GuidanceSubType::LedgeGrab});
+        }
+        let (a,b,p)=beam_at(Vec3::new(2.0,4.1,0.05),Vec3::X,&guidance,&world).unwrap();
+        assert!((p.y-4.0).abs()<1e-5 && p.z.abs()<1e-5 && (b-a).length()>3.99);
+        guidance.edges[1].p0.z=1.0;guidance.edges[1].p1.z=1.0;
+        assert!(beam_at(Vec3::new(2.0,4.1,0.05),Vec3::X,&guidance,&world).is_none());
     }
 }

@@ -573,7 +573,7 @@ pub fn update_air(
                         }
                     }
                     // a jump without a real target (on the spot / free jump) can come down on a beam or a pilotis
-                    if air.target.is_none() && hang_on.is_none() {
+                    if !AIR_CATCHES && air.target.is_none() && hang_on.is_none() {
                         narrow_on = narrow_catch(body.feet, fwd, foot, &guidance, &collision);
                     }
                     match then_fall_to {
@@ -640,7 +640,7 @@ pub fn update_air(
                 }
                 air.fall_t += dt;
                 // narrow objects are caught before the ground contact (0xE0BB70 runs before 0xE05200)
-                if body.velocity.y <= 0.0 && air.apex_y - body.feet.y < 9.0 && air.time_in_air > 0.1 {
+                if !AIR_CATCHES && body.velocity.y <= 0.0 && air.apex_y - body.feet.y < 9.0 && air.time_in_air > 0.1 {
                     narrow_on = narrow_catch(body.feet + body.velocity * dt, body.forward(), foot, &guidance, &collision);
                 }
                 let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, b.velocity * dt, false, dt) };
@@ -668,7 +668,7 @@ pub fn update_air(
                 if narrow_on.is_some() || hay_on.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 {
                     landed_at = Some(body.feet.y);
-                } else if if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
+                } else if !AIR_CATCHES && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
                     // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
                     // in reach
                     if let Some(e) = super::ladder::find_ladder_catch(body.feet, body.forward(), true, &guidance, &collision) {
@@ -681,6 +681,31 @@ pub fn update_air(
             }
             AirMode::Idle => {
                 air.mode = AirMode::Fall { steer_to: None };
+            }
+        }
+
+        if AIR_CATCHES && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
+            let fall_height = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
+            let manual = super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
+            let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), air.target.map(|t| t.type_flags), body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
+            // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
+            let reach = if manual && pad.speed01 > 0.0 { pad.dir } else { body.forward() };
+            if manual || automatic {
+                if let Some(mut e) = super::ladder::find_ladder_catch(body.feet, reach, manual, &guidance, &collision) {
+                    e.facing = body.forward();
+                    e.catch_speed = body.velocity.length();
+                    ladder_on = Some(e);
+                } else if manual {
+                    // PORT: the pre-existing generic ledge adapter is outside this catch-geometry pass.
+                    if let Some(h) = find_air_catch(body.feet, reach, &guidance) {
+                        air.long_catch = fall_height >= 3.0;
+                        hang_on = Some(LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception));
+                    }
+                }
+            }
+            if ladder_on.is_none() && hang_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
+                let ahead = super::air_catches::target_ahead(body.feet, air.target, &collision);
+                if !ahead { narrow_on = narrow_catch(body.feet, body.forward(), foot, &guidance, &collision); }
             }
         }
 
@@ -699,6 +724,7 @@ pub fn update_air(
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
+            if AIR_CATCHES { data.ladder.advance_catch_root(&mut body, dt); }
         } else if let Some(entry) = hang_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
@@ -721,6 +747,7 @@ pub fn update_air(
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, setup);
+            if AIR_CATCHES { data.narrow.advance_catch_root(&mut body, dt); }
         } else if let Some(e) = hay_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;

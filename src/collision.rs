@@ -80,6 +80,34 @@ impl CollisionWorld {
         axes[0].abs() * half.x + axes[1].abs() * half.y + axes[2].abs() * half.z
     }
 
+    /// Layer-filtered ray used by 0xE044D0 / 0x116D960.
+    /// PORT: static analytic geometry replaces Havok; the player's own body is not in this world.
+    pub fn ray_distance(&self, origin: Vec3, direction: Vec3, max: f32, layer: u8) -> f32 {
+        let direction = direction.normalize_or_zero();
+        if direction == Vec3::ZERO { return 0.0; }
+        let mut nearest = max;
+        for (i, b) in self.boxes.iter().enumerate() {
+            if !self.sees(layer, i) { continue; }
+            let (mut lo, mut hi) = (0.0f32, nearest);
+            let mut hit = true;
+            for axis in 0..3 {
+                if direction[axis].abs() < 1e-8 {
+                    if origin[axis] < b.min[axis] || origin[axis] > b.max[axis] { hit = false; break; }
+                } else {
+                    let a = (b.min[axis] - origin[axis]) / direction[axis];
+                    let c = (b.max[axis] - origin[axis]) / direction[axis];
+                    lo = lo.max(a.min(c)); hi = hi.min(a.max(c));
+                    if lo > hi { hit = false; break; }
+                }
+            }
+            if hit { nearest = nearest.min(lo); }
+        }
+        let end = origin + direction * nearest;
+        self.triangles_in_bounds(origin.min(end), origin.max(end))
+            .filter(|t| layer == 0 || crate::layers::collides(layer, t.layer))
+            .filter_map(|t| t.ray(origin, direction, nearest)).fold(nearest, f32::min)
+    }
+
     /// PORT: camera obstruction ray against imported static faces; native NavigationCamera remains open.
     pub fn camera_distance(&self, origin: Vec3, direction: Vec3, max: f32) -> f32 {
         let end = origin + direction * max;

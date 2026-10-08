@@ -1137,7 +1137,7 @@ fn pilotis_impulsion_and_jump_on_the_spot() {
 }
 
 #[test]
-fn running_jump_onto_a_beam_mounts_it_straight() {
+fn running_jump_onto_a_beam_uses_incidental_reception_when_target_ray_is_blocked() {
     use crate::player::narrow::{BeamEntryMode, BeamState, NarrowKind};
     // platform B (x 78..82, top 4) → the free beam x 84.5..90.5 at z 70
     let mut s = Sim::new(Vec3::new(79.0, 4.0, 70.0), -std::f32::consts::FRAC_PI_2);
@@ -1145,8 +1145,10 @@ fn running_jump_onto_a_beam_mounts_it_straight() {
     assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never reached the beam: {:?} {:?}", s.loco().current, s.body().feet);
     let n = &s.data().narrow;
     assert_eq!(n.kind, NarrowKind::Beam);
-    assert_eq!(n.entry_mode, BeamEntryMode::Straight);
+    // 0xE0DEF0 checks incidental catches throughout flight; this path contacts the beam before target arrival.
+    assert_eq!(n.entry_mode, BeamEntryMode::Reception);
     assert!(n.toward_p1);
+    s.run(0.25); // 0xE0BB70: reception starts before the 0.2 s RootInterp finishes.
     let f = s.body().feet;
     assert!((f.z - 70.0).abs() < 0.01 && (f.y - 4.0).abs() < 0.01 && f.x > 84.5, "on the beam line: {f:?}");
     // keeps walking along it while the stick is held
@@ -1347,7 +1349,10 @@ fn walking_a_bent_beam_carries_on_round_the_bend() {
 fn beam_support_loss_enters_air_and_descends() {
     let mut s = on_free_beam(87.0);
     s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>().edges
-        .retain(|e| e.subtype != crate::guidance::GuidanceSubType::Beam);
+        .retain(|e| e.subtype != crate::guidance::GuidanceSubType::Beam
+            && !(e.p0.min(e.p1).x < 90.6 && e.p0.max(e.p1).x > 84.4
+                && (e.p0.y-4.0).abs()<0.01 && (e.p0.z-70.0).abs()<0.3));
+    // Remove the source ledge contacts too: the runtime detector now derives beams from these.
     s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes
         .retain(|b| !(b.min.x < 87.0 && b.max.x > 87.0 && b.min.z < 70.0 && b.max.z > 70.0 && (b.max.y-4.0).abs()<0.01));
     assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir));
@@ -2936,4 +2941,75 @@ fn an_ordinary_ballistic_fall_enters_hay_without_ground_damage() {
     assert_eq!(s.data().hay.action.map(|a|a.id),Some(crate::player::hay::HAYSTACK_FROM_AIR));
     assert!(s.ground().last_landing.is_none());
     assert!(s.run_until(3.0, |s| s.data().hay.phase==crate::player::hay::HayPhase::Waiting));
+}
+
+
+#[test]
+fn falling_ladder_catch_requires_empty_hand_and_finishes_the_full_action() {
+    for hand in [false,true] {
+        let from=Vec3::new(50.0,3.2,62.9);
+        let mut s=Sim::new(from,std::f32::consts::PI);
+        force(&mut s,crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall{from,velocity:Vec3::ZERO,origin:air::FallOrigin::Ground,speed_param:0.0}));
+        s.pad(Vec3::ZERO,0.0,false,!hand);
+        s.app.world_mut().resource_mut::<PadInput>().hand_held=hand;
+        assert!(s.run_until(2.0,|s|s.loco().current!=ActorContextId::InAir));
+        if hand {
+            assert_eq!(s.loco().current,ActorContextId::Ladder);
+            assert_eq!(s.data().ladder.action.unwrap().id,crate::player::ladder::CATCH_AIR);
+            assert!(s.run_until(2.0,|s|s.data().ladder.phase==Some(crate::player::ladder::LadderPhase::Wait)));
+            assert!(!s.data().ladder.high && s.data().ladder.foot==0);
+            assert!((s.body().feet.y-s.data().ladder.height).abs()<0.001);
+        } else {assert_ne!(s.loco().current,ActorContextId::Ladder);}
+    }
+}
+
+#[test]
+fn air_catch_ladder_uses_raw_reach_and_clearance_before_ledge_priority() {
+    use crate::player::ladder::find_ladder_catch;
+    let (mut collision,guidance)=level::geometry();
+    let from=Vec3::new(50.15,2.7,62.9);
+    let reach=Vec3::new(-0.15,0.0,0.6).normalize();
+    let e=find_ladder_catch(from,reach,true,&guidance,&collision).expect("diagonal ladder catch");
+    assert!(e.catch_out.unwrap().x>0.1,"approach-side root normal is retained");
+    let to=e.base+Vec3::Y*e.height.unwrap()+e.catch_out.unwrap()*0.6+Vec3::Y;
+    collision.boxes.push(crate::collision::Aabb3{min:to-Vec3::splat(0.1),max:to+Vec3::splat(0.1)});
+    assert!(find_ladder_catch(from,reach,true,&guidance,&collision).is_none());
+}
+
+#[test]
+fn falling_beam_catch_uses_runtime_contacts_without_authored_beam_lines() {
+    let from=Vec3::new(86.0,5.5,70.05);
+    let mut s=Sim::new(from,-std::f32::consts::FRAC_PI_2);
+    s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>().edges.retain(|e|e.subtype!=crate::guidance::GuidanceSubType::Beam);
+    s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().native_query_culling=true;
+    force(&mut s,crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall{from,velocity:Vec3::ZERO,origin:air::FallOrigin::Ground,speed_param:0.0}));
+    assert!(s.run_until(2.0,|s|s.loco().current!=ActorContextId::InAir));
+    assert_eq!(s.loco().current,ActorContextId::NarrowObject);
+    assert_eq!(s.data().narrow.kind,crate::player::narrow::NarrowKind::Beam);
+    s.run(1.5);assert!((s.body().feet.y-4.0).abs()<0.01);
+    assert_eq!(s.loco().current,ActorContextId::NarrowObject,"runtime support persists after reception");
+}
+
+#[test]
+fn native_masyaf_runtime_beam_contacts_are_derived_from_ledge_edges() {
+    let Some((collision,guidance,_))=crate::native_map::village_simulation_fixture() else {return;};
+    let report=crate::guidance::beam_contacts::detect(&guidance,&collision,Vec3::ZERO,Vec3::splat(10000.0));
+    eprintln!("native runtime beam contacts: {}",report.len());
+    assert!(!report.is_empty(),"native ledge geometry must produce runtime beam contacts");
+    assert!(report.iter().all(|b|b.widths.iter().all(|w|*w<=0.5005)));
+    let clear=report.iter().filter(|b|crate::player::narrow::beam_catch_clear(b.p0.lerp(b.p1,0.5),(b.p1-b.p0).with_y(0.0).normalize_or_zero(),b.width(b.p0.lerp(b.p1,0.5)),&collision)).count();
+    eprintln!("native runtime contacts with clear reception: {clear}");
+    let beam=report.iter().filter(|b|b.p0.distance(b.p1)>0.8).filter(|b| {
+        let point=b.p0.lerp(b.p1,0.5);let axis=(b.p1-b.p0).with_y(0.0).normalize_or_zero();
+        crate::player::narrow::beam_catch_clear(point,axis,b.width(point),&collision) && collision.capsule_fits(point+Vec3::Y*1.5)
+    }).max_by(|a,b|a.p0.distance_squared(a.p1).total_cmp(&b.p0.distance_squared(b.p1))).expect("clear native reception fixture");
+    let from=beam.p0.lerp(beam.p1,0.5)+Vec3::Y*1.5;
+    let facing=(beam.p1-beam.p0).with_y(0.0).normalize();
+    let mut s=Sim::new_raw(from,crate::player::heading_of(facing));
+    s.app.insert_resource(collision).insert_resource(guidance);s.app.update();
+    assert!(s.run_until(3.0,|s|s.loco().current==ActorContextId::NarrowObject),"native fall missed beam: {:?} {:?}",s.loco().current,s.body().feet);
+    assert_eq!(s.data().narrow.entry_mode,crate::player::narrow::BeamEntryMode::Reception);
+    s.run(1.5);
+    assert_eq!(s.loco().current,ActorContextId::NarrowObject,"source beam support persists after reception");
+    assert_eq!(s.data().narrow.state,crate::player::narrow::BeamState::Wait);
 }

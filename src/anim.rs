@@ -808,7 +808,7 @@ fn choose_clip(
             ActorContextId::Ladder if data.ladder.current().is_some_and(|(b, _)| sim_item(&lib, &b).is_some()) => {
                 let (b, ph) = data.ladder.current().unwrap();
                 p.sim_phase = Some(ph);
-                sim_request(&mut p, &lib, &b, 7_700_000 + data.ladder.seq as u64, 0.1)
+                sim_request(&mut p, &lib, &b, 7_700_000 + data.ladder.seq as u64, data.ladder.blend_time)
             }
             // swinging on a bar (0xDD24F0): landing, swing cycle, stops / impacts
             ActorContextId::Ledge if data.ledge.swing.is_some_and(|s| sim_item(&lib, &s.action).is_some()) => {

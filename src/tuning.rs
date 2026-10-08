@@ -10,6 +10,8 @@
 pub const GAME_SMOOTHING: bool = true;
 /// PORT comparison switch for the verified fall scalar/input corrections.
 pub const GAME_FALLS: bool = true;
+/// PORT comparison switch for the verified air-catch rules and beam contact detector.
+pub const AIR_CATCHES: bool = true;
 
 // ---------------------------------------------------------------- input (RE/01 §6)
 /// Stick dead-zone; speed = (|stick| - 0.35) / 0.65.  GoAssassinActionInterpreter 0xEE65A0

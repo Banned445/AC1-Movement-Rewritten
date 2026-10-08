@@ -228,7 +228,8 @@ pub fn find_jump_target(
         }
         let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
         let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
-        let Some(h) = super::ladder::catch_height(feet.y + 1.0 - base.y, top.y - base.y) else { continue };
+        // PORT: retain the existing target-candidate rounding slack; incidental catches use exact truncation.
+        let Some(h) = super::ladder::catch_height(feet.y + 1.0 - base.y + 0.0005, top.y - base.y) else { continue };
         if Vec3::new(feet.x - base.x, 0.0, feet.z - base.z).dot(n) <= 0.0 {
             continue;
         }

@@ -9,6 +9,7 @@
 //! - every context's runtime data lives in one `HumanDataBundle` (HumanData+0x30 in the game).
 
 pub mod air;
+pub mod air_catches;
 pub mod anim_gate;
 pub mod climb;
 pub mod collide;
