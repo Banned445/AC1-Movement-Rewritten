@@ -61,6 +61,8 @@ pub struct AltairModel {
     pub visual_compressions: Vec<crate::visual_pose::SkirtCompression>,
     pub visual_look_at: Vec<crate::visual_pose::SkirtLookAt>,
     pub visual_hinges: Vec<crate::skirt_hinge::SkirtHinge>,
+    /// SkeletonComponent force config +316 (enabled → scale), the hinges' environment input (RE/09 §8.16).
+    pub skeleton_force: Option<f32>,
     /// Lowest vertex z in model space (feet), used to put the feet at y = 0.
     pub min_z: f32,
     pub source: String,
@@ -340,6 +342,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
             }
         }
     }
+    let skeleton_force = find("UCMA_Altair_Rank_9", crc32("Entity")).and_then(|e| crate::visual_pose::decode_skeleton_force(&e.payload));
     let joint_of: HashMap<u32, u16> = skeleton.iter().chain(&visual_bones).enumerate().map(|(i, b)| (b.bone_id, i as u16)).collect();
     let visual_rotation_copies: Vec<_> = rotation_ids.into_iter().map(|(target, source)| {
         let target = *joint_of.get(&target).ok_or("skirt rotation-copy target absent from rig")? as usize;
@@ -548,7 +551,7 @@ pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
         }
         parts.push(PartMesh { name, positions, normals, tangents, uvs: m.uvs.clone(), joints, weights, sections, normal_maps, materials, inside_materials, skin_joints, inverse_bindposes, cloth });
     }
-    Ok(AltairModel { parts, textures, normal_textures, material_textures, cube_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, min_z, source: format!("{} / Rank 9", path.display()) })
+    Ok(AltairModel { parts, textures, normal_textures, material_textures, cube_textures, skeleton, visual_bones, visual_rotation_copies, visual_compressions, visual_look_at, visual_hinges, skeleton_force, min_z, source: format!("{} / Rank 9", path.display()) })
 }
 
 /// Add only new descendants, aliasing shared BoneIDs to existing animated joints (RE/09 §7).

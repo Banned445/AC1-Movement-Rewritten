@@ -322,6 +322,10 @@ fn character_attachments_and_cloth_constraints_from_install() {
     assert!(cloth.pull.iter().any(|&p| p > 0.5), "authored pull strength, not speed/decay fields");
     assert_eq!(cloth.colliders.len(), 6);
     assert_eq!(cloth.action_settings.len(), 20);
+    // Embedded force config and its split (RE/09 §8.16): the robe takes the authored wind.
+    assert!(cloth.force_enabled && cloth.force_scale == 1.0);
+    assert!((cloth.force_tangent - 0.3).abs() < 1e-6 && cloth.force_random == 1.0);
+    assert_eq!(m.skeleton_force, Some(1.0), "SkeletonComponent force config feeds the hinges");
     assert!((cloth.pull_motion.x - 0.03).abs() < 1e-6);
     assert!((cloth.pull_motion.y - 0.015).abs() < 1e-6);
     assert!((cloth.pull_decay - 0.99).abs() < 1e-6);

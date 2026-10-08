@@ -31,6 +31,12 @@ pub struct ClothSettings {
     pub upward_motion: Vec2,
     pub action_settings: Vec<(u32, f32)>,
     pub action_strength: f32,
+    /// Embedded force config +456 (ForceConfig__Read 0x5C6B20): enabled, scale; global sources only.
+    pub force_enabled: bool,
+    pub force_scale: f32,
+    /// +152 tangent share and +156 random amplitude of the sampled force (0x4D0EC0).
+    pub force_tangent: f32,
+    pub force_random: f32,
 }
 
 #[derive(Clone)]
@@ -55,35 +61,47 @@ impl ClothCollider {
         if self.mode == 2 { return 0.0; }
         (self.radius + vertex_radius - position.distance(self.closest(position))).max(0.0)
     }
-    /// Native capsule response (Cloth__sub_6C8260 0x6C8260; RE/09 §8.2).
+    /// Native capsule response (Cloth__CapsuleContact 0x6C8260; RE/09 §8.2), branch for branch.
     fn correct(&self, position: Vec3, target: Vec3, vertex_radius: f32, pull: f32) -> Vec3 {
         if self.mode == 2 { return position; }
-        let axis = self.local_end - self.local_start;
-        let length = axis.length_squared();
-        let parameter = if length > 1e-12 { (position - self.local_start).dot(axis) / length } else { 0.0 };
-        let closest = self.local_start + axis * parameter.clamp(0.0, 1.0);
-        let delta = position - closest;
-        let distance_squared = delta.length_squared();
+        let radial = self.mode == 1 || self.threshold > pull;
         let radius = self.radius + vertex_radius;
-        let interior = parameter > 0.0 && parameter < 1.0;
-        if distance_squared >= radius * radius || (interior && radius * radius - distance_squared <= 0.0005) { return position; }
-        // PORT: deterministic escape for a zero-distance contact; native normalization is undefined here.
-        let radial = delta.try_normalize().or_else(|| (target - closest).try_normalize()).unwrap_or(Vec3::X);
-        let escape = (target - self.local_start).try_normalize().unwrap_or(radial); // 0x6C9C50
-        let radial_mode = self.mode == 1 || self.threshold > pull;
-        if radial_mode { return position + radial * (radius - distance_squared.sqrt()); }
-        if !interior { return position + escape * (radius - distance_squared.sqrt()); }
-        let axis = axis / length.sqrt();
-        let perpendicular = escape - axis * escape.dot(axis);
-        if 1.0 - escape.dot(axis).abs() <= 0.0005 {
-            return position + radial * (radius - distance_squared.sqrt());
+        let rr = radius * radius;
+        let axis = self.local_end - self.local_start;
+        let from_start = position - self.local_start;
+        let t = from_start.dot(axis);
+        // Cloth__Integrate 0x6C9C50 stores normalize(target - capsule start) as the mode-0 escape.
+        let escape = native_normalize(target - self.local_start);
+        if t <= 0.0 {
+            let d2 = from_start.length_squared();
+            if rr <= d2 { return position; }
+            return position + if radial { native_normalize(from_start) } else { escape } * (radius - d2.sqrt());
         }
-        let direction = perpendicular.normalize_or_zero();
-        let along = delta.dot(direction);
-        let across = delta - direction * along;
-        let exit = (radius * radius - across.length_squared()).max(0.0).sqrt();
-        position + direction * (exit - along)
+        let length2 = axis.length_squared();
+        if t >= length2 {
+            let delta = position - self.local_end;
+            let d2 = delta.length_squared();
+            if rr <= d2 { return position; }
+            return position + if radial { native_normalize(delta) } else { escape } * (radius - d2.sqrt());
+        }
+        let delta = position - (self.local_start + axis * (t / length2));
+        let d2 = delta.length_squared();
+        if rr <= d2 || (d2 - rr).abs() <= 0.0005 { return position; } // 0x6C865D
+        // 0x6C86C1 compares the raw (unnormalized) axis with the unit escape.
+        if radial || (escape.dot(axis).abs() - 1.0).abs() <= 0.0005 {
+            return position + native_normalize(delta) * (radius - d2.sqrt());
+        }
+        let side = native_normalize(axis.cross(escape));
+        let out = native_normalize(side.cross(axis));
+        let across = delta.dot(side);
+        position + out * ((rr - across * across).max(0.0).sqrt() - delta.dot(out))
     }
+}
+
+/// 0x48DEA0: zero below FLT_MIN instead of a fallback direction.
+fn native_normalize(v: Vec3) -> Vec3 {
+    let length = v.length();
+    if length >= f32::MIN_POSITIVE { v / length } else { Vec3::ZERO }
 }
 
 fn adaptive_length_squared(base: f32, rest: [Vec3; 2], targets: [Vec3; 2], current: [Vec3; 2]) -> f32 {
@@ -296,6 +314,11 @@ pub fn decode_settings(mesh: &[u8], entity: &[u8], compiled: &[[f32; 3]]) -> Res
         let gravity = float(entity, component + 13)?;
         // Iteration count is the serialized enum at base +168 (0x4CFF7C, 0x4D397D).
         let iterations = *entity.get(c + 79)? as usize;
+        // Embedded force config (class -403070396) at +44, then +152 / +156 (SoftBody__Read 0x4CFCF0).
+        if word(entity, c + 48)? != (-403070396i32) as u32 || entity.get(c + 57..c + 59)? != [0, 0] { return None; }
+        let force_enabled = match *entity.get(c + 52)? { 0 => false, 1 => true, _ => return None };
+        let (force_scale, force_tangent, force_random) = (float(entity, c + 53)?, float(entity, c + 59)?, float(entity, c + 63)?);
+        if ![force_scale, force_tangent, force_random].iter().all(|v| v.is_finite()) { return None; }
         if !(1..=7).contains(&iterations) || ![damping, upward_damping, pull_min, pull_max, gravity].iter().all(|v| v.is_finite())
             || !(0.0..=1.0).contains(&damping) || !(0.0..=1.0).contains(&upward_damping)
             || !(0.0..=1.0).contains(&pull_min) || !(0.0..=1.0).contains(&pull_max) { return None; }
@@ -315,7 +338,8 @@ pub fn decode_settings(mesh: &[u8], entity: &[u8], compiled: &[[f32; 3]]) -> Res
         }
         Some(ClothSettings { source_positions, source_weights, source_palette, pinned, pull, edges, triangles, damping, upward_damping, gravity, iterations, vertex_radius, colliders: Vec::new(),
             pull_motion: Vec2::new(float(entity, c + 257)?, float(entity, c + 261)?), pull_decay: float(entity, c + 265)?,
-            upward_motion: Vec2::new(float(entity, c + 277)?, float(entity, c + 281)?), action_settings: Vec::new(), action_strength: 1.0 })
+            upward_motion: Vec2::new(float(entity, c + 277)?, float(entity, c + 281)?), action_settings: Vec::new(), action_strength: 1.0,
+            force_enabled, force_scale, force_tangent, force_random })
     };
     decode().ok_or_else(|| "unsupported or inconsistent character cloth layout".into())
 }
@@ -350,6 +374,36 @@ pub struct ClothState {
     motion: Vec3,
     orientation: Option<Quat>,
     action_pull: f32,
+    /// Area-weighted vertex normals of the last export (SoftBody__ComputeNormals 0x4D49A0).
+    normals: Vec<Vec3>,
+    /// PORT: the game shares one LCG (dword_1A1FC3C) across systems; the robe keeps its own.
+    random: u32,
+}
+
+/// SoftBody__ComputeNormals 0x4D49A0: sum of (b - a) × (c - b) per vertex, normalized.
+fn vertex_normals(triangles: &[[usize; 3]], positions: &[Vec3]) -> Vec<Vec3> {
+    let mut normals = vec![Vec3::ZERO; positions.len()];
+    for &[a, b, c] in triangles {
+        let n = (positions[b] - positions[a]).cross(positions[c] - positions[b]);
+        normals[a] += n; normals[b] += n; normals[c] += n;
+    }
+    for n in &mut normals { if n.length_squared() > 0.0 { *n = n.normalize(); } }
+    normals
+}
+
+impl ClothState {
+    /// SoftBody__ComputeAcceleration 0x4D0EC0: the sampled force scaled by 1 + amplitude·r, its normal part plus a
+    /// tangent share, then gravity. Without an enabled config only gravity applies.
+    fn acceleration(&mut self, settings: &ClothSettings, i: usize, force: Vec3) -> Vec3 {
+        let gravity = Vec3::Y * settings.gravity;
+        if !settings.force_enabled { return gravity; }
+        self.random = self.random.wrapping_mul(1664525).wrapping_add(1013904223);
+        let r = (self.random & 0x0FFF_FFFF) as f32 * 3.725290298461914e-9 * 2.0 - 1.0;
+        let f = force * (r * settings.force_random) + force;
+        let n = self.normals.get(i).copied().unwrap_or(Vec3::ZERO);
+        let normal = n * f.dot(n);
+        settings.force_tangent * (f - normal) + normal + gravity
+    }
 }
 
 fn contact_report(settings: &ClothSettings, positions: &[Vec3], capsules: &[ClothCollider]) -> (usize, f32) {
@@ -487,7 +541,13 @@ impl ClothState {
         self.orientation = Some(rotation);
     }
 
+    #[cfg(test)]
     pub fn advance(&mut self, settings: &ClothSettings, targets: &[Vec3], rigid_rest: &[Vec3], capsules: &[ClothCollider], anchor: Vec3, dt: f32) -> &[Vec3] {
+        self.advance_in_wind(settings, targets, rigid_rest, capsules, anchor, Vec3::ZERO, dt)
+    }
+
+    /// `force` is the environment sample at the owner entity (ForceField__SampleForce in SoftBody__Simulate 0x4D21F0).
+    pub fn advance_in_wind(&mut self, settings: &ClothSettings, targets: &[Vec3], rigid_rest: &[Vec3], capsules: &[ClothCollider], anchor: Vec3, force: Vec3, dt: f32) -> &[Vec3] {
         // Native component passes literal 0.033333 s once per dispatch (0x577220; RE/09 §8.11).
         // PORT: legacy comparison uses accumulated render time and bounded catch-up.
         let dispatch = self.native_dispatch();
@@ -500,6 +560,8 @@ impl ClothState {
             self.lengths_squared = settings.edges.iter().map(|[a, b]| rigid_rest[*a].distance_squared(rigid_rest[*b])).collect();
             self.accumulator = 0.0;
             self.action_pull = 0.0;
+            // Cloth__ResetToSkin 0x6C93E0 exports the skinned pose, which gives the first normals.
+            self.normals = vertex_normals(&settings.triangles, &self.current);
         }
         // 0x5B55B0 frame guard → 0x577220: one dispatch, independent of accumulated render dt.
         // PORT: visible Bevy update replaces the native task/LOD dispatch; teleport reset above remains.
@@ -524,7 +586,7 @@ impl ClothState {
                     let velocity = old - self.previous[i];
                     let vertical_damping = if velocity.y >= 0.0 { upward } else { settings.damping };
                     let predicted = old + velocity * Vec3::new(1.0 - settings.damping, 1.0 - vertical_damping, 1.0 - settings.damping)
-                        + Vec3::Y * settings.gravity * step * step;
+                        + self.acceleration(settings, i, force) * step * step;
                     self.current[i] = predicted.lerp(target, settings.pull[i].max(self.action_pull));
                 }
                 self.previous[i] = old;
@@ -553,6 +615,8 @@ impl ClothState {
                     }
                 }
             }
+            // SoftBody__RunSteps 0x4CE660 exports after each step (+76); the next step reads these normals.
+            self.normals = vertex_normals(&settings.triangles, &self.current);
         }
         // Pins follow the skeleton even on render frames with no simulation step.
         for (i, &target) in targets.iter().enumerate() { if settings.pinned[i] { self.current[i] = target; } }
@@ -613,7 +677,7 @@ fn turn_motion(old: Quat, current: Quat, dt: f32) -> f32 {
     ((old.inverse() * current) * Vec3::X - Vec3::X).length() / dt
 }
 
-pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cloth: Query<&mut CharacterCloth>, mut meshes: ResMut<Assets<Mesh>>, animations: Query<&crate::anim::AnimPlayer>, mut diagnostics: Local<Option<bool>>, mut report_time: Local<f32>) {
+pub fn update_cloth(time: Res<Time>, wind: Res<crate::wind::WindField>, transforms: Query<&GlobalTransform>, mut cloth: Query<&mut CharacterCloth>, mut meshes: ResMut<Assets<Mesh>>, animations: Query<&crate::anim::AnimPlayer>, mut diagnostics: Local<Option<bool>>, mut report_time: Local<f32>) {
     let diagnostics = *diagnostics.get_or_insert_with(|| std::env::var_os("AC_CLOTH_DIAGNOSTICS").is_some());
     *report_time += time.delta_secs();
     let report = diagnostics && *report_time >= 0.5;
@@ -639,19 +703,30 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
         let Some(capsules) = capsules else { continue; };
         let inverse = player.to_matrix().inverse();
         let rigid_rest: Vec<_> = cloth.rest.iter().map(|&p| player.to_matrix().transform_point3(p)).collect();
-        let positions: Vec<[f32; 3]> = cloth.state.advance(&settings, &targets, &rigid_rest, &capsules, player.translation(), time.delta_secs()).iter()
+        let force = if settings.force_enabled { wind.sample(player.translation(), settings.force_scale) } else { Vec3::ZERO };
+        let positions: Vec<[f32; 3]> = cloth.state.advance_in_wind(&settings, &targets, &rigid_rest, &capsules, player.translation(), force, time.delta_secs()).iter()
             .map(|&p| inverse.transform_point3(p).to_array()).collect();
         if report {
             let lag = cloth.state.current.iter().zip(&targets).map(|(p, t)| p.distance(*t)).fold(0.0f32, f32::max);
             let stretch = settings.edges.iter().map(|[a, b]| cloth.state.current[*a].distance(cloth.state.current[*b])
                 / targets[*a].distance(targets[*b]).max(1e-6)).fold(0.0f32, f32::max);
-            eprintln!("cloth shape: max target lag {lag:.4} m; max animated-edge stretch {stretch:.2}x");
+            let free: Vec<f32> = cloth.state.current.iter().zip(&targets).enumerate().filter(|(i, _)| !settings.pinned[*i]).map(|(_, (p, t))| p.distance(*t)).collect();
+            let mean = free.iter().sum::<f32>() / free.len().max(1) as f32;
+            eprintln!("cloth shape: max target lag {lag:.4} m; mean free lag {mean:.4} m; max animated-edge stretch {stretch:.2}x; wind {:.2?}", wind.sample(player.translation(), 1.0));
             eprintln!("cloth t={:.2} contacts>1mm: {} -> {}; max depth: {:.4} -> {:.4} m", time.elapsed_secs(),
                 cloth.state.contact_before.0, cloth.state.contact_after.0, cloth.state.contact_before.1, cloth.state.contact_after.1);
             let mut positions = cloth.state.current.clone();
             let body = surface_contacts(&settings, &mut positions, &targets, &capsules, false);
             let folds = fold_contacts(&settings, &mut positions, &cloth.state.previous, false);
             eprintln!("cloth surfaces: {body} triangle/capsule contacts; {folds} non-adjacent face crossings");
+            // Collision margins are not visible body surfaces. Report the authored volumes separately.
+            let mut body_settings = settings.clone();
+            body_settings.vertex_radius.fill(0.0);
+            let body = surface_contacts(&body_settings, &mut positions, &targets, &capsules, false);
+            let (lo, hi) = cloth.rest.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+            body_settings.triangles.retain(|tri| tri.iter().any(|&i| cloth.rest[i].y < (lo + hi) * 0.5));
+            let hem = surface_contacts(&body_settings, &mut positions, &targets, &capsules, false);
+            eprintln!("cloth body volumes without margin: {body} surface contacts; {hem} lower-robe contacts");
         }
         let Some(mut mesh) = meshes.get_mut(&cloth.mesh) else { continue; };
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -703,7 +778,31 @@ mod tests {
         assert!(state.contact_after.0 > 0, "native contacts wait for the solver tick");
     }
     fn settings() -> ClothSettings {
-        ClothSettings { source_positions: Vec::new(), source_weights: Vec::new(), source_palette: Vec::new(), pinned: vec![true, false, false], pull: vec![1.0, 0.015, 0.015], edges: vec![[0, 1], [1, 2]], triangles: Vec::new(), damping: 0.1, upward_damping: 0.75, gravity: -9.8, iterations: 3, vertex_radius: vec![0.01; 3], colliders: Vec::new(), pull_motion: Vec2::ZERO, pull_decay: 0.99, upward_motion: Vec2::new(0.0, 1.0), action_settings: Vec::new(), action_strength: 1.0 }
+        ClothSettings { source_positions: Vec::new(), source_weights: Vec::new(), source_palette: Vec::new(), pinned: vec![true, false, false], pull: vec![1.0, 0.015, 0.015], edges: vec![[0, 1], [1, 2]], triangles: Vec::new(), damping: 0.1, upward_damping: 0.75, gravity: -9.8, iterations: 3, vertex_radius: vec![0.01; 3], colliders: Vec::new(), pull_motion: Vec2::ZERO, pull_decay: 0.99, upward_motion: Vec2::new(0.0, 1.0), action_settings: Vec::new(), action_strength: 1.0,
+            force_enabled: false, force_scale: 1.0, force_tangent: 0.3, force_random: 1.0 }
+    }
+
+    #[test]
+    fn sampled_force_splits_into_normal_and_tangent_shares() {
+        let mut cfg = settings();
+        cfg.force_enabled = true; cfg.force_random = 0.0; cfg.gravity = 0.0;
+        let mut state = ClothState { normals: vec![Vec3::Y; 3], ..default() };
+        let a = state.acceleration(&cfg, 1, Vec3::new(2.0, 4.0, 0.0));
+        assert!(a.distance(Vec3::new(0.6, 4.0, 0.0)) < 1e-6, "normal part kept, 0.3 of the tangent part");
+        assert_eq!(state.acceleration(&cfg, 1, -Vec3::new(2.0, 4.0, 0.0)), -a, "the normal's sign does not matter");
+        cfg.force_random = 1.0;
+        for _ in 0..100 {
+            let a = state.acceleration(&cfg, 1, Vec3::Y);
+            assert!((0.0..=2.0).contains(&a.y) && a.x == 0.0, "amplitude scales the force by 1 ± r");
+        }
+        cfg.force_enabled = false; cfg.gravity = -9.8;
+        assert_eq!(state.acceleration(&cfg, 1, Vec3::X * 50.0), Vec3::Y * -9.8);
+    }
+    #[test]
+    fn normals_are_area_weighted_face_sums() {
+        let p = [Vec3::ZERO, Vec3::X, Vec3::Z, Vec3::new(1.0, 0.0, 1.0)];
+        let n = vertex_normals(&[[0, 1, 2], [1, 3, 2]], &p);
+        assert!(n.iter().all(|n| (n.y.abs() - 1.0).abs() < 1e-6));
     }
 
     #[test]
@@ -770,7 +869,8 @@ mod tests {
         settings.edges.clear();
         settings.gravity = 0.0;
         let capsule = ClothCollider { bone_id: 0, local_start: -Vec3::Y, local_end: Vec3::Y, radius: 0.1, mode: 1, threshold: 0.0 };
-        let targets = vec![Vec3::ZERO, Vec3::X * 0.02, Vec3::ZERO];
+        // Off the axis: a vertex exactly on it has no direction and the game leaves it (0x48DEA0).
+        let targets = vec![Vec3::ZERO, Vec3::X * 0.02, Vec3::Z * 0.001];
         let mut state = ClothState::default();
         for frame in 0..120 {
             let positions = state.advance(&settings, &targets, &targets, std::slice::from_ref(&capsule), Vec3::ZERO, 1.0 / 60.0);
@@ -829,6 +929,17 @@ mod tests {
         assert_eq!(adaptive_length_squared(1.0, rest, targets, targets), 4.0);
         assert_eq!(adaptive_length_squared(1.0, rest, targets, [Vec3::ZERO, Vec3::X * 1.5]), 2.5);
         assert_eq!(adaptive_length_squared(1.0, rest, rest, rest), 1.0);
+    }
+    #[test]
+    fn degenerate_capsule_contacts_apply_no_correction() {
+        let capsule = ClothCollider { bone_id: 0, local_start: -Vec3::Y, local_end: Vec3::Y, radius: 0.1, mode: 1, threshold: 0.0 };
+        assert_eq!(capsule.correct(Vec3::ZERO, Vec3::X, 0.0, 0.0), Vec3::ZERO);
+        // Raw-axis parallel test: a 2 m axis never reads as parallel, so the perpendicular branch runs and,
+        // with the escape along the axis, its zero cross product gives no correction.
+        let mut directed = capsule.clone();
+        directed.mode = 0;
+        let p = Vec3::new(0.05, 0.0, 0.0);
+        assert_eq!(directed.correct(p, Vec3::Y * 3.0, 0.0, 0.0), p);
     }
     #[test]
     fn directed_capsule_contacts_escape_toward_the_skinned_side() {

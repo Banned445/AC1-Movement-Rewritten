@@ -419,6 +419,53 @@ fn probe_model_parts() {
     }
 }
 
+#[test]
+#[ignore]
+fn probe_robe_collision_frames() {
+    if !game_dir().join("DataPC.forge").exists() { return; }
+    let m = load_altair(&game_dir()).unwrap();
+    let mut animated = std::collections::BTreeMap::<u32, usize>::new();
+    for resource in game_fix().iter().filter(|r| r.class_hash == CLASS_ANIMATION) {
+        if let Ok(clip) = decode(&resource.payload) {
+            let (rotation, translation) = bone_tracks(&clip);
+            let skirt = m.visual_hinges.iter().filter(|h| !h.equipment).filter(|h| {
+                let b = m.skeleton.iter().chain(&m.visual_bones).nth(h.target).unwrap();
+                rotation.contains_key(&b.bone_id) || translation.contains_key(&b.bone_id)
+            }).count();
+            if skirt > 0 { println!("skirt animation {}: {} hinge tracks", resource.name, skirt); }
+            for b in &m.visual_bones {
+                if rotation.contains_key(&b.bone_id) || translation.contains_key(&b.bone_id) { *animated.entry(b.bone_id).or_default() += 1; }
+            }
+        }
+    }
+    println!("animated secondary bone coverage: {animated:?}");
+    println!("rotation copies: {:?}", m.visual_rotation_copies);
+    for h in &m.visual_hinges {
+        let b = m.skeleton.iter().chain(&m.visual_bones).nth(h.target).unwrap();
+        println!("hinge target {} parent {:?} axis {} constraint {:?} animated clips {}", h.target, b.parent, h.axis, h.constraint_reference, animated.get(&b.bone_id).copied().unwrap_or(0));
+    }
+    let root = Mat4::from_cols(Vec4::new(0.0, 0.0, -1.0, 0.0), Vec4::new(-1.0, 0.0, 0.0, 0.0), Vec4::new(0.0, 1.0, 0.0, 0.0), Vec4::new(0.0, -m.min_z, 0.0, 1.0));
+    let mut global = Vec::new();
+    for b in m.skeleton.iter().chain(&m.visual_bones) {
+        let local = Mat4::from_rotation_translation(Quat::from_array(b.local_rot).normalize(), Vec3::from_array(b.local_pos));
+        global.push(b.parent.map_or(root, |p| global[p]) * local);
+    }
+    for p in &m.parts {
+        if !p.name.contains("Cloth") && !p.name.contains("Flaps") && !p.name.contains("Boots") { continue; }
+        let y = p.positions.iter().map(|p| p[1]).fold((f32::MAX, f32::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
+        println!("{} y range {y:?}", p.name);
+        if let Some(s) = &p.cloth {
+            for (i, &j) in p.skin_joints.iter().enumerate() {
+                let delta = global[j] * Mat4::from_cols_array(&p.inverse_bindposes[i]);
+                println!("cloth bind joint {j} shift {:?} rotation {}", delta.w_axis, delta.to_scale_rotation_translation().1.angle_between(Quat::IDENTITY));
+            }
+            let radii = s.vertex_radius.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &r| (lo.min(r), hi.max(r)));
+            println!("cloth damping {} upward {} gravity {} iterations {} vertex radii {radii:?}", s.damping, s.upward_damping, s.gravity, s.iterations);
+            for c in &s.colliders { println!("bone {:08x} capsule {:?} -> {:?} radius {} mode {} threshold {}", c.bone_id, c.local_start, c.local_end, c.radius, c.mode, c.threshold); }
+        }
+    }
+}
+
 /// Writes Altaïr's decoded diffuse textures (mip 0) as BMPs into PROBE_OUT (local inspection only).
 #[test]
 #[ignore]
@@ -617,6 +664,95 @@ fn probe_find_actions() {
         }
         if !found {
             println!("{id:#010x}: not found");
+        }
+    }
+}
+
+/// Which action id space the cloth action table uses (ClothActionSettings__GetStrength 0x6C71E0 keys on Action+8).
+#[test]
+#[ignore]
+fn probe_cloth_action_keys() {
+    let m = load_altair(&game_dir()).unwrap();
+    let cloth = m.parts.iter().find_map(|p| p.cloth.as_ref()).unwrap();
+    let (_, graph, _) = super::anims::load_locomotion(&game_dir()).unwrap();
+    for (key, strength) in &cloth.action_settings {
+        let by_id = graph.actions.values().find(|a| a.id == *key);
+        let by_request = graph.actions.values().find(|a| a.request_id == *key);
+        println!("key {key:#010x} strength {strength}: id match {:?} ({}), request match {:?} ({})",
+            by_id.map(|a| a.id), by_id.map_or("", |a| a.block.as_str()), by_request.map(|a| a.id), by_request.map_or("", |a| a.block.as_str()));
+    }
+}
+
+/// Serialized scimitar::Wind objects (Wind__Read 0x5C7F20) in the world archives.
+#[test]
+#[ignore]
+fn probe_wind_sources() {
+    let class = super::forge::crc32("Wind");
+    let archives: Vec<String> = std::env::var("PROBE_ARCHIVES").unwrap_or("DataPC_Masyaf.forge|DataPC_Common.forge|DataPC.forge".into()).split('|').map(String::from).collect();
+    for archive in archives {
+        let Ok(mut forge) = Forge::open(&game_dir().join(&archive)) else { continue; };
+        let entries = forge.entries.clone();
+        let mut found = 0;
+        for e in &entries {
+            let Ok(resources) = forge.resources(e) else { continue; };
+            for r in &resources {
+                let d = &r.payload;
+                let w = |p: usize| d.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+                let f = |p: usize| w(p).map(f32::from_bits).unwrap_or(f32::NAN);
+                for p in 5..d.len().saturating_sub(64) {
+                    if w(p) != Some(class) { continue; }
+                    let b = p + 4;
+                    let regions = w(b + 26).unwrap_or(u32::MAX);
+                    found += 1;
+                    if found > 12 { continue; }
+                    println!("{archive} {} / {} class {:#x} @{p}: pre {:02x?} active {} strength {} noise {} pct {} {} {} {} regions {}",
+                        e.name, r.name, r.class_hash, &d[p - 5..p], d[b], f(b + 1), d[b + 5], f(b + 6), f(b + 10), f(b + 14), f(b + 18), regions);
+                    let raw: Vec<String> = (0..36).map(|k| format!("{}:{:08x}", k * 4, w(b + 26 + k * 4).unwrap_or(0))).collect();
+                    println!("   raw from count: {}", raw.join(" "));
+                    if regions == 0 {
+                        let q = b + 30;
+                        println!("   mode {} osc {} {} {} kind {} scale {} min ({} {} {} {}) max ({} {} {} {}) t {} next {:02x?}",
+                            w(q).unwrap_or(0), f(q + 4), f(q + 8), f(q + 12), w(q + 16).unwrap_or(0), f(q + 20),
+                            f(q + 24), f(q + 28), f(q + 32), f(q + 36), f(q + 40), f(q + 44), f(q + 48), f(q + 52), f(q + 56), &d[q + 60..(q + 76).min(d.len())]);
+                    }
+                }
+            }
+        }
+        println!("{archive}: {found} Wind objects");
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_wind_placements() {
+    for (archive, cell) in [("DataPC_Masyaf.forge", "Cell05460_DataBlock"), ("DataPC_Kingdom.forge", "Cell05460_DataBlock"), ("DataPC_Jerusalem.forge", "Cell01364_DataBlock"),
+        ("DataPC_Acre.forge", "Cell01364_DataBlock"), ("DataPC_Damascus.forge", "Cell01364_DataBlock"), ("DataPC_Arsuf.forge", "Cell21844_DataBlock")] {
+        let mut f = Forge::open(&game_dir().join(archive)).unwrap();
+        let e = f.find(cell).cloned().unwrap();
+        for r in f.resources(&e).unwrap() {
+            if !r.name.starts_with("Wind_") { continue; }
+            let m = super::world::entity_transform(&r.payload).unwrap();
+            println!("{archive} {}: x {:?} pos {:?}", r.name, m.x_axis.truncate(), m.w_axis.truncate());
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_cloth_force_fields() {
+    let mut forge = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let entry = forge.find("Rank 9").cloned().unwrap();
+    for r in forge.resources(&entry).unwrap() {
+        let d = &r.payload;
+        let w = |p: usize| d.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+        for (name, class) in [("Cloth", super::forge::crc32("Cloth")), ("SkeletonComponent", super::forge::crc32("SkeletonComponent"))] {
+            for c in (4..d.len().saturating_sub(4)).filter(|&p| w(p) == Some(class)) {
+                let cfg = (c..(c + 400).min(d.len() - 4)).find(|&p| w(p) == Some((-403070396i32) as u32));
+                if let Some(p) = cfg {
+                    let f = |o: usize| w(o).map(f32::from_bits).unwrap_or(f32::NAN);
+                    println!("{} {name}@{c}: cfg class @+{} enabled {} scale {} specific {} suppress {} next floats {} {} {} {}", r.name, p - c, d[p + 4], f(p + 5), d[p + 9], d[p + 10], f(p + 11), f(p + 15), f(p + 19), f(p + 23));
+                }
+            }
         }
     }
 }
