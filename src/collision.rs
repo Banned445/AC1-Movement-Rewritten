@@ -108,6 +108,45 @@ impl CollisionWorld {
             .filter_map(|t| t.ray(origin, direction, nearest)).fold(nearest, f32::min)
     }
 
+    /// As `ray_distance`, with the surface normal at the hit (against the ray): the foot IK's ground ray
+    /// (`FootIK__RayDown` 0x432570). None when nothing is hit within `max`.
+    pub fn ray_hit(&self, origin: Vec3, direction: Vec3, max: f32, layer: u8) -> Option<(f32, Vec3)> {
+        let direction = direction.normalize_or_zero();
+        if direction == Vec3::ZERO { return None; }
+        let mut best: Option<(f32, Vec3)> = None;
+        for (i, b) in self.boxes.iter().enumerate() {
+            if !self.sees(layer, i) { continue; }
+            let (mut lo, mut hi, mut axis_lo) = (0.0f32, best.map_or(max, |h| h.0), usize::MAX);
+            let mut hit = true;
+            for axis in 0..3 {
+                if direction[axis].abs() < 1e-8 {
+                    if origin[axis] < b.min[axis] || origin[axis] > b.max[axis] { hit = false; break; }
+                } else {
+                    let a = (b.min[axis] - origin[axis]) / direction[axis];
+                    let c = (b.max[axis] - origin[axis]) / direction[axis];
+                    if a.min(c) > lo { lo = a.min(c); axis_lo = axis; }
+                    hi = hi.min(a.max(c));
+                    if lo > hi { hit = false; break; }
+                }
+            }
+            if hit && axis_lo != usize::MAX {
+                let mut n = Vec3::ZERO;
+                n[axis_lo] = -direction[axis_lo].signum();
+                best = Some((lo, n));
+            }
+        }
+        let reach = best.map_or(max, |h| h.0);
+        let end = origin + direction * reach;
+        for t in self.triangles_in_bounds(origin.min(end), origin.max(end)).filter(|t| layer == 0 || crate::layers::collides(layer, t.layer)) {
+            if let Some(d) = t.ray(origin, direction, best.map_or(max, |h| h.0)) {
+                if best.is_none_or(|h| d < h.0) {
+                    best = Some((d, if t.normal.dot(direction) > 0.0 { -t.normal } else { t.normal }));
+                }
+            }
+        }
+        best
+    }
+
     /// PORT: camera obstruction ray against imported static faces; native NavigationCamera remains open.
     pub fn camera_distance(&self, origin: Vec3, direction: Vec3, max: f32) -> f32 {
         let end = origin + direction * max;

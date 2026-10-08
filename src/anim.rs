@@ -288,6 +288,9 @@ pub struct AnimPlayer {
     pending_b: Option<(u32, ActBlend)>,
     /// A partial-body action playing over the full-body one (a channel of slot group 1).
     pub overlay: Option<Overlay>,
+    /// Action +48 flags of the playing item's action (bit 3 lets the standing foot IK run, `IKGroundBiped__Update`
+    /// 0x432C8A); 8 for named clips outside the graph.
+    pub action_flags: u8,
 }
 
 /// A partial-body slot (`Anim__PlayActionOnSlots` 0x4FE730: an action on a channel of slot group 1 plays on the
@@ -1144,6 +1147,7 @@ pub fn apply_clip(
             continue;
         }
         let item = p.items[p.item.min(p.items.len() - 1)].clone();
+        p.action_flags = if item.action == 0 { 8 } else { lib.graph.actions.get(&item.action).map_or(8, |a| a.flags) };
         let duration = lib.item_duration(&item).max(1e-3);
         let root_speed = item.layers.first().and_then(|(n, _)| lib.clips.get(n)).map(|c| c.root_speed).unwrap_or(0.0);
         // playback rate: locomotion cycles match their root motion to the actual speed (no foot
