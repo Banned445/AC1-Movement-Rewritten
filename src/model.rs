@@ -37,8 +37,15 @@ impl Plugin for ModelPlugin {
     fn build(&self, app: &mut App) {
         crate::character_material::install(app);
         app.init_resource::<ModelStatus>().add_systems(PostStartup, attach_altair)
-            .add_systems(Update, crate::visual_pose::update_rotation_copies.after(crate::anim::apply_clip))
             .add_systems(PostUpdate, crate::cloth::update_cloth.after(bevy::transform::TransformSystems::Propagate));
+        // PORT: use the final Bevy leg pose for secondary targets; native task ordering remains unported.
+        const ROBE_POSE_AFTER_IK: bool = true;
+        let after_ik = std::env::var("AC_ROBE_POSE_AFTER_IK").map_or(ROBE_POSE_AFTER_IK, |v| v != "0");
+        if after_ik {
+            app.add_systems(Update, crate::visual_pose::update_rotation_copies.after(crate::ik::solve_limbs));
+        } else {
+            app.add_systems(Update, crate::visual_pose::update_rotation_copies.after(crate::anim::apply_clip));
+        }
     }
 }
 

@@ -448,7 +448,7 @@ fn ground_foot_target(ankle: Vec3, collision: &crate::collision::CollisionWorld)
     (ankle.y < want - 1e-3).then_some(Vec3::new(ankle.x, want, ankle.z))
 }
 
-fn solve_limbs(
+pub(crate) fn solve_limbs(
     time: Res<Time>,
     collision: Option<Res<crate::collision::CollisionWorld>>,
     mut q: Query<(Entity, &Rig, &mut Body, &LimbTargets, &mut LimbIk, Option<&crate::anim::AnimPlayer>)>,

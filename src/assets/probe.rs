@@ -419,6 +419,53 @@ fn probe_model_parts() {
     }
 }
 
+#[test]
+#[ignore]
+fn probe_robe_collision_frames() {
+    if !game_dir().join("DataPC.forge").exists() { return; }
+    let m = load_altair(&game_dir()).unwrap();
+    let mut animated = std::collections::BTreeMap::<u32, usize>::new();
+    for resource in game_fix().iter().filter(|r| r.class_hash == CLASS_ANIMATION) {
+        if let Ok(clip) = decode(&resource.payload) {
+            let (rotation, translation) = bone_tracks(&clip);
+            let skirt = m.visual_hinges.iter().filter(|h| !h.equipment).filter(|h| {
+                let b = m.skeleton.iter().chain(&m.visual_bones).nth(h.target).unwrap();
+                rotation.contains_key(&b.bone_id) || translation.contains_key(&b.bone_id)
+            }).count();
+            if skirt > 0 { println!("skirt animation {}: {} hinge tracks", resource.name, skirt); }
+            for b in &m.visual_bones {
+                if rotation.contains_key(&b.bone_id) || translation.contains_key(&b.bone_id) { *animated.entry(b.bone_id).or_default() += 1; }
+            }
+        }
+    }
+    println!("animated secondary bone coverage: {animated:?}");
+    println!("rotation copies: {:?}", m.visual_rotation_copies);
+    for h in &m.visual_hinges {
+        let b = m.skeleton.iter().chain(&m.visual_bones).nth(h.target).unwrap();
+        println!("hinge target {} parent {:?} axis {} constraint {:?} animated clips {}", h.target, b.parent, h.axis, h.constraint_reference, animated.get(&b.bone_id).copied().unwrap_or(0));
+    }
+    let root = Mat4::from_cols(Vec4::new(0.0, 0.0, -1.0, 0.0), Vec4::new(-1.0, 0.0, 0.0, 0.0), Vec4::new(0.0, 1.0, 0.0, 0.0), Vec4::new(0.0, -m.min_z, 0.0, 1.0));
+    let mut global = Vec::new();
+    for b in m.skeleton.iter().chain(&m.visual_bones) {
+        let local = Mat4::from_rotation_translation(Quat::from_array(b.local_rot).normalize(), Vec3::from_array(b.local_pos));
+        global.push(b.parent.map_or(root, |p| global[p]) * local);
+    }
+    for p in &m.parts {
+        if !p.name.contains("Cloth") && !p.name.contains("Flaps") && !p.name.contains("Boots") { continue; }
+        let y = p.positions.iter().map(|p| p[1]).fold((f32::MAX, f32::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
+        println!("{} y range {y:?}", p.name);
+        if let Some(s) = &p.cloth {
+            for (i, &j) in p.skin_joints.iter().enumerate() {
+                let delta = global[j] * Mat4::from_cols_array(&p.inverse_bindposes[i]);
+                println!("cloth bind joint {j} shift {:?} rotation {}", delta.w_axis, delta.to_scale_rotation_translation().1.angle_between(Quat::IDENTITY));
+            }
+            let radii = s.vertex_radius.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &r| (lo.min(r), hi.max(r)));
+            println!("cloth damping {} upward {} gravity {} iterations {} vertex radii {radii:?}", s.damping, s.upward_damping, s.gravity, s.iterations);
+            for c in &s.colliders { println!("bone {:08x} capsule {:?} -> {:?} radius {} mode {} threshold {}", c.bone_id, c.local_start, c.local_end, c.radius, c.mode, c.threshold); }
+        }
+    }
+}
+
 /// Writes Altaïr's decoded diffuse textures (mip 0) as BMPs into PROBE_OUT (local inspection only).
 #[test]
 #[ignore]

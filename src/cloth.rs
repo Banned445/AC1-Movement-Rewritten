@@ -652,6 +652,14 @@ pub fn update_cloth(time: Res<Time>, transforms: Query<&GlobalTransform>, mut cl
             let body = surface_contacts(&settings, &mut positions, &targets, &capsules, false);
             let folds = fold_contacts(&settings, &mut positions, &cloth.state.previous, false);
             eprintln!("cloth surfaces: {body} triangle/capsule contacts; {folds} non-adjacent face crossings");
+            // Collision margins are not visible body surfaces. Report the authored volumes separately.
+            let mut body_settings = settings.clone();
+            body_settings.vertex_radius.fill(0.0);
+            let body = surface_contacts(&body_settings, &mut positions, &targets, &capsules, false);
+            let (lo, hi) = cloth.rest.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+            body_settings.triangles.retain(|tri| tri.iter().any(|&i| cloth.rest[i].y < (lo + hi) * 0.5));
+            let hem = surface_contacts(&body_settings, &mut positions, &targets, &capsules, false);
+            eprintln!("cloth body volumes without margin: {body} surface contacts; {hem} lower-robe contacts");
         }
         let Some(mut mesh) = meshes.get_mut(&cloth.mesh) else { continue; };
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);

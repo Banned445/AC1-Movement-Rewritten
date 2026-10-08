@@ -820,7 +820,9 @@ impl Plugin for ShotsPlugin {
         let views = std::env::var("AC_VIEWS").unwrap_or("back,left,right,high,hands".into()).split(',').map(String::from).collect();
         let dir = std::env::var("AC_SHOT_DIR").unwrap_or(".".into());
         let _ = std::fs::create_dir_all(&dir);
-        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(1.0 / 60.0)))
+        let fps = std::env::var("AC_SHOT_FPS").ok().and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && (1.0..=240.0).contains(v)).unwrap_or(60.0);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(1.0 / fps)))
             .insert_resource(Shots { times, views, dir, next: 0, view: None, done_at: None, frames: 0 })
             .add_systems(Startup, fill_light)
             .add_systems(PostUpdate, shots.before(bevy::transform::TransformSystems::Propagate));
@@ -871,6 +873,10 @@ fn shots(
     let (target, eye) = match name.as_str() {
         "left" => (focus, focus - right * 3.0 + Vec3::Y * 0.3),
         "right" => (focus, focus + right * 3.0 + Vec3::Y * 0.3),
+        "hem" => {
+            let hem = body.feet + Vec3::Y * 0.4;
+            (hem, hem + right * 1.2 + fwd * 0.3 + Vec3::Y * 0.1)
+        }
         "high" => (focus, focus - fwd * 2.2 - right * 1.6 + Vec3::Y * 2.2),
         "front" => (focus, focus + fwd * 3.0 + Vec3::Y * 0.3),
         "fingers" | "fingers_side" => {
