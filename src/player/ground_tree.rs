@@ -15,9 +15,17 @@ use std::f32::consts::FRAC_PI_2;
 
 /// The ground waits, [low, high profile] x [left, right foot ahead] (table 0x1A2BFE0: legacy 48 / 50, 51 / 53).
 pub const WAITS: [[u32; 2]; 2] = [[0x00D8_243F, 0x00D8_24C5], [0x00D8_2508, 0x00D8_258E]];
+/// The parallel-feet waits, [low, high] (legacy 49 / 52): Idle's wait table has a third column for the exit foot 3
+/// (`HumanGround__PickLocomotionFoot` 0xD86760 → 2), played by the wait's enter 0xD94580.
+pub const WAITS_PARALLEL: [u32; 2] = [0x00D8_2482, 0x00D8_254B];
+
+/// The wait Idle plays for a profile and a `PickLocomotionFoot` result (0 left ahead, 1 right ahead, 2 parallel).
+pub fn wait_action(high: bool, foot: usize) -> u32 {
+    if foot >= 2 { WAITS_PARALLEL[high as usize] } else { WAITS[high as usize][foot] }
+}
 
 /// The destinations whose authored item transitions the simulation follows: the locomotion and the four waits.
-pub const GROUND_DESTINATIONS: [u32; 5] = [ACT_GROUND_LOCOMOTION, WAITS[0][0], WAITS[0][1], WAITS[1][0], WAITS[1][1]];
+pub const GROUND_DESTINATIONS: [u32; 7] = [ACT_GROUND_LOCOMOTION, WAITS[0][0], WAITS[0][1], WAITS[1][0], WAITS[1][1], WAITS_PARALLEL[0], WAITS_PARALLEL[1]];
 
 /// Run stop → Move (`HumanGround__PlayRunStopExitMove` 0xD8B3F0): legacy 92 / 93,
 /// `xx_h_runstop_foot{l,r}_tr_{walk,jog}_hipm_foot{r,l}` [walk, jog]. 92 follows the left-foot stop (legacy 86) and

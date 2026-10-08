@@ -667,7 +667,7 @@ fn choose_clip(
                 }
                 // the same transition action can lead to several destinations (e.g. the skid turn's exit into the
                 // locomotion and into a fight action): the one into the locomotion, or into a wait
-                let wanted = |b: u32| if t.to_wait { ACT_WAIT.iter().flatten().any(|w| *w == b) } else { b == ACT_GROUND_LOCOMOTION };
+                let wanted = |b: u32| if t.to_wait { ACT_WAIT.iter().flatten().any(|w| *w == b) || crate::player::ground_tree::WAITS_PARALLEL.contains(&b) } else { b == ACT_GROUND_LOCOMOTION };
                 let authored = t.from.and_then(|(a, i)| lib.graph.actions.get(&a).and_then(|a| a.items.get(i)))
                     .and_then(|it| it.transitions.iter().find(|tr| tr.action_a == t.action.id && wanted(tr.action_b)).copied());
                 let cur = p.items.get(p.item.min(p.items.len().max(1) - 1)).filter(|_| p.clip.is_some()).cloned();
@@ -704,7 +704,7 @@ fn choose_clip(
             // standing: the game's wait action of the leading foot (MoveBlend foot: 0 = left ahead), entered through the
             // graph's transition like every action (RE/13 §7)
             ActorContextId::Ground if speed_band(g.speed_param) == SpeedBand::None => {
-                let id = ACT_WAIT[g.high_profile as usize][(g.blend.foot != 0) as usize];
+                let id = if crate::tuning::GAME_GROUND_TREE { crate::player::ground_tree::wait_action(g.high_profile, g.wait_foot) } else { ACT_WAIT[g.high_profile as usize][(g.blend.foot != 0) as usize] };
                 let name = match (g.high_profile, g.blend.foot == 0) {
                     (true, true) => "idle_high",
                     (true, false) => "idle_high_r",
@@ -962,7 +962,7 @@ fn choose_clip(
         let pending = if req.blend.is_some() {
             None
         } else {
-            p.pending_b.take().filter(|(d, _)| *d == new_action || (*d == 0 && ACT_WAIT.iter().flatten().any(|w| *w == new_action)))
+            p.pending_b.take().filter(|(d, _)| *d == new_action || (*d == 0 && (ACT_WAIT.iter().flatten().any(|w| *w == new_action) || crate::player::ground_tree::WAITS_PARALLEL.contains(&new_action))))
         };
         let blend = if let Some(b) = req.blend {
             b

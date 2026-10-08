@@ -113,6 +113,9 @@ pub struct HumanGroundData {
     pub owner: TreeState,
     /// HG+688 (0x2B0): the pivot's turn angle, read by the turn start's layouts 2 / 3.
     pub pivot_turn: f32,
+    /// The foot column of Idle's wait (`HumanGround__PickLocomotionFoot` on the item Idle was entered from: 0 left
+    /// ahead, 1 right ahead, 2 parallel), RE/02 §4.6.
+    pub wait_foot: usize,
 }
 
 /// The Movement child states that end a one-shot by their own rules (`HumanGround__Movement_Update` 0xDAD1C0).
@@ -274,14 +277,25 @@ impl HumanGroundData {
         self.blend.speed_param = 0.0;
         self.tr = None;
         let waits = super::ground_tree::WAITS[high as usize];
-        let found = super::jump_clips::GROUND_TRANSITIONS.iter().find(|t| t.0 == from.id && t.1 == from.item && waits.contains(&t.4));
+        // Idle's wait column: the exit foot of the item it is entered from (0xD94580 → 0xD86760)
+        self.set_wait_foot(super::ground_tree::pick_locomotion_foot(super::anim_gate::word(&from), self.blend.foot));
+        let parallel = super::ground_tree::WAITS_PARALLEL[high as usize];
+        let found = super::jump_clips::GROUND_TRANSITIONS.iter().find(|t| t.0 == from.id && t.1 == from.item && (waits.contains(&t.4) || t.4 == parallel));
         if let Some(&(_, _, ta, ua, dest, _)) = found {
             if self.start_transition(ta, ua as usize, 0, 0, from.weights(), Some((from.id, from.item))) {
                 if let Some(t) = self.tr.as_mut() {
                     t.to_wait = true;
                 }
-                self.blend.foot = (dest == waits[1]) as usize;
+                self.set_wait_foot(if dest == parallel { 2 } else { (dest == waits[1]) as usize });
             }
+        }
+    }
+
+    /// Idle's wait column; a foot ahead is also the leading foot the next start uses.
+    pub fn set_wait_foot(&mut self, foot: usize) {
+        self.wait_foot = foot.min(2);
+        if foot < 2 {
+            self.blend.foot = foot;
         }
     }
 
@@ -634,6 +648,7 @@ pub fn update_ground(
                 if can_run_stop {
                     g.start_run_stop();
                 } else {
+                    g.set_wait_foot(super::ground_tree::pick_locomotion_foot(super::anim_gate::word(&t.action), g.blend.foot));
                     g.speed_param = 0.0;
                     g.blend.speed_param = 0.0;
                 }
@@ -727,6 +742,11 @@ pub fn update_ground(
             g.start_run_stop();
         }
         if pad.speed01 <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_none() && g.tr.is_none() {
+            if GAME_GROUND_TREE {
+                // Idle from Move (0xD8B220): the wait of the locomotion item's exit foot (its word, 0xD86760)
+                let word = super::anim_gate::item_word(super::move_blend::ACT_GROUND_LOCOMOTION, g.blend.foot);
+                g.set_wait_foot(super::ground_tree::pick_locomotion_foot(word, g.blend.foot));
+            }
             if g.speed_param > 0.25 {
                 g.start_run_stop();
                 if !GAME_GROUND_TREE && g.oneshot.is_some() {
