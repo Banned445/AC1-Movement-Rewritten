@@ -186,6 +186,8 @@ pub struct HumanInAirData {
     pub flat_horizontal: bool,
     /// Ground loss: the drop sub-state's (type, side) (InAirData+944 +64 / +68) and the edge's outward normal.
     pub drop: Option<(usize, usize, Option<Vec3>)>,
+    /// First steep contact and rag-fall requirement (0xE038A0 / 0xE05200).
+    pub slope_slide: super::ground_extras::SlopeSlide,
 }
 
 impl HumanInAirData {
@@ -200,6 +202,7 @@ impl HumanInAirData {
         self.fall_t = 0.0;
         self.flat_horizontal = false;
         self.drop = None;
+        self.slope_slide = default();
         self.entry_velocity = None;
         match entry {
             InAirEntry::JumpToTarget { from, target, speed_param, foot_left } => {
@@ -645,9 +648,23 @@ pub fn update_air(
                 }
                 let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, b.velocity * dt, false, dt) };
                 body.feet = r.position;
+                // PORT: static proxy contacts have no character bodies. The 0.3 m / Data+528
+                // rejection gate (0xE038A0) is inactive until native AntiStuckNudge (0xE0B1C0)
+                // arms it; that recovery path is not yet ported.
+                let contact = if GAME_GROUND_EXTRAS {
+                    super::ground_extras::ground_contact(body.proxy.manifold.iter().map(|c| c.normal.y))
+                } else { super::ground_extras::GroundContact::None };
+                if contact == super::ground_extras::GroundContact::Steep {
+                    air.slope_slide.contact(contact, body.feet.y);
+                    let height = if air.apex_reached { air.apex_y-body.feet.y } else { 0.0 };
+                    air.slope_slide.check(height,body.feet.y,false);
+                    // PORT: articulated RagFall is a logged dependency; retain the required flag instead of
+                    // inventing a ragdoll/recovery animation (native 0xE05200 -> 0xDCE480).
+                    body.velocity = r.velocity;
+                }
                 if narrow_on.is_some() {
                     // caught: the entry warps the root onto the beam / top
-                } else if r.hit_wall {
+                } else if r.hit_wall && contact != super::ground_extras::GroundContact::Steep {
                     body.velocity.x = 0.0;
                     body.velocity.z = 0.0;
                 }

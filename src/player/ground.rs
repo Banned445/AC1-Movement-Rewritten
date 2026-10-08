@@ -97,6 +97,15 @@ pub struct HumanGroundData {
     pub face_next: Option<f32>,
     /// Side of the turn in progress (+1 / -1, 0 = none): the 180 deg tie-break.
     pub turn_sign: f32,
+    pub extra: Option<super::ground_extras::ExtraAction>,
+    pub crowd_avoid: Option<Vec3>,
+    pub crouch: Option<super::crouch::Crouch>,
+    /// Data+284 and HG+1784, set by the social helper bit-5 interpreter branch (0xEE7048).
+    /// PORT boundary: the producer of that social status remains under RE. No invented crouch button.
+    pub crouch_requested: bool,
+    pub crouch_hide_hint: bool,
+    /// Input timer +4408, reset every frame Legs is held (0xEEE08C).
+    pub legs_released_ago: f32,
 }
 
 /// `HumanGround__LookDown_Enter` 0xD9FC80: `xx_l_ledge_lookdown_{front,left,right}_foot{l,r}` (by the leading foot)
@@ -120,7 +129,16 @@ pub fn is_start(id: u32) -> bool {
     START_MOVE.iter().flatten().any(|&s| s == id)
 }
 
-pub const PIVOT_ACTIONS: [u32; 20] = [
+// Probe action list also includes the native Ground extras; kept here for the existing dump tool.
+pub const PIVOT_ACTIONS: [u32; 37] = [
+    super::ground_extras::FREERUN_WAIT[0], super::ground_extras::FREERUN_WAIT[1],
+    super::ground_extras::STATIC_PREPARE[0], super::ground_extras::STATIC_PREPARE[1],
+    super::ground_extras::STATIC_JUMP[0], super::ground_extras::STATIC_JUMP[1], super::ground_extras::STATIC_FALL,
+    super::ground_extras::CROUCH_WAIT[0][0], super::ground_extras::CROUCH_WAIT[0][1],
+    super::ground_extras::CROUCH_WAIT[1][0], super::ground_extras::CROUCH_WAIT[1][1],
+    super::ground_extras::CROUCH_START[0], super::ground_extras::CROUCH_START[1],
+    super::ground_extras::CROUCH_WALK, super::ground_extras::CROUCH_PIVOT,
+    super::ground_extras::CROUCH_HIDE_ENTER[0], super::ground_extras::CROUCH_HIDE_ENTER[1],
     0x09A0_8AC6, 0x09A0_A426, 0x09A0_AA2D, 0x09A0_AA2E,
     0x082F_BC7C, 0x082F_BC87, 0x1ABA_2384, 0x1ABA_2385, 0x1ABA_2388, 0x1ABA_2389, 0x09A0_9DF1, 0x09A0_A217,
     0x082F_BC88, 0x082F_BC89, 0x1ABA_2386, 0x1ABA_2387, 0x1ABA_238A, 0x1ABA_238B, 0x09A0_9DF2, 0x09A0_A218,
@@ -177,6 +195,8 @@ impl HumanGroundData {
         self.ledge_stop = None;
         self.collide = None;
         self.look_down = None;
+        self.extra = None;
+        self.crouch = None;
         self.oneshot_next = None;
         if landing.is_none() {
             // PORT: entries without a landing (pull-up, beam / ladder / pass-over exits …) start standing. The game's
@@ -205,6 +225,8 @@ fn wrap_angle(a: f32) -> f32 {
     angle_diff(a, 0.0)
 }
 
+pub fn heading_delta(a:f32,b:f32)->f32 { angle_diff(a,b) }
+
 fn angle_diff(a: f32, b: f32) -> f32 {
     let mut d = (a - b) % std::f32::consts::TAU;
     if d > std::f32::consts::PI {
@@ -223,10 +245,10 @@ pub fn update_ground(
     guidance: Res<GuidanceWorld>,
     spawn: Res<SpawnPoint>,
     mut rig: ResMut<CameraRig>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
-    for (mut loco, mut body, mut data) in &mut q {
+    for (mut loco, mut body, mut data, anim) in &mut q {
         let g = &mut data.ground;
         if loco.current != ActorContextId::Ground {
             continue;
@@ -249,6 +271,108 @@ pub fn update_ground(
             body.grounded = true;
             super::coast(&mut body, &collision, dt);
             continue;
+        }
+
+        if GAME_GROUND_EXTRAS {
+            if g.crouch.is_none() && g.crouch_requested && !pad.high_profile && g.extra.is_none()
+                && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none()
+            {
+                g.pose_seq=g.pose_seq.wrapping_add(1);
+                g.crouch=Some(if pad.speed01>0.0 && g.speed_param>0.0 {
+                    super::crouch::Crouch::enter_moving(g.blend.foot,g.crouch_hide_hint,g.pose_seq)
+                } else {super::crouch::Crouch::enter(g.blend.foot,g.crouch_hide_hint,g.pose_seq)});
+                g.look_down=None;g.speed_param=0.0;g.blend.speed_param=0.0;
+            }
+            if let Some(mut crouch)=g.crouch {
+                let (item_clock,blend_progress)=if let Some(anim)=anim {
+                    (Some((anim.contacts.t,anim.phase)),
+                        (anim.fade<anim.fade_time && anim.fade_time>0.0).then(||anim.fade/anim.fade_time))
+                } else { (Some((crouch.time,crouch.phase())),None) };
+                let moving=pad.magnitude>0.35;
+                let exit=super::anim_gate::allows_mode_exit(&crouch.action,moving,pad.high_profile);
+                let input=super::crouch::CrouchInput{request:g.crouch_requested,hide:g.crouch_hide_hint,
+                    high:pad.high_profile,moving,want_heading:if moving {heading_of(pad.dir)} else {body.heading},
+                    can_stand:super::ground_extras::can_stand(body.feet,&collision),anim_allows_exit:exit,
+                    blend_progress,item_clock};
+                let wait_high=matches!(crouch.mode,super::crouch::CrouchMode::Wait) && !moving && pad.high_profile;
+                let mut heading=body.heading;
+                let delta=crouch.update(input,g.blend.foot,&mut heading,dt);
+                body.heading=heading;
+                if wait_high && delta.is_some() {
+                    // Wait -> FreeRun 0xDA9510: phase 1 starts on the impulsion wait item (0xD8B9D0).
+                    g.pose_seq=g.pose_seq.wrapping_add(1);
+                    let mut extra=super::ground_extras::ExtraAction::free_run(g.blend.foot,g.pose_seq);
+                    extra.action.item=1;g.extra=Some(extra);g.crouch=None;body.proxy.height=None;
+                } else if let Some(delta)=delta {
+                    body.proxy.height=Some(1.0);g.crouch=Some(crouch);
+                    let d=super::right_of(body.forward())*delta.x+body.forward()*delta.z;
+                    let r={let b=&mut *body;collision.move_capsule(&mut b.proxy,b.feet,d,true,dt)};
+                    body.feet=r.position;body.velocity=r.velocity;
+                    if let Some(support)=collision.ground_support_height(body.feet,body.proxy.height.unwrap_or(CAPSULE_HEIGHT)) {
+                        body.stick_residual=body.feet.y-support.y;body.stick_normal_y=Some(support.normal_y);
+                        body.feet.y=support.y;body.grounded=true;
+                    } else {
+                        body.grounded=false;
+                        let entry=InAirEntry::Fall{from:body.feet,velocity:body.velocity,origin:FallOrigin::Ground,speed_param:0.0};
+                        switch_context(&mut loco,&mut data,TransitionSetup::ToInAir(entry));
+                    }
+                    continue;
+                } else {g.crouch=None;body.proxy.height=None;}
+            }
+        }
+
+        if GAME_GROUND_EXTRAS {
+            g.legs_released_ago = if pad.legs_held { 0.0 } else { g.legs_released_ago+dt };
+            // Event43: high profile, stationary, Legs held; native 0xEE8B93 checks button capture.
+            // PORT: ability-stack/input-capture ownership is absent in the movement-only input adapter.
+            if g.extra.is_none() && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none()
+                && g.look_down.is_none() && pad.high_profile && pad.magnitude<=0.35 && pad.legs_held
+            {
+                g.pose_seq=g.pose_seq.wrapping_add(1);
+                g.extra=Some(super::ground_extras::ExtraAction::free_run(g.blend.foot,g.pose_seq));
+                g.speed_param=0.0;g.blend.speed_param=0.0;
+            }
+            if g.crouch_requested && !pad.high_profile {g.extra=None;}
+            if let Some(mut extra)=g.extra {
+                g.sub_state=HumanGroundSubState::FreeRun;
+                g.high_profile=pad.high_profile;
+                // 0xEE84CC: high, <=0.35 stick, Legs released after being held within the last 0.5 s.
+                // 0x6D0F50 is the uncaptured held-button query, not the capture query.
+                // Event47 takes a hand report first; event48 is the no-target fallback (0xEE84FE-0xEE858B).
+                let request=pad.high_profile && !pad.legs_held && pad.magnitude<=0.35 && g.legs_released_ago<0.5;
+                if request && extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed+dt>=0.2 {
+                    extra.target=static_hand_target(body.feet,body.forward(),&guidance,&collision);
+                }
+                let (out,delta)=extra.advance(dt,pad.magnitude>0.35,request,g.blend.foot);
+                match out {
+                    super::ground_extras::ExtraResult::Inactive=>{g.extra=None;},
+                    super::ground_extras::ExtraResult::Jump{action,fall}=>{
+                        pad.consume_jump();
+                        let entry=if let Some(target)=extra.target {
+                            InAirEntry::JumpToTarget{from:body.feet,target,speed_param:0.0,foot_left:g.blend.foot==0}
+                        } else {InAirEntry::OnPlace { from:body.feet,fwd:body.forward(),
+                            action:ActionBlend::new(action,0,&[1.0]),fall:Some(ActionBlend::new(fall,0,&[1.0])) }};
+                        body.velocity=Vec3::ZERO;
+                        switch_context(&mut loco,&mut data,TransitionSetup::ToInAir(entry));
+                        continue;
+                    },
+                    super::ground_extras::ExtraResult::Stay=>{
+                        g.extra=Some(extra);
+                        let d=super::right_of(body.forward())*delta.x+body.forward()*delta.z;
+                        let r={let b=&mut *body;collision.move_capsule(&mut b.proxy,b.feet,d,true,dt)};
+                        body.feet=r.position;body.velocity=r.velocity;
+                        if let Some(support)=collision.ground_support_height(body.feet,body.proxy.height.unwrap_or(CAPSULE_HEIGHT)) {
+                            body.stick_residual=body.feet.y-support.y;body.stick_normal_y=Some(support.normal_y);
+                            body.feet.y=support.y;body.grounded=true;
+                        } else {
+                            body.grounded=false;
+                            let entry=InAirEntry::Fall{from:body.feet,velocity:body.velocity,origin:FallOrigin::Ground,speed_param:0.0};
+                            switch_context(&mut loco,&mut data,TransitionSetup::ToInAir(entry));
+                        }
+                        continue;
+                    },
+                }
+            }
         }
 
         // ---------------------------------------------------------------- input → wanted motion
@@ -278,7 +402,7 @@ pub fn update_ground(
         let prev_high = g.high_profile;
         g.high_profile = pad.high_profile;
         g.sprint = pad.high_profile && pad.legs_held; // sprint = high profile + legs (RE/01 §6.2)
-        g.sub_state = if g.sprint { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
+        g.sub_state = if !GAME_GROUND_EXTRAS && g.sprint { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
 
         // turn attenuation (interpreter 0xEE65A0): beyond 45° slow down; forced to 1 in low profile
         let want_heading = if moving { heading_of(pad.dir) } else { body.heading };
@@ -383,7 +507,7 @@ pub fn update_ground(
         // heading before this frame's turn (HG+0x600, Movement_PreUpdate 0xD97E30).
         g.blend.speed_param = g.speed_param;
         g.blend.update_speed(target, dt);
-        g.blend.update_angles(body.heading, moving.then_some(want_heading), None, false, dt);
+        g.blend.update_angles(body.heading, moving.then_some(want_heading), g.crowd_avoid.take().map(heading_of), false, dt);
         g.blend.update_weights(target, dt);
         g.speed_param = g.blend.speed_param;
         // the run stop (state 18) does not run MoveBlend: the parameter stays 0 while it plays
@@ -807,10 +931,33 @@ pub fn straight_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld,
     let n = hand.wall_normal;
     // both hands on the edge (not past its end)
     let point = guidance.fit_hands(hand.point, n);
+    straight_target(feet,point,n,collision,beam)
+}
+fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bool)->Option<JumpTarget> {
     let wall = super::ledge::hang_type_at(point, n, collision) == super::ledge::LedgeHangType::Wall;
     let dz = point.y - feet.y;
     let j = if beam { super::ledge_moves::hang_jump_in_beam(dz, wall)? } else { super::ledge_moves::hang_jump_in(dz, wall)? };
     Some(JumpTarget { position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None, ladder: None })
+}
+
+/// Stationary request's box is initialized by 0x1610920 / 0x1610970, consumed by 0xB10990.
+/// PORT: immutable LedgeGrab reports replace the complete 0xE165D0 chain/limb-config and clearance classifier.
+/// Rope/kiosk/pole reports and owner validity cannot be synthesized by this adapter.
+fn static_hand_target(feet:Vec3,forward:Vec3,guidance:&GuidanceWorld,collision:&CollisionWorld)->Option<JumpTarget> {
+    let right=super::right_of(forward);
+    let mut candidates=Vec::new();
+    for edge in &guidance.edges {
+        let one=GuidanceWorld{edges:vec![edge.clone()],..Default::default()};
+        let Some(hit)=one.probe_box(feet+forward*0.5+Vec3::Y*1.85,right,forward,Vec3::Y,
+            Vec3::new(0.5,1.0,1.35),feet,120f32.to_radians(),0.0,1<<1) else {continue;};
+        let point=guidance.fit_hands(hit.point,hit.wall_normal);
+        if !(GRAB_MIN_HEIGHT..=STRAIGHT_JUMP_MAX).contains(&(point.y-feet.y)) {continue;}
+        if let Some(target)=straight_target(feet,point,hit.wall_normal,collision,false) {
+            candidates.push((point,hit.wall_normal,target));
+        }
+    }
+    let reports:Vec<_>=candidates.iter().map(|c|(c.0,c.1)).collect();
+    super::ground_extras::choose_static_report(feet,forward,&reports).map(|i|candidates[i].2)
 }
 
 /// Pull-down type Wait (1) from Movement (0xDB1470 event 70 → fill 0xD843E0 → PullDown_Enter 0xDDE4D0): a

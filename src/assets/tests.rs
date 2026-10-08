@@ -179,6 +179,11 @@ fn locomotion_clips_decode_with_measured_speeds() {
     for id in [0x012D_A39Fu32, 0x0106_D2C5, 0x019A_05F1, 0x1F0C_22C2] {
         assert!(graph.actions.contains_key(&id), "action {id:#x} missing");
     }
+    // Action+8 request IDs differ from their object IDs for the standing jump (0x6E9A30).
+    for (request,object) in [(30,0x00D8_1408),(31,0x00D8_144B),(89,0x00F0_A538)] {
+        assert_eq!(graph.actions[&request].id,object);
+        assert_eq!(graph.actions[&object].request_id,request);
+    }
     // root-motion speeds measured in RE/10 (DISPLACEMENT track / duration)
     let expect = [("walk", 1.90f32), ("jog", 3.54), ("run", 5.12), ("sprint", 6.28)];
     for (name, speed) in expect {

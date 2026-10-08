@@ -623,6 +623,15 @@ fn choose_clip(
             p.hold = None;
         }
         let req = match loco.current {
+            ActorContextId::Ground if g.crouch.is_some() => {
+                let c=g.crouch.unwrap();p.sim_phase=Some(c.phase());
+                sim_request(&mut p,&lib,&c.action,1_800_000+c.sequence as u64,c.fade)
+            }
+            ActorContextId::Ground if g.extra.is_some() => {
+                let extra=g.extra.unwrap();
+                p.sim_phase=Some(extra.phase());
+                sim_request(&mut p,&lib,&extra.action,1_700_000+extra.sequence as u64,0.2)
+            }
             // landing / free-step reception action (0xE05940 / 0xE07D00), shown at the sim's phase
             ActorContextId::Ground if g.oneshot.is_some_and(|os| sim_item(&lib, &os.blend).is_some()) => {
                 let os = g.oneshot.unwrap();

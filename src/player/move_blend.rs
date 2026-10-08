@@ -138,7 +138,7 @@ impl MoveBlend {
 
     /// Lean and bank (0xDA1A3F–0xDA1C2A). `heading` is this frame's body heading snapshot (HG+0x600);
     /// `dest` the wanted heading (DestHeading Data+0x50) when there is one; `avoid` the crowd-avoid
-    /// direction (Data+0x60), which the port does not produce yet.
+    /// direction (Data+0x60), produced from registered actors by `crowd::update_crowd`.
     pub fn update_angles(&mut self, heading: f32, dest: Option<f32>, avoid: Option<f32>, careful: bool, dt: f32) {
         self.lean = update_lean_angle(self.lean, heading, avoid, FRAC_PI_2, dt);
         self.bank = update_lean_angle(self.bank, heading, dest, if careful { FRAC_PI_4 } else { FRAC_PI_2 }, dt);

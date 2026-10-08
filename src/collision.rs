@@ -117,6 +117,7 @@ impl CollisionWorld {
 
 pub struct MoveResult {
     pub position: Vec3,
+    pub velocity: Vec3,
     pub hit_wall: bool,
     pub hit_ceiling: bool,
     pub landed: bool,
@@ -146,8 +147,8 @@ impl CollisionWorld {
     pub fn move_capsule(&self, proxy: &mut crate::proxy::ProxyState, feet: Vec3, delta: Vec3, grounded: bool, dt: f32) -> MoveResult {
         let lift = if grounded { STEP_HEIGHT } else { 0.0 };
         let dt = dt.max(1e-4);
-        let (p, _, t) = crate::proxy::integrate(self, proxy, feet + Vec3::Y * lift, delta / dt, dt, lift);
-        MoveResult { position: p - Vec3::Y * lift, hit_wall: t.wall, hit_ceiling: t.ceiling, landed: t.floor }
+        let (p, velocity, t) = crate::proxy::integrate(self, proxy, feet + Vec3::Y * lift, delta / dt, dt, lift);
+        MoveResult { position: p - Vec3::Y * lift, velocity, hit_wall: t.wall, hit_ceiling: t.ceiling, landed: t.floor }
     }
 
     /// The stick-to-ground cast (`CharacterController__StickToGround` 0x57D240, `crate::proxy::stick_to_ground`): the
@@ -156,6 +157,12 @@ impl CollisionWorld {
     /// contact normal.
     pub fn support(&self, feet: Vec3) -> Option<Support> {
         crate::proxy::stick_to_ground(self, feet, STEP_HEIGHT, SNAP_DOWN).map(|(y, normal_y)| Support { y, normal_y })
+    }
+
+    /// Same stick/fall rule with the live shape height (crouch 0xD859D0).
+    pub fn ground_support_height(&self,feet:Vec3,height:f32)->Option<Support> {
+        let (y,normal_y)=crate::proxy::stick_to_ground_height(self,feet,STEP_HEIGHT,SNAP_DOWN,height)?;
+        (normal_y>=crate::proxy::MAX_SLOPE_COS || self.floor_below(feet,0.8)).then_some(Support{y,normal_y})
     }
 
     /// Height of the floor straight below `p` within `max` (a ray, no footprint).

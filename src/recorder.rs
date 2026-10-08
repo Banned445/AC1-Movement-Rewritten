@@ -23,6 +23,8 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::time::TimeUpdateStrategy;
 
+pub(crate) mod ground_checks;
+
 use crate::anim::AnimPlayer;
 use crate::camera::CameraRig;
 use crate::ik::LimbIk;
@@ -189,6 +191,12 @@ impl Plugin for RecorderPlugin {
                     .add_systems(PostStartup, place_fall_check.after(crate::map_menu::initialize))
                     .add_systems(Update, drive_fall_check.before(record_input));
             }
+        }
+        if let Some(check)=ground_checks::GroundCheck::from_env() {
+            app.insert_resource(check)
+                .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(16_666_667)))
+                .add_systems(PostStartup, ground_checks::place.after(crate::map_menu::initialize).after(replay_place))
+                .add_systems(Update, ground_checks::drive.before(record_input));
         }
         if let Ok(dir) = std::env::var("AC_REPLAY") {
             let dir = std::path::PathBuf::from(dir);
@@ -380,6 +388,10 @@ fn record_state(
     let mut s = gameplay_key(frame, loco, body);
     let _ = write!(s, " | t={:.3} dt={:.4} vel={} gnd={}", time.elapsed_secs(), time.delta_secs(), v3(body.velocity), body.grounded as u8);
     let _ = write!(s, " ground={:?}", data.ground.sub_state);
+    let _=write!(s," extras={:?} crouch={:?} height={:?} speed={:.4} slide={:?}/{:.3}/{}",
+        data.ground.extra.map(|a|(a.mode,a.action.id,a.action.item)),
+        data.ground.crouch.map(|c|(c.mode,c.action.id,c.action.item)),body.proxy.height,data.ground.speed_param,
+        data.air.slope_slide.start_y,data.air.slope_slide.drop(body.feet.y),data.air.slope_slide.ragfall_required as u8);
     if let Some(l) = data.ground.last_landing {
         let _ = write!(s, " landing={:?}/{} fall={:.3} drop={:.3}", l.kind, l.damage, l.fall_height, l.total_drop);
     }
@@ -442,6 +454,7 @@ fn save_bug(
     rec: Res<Recorder>,
     replay: Option<Res<Replay>>,
     mut auto_done: Local<bool>,
+    check: Option<Res<ground_checks::GroundCheck>>,
 ) {
     if replay.is_some() {
         return;
@@ -462,6 +475,7 @@ fn save_bug(
     }
     let (feet, heading) = rec.start.unwrap_or((Vec3::ZERO, 0.0));
     let mut input = String::from("# ac_port recording v1: dt_nanos dir.x dir.y dir.z magnitude speed01 high legs legs_pressed_ago cam_yaw cam_pitch hand_pressed_ago hand_held\n");
+    if let Some(check)=check {let _=writeln!(input,"# ground_check {}",check.name);}
     let _ = writeln!(input, "start {:?} {:?} {:?} {:?}", feet.x, feet.y, feet.z, heading);
     for f in &rec.inputs {
         input.push_str(&f.to_line());

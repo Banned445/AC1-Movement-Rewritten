@@ -36,7 +36,7 @@ impl Sim {
             .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
             .insert_resource(SpawnPoint(SPAWN))
             .init_resource::<CameraRig>()
-            .add_systems(Update, (ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
+            .add_systems(Update, (crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
         let (c, g) = level::geometry();
         app.insert_resource(c).insert_resource(g);
         let player = app.world_mut().spawn(player_components(feet, heading)).id();
@@ -3012,4 +3012,75 @@ fn native_masyaf_runtime_beam_contacts_are_derived_from_ledge_edges() {
     s.run(1.5);
     assert_eq!(s.loco().current,ActorContextId::NarrowObject,"source beam support persists after reception");
     assert_eq!(s.data().narrow.state,crate::player::narrow::BeamState::Wait);
+}
+
+#[test]
+fn ground_extras_static_jump_requires_high_profile_then_returns_to_ground() {
+    let start=Vec3::new(-30.0,0.0,-30.0);
+    let mut s=Sim::new(start,0.0);
+    s.pad(Vec3::ZERO,0.0,false,true);s.run(0.5);assert!(!s.saw_air);
+    s.pad(Vec3::ZERO,0.0,true,true);s.press_legs();
+    s.run(0.4);assert!(!s.saw_air,"holding Legs must remain in FreeRun");
+    assert!(s.ground().extra.is_some());
+    s.pad(Vec3::ZERO,0.0,true,false);
+    let mut top=0.0f32;
+    for _ in 0..120 {s.run(1.0/60.0+0.0001);top=top.max(s.body().feet.y);if s.saw_air {s.pad(Vec3::ZERO,0.0,false,false);}}
+    assert!(s.saw_air,"static jump did not leave Ground");assert!(top>0.2,"static clip did not lift: {top}");
+    assert_eq!(s.loco().current,ActorContextId::Ground);assert!(s.body().feet.y.abs()<0.02);
+}
+
+#[test]
+fn ground_extras_crouch_walk_and_clearance_exit_use_real_ground_system() {
+    let start=Vec3::new(-30.0,0.0,-30.0);let mut s=Sim::new(start,0.0);
+    {
+        let mut helper=s.app.world_mut().get_mut::<crate::player::social::SocialHelper>(s.player).unwrap();
+        helper.allowed=true;helper.set(5); // PORT validation: native status-5 producer remains unknown.
+    }
+    s.run(0.2);assert!(s.ground().crouch.is_some());assert_eq!(s.body().proxy.height,Some(1.0));
+    s.pad(Vec3::NEG_Z,1.0,false,false);s.run(2.0);
+    assert!(s.body().feet.z<start.z-0.2,"crouch root motion missing: {:?}",s.body().feet);
+    s.pad(Vec3::ZERO,0.0,false,false);s.run(0.2);
+    s.app.world_mut().get_mut::<crate::player::social::SocialHelper>(s.player).unwrap().clear(5);
+    s.run(1.0);assert!(s.ground().crouch.is_none());assert_eq!(s.body().proxy.height,None);
+}
+
+#[test]
+fn ground_extras_steep_surface_slides_in_air_then_lands_on_flat() {
+    let mut s=Sim::new_raw(Vec3::new(-30.0,9.0,-30.0),0.0);
+    crate::recorder::ground_checks::slope_fixture(&mut s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>());
+    s.app.insert_resource(crate::guidance::GuidanceWorld::default());
+    s.app.update();
+    assert!(s.run_until(2.0,|s|s.data().air.slope_slide.start_y.is_some()),"no steep contact: {:?}",s.body().feet);
+    assert_eq!(s.loco().current,ActorContextId::InAir);
+    let contact=s.body().feet;
+    assert!(s.run_until(4.0,|s|s.loco().current==ActorContextId::Ground),"stuck: {:?} {:?}",s.body().feet,s.body().velocity);
+    assert!(s.body().feet.x<contact.x-2.0,"did not slide down: {:?}",s.body().feet);
+    assert!(!s.data().air.slope_slide.ragfall_required);
+}
+
+#[test]
+fn ground_extras_social_request_keeps_crouch_under_a_low_ceiling() {
+    let start=Vec3::new(-30.0,0.0,-30.0);let mut s=Sim::new_raw(start,0.0);
+    s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3{
+        min:start+Vec3::new(-2.0,1.2,-2.0),max:start+Vec3::new(2.0,1.5,2.0)});
+    {let mut helper=s.app.world_mut().get_mut::<crate::player::social::SocialHelper>(s.player).unwrap();helper.allowed=true;helper.set(5);}
+    s.app.update();s.run(1.0);assert!(s.ground().crouch.is_some());assert_eq!(s.body().proxy.height,Some(1.0));
+    s.app.world_mut().get_mut::<crate::player::social::SocialHelper>(s.player).unwrap().clear(5);
+    s.run(1.0);assert!(s.ground().crouch.is_some(),"standing must wait for clearance");
+    s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.pop();
+    assert!(s.run_until(1.0,|s|s.ground().crouch.is_none()));assert_eq!(s.body().proxy.height,None);
+}
+
+#[test]
+fn ground_extras_registered_crowd_actor_drives_and_releases_lean() {
+    use crate::player::crowd::{CrowdActor,PushReceiver};
+    let start=Vec3::new(-30.0,0.0,-30.0);let mut s=Sim::new(start,0.0);
+    let actor=s.app.world_mut().spawn((Body{feet:start+Vec3::new(0.6,0.0,-1.0),..default()},CrowdActor{
+        proximity_eligible:true,receiver:PushReceiver{valid:true,relationship_blocks:false,state_63_87_81:false,state_77:false,
+        protected:false,context_blocks:false,move_mode:0,special_gentle:false,event_allowed:true,minimum_reaction:0}})).id();
+    s.pad(Vec3::NEG_Z,0.6,false,false);s.run(0.5);
+    assert!(s.ground().blend.lean.abs()>0.05,"crowd actor did not alter locomotion lean");
+    assert!(s.ground().crowd_avoid.is_none(),"native vector consumed once by the blend");
+    s.app.world_mut().despawn(actor);s.run(2.0);
+    assert!(s.ground().blend.lean.abs()<0.001,"lean did not release: {}",s.ground().blend.lean);
 }
