@@ -1,87 +1,89 @@
 # AC1 Movement Rewritten
 
-A clean-room recreation of Altaïr's movement from Assassin's Creed (2008) in Rust and Bevy: ground locomotion,
-jumps and falls, ledges, climbing, beams, wall runs, ladders and swing bars, on a greybox test level or an
-experimental imported Masyaf environment.
+A clean-room recreation of Altaïr's movement from Assassin's Creed (2008), written in Rust with Bevy.
 
-> **Status: early and unfinished.** This is a work in progress, not a playable game. Many moves are missing or only
-> partly done, animation switches can still look choppy, and some behaviour is a placeholder (marked `PORT:` in the
-> code) until the game's own rule is understood. Expect bugs.
+> **Status: early and unfinished.** Not a playable game. Many moves are missing or partial, animation
+> transitions can still look choppy, and placeholders are marked `PORT:` in the code. Expect bugs.
 
-No game files are included. The program reads Altaïr's model, animations and optional map assets from **your own
-copy** of the game (the Steam PC version, `DataPC.forge` and `DataPC_Masyaf.forge`). Educational and personal use only.
+## What it covers
 
-## Setup
+- Ground locomotion: walk, jog, run, sprint, stops and pivots
+- Jumps, falls and landings
+- Ledges: hang, shimmy, pull-up and drops
+- Climbing walls and climb jumps
+- Wall runs, beams, ladders and swing bars
 
-1. Install Rust: <https://rustup.rs>
-2. Build and run:
+No game files are included. The program reads Altaïr's models, animations and map data from **your own copy**
+of the Steam PC version. Educational and personal use only.
 
-   ```
-   cargo run --release
-   ```
+## Requirements
 
-3. Point it at your game the first time, if it isn't found automatically:
+- Rust (<https://rustup.rs>)
+- Assassin's Creed (2008), PC (Steam)
 
-   ```
-   cargo run --release -- --game-dir "C:\Program Files (x86)\Steam\steamapps\common\Assassin's Creed"
-   ```
+## Run
 
-   Use the folder that contains `AssassinsCreed_Dx9.exe` and `DataPC.forge`. The path is saved to `game_dir.txt`
-   next to the executable, so you only do this once.
-
-The game folder is found in this order: the `AC_GAME_DIR` environment variable, `game_dir.txt`, a folder named
-`Assassin's Creed` beside the project, then your Steam libraries. Without the game the level still runs, with a
-capsule in place of Altaïr and no animations.
-
-An experimental Masyaf rooftop slice can be loaded from your install instead of the greybox:
-
-```powershell
-$env:AC_NATIVE_MAP = "masyaf-roofs"
+```
 cargo run --release
 ```
 
-It reads three source houses, their placements, textures, triangle collision and authored climbing edges,
-plus a ladder between the roofs. Clear `AC_NATIVE_MAP` to return to the greybox. This is a bounded crop:
-surrounding terrain and props are absent, and native material blending, lighting and some guidance-filter
-semantics remain unfinished. It is not yet an exact recreation of the original scene.
+The game folder is found automatically when it sits beside this project or in your Steam libraries. To set it
+yourself, point to the folder that contains `AssassinsCreed_Dx9.exe` and `DataPC.forge`:
 
-Press **F2** in-game to open the debug map menu. Click a map or press **1** (greybox) / **2** (Masyaf roofs) / **3** (Masyaf village)
-to switch without restarting. Switching resets the player and respawn position. Movement pauses while
-the menu is open; **F2** or **Esc** closes it. If a map cannot load, the current scene stays available and
-the menu shows the error.
+```
+cargo run --release -- --game-dir "C:\Program Files (x86)\Steam\steamapps\common\Assassin's Creed"
+```
 
-**Masyaf village** (**3** in the menu, or `AC_NATIVE_MAP=masyaf-village`) expands the sample into a connected
-street and rooftop test area. It loads four neighbouring village cells and the shared native ground:
-145 static placements, including houses, ladders, walls, rocks, stairs and props, with original collision
-and authored climbing edges. You spawn on a street and can climb to the roofs. Camera obstruction
-avoidance keeps nearby buildings from blocking the view. Source street walking and a street-to-roof
-ladder route are tested. This is a village test area, with surrounding ground extending beyond the
-imported buildings; other city cells, animated vegetation, NPCs and original material blending remain absent.
+The path is saved to `game_dir.txt`, so you only do this once. You can also set the `AC_GAME_DIR`
+environment variable. Without the game, the level still runs with a capsule in place of Altaïr.
 
 ## Controls
 
-WASD move, left mouse button capture the mouse (Esc releases it), right mouse button high profile, Space legs
-(with the right button held: sprint / free-run; into a wall: climb or grab), E empty hand (drop off a ladder), G show the climbable edges, F9 save a bug
-report, F1 hide the help. The full list is on screen.
+| Input | Action |
+|---|---|
+| WASD | Move |
+| Left mouse | Capture mouse (Esc releases) |
+| Right mouse (hold) | High profile |
+| Space | Legs. Into a wall: climb or grab. With right mouse held: sprint / free-run |
+| E | Empty hand (drop off a ladder) |
+| G | Show climbable edges |
+| F1 | Toggle help |
+| F2 | Debug map menu |
+| F9 | Save a bug report |
+
+## Maps
+
+Press **F2** to open the map menu, then click a map or press a number key. Switching resets the player.
+
+| Key | Map |
+|---|---|
+| 1 | Greybox test level (default) |
+| 2 | Masyaf roofs |
+| 3 | Masyaf village |
+
+Masyaf maps are imported from your install. They are bounded crops: surrounding terrain, props, NPCs and
+vegetation are absent, and materials are not exact.
+
+To start on a native map from the command line:
+
+```powershell
+$env:AC_NATIVE_MAP = "masyaf-village"   # or "masyaf-roofs"; unset to use the greybox
+cargo run --release
+```
 
 ## Progress
 
-Movement only: there is no combat or NPCs. The default scene is a greybox test level; the optional Masyaf
-slice imports a small section of the original environment.
-
 | Area | State |
 |---|---|
-| Imported environments | Experimental Masyaf roofs and connected village, with source textures, collision and climbing edges; exact materials, surrounding city cells and vegetation remain unfinished |
-| Ground: walk, jog, run, sprint, stops, pivots | Working. The full ground state machine is not done yet, so some transitions into and out of the run are simplified |
-| Jumps, falls and landings | Mostly working. Some fall and damage cases are missing |
-| Ledges: hang, shimmy, corners, pull-up, drops | Mostly working. Hand spacing after a shimmy is a placeholder |
-| Climbing on walls, climb jumps | Working, with placeholders in hold choice and some jump paths |
-| Wall runs | Working |
-| Beams: walking, 90° turns, pull-down, corner hops, bends, support loss and climb starts | Mostly working. Entry and step-off use locomotion; bends steer gradually and hop landings move. Impulsion uses the native 0.2 s input delay; jump/hop completion waits until past item end. Native animation queue scheduling and obstacle target selection still need comparison |
-| Ladders | Mostly working. The ladder turn and the hang's side jump are missing |
+| Ground | Working. Some transitions into and out of the run are simplified |
+| Jumps and falls | Mostly working. Some fall and damage cases missing |
+| Ledges | Mostly working. Hand spacing after a shimmy is a placeholder |
+| Climbing and wall runs | Working |
+| Beams | Mostly working. Some bends and hop landings still approximate |
+| Ladders | Mostly working. Ladder turn and side jump missing |
 | Swing bars | Working |
-| Animation: blending, transitions, foot and hand IK | Partial. Transitions into the ground run are skipped for now, which is the main source of choppy switches |
-| Character appearance | All 15 Rank 9 parts load, including the face, lower robe and sheathed equipment. Authored material parameters, specular masks, cloth/skin/metal ramps, eye reflection and separate inside-cloth materials load from the install. Character template lighting has a comparison switch; original-game shader parity remains unverified. Robe folds, exact weapon offsets and facial expressions remain unfinished |
+| Animation and IK | Partial. Transitions into the ground run are skipped for now |
+| Character | All Rank 9 parts load. Robe folds, weapon offsets and facial expressions unfinished |
 | Not started | Crouch, crowds, swimming, hay and kiosk hiding, slope slides, combat |
 
 ## Tests
@@ -91,23 +93,3 @@ cargo test --release
 ```
 
 Tests that need game data skip themselves when the game isn't found.
-
-`AC_CHARACTER_MATERIAL_LAYERS=0` compares the previous character PBR materials. The default character shader
-uses authored specular power/color/factor, cloth rim layers, skin masks, lighting ramps and eye reflection.
-Bevy still supplies light units, ambient light, shadows, exposure and fog; native environment permutations,
-sampler/color-space fidelity and a matched original-game comparison remain unfinished. The inside-cloth draw
-shares its mesh with the outer draw, including the simulated robe; it does not add a second cloth solver.
-
-For robe comparisons, `AC_CLOTH_NATIVE_DISPATCH=0` restores the previous accumulated 30 Hz schedule.
-The default passes one 0.033333 s step per active frame, with entity motion sampled over the same interval.
-Native task/LOD scheduling is still unported, so this is not a guarantee of identical behaviour at every frame rate.
-`AC_CLOTH_DIAGNOSTICS=1` reports target lag, edge stretch and contact counts. Hood and sword-tag dynamics use
-four authored hinges, a hood look-at frame and the sword's soft angular limit. `AC_CHARACTER_EQUIPMENT_DYNAMICS=0`
-restores their previous rest poses. The secondary skirt chain remains experimental (`AC_SKIRT_ROTATION_COPIES=1`)
-and disabled by default because jump folds remain. Native pose/LOD scheduling and environmental forces are unfinished.
-
-To reproduce the native-map walk-to-freerun transition, set `AC_NATIVE_MAP=masyaf-village` and
-`AC_AUTOPILOT=native-freerun`. It walks from the map spawn and presses Legs in high profile after two seconds.
-Native query bounds filtering and cached static jump candidates are enabled by default;
-`AC_NATIVE_QUERY_CULLING=0` disables them for comparison. A manual CPU timing check is available with
-`cargo test --release profile_native_freerun_transition -- --ignored --nocapture`.
