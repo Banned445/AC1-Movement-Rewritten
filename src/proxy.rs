@@ -632,7 +632,7 @@ mod tests {
     fn review_shallow_incidence_cast_detects_the_wall() {
         let w = boxes(&[(Vec3::new(0.451, -2.0, -50.0), Vec3::new(1.451, 4.0, 50.0))]);
         let disp = Vec3::new(0.102, 0.0, 0.75);
-        let hits = linear_cast(&w, 0, Vec3::ZERO, disp, 0.0);
+        let hits = linear_cast(&w, 0, Vec3::ZERO, disp, 0.0, CAPSULE_HEIGHT);
         assert_eq!(hits.len(), 1, "capsule crosses the wall at 0.101 / 0.102 but cast returned {hits:?}");
         assert!((hits[0].fraction - 0.101 / 0.102).abs() < 0.002, "{hits:?}");
         assert!(hits[0].normal.dot(Vec3::NEG_X) > 0.999);
@@ -646,7 +646,7 @@ mod tests {
             Vec3::new(0.451, 0.0, 10.0),
         ], crate::layers::STATIC).unwrap();
         let w = CollisionWorld { triangles: vec![tri], ..Default::default() };
-        let hits = linear_cast(&w, 0, Vec3::ZERO, Vec3::new(0.102, 0.0, 0.75), 0.0);
+        let hits = linear_cast(&w, 0, Vec3::ZERO, Vec3::new(0.102, 0.0, 0.75), 0.0, CAPSULE_HEIGHT);
         assert_eq!(hits.len(), 1, "shallow triangle crossing was missed: {hits:?}");
         assert!((hits[0].fraction - 0.101 / 0.102).abs() < 0.002, "{hits:?}");
         assert!(hits[0].normal.dot(Vec3::NEG_X) > 0.999);
@@ -656,9 +656,9 @@ mod tests {
     fn review_cast_clear_paths_and_layers_remain_clear() {
         let w = boxes(&[(Vec3::new(0.451, -2.0, -50.0), Vec3::new(1.451, 4.0, 50.0))]);
         for disp in [Vec3::new(0.1, 0.0, 0.75), Vec3::new(-0.102, 0.0, 0.75), Vec3::new(0.0, 0.0, 0.75)] {
-            assert!(linear_cast(&w, 0, Vec3::ZERO, disp, 0.0).is_empty(), "false contact for {disp:?}");
+            assert!(linear_cast(&w, 0, Vec3::ZERO, disp, 0.0, CAPSULE_HEIGHT).is_empty(), "false contact for {disp:?}");
         }
-        assert!(linear_cast(&w, crate::layers::MAIN_CHARACTER_NO_STATIC, Vec3::ZERO, Vec3::new(0.102, 0.0, 0.75), 0.0).is_empty());
+        assert!(linear_cast(&w, crate::layers::MAIN_CHARACTER_NO_STATIC, Vec3::ZERO, Vec3::new(0.102, 0.0, 0.75), 0.0, CAPSULE_HEIGHT).is_empty());
     }
 
     #[test]
