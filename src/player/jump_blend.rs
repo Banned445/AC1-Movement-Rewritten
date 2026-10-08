@@ -58,6 +58,8 @@ pub const LAND_DAMAGE_ROLL: u32 = 0x010D_D70B;
 pub const DUMPED_ACTIONS: &[u32] = &[
     TAKEOFF_RUN[0], TAKEOFF_RUN[1], TAKEOFF_FREESTEP[0], TAKEOFF_FREESTEP[1],
     FLIGHT_FREESTEP[0], FLIGHT_FREESTEP[1],
+    // the flights to hang targets (wall hang / ladder: `…_to_surface`; free hang and the rest: `…_to_swing`)
+    FLIGHT_SURFACE[0], FLIGHT_SURFACE[1], FLIGHT_SWING[0], FLIGHT_SWING[1],
     TAKEOFF_FREESTEP_DOWN[0], TAKEOFF_FREESTEP_DOWN[1], FLIGHT_FREESTEP_DOWN[0], FLIGHT_FREESTEP_DOWN[1],
     RECEPTION_FREESTEP[0], RECEPTION_FREESTEP[1],
     LAND_FORWARD_MOVE[0], LAND_FORWARD_MOVE[1], LAND_FORWARD_STOP[0], LAND_FORWARD_STOP[1],
@@ -488,6 +490,22 @@ mod tests {
             assert!((s - 1.0).abs() < 1e-4, "dz {dz} dist {dist}: {s} {:?}", b);
             let st: f32 = b.takeoff_w.iter().sum();
             assert!((st - 1.0).abs() < 1e-4, "takeoff sum {st}");
+        }
+    }
+
+    #[test]
+    fn every_target_type_has_a_flight_with_clips() {
+        // bugs 1791501015 / 1791501115: the hang-target flights were missing from the clip table, so the jump to a
+        // ledge lasted only its takeoff (0.2 s over 4 m) and played no flight clip
+        for ty in [TARGET_FREESTEP, 0x40, 0x80, 0x1000, 2] {
+            for foot_left in [true, false] {
+                for &(dz, dist) in &[(0.7, 2.6), (0.7, 4.3), (2.3, 1.6), (0.0, 3.0)] {
+                    let b = compute(dz, dist, ty, foot_left, 1.0);
+                    let d = ActionBlend::new(b.flight, 0, &b.flight_w).duration();
+                    assert!(action_items(b.flight).is_some(), "flight {:#x} of type {ty:#x} not in the clip table", b.flight);
+                    assert!(d > 0.1, "type {ty:#x} dz {dz} dist {dist}: flight {:#x} lasts {d}", b.flight);
+                }
+            }
         }
     }
 

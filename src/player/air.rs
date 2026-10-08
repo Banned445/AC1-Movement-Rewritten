@@ -327,6 +327,10 @@ impl HumanInAirData {
         self.flight = Some(flight);
         let end = add(takeoff.disp(1.0), flight.disp(1.0));
         let clip_end = from + to_world(end, fwd);
+        if std::env::var_os("AC_ANIM_LOG").is_some() {
+            info!("target jump: type {target_type:#x} kind {kind} dz {:.2} dist {:.2}: takeoff {takeoff_id:#010x} {t1:.2}s, flight {flight_id:#010x} {t2:.2}s, clip end {:.2} vs aim {:.2}",
+                aim.y - from.y, flat.length(), (clip_end - from).length(), (aim - from).length());
+        }
         AirMode::Jump { from, clip_end, aim, apex: 0.0, duration: (t1 + t2).max(1e-3), t: 0.0, then_fall_to, real: true, t_takeoff: t1, fwd }
     }
 }
@@ -341,6 +345,9 @@ impl HumanInAirData {
         self.flight = Some(flight);
         let d = flight.duration();
         let clip_end = from + to_world(flight.disp(1.0), fwd);
+        if std::env::var_os("AC_ANIM_LOG").is_some() {
+            info!("straight jump: flight {:#010x} b {:.2} {d:.2}s, clip end {:.2} vs aim {:.2}", j.flight, j.b, (clip_end - from).length(), (aim - from).length());
+        }
         AirMode::Jump { from, clip_end, aim, apex: 0.0, duration: d.max(0.2), t: 0.0, then_fall_to: None, real: true, t_takeoff: 0.0, fwd }
     }
 }

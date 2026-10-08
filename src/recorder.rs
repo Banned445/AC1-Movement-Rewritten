@@ -2,7 +2,7 @@
 //!
 //! **Recording (always on).** Every frame the recorder keeps:
 //! - the frame's exact timestep (nanoseconds) and the final pad state the gameplay systems read, for the whole session;
-//! - a state line for the last `RING_FRAMES` frames: context, root, heading, velocity, context actions, the playing
+//! - a state line for every frame of the last `RING_SECONDS`: context, root, heading, velocity, context actions, the playing
 //!   animation, the IK goals and weights, and where the hand / elbow / foot / knee bones ended up after the solve.
 //!
 //! **F9** writes `bugs/bug-<unix time>/` in the project folder:
@@ -32,8 +32,8 @@ use crate::input::PadInput;
 use crate::model::Rig;
 use crate::player::{Body, HumanDataBundle, LimbTargets, Locomotion, Player, PlayerSet};
 
-/// Frames of state kept for a bug report (10 s at 60 fps).
-pub const RING_FRAMES: usize = 600;
+/// Seconds of state kept for a bug report. Kept by time, not frames: 600 frames at 144 fps held only 4 s.
+pub const RING_SECONDS: f32 = 10.0;
 
 /// Where bug folders go: `bugs/` in the crate root when started by cargo (`cargo run` / `cargo test` set
 /// `CARGO_MANIFEST_DIR` at run time), else `bugs/` next to the executable, like `game_dir.txt`. Read at run time so
@@ -161,7 +161,8 @@ struct Recorder {
     frame: u64,
     start: Option<(Vec3, f32)>,
     inputs: Vec<InputFrame>,
-    ring: VecDeque<String>,
+    /// (time, state line) for the last `RING_SECONDS`.
+    ring: VecDeque<(f32, String)>,
 }
 
 #[derive(Resource)]
@@ -337,7 +338,7 @@ fn replay_advance(mut replay: ResMut<Replay>, rec: Res<Recorder>, mut strategy: 
         Some(f) => *strategy = TimeUpdateStrategy::ManualDuration(Duration::from_nanos(f.dt_nanos)),
         None => {
             let path = replay.dir.join("replay_state.txt");
-            let text: String = rec.ring.iter().map(|l| format!("{l}\n")).collect();
+            let text: String = rec.ring.iter().map(|(_, l)| format!("{l}\n")).collect();
             match std::fs::write(&path, text) {
                 Ok(()) => info!("replay done: {}", path.display()),
                 Err(e) => error!("replay: cannot write {}: {e}", path.display()),
@@ -440,8 +441,9 @@ fn record_state(
             }
         }
     }
-    rec.ring.push_back(s);
-    while rec.ring.len() > RING_FRAMES {
+    let now = time.elapsed_secs();
+    rec.ring.push_back((now, s));
+    while rec.ring.front().is_some_and(|(t, _)| *t < now - RING_SECONDS) {
         rec.ring.pop_front();
     }
 }
@@ -481,7 +483,7 @@ fn save_bug(
         input.push_str(&f.to_line());
         input.push('\n');
     }
-    let state: String = rec.ring.iter().map(|l| format!("{l}\n")).collect();
+    let state: String = rec.ring.iter().map(|(_, l)| format!("{l}\n")).collect();
     let note = "Describe what looked wrong, and roughly when (seconds before pressing F9):\n\n";
     let ok = std::fs::write(dir.join("input.txt"), input).is_ok()
         && std::fs::write(dir.join("state.txt"), state).is_ok()

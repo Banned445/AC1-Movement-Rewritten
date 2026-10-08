@@ -75,6 +75,17 @@ mod beam_warp_tests {
         assert!(w.root_at(0.14).distance(w.root_at(0.13)) < 0.1);
         assert!(w.root_at(0.3).y > target.y);
     }
+
+    #[test]
+    fn ledge_hands_keep_left_and_right_whichever_way_the_edge_runs() {
+        // facing +Z into a wall whose outward normal is -Z: the climber's right is -X
+        for dir in [Vec3::X, Vec3::NEG_X] {
+            let c = LedgeCandidate { point: Vec3::new(0.0, 2.0, 0.0), normal: Vec3::NEG_Z, edge_dir: dir, height: 2.0, lateral: 0.0 };
+            let (l, r) = hands(&c);
+            assert!(l.x > r.x, "left hand on the climber's left for edge direction {dir}");
+            assert!((l.distance(r) - 0.4).abs() < 1e-6);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -290,8 +301,11 @@ fn classify(c: &LedgeCandidate, collision: &CollisionWorld) -> u8 {
     }
 }
 
+/// The two hands 0.2 m either side of the grab point along the edge, the left hand on the climber's left. Edges are
+/// authored in either direction, so the edge direction is first turned to the climber's right.
 fn hands(c: &LedgeCandidate) -> (Vec3, Vec3) {
-    let along = if c.edge_dir == Vec3::ZERO { right_of(-c.normal) } else { c.edge_dir };
+    let right = right_of(-Vec3::new(c.normal.x, 0.0, c.normal.z).normalize_or_zero());
+    let along = if c.edge_dir == Vec3::ZERO { right } else if c.edge_dir.dot(right) < 0.0 { -c.edge_dir } else { c.edge_dir };
     (c.point - along * 0.2, c.point + along * 0.2)
 }
 
