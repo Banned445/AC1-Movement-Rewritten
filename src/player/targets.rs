@@ -228,7 +228,8 @@ pub fn find_jump_target(
         }
         let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
         let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
-        let Some(h) = super::ladder::catch_height(feet.y + 1.0 - base.y, top.y - base.y) else { continue };
+        // PORT: retain the existing target-candidate rounding slack; incidental catches use exact truncation.
+        let Some(h) = super::ladder::catch_height(feet.y + 1.0 - base.y + 0.0005, top.y - base.y) else { continue };
         if Vec3::new(feet.x - base.x, 0.0, feet.z - base.z).dot(n) <= 0.0 {
             continue;
         }
@@ -275,6 +276,32 @@ pub fn find_jump_target(
 }
 
 /// True when there is no floor a short way ahead (approaching a roof edge).
+/// The jump off a ledge or a climb wall (`GoAssassinActionInterpreter__LedgeState` 0xEEC89F, `__ClimbState`
+/// 0xEE6372, event 2): the stick when it is past the dead zone, else straight away from the wall (`away` = the wall's
+/// outward normal); turned to 89 degrees off `away` when it points further round, refused beyond 135 (into the wall).
+pub fn jump_off_wall_dir(stick: Option<Vec3>, away: Vec3) -> Option<Vec3> {
+    let away = Vec3::new(away.x, 0.0, away.z).normalize_or_zero();
+    let want = stick.map(|d| Vec3::new(d.x, 0.0, d.z).normalize_or(away)).unwrap_or(away);
+    let a = away.angle_between(want);
+    if a > 135f32.to_radians() {
+        return None;
+    }
+    if a > std::f32::consts::FRAC_PI_2 {
+        let side = if away.cross(want).y >= 0.0 { 1.0 } else { -1.0 };
+        return Some(Quat::from_rotation_y(1.553_343_1 * side) * away);
+    }
+    Some(want)
+}
+
+/// Its target (0xEEC89F): the guidance search along `dir`, else the free-jump target (vt68 -> 0xB1E7F0, 8 m along it,
+/// 3 m down). PORT: the Leap of Faith search in between (vt76) is not modelled for these jumps.
+pub fn jump_off_wall_entry(from: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> super::air::InAirEntry {
+    match find_jump_target(from, dir, guidance, collision) {
+        Some(target) => super::air::InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true },
+        None => super::air::InAirEntry::FreeJump { from, dir, speed_param: 0.5, foot_left: true },
+    }
+}
+
 pub fn edge_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> bool {
     let probe = feet + forward * 0.6 + Vec3::Y * 0.05;
     collision.ground_height(probe, 0.6).is_none()

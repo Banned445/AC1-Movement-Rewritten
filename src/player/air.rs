@@ -106,7 +106,9 @@ pub enum InAirEntry {
     /// PORT: `speed_param` seeds the entry; 0xEDBAF0 updates the live air ratio on subsequent updates;
     /// `foot_left` = the leading foot (byte+60 bits 2–3 of the playing item, or sub_B18850).
     JumpToTarget { from: Vec3, target: JumpTarget, speed_param: f32, foot_left: bool },
-    FreeJump { from: Vec3, dir: Vec3, speed_param: f32 },
+    /// No target found: the free-jump target (`Human__MakeFreeJumpTarget` 0xB13630 → 0xB1E7F0, `FREE_JUMP_AHEAD` along
+    /// `dir`, `FREE_JUMP_DOWN` below), jumped at like any target (type 1) and ended by the ground contact.
+    FreeJump { from: Vec3, dir: Vec3, speed_param: f32, foot_left: bool },
     /// A free-step jump (jump kind 1: the `freestep_*_to_air` takeoff) from a beam or a pilotis to a target
     /// (NarrowObject event 4 → `Human__SetupJumpToTarget` 0xB20200 with kind 1, 0xE4D950).
     FreeStepJump { from: Vec3, target: JumpTarget, foot_left: bool },
@@ -180,12 +182,13 @@ pub struct HumanInAirData {
     /// The action played once the jump turns into a fall (HumanInAirData+416), and the time since.
     pub fall_action: Option<ActionBlend>,
     pub fall_t: f32,
-    /// PORT (free jump without a target): the clips' horizontal displacement is spread evenly over the jump. The
-    /// free-step flight is authored to brake onto a landing spot; with nothing to land on that read as a stagger
-    /// in mid-air. The vertical arc stays the clips'.
-    pub flat_horizontal: bool,
+    /// The jump is at the free-jump target (no target found): the ground contact ends it, as it does in the game
+    /// (0xE05200 on the controller contact) long before the target 3 m down is reached.
+    pub free_target: bool,
     /// Ground loss: the drop sub-state's (type, side) (InAirData+944 +64 / +68) and the edge's outward normal.
     pub drop: Option<(usize, usize, Option<Vec3>)>,
+    /// First steep contact and rag-fall requirement (0xE038A0 / 0xE05200).
+    pub slope_slide: super::ground_extras::SlopeSlide,
 }
 
 impl HumanInAirData {
@@ -198,8 +201,9 @@ impl HumanInAirData {
         self.time_in_air = 0.0;
         self.fall_action = None;
         self.fall_t = 0.0;
-        self.flat_horizontal = false;
+        self.free_target = false;
         self.drop = None;
+        self.slope_slide = default();
         self.entry_velocity = None;
         match entry {
             InAirEntry::JumpToTarget { from, target, speed_param, foot_left } => {
@@ -277,25 +281,20 @@ impl HumanInAirData {
                 let d = action.duration().max(0.1);
                 self.mode = AirMode::Jump { from, clip_end, aim: clip_end, apex: 0.0, duration: d, t: 0.0, then_fall_to: Some(clip_end), real: true, t_takeoff: 0.0, fwd };
             }
-            InAirEntry::FreeJump { from, dir, speed_param } => {
+            InAirEntry::FreeJump { from, dir, speed_param, foot_left } => {
                 self.start_y = from.y;
                 self.start = from;
                 self.apex_y = from.y;
                 self.prev_y = from.y;
                 self.speed_ratio = speed_param;
-                self.foot_left = true;
-                // PORT: the game always jumps to a target (vt28 resolves one, 0xD832F0); with none in
-                // range the port jumps FREE_JUMP_DISTANCE ahead with the free-step blend, then falls.
-                // The blend is weighted for that distance, but no correction pulls the jump onto it: the clips'
-                // own displacement plays out and the fall carries on at their end velocity. (A correction toward a
-                // point closer than the clips' reach braked a running jump in mid-air, 7.8 → 4 m/s.)
-                let aim = from + dir * FREE_JUMP_DISTANCE;
+                self.foot_left = foot_left;
+                // the game's free-jump target (0xB1E7F0): 8 m ahead, 3 m down, type 1, jumped at through
+                // `Human__SetupJumpToTarget` like any target; on open ground the contact ends the jump long before
+                // it (live: 0.66 s, 4.8 m), off a roof it falls on from there
+                let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
+                let aim = from + flat * FREE_JUMP_AHEAD - Vec3::Y * FREE_JUMP_DOWN;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
-                if let AirMode::Jump { clip_end, aim, then_fall_to, .. } = &mut self.mode {
-                    *aim = *clip_end;
-                    *then_fall_to = Some(*clip_end);
-                }
-                self.flat_horizontal = true;
+                self.free_target = true;
             }
             InAirEntry::Fall { from, velocity, origin, speed_param } => {
                 self.entry_velocity = Some(velocity);
@@ -320,8 +319,9 @@ impl HumanInAirData {
         let flat = Vec3::new(aim.x - from.x, 0.0, aim.z - from.z);
         let fwd = flat.normalize_or(Vec3::NEG_Z);
         let b = jump_blend::compute_kind(aim.y - from.y, flat.length(), target_type, self.foot_left, 1.0, kind);
-        let takeoff = ActionBlend::new(b.takeoff, 0, &b.takeoff_w);
-        let flight = ActionBlend::new(b.flight, 0, &b.flight_w);
+        let (takeoff_id, flight_id) = jump_blend::down_variants(b.takeoff, b.flight, aim.y - from.y);
+        let takeoff = ActionBlend::new(takeoff_id, 0, &b.takeoff_w);
+        let flight = ActionBlend::new(flight_id, 0, &b.flight_w);
         let (t1, t2) = (takeoff.duration(), flight.duration());
         self.takeoff = Some(takeoff);
         self.flight = Some(flight);
@@ -366,14 +366,7 @@ fn to_world(d: [f32; 3], fwd: Vec3) -> Vec3 {
 
 /// Blended root displacement of the jump at time `t` (takeoff item, then the flight item from its end).
 fn jump_disp(air: &HumanInAirData, t: f32, t1: f32, duration: f32) -> [f32; 3] {
-    let mut d = jump_disp_clips(air, t, t1, duration);
-    if air.flat_horizontal {
-        let end = jump_disp_clips(air, duration, t1, duration);
-        let u = (t / duration.max(1e-4)).clamp(0.0, 1.0);
-        d[0] = end[0] * u;
-        d[1] = end[1] * u;
-    }
-    d
+    jump_disp_clips(air, t, t1, duration)
 }
 
 fn jump_disp_clips(air: &HumanInAirData, t: f32, t1: f32, duration: f32) -> [f32; 3] {
@@ -511,7 +504,10 @@ pub fn update_air(
                 body.heading = super::heading_of(fwd);
                 body.feet = r.position;
                 let blocked = (r.position - next).length() > JUMP_BLOCKED_LAG;
-                if blocked {
+                if air.free_target && r.landed && path_vel.y <= 0.0 {
+                    // the free jump comes down on the ground before its target (0xE05200, controller contact)
+                    landed_at = Some(body.feet.y);
+                } else if blocked {
                     // held back by a wall (anti-stuck 0xE0B1E0, simplified): fall from here with the path's
                     // horizontal velocity damped and no upward push
                     air.mode = AirMode::Fall { steer_to: None };
@@ -573,7 +569,7 @@ pub fn update_air(
                         }
                     }
                     // a jump without a real target (on the spot / free jump) can come down on a beam or a pilotis
-                    if air.target.is_none() && hang_on.is_none() {
+                    if !AIR_CATCHES && air.target.is_none() && hang_on.is_none() {
                         narrow_on = narrow_catch(body.feet, fwd, foot, &guidance, &collision);
                     }
                     match then_fall_to {
@@ -640,14 +636,28 @@ pub fn update_air(
                 }
                 air.fall_t += dt;
                 // narrow objects are caught before the ground contact (0xE0BB70 runs before 0xE05200)
-                if body.velocity.y <= 0.0 && air.apex_y - body.feet.y < 9.0 && air.time_in_air > 0.1 {
+                if !AIR_CATCHES && body.velocity.y <= 0.0 && air.apex_y - body.feet.y < 9.0 && air.time_in_air > 0.1 {
                     narrow_on = narrow_catch(body.feet + body.velocity * dt, body.forward(), foot, &guidance, &collision);
                 }
                 let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, b.velocity * dt, false, dt) };
                 body.feet = r.position;
+                // PORT: static proxy contacts have no character bodies. The 0.3 m / Data+528
+                // rejection gate (0xE038A0) is inactive until native AntiStuckNudge (0xE0B1C0)
+                // arms it; that recovery path is not yet ported.
+                let contact = if GAME_GROUND_EXTRAS {
+                    super::ground_extras::ground_contact(body.proxy.manifold.iter().map(|c| c.normal.y))
+                } else { super::ground_extras::GroundContact::None };
+                if contact == super::ground_extras::GroundContact::Steep {
+                    air.slope_slide.contact(contact, body.feet.y);
+                    let height = if air.apex_reached { air.apex_y-body.feet.y } else { 0.0 };
+                    air.slope_slide.check(height,body.feet.y,false);
+                    // PORT: articulated RagFall is a logged dependency; retain the required flag instead of
+                    // inventing a ragdoll/recovery animation (native 0xE05200 -> 0xDCE480).
+                    body.velocity = r.velocity;
+                }
                 if narrow_on.is_some() {
                     // caught: the entry warps the root onto the beam / top
-                } else if r.hit_wall {
+                } else if r.hit_wall && contact != super::ground_extras::GroundContact::Steep {
                     body.velocity.x = 0.0;
                     body.velocity.z = 0.0;
                 }
@@ -668,19 +678,44 @@ pub fn update_air(
                 if narrow_on.is_some() || hay_on.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 {
                     landed_at = Some(body.feet.y);
-                } else if if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
+                } else if !AIR_CATCHES && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
                     // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
                     // in reach
                     if let Some(e) = super::ladder::find_ladder_catch(body.feet, body.forward(), true, &guidance, &collision) {
                         ladder_on = Some(e);
                     } else if let Some(h) = find_air_catch(body.feet, body.forward(), &guidance) {
                         air.long_catch = air.apex_y - body.feet.y >= 3.0;
-                        hang_on = Some(LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception));
+                        hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception) });
                     }
                 }
             }
             AirMode::Idle => {
                 air.mode = AirMode::Fall { steer_to: None };
+            }
+        }
+
+        if AIR_CATCHES && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
+            let fall_height = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
+            let manual = super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
+            let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), air.target.map(|t| t.type_flags), body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
+            // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
+            let reach = if manual && pad.speed01 > 0.0 { pad.dir } else { body.forward() };
+            if manual || automatic {
+                if let Some(mut e) = super::ladder::find_ladder_catch(body.feet, reach, manual, &guidance, &collision) {
+                    e.facing = body.forward();
+                    e.catch_speed = body.velocity.length();
+                    ladder_on = Some(e);
+                } else if manual {
+                    // PORT: the pre-existing generic ledge adapter is outside this catch-geometry pass.
+                    if let Some(h) = find_air_catch(body.feet, reach, &guidance) {
+                        air.long_catch = fall_height >= 3.0;
+                        hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception) });
+                    }
+                }
+            }
+            if ladder_on.is_none() && hang_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
+                let ahead = super::air_catches::target_ahead(body.feet, air.target, &collision);
+                if !ahead { narrow_on = narrow_catch(body.feet, body.forward(), foot, &guidance, &collision); }
             }
         }
 
@@ -699,6 +734,7 @@ pub fn update_air(
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
+            if AIR_CATCHES { data.ladder.advance_catch_root(&mut body, dt); }
         } else if let Some(entry) = hang_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
@@ -721,6 +757,7 @@ pub fn update_air(
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, setup);
+            if AIR_CATCHES { data.narrow.advance_catch_root(&mut body, dt); }
         } else if let Some(e) = hay_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;

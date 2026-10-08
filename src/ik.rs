@@ -184,6 +184,8 @@ pub const ADJUST_HEAD: u8 = 2;
 
 /// Bone ids: Hips, Spine, Head (CRC32 of the names; the exe queries the same hashes in 0xE57570).
 const HIPS: u32 = 0xded1_0611;
+/// The skeleton's Reference bone (its root, carrying the root motion).
+const REFERENCE: u32 = 0x2c52_cbb0;
 const SPINE: u32 = 0x530e_c1cb;
 const HEAD: u32 = 0x07c1_59a2;
 
@@ -201,6 +203,12 @@ pub struct LimbIk {
     pub ground: [GroundFoot; 2],
     pub pelvis: f32,
     pub stick: StickToGround,
+    /// IKGroundBiped +1520 bit 3: switched off on even ground; stays off while a foot is still fading out.
+    ground_off: bool,
+    /// Each foot's cached ground hit (point, normal, seconds left), re-probed every 0.3-0.5 s (`FootIK__ProbeGroundCached`
+    /// 0x432730), and the random state for that interval.
+    ground_cache: [Option<(Vec3, Vec3, f32)>; 2],
+    rng: u32,
     /// Joint indices of each chain (resolved once from the rig).
     chains: Option<[[usize; 3]; 4]>,
 }
@@ -292,9 +300,12 @@ impl GroundFoot {
         }
     }
     fn fade_out(&mut self) {
-        // sub_42D5E0: unless off, or already fading out with less than the new time left
-        if self.state != 0 && (self.state != 3 || self.dur - self.t > GROUND_IK_FADE) {
-            (self.t, self.dur, self.from) = (0.0, GROUND_IK_FADE, self.goal);
+        self.fade_out_for(GROUND_IK_FADE);
+    }
+    /// `FootIK__FadeOut` 0x42D5E0: unless off, or already fading out with less than the new time left.
+    fn fade_out_for(&mut self, dur: f32) {
+        if self.state != 0 && (self.state != 3 || self.dur - self.t > dur) {
+            (self.t, self.dur, self.from) = (0.0, dur, self.goal);
             self.state = 3;
         }
     }
@@ -396,6 +407,39 @@ fn ground_socket(c: &crate::collision::CollisionWorld, ankle: Vec3, knee: Vec3, 
     (knee.y - target >= 0.15).then_some(target)
 }
 
+/// `FootIK__FindGroundSocket` 0x432940 with `FootIK__ProbeGroundCached` 0x432730: the ground ray (`FootIK__RayDown`
+/// 0x432570, from 0.5 m above the ankle, 1 m down, boxes and mesh faces) is cast again only when its 0.3-0.5 s timer has
+/// run out after a hit (an expiry on the game clock `qword_1A1E7B0`, so it also runs out while moving: `solve_limbs`
+/// counts it down every frame); in between the cached hit plane is used under the ankle's current x / z. The target is the hit
+/// plus the ankle's animated height; refused when the knee would be less than 0.15 m above it. PORT: the ray's filter
+/// (dword_1934170) is not decoded; every static surface counts.
+fn cached_socket(c: &crate::collision::CollisionWorld, cache: &mut Option<(Vec3, Vec3, f32)>, rng: &mut u32, ankle: Vec3, knee: Vec3, ankle_height: f32) -> Option<f32> {
+    let h = match cache.as_mut().filter(|e| e.2 > 0.0) {
+        Some((p, n, _)) => {
+            if (n.y - 1.0).abs() > 0.0005 && n.y.abs() > 1e-3 {
+                p.y - (n.x * (ankle.x - p.x) + n.z * (ankle.z - p.z)) / n.y
+            } else {
+                p.y
+            }
+        }
+        None => {
+            let start = ankle + Vec3::Y * 0.5;
+            let Some((d, n)) = c.ray_hit(start, Vec3::NEG_Y, 1.0, 0) else {
+                *cache = None;
+                return None;
+            };
+            // the exe's LCG (1664525, 1013904223) for the 0.3-0.5 s interval
+            *rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let u = (*rng & 0x0FFF_FFFF) as f32 / 0x1000_0000 as f32;
+            let p = start - Vec3::Y * d;
+            *cache = Some((p, n, 0.3 + 0.2 * u));
+            p.y
+        }
+    };
+    let target = h + ankle_height;
+    (knee.y - target >= 0.15).then_some(target)
+}
+
 /// PORT stand-in, outside the standing foot IK: a foot the animation puts below the surface under it is lifted onto
 /// it. Without it the flight clips' reaching leg went through the roof on landings.
 fn ground_foot_target(ankle: Vec3, collision: &crate::collision::CollisionWorld) -> Option<Vec3> {
@@ -413,11 +457,19 @@ fn solve_limbs(
     let dt = time.delta_secs().min(1.0 / 20.0);
     for (entity, rig, mut body, targets, mut ik, player) in &mut q {
         let ground = ik.ground;
+        // the ground probes' expiry runs on the game clock (0x432730), whatever the body does
+        for e in ik.ground_cache.iter_mut().flatten() {
+            e.2 -= time.delta_secs();
+        }
         let stick_offset = ik.stick.update(&mut body, &ground, time.delta_secs());
+        if std::env::var_os("AC_SINK_LOG").is_some() && (ik.pelvis < -0.1 || stick_offset.abs() > 0.1) {
+            info!("sink: t={:.2} pelvis {:.3} stick {:.3} feet y {:.3} grounded {}", time.elapsed_secs(), ik.pelvis, stick_offset, body.feet.y, body.grounded);
+        }
         if let Ok(mut transform) = joints.get_mut(entity) {
             transform.translation.y += stick_offset;
         }
         let contacts = player.map(|p| p.contacts).unwrap_or_default();
+        let action_flags = player.map_or(8, |p| p.action_flags);
         if ik.chains.is_none() {
             let find = |id: u32| rig.bone_ids.iter().position(|b| *b == id);
             let mut chains = [[usize::MAX; 3]; 4];
@@ -479,16 +531,59 @@ fn solve_limbs(
             }
         }
         // ---------------------------------------------------------------- standing foot IK (IKGroundBiped 0x432AC0)
-        // Only while standing still on the ground (speed ≤ 0.001; moving fades both feet out over 0.2 s). Each foot
-        // looks for the ground under it; the IK runs only when the ground is uneven (feet ≥ 5 cm apart in height, or
-        // the left foot ≥ 5 cm off the root), the pelvis drops for the lower foot (≤ 1.5 m/s) and each leg is solved
-        // onto its ankle height.
-        let standing = body.grounded && body.velocity.length() <= 0.001 && targets.feet.is_none() && targets.hands.is_none();
+        // Only while standing still on the ground (speed <= 0.001). Each foot looks for the ground under it; the IK runs
+        // when the feet's targets differ by 5 cm or the left one sits 5 cm off the root, the pelvis drops for the lower
+        // foot and each leg is solved onto its ankle height.
+        let speed = body.velocity.length();
+        let standing = body.grounded && speed <= 0.001 && targets.feet.is_none() && targets.hands.is_none();
         let mut ground_goal: [Option<f32>; 2] = [None; 2];
         if let Some(c) = collision.as_deref() {
             let ankle = [global[chains[2][2]].pos, global[chains[3][2]].pos];
             let knee = [global[chains[2][1]].pos, global[chains[3][1]].pos];
-            if standing {
+            if crate::tuning::GAME_SMOOTHING {
+                if standing {
+                    // +1520 bit 3 holds until both feet are off (0x432C39)
+                    if ik.ground_off && ik.ground.iter().all(|f| f.state == 0) {
+                        ik.ground_off = false;
+                    }
+                    // the animation gate (0x432C6E): the playing action has flag 8, and its Reference bone stands upright
+                    // (its up axis at least 0.5 up) within 0.25 m of the entity on the ground plane
+                    let reference = rig.bone_ids.iter().position(|b| *b == REFERENCE).map(|i| global[i]);
+                    let gate = action_flags & 8 != 0
+                        && reference.is_none_or(|r| (r.rot * Vec3::Z).y >= 0.5 && Vec2::new(r.pos.x - body.feet.x, r.pos.z - body.feet.z).length() <= 0.25);
+                    if ik.ground_off || !gate {
+                        ik.ground.iter_mut().for_each(GroundFoot::fade_out);
+                    } else {
+                        let mut cache = ik.ground_cache;
+                        let mut rng = ik.rng;
+                        let sockets: [Option<f32>; 2] = std::array::from_fn(|f| cached_socket(c, &mut cache[f], &mut rng, ankle[f], knee[f], ankle[f].y - body.feet.y));
+                        (ik.ground_cache, ik.rng) = (cache, rng);
+                        // the targets (or the animated ankles) against each other and the left one against the root
+                        // (0x432F64); an animated ankle more than 0.5 m off its last pose with the feet 0.6 m apart also
+                        // switches off (0x432EB5), which the port's single pose never meets
+                        let zl = sockets[0].unwrap_or(ankle[0].y);
+                        let zr = sockets[1].unwrap_or(ankle[1].y);
+                        if (zl - zr).abs() >= 0.05 || (zl - body.feet.y).abs() >= 0.05 {
+                            for f in 0..2 {
+                                if let Some(t) = sockets[f] {
+                                    ik.ground[f].target = t;
+                                    let from = if ik.ground[f].state == 0 { ankle[f].y } else { ik.ground[f].goal };
+                                    ik.ground[f].fade_in(from);
+                                }
+                            }
+                        } else {
+                            ik.ground_off = true;
+                            ik.ground.iter_mut().for_each(GroundFoot::fade_out);
+                        }
+                    }
+                } else if ik.ground.iter().any(|f| f.state != 0) {
+                    // moving (0x433088): the player (EntityDescriptor Main, `sub_AEB650`) fades out over 0.6 s, 0.1 s
+                    // above 10 m/s; otherwise 0.2 s
+                    let d = if speed > 0.001 { if speed > 10.0 { 0.1 } else { 0.6 } } else { GROUND_IK_FADE };
+                    ik.ground.iter_mut().for_each(|f| f.fade_out_for(d));
+                    ik.ground_off = false;
+                }
+            } else if standing {
                 let sockets: [Option<f32>; 2] = std::array::from_fn(|f| ground_socket(c, ankle[f], knee[f], (ankle[f].y - body.feet.y).max(0.0)));
                 let z = [sockets[0].unwrap_or(ankle[0].y), sockets[1].unwrap_or(ankle[1].y)];
                 let (ah0, ah1) = (ankle[0].y - body.feet.y, ankle[1].y - body.feet.y);
@@ -510,9 +605,21 @@ fn solve_limbs(
             for f in 0..2 {
                 ground_goal[f] = ik.ground[f].advance(ankle[f].y, dt);
             }
-            // the pelvis goes down by how far the lower foot's ankle sits below its animated height (sub_431240)
-            let want = (0..2).filter_map(|f| ground_goal[f].map(|g| g - ankle[f].y)).fold(0.0f32, f32::min);
-            ik.pelvis += (want - ik.pelvis).clamp(-1.5 * dt, 1.5 * dt);
+            if crate::tuning::GAME_SMOOTHING {
+                // `IKGroundBiped__UpdatePelvis` 0x431240 (only while a foot runs): the Reference goes down by how far the
+                // lower foot's goal sits below the root, at most 1.5 m/s, and at once while both feet fade out
+                if ground_goal.iter().any(Option::is_some) {
+                    let lower = (0..2).map(|f| ground_goal[f].unwrap_or(ankle[f].y)).fold(f32::INFINITY, f32::min);
+                    let want = (lower - body.feet.y).min(0.0);
+                    ik.pelvis = if ik.ground.iter().all(|f| f.state == 3) { want } else { ik.pelvis + (want - ik.pelvis).clamp(-1.5 * dt, 1.5 * dt) };
+                } else {
+                    ik.pelvis = 0.0;
+                }
+            } else {
+                // the pelvis goes down by how far the lower foot's ankle sits below its animated height (sub_431240)
+                let want = (0..2).filter_map(|f| ground_goal[f].map(|g| g - ankle[f].y)).fold(0.0f32, f32::min);
+                ik.pelvis += (want - ik.pelvis).clamp(-1.5 * dt, 1.5 * dt);
+            }
             if ground_goal.iter().any(Option::is_some) || ik.pelvis != 0.0 {
                 for f in 0..2 {
                     if let Some(g) = ground_goal[f] {

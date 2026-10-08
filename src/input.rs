@@ -42,6 +42,14 @@ impl PadInput {
     pub fn hand_just_pressed(&self) -> bool {
         self.hand_pressed_ago <= 0.0
     }
+    /// The empty-hand buffer (interp +0x1129): set on the press, cleared 0.3 s after it
+    /// (`GoAssassinActionInterpreter__ReadInput` 0xEEE0F8 / 0xEEE125), like the Legs buffer.
+    pub fn hand_buffered(&self) -> bool {
+        self.hand_pressed_ago <= JUMP_BUFFER
+    }
+    pub fn consume_hand(&mut self) {
+        self.hand_pressed_ago = f32::INFINITY;
+    }
 }
 
 pub struct InputPlugin;

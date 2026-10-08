@@ -14,6 +14,11 @@ pub struct DebugCapturePlugin;
 
 #[derive(Resource, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
+    /// The wall run's start at a wall picked by `AC_KICK_X` (70: the pull-up from the entry, 76: the vertical step
+    /// and hang, 82: no ledge), stick held into the wall.
+    KickUp,
+    /// Run in high profile and tap Legs every 1.6 s: running jumps without a target and their landings.
+    Jumps,
     /// Walk from the loaded map spawn, then press Legs in high profile (native-map hitch reproduction).
     NativeFreerun,
     Roofs,
@@ -98,6 +103,8 @@ impl Plugin for DebugCapturePlugin {
                 "ledge" => Scenario::Ledge,
                 "pose" => Scenario::Pose,
                 "run" => Scenario::Run,
+                "kickup" => Scenario::KickUp,
+                "jumps" => Scenario::Jumps,
                 "sprint" => Scenario::Sprint,
                 "walk" => Scenario::Walk,
                 "back" => Scenario::Back,
@@ -307,6 +314,13 @@ fn place(sc: Res<Scenario>, mut q: Query<&mut Body, With<Player>>, mut rig: ResM
                 rig.yaw = 0.0;
                 rig.distance = 7.0;
             }
+            Scenario::KickUp => {
+                let x = std::env::var("AC_KICK_X").ok().and_then(|v| v.parse().ok()).unwrap_or(70.0);
+                b.feet = Vec3::new(x, 0.0, 57.9);
+                b.heading = std::f32::consts::PI;
+                rig.yaw = std::f32::consts::FRAC_PI_2;
+                rig.distance = 6.0;
+            }
             Scenario::WallRun => {
                 b.feet = Vec3::new(76.0, 0.0, 57.9);
                 b.heading = std::f32::consts::PI; // facing +Z, at the wall
@@ -342,7 +356,7 @@ fn place(sc: Res<Scenario>, mut q: Query<&mut Body, With<Player>>, mut rig: ResM
                 b.feet = Vec3::new(12.0, 0.0, 40.6);
                 b.heading = std::f32::consts::PI; // facing +Z, into the wall
             }
-            Scenario::Walk | Scenario::Run | Scenario::Sprint => {
+            Scenario::Walk | Scenario::Run | Scenario::Sprint | Scenario::Jumps => {
                 b.feet = Vec3::new(-60.0, 0.0, -40.0);
                 b.heading = -std::f32::consts::FRAC_PI_2; // facing +X
                 rig.yaw = 0.0; // camera on the +Z side → side view
@@ -371,8 +385,13 @@ fn autopilot(
     mut since: Local<(u32, f32)>,
     mut level_at: Local<Option<f32>>,
     mut freerun_pressed: Local<bool>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     let t = time.elapsed_secs();
+    // AC_QUIT_AT=<s>: end the run after that much game time
+    if std::env::var("AC_QUIT_AT").ok().and_then(|v| v.parse::<f32>().ok()).is_some_and(|q| t >= q) {
+        exit.write(AppExit::Success);
+    }
     // seconds the narrow-object state has stayed the same (`since` = (state seq, time))
     let narrow = q.single().ok().map(|(l, d, b)| (l.current, d.narrow.seq, d.narrow.state, b.feet));
     let held = match narrow {
@@ -400,6 +419,13 @@ fn autopilot(
             pad.magnitude = 0.0;
             pad.speed01 = 0.0;
         }
+        Scenario::Jumps => {
+            pad.dir = Vec3::X;
+            pad.high_profile = true;
+            pad.legs_held = false;
+            // the time since the last tap (a tap is let go at once)
+            pad.legs_pressed_ago = if t >= 1.5 { (t - 1.5) % 1.6 } else { f32::INFINITY };
+        }
         Scenario::Walk | Scenario::Run | Scenario::Sprint => {
             pad.dir = Vec3::X;
             pad.high_profile = *sc != Scenario::Walk;
@@ -413,7 +439,11 @@ fn autopilot(
         Scenario::Climb => {
             pad.dir = Vec3::Z;
             pad.high_profile = true;
-            pad.legs_held = true;
+            pad.legs_held = false;
+            // climbing from the ground: the empty-hand press (event 50) until the climb has started
+            if t < 1.0 && q.single().ok().is_none_or(|(l, _, _)| l.current != crate::player::ActorContextId::Climb) {
+                pad.hand_pressed_ago = 0.0;
+            }
         }
         Scenario::PullDown => {
             pad.magnitude = 0.0;
@@ -484,11 +514,15 @@ fn autopilot(
             pad.speed01 = pad.magnitude;
         }
         Scenario::ClimbJump => {
-            // 1 s still, then grab the wall (high profile + Legs) and keep pushing up; let go once hanging
+            // 1 s still, then grab the wall (the empty hand) and keep pushing up; let go once hanging
             let hanging = q.single().ok().is_some_and(|(l, _, _)| l.current == crate::player::ActorContextId::Ledge);
             pad.dir = Vec3::Z;
             pad.high_profile = true;
-            pad.legs_held = (1.0..1.4).contains(&t);
+            // climbing from the ground: the empty-hand press (event 50), repeated until the climb has started
+            pad.legs_held = false;
+            if (1.0..2.0).contains(&t) && q.single().ok().is_none_or(|(l, _, _)| l.current != crate::player::ActorContextId::Climb) {
+                pad.hand_pressed_ago = 0.0;
+            }
             pad.magnitude = if t > 1.0 && !hanging { 1.0 } else { 0.0 };
             pad.speed01 = pad.magnitude;
         }
@@ -499,7 +533,11 @@ fn autopilot(
             let climbing = state.is_some_and(|(c, _)| c == crate::player::ActorContextId::Climb);
             let level = state.is_some_and(|(_, y)| y > 2.3);
             pad.high_profile = true;
-            pad.legs_held = (1.0..1.4).contains(&t);
+            // climbing from the ground: the empty-hand press (event 50), repeated until the climb has started
+            pad.legs_held = false;
+            if (1.0..2.0).contains(&t) && q.single().ok().is_none_or(|(l, _, _)| l.current != crate::player::ActorContextId::Climb) {
+                pad.hand_pressed_ago = 0.0;
+            }
             if t < 1.0 || (!climbing && t > 2.0) {
                 pad.magnitude = 0.0;
             } else if level {
@@ -518,7 +556,11 @@ fn autopilot(
             let climbing = state.is_some_and(|(c, _)| c == crate::player::ActorContextId::Climb);
             let level = state.is_some_and(|(_, y)| y > 2.3);
             pad.high_profile = true;
-            pad.legs_held = (1.0..1.4).contains(&t);
+            // climbing from the ground: the empty-hand press (event 50), repeated until the climb has started
+            pad.legs_held = false;
+            if (1.0..2.0).contains(&t) && q.single().ok().is_none_or(|(l, _, _)| l.current != crate::player::ActorContextId::Climb) {
+                pad.hand_pressed_ago = 0.0;
+            }
             if t < 1.0 || (!climbing && t > 2.0) {
                 pad.magnitude = 0.0;
             } else if level {
@@ -541,7 +583,11 @@ fn autopilot(
                 *since = Some(t);
             }
             pad.high_profile = true;
-            pad.legs_held = (1.0..1.4).contains(&t);
+            // climbing from the ground: the empty-hand press (event 50), repeated until the climb has started
+            pad.legs_held = false;
+            if (1.0..2.0).contains(&t) && q.single().ok().is_none_or(|(l, _, _)| l.current != crate::player::ActorContextId::Climb) {
+                pad.hand_pressed_ago = 0.0;
+            }
             if t < 1.0 || (!climbing && t > 2.0) {
                 pad.magnitude = 0.0;
             } else if let Some(t0) = *since {
@@ -558,7 +604,11 @@ fn autopilot(
             let hanging = q.single().ok().is_some_and(|(l, _, _)| l.current == crate::player::ActorContextId::Ledge);
             pad.dir = Vec3::Z;
             pad.high_profile = true;
-            pad.legs_held = (1.0..1.4).contains(&t);
+            // climbing from the ground: the empty-hand press (event 50), repeated until the climb has started
+            pad.legs_held = false;
+            if (1.0..2.0).contains(&t) && q.single().ok().is_none_or(|(l, _, _)| l.current != crate::player::ActorContextId::Climb) {
+                pad.hand_pressed_ago = 0.0;
+            }
             pad.magnitude = if t > 1.0 && !hanging { if t < 1.4 { 1.0 } else { 0.45 } } else { 0.0 };
             pad.speed01 = pad.magnitude;
         }
@@ -608,6 +658,21 @@ fn autopilot(
             pad.speed01 = pad.magnitude;
             if on && !walk && ((st == Some(BeamState::Wait) && held > 0.5 && held < 0.52) || (st == Some(BeamState::ImpulseWait) && held > 0.6 && held < 0.62)) {
                 pad.legs_pressed_ago = 0.0;
+            }
+        }
+        Scenario::KickUp => {
+            let t = t - 1.0;
+            pad.dir = Vec3::Z;
+            pad.high_profile = true;
+            pad.legs_held = t > 0.2;
+            // one press (a press that is consumed stays consumed)
+            if t > 0.2 && !*freerun_pressed {
+                pad.legs_pressed_ago = 0.0;
+                *freerun_pressed = true;
+            }
+            if t < 0.0 {
+                pad.magnitude = 0.0;
+                pad.speed01 = 0.0;
             }
         }
         Scenario::WallRun => {

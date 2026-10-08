@@ -9,10 +9,15 @@
 //! - every context's runtime data lives in one `HumanDataBundle` (HumanData+0x30 in the game).
 
 pub mod air;
+pub mod air_catches;
 pub mod anim_gate;
 pub mod climb;
 pub mod collide;
+pub mod crouch;
+pub mod crowd;
 pub mod ground;
+pub mod ground_extras;
+pub mod ground_tree;
 pub mod falls;
 pub mod hay;
 pub mod item_flags;
@@ -25,6 +30,7 @@ pub mod move_blend;
 pub mod narrow;
 pub mod passover;
 pub mod swing;
+pub mod social;
 pub mod targets;
 pub mod walling;
 
@@ -235,7 +241,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(Startup, spawn_player)
             .add_systems(
                 Update,
-                (ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
+                (social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
                     .chain()
                     .in_set(PlayerSet),
             );
@@ -252,8 +258,9 @@ impl Plugin for PlayerPlugin {
 /// - CharacterNoStatic (→ MainCharacterNoStatic): `HumanLedge__EnterCommon` 0xDE26D0, `HumanClimb__EnterCommon`
 ///   0xDE97B0, `HumanLedge__PassOverToPullDown` 0xDE0220: hanging and climbing, the capsule ignores the static world.
 /// PORT: by context only (the ledge pull-up keeps NoStatic; the port's ledge / climb moves don't run the proxy).
-pub fn proxy_layer(mut q: Query<(&Locomotion, &mut Body), With<Player>>) {
-    for (loco, mut body) in &mut q {
+pub fn proxy_layer(mut q: Query<(&Locomotion, &HumanDataBundle, &mut Body), With<Player>>) {
+    for (loco, data, mut body) in &mut q {
+        body.proxy.height = (loco.current == ActorContextId::Ground && data.ground.crouch.is_some()).then_some(1.0);
         let layer = match loco.current {
             ActorContextId::Ledge | ActorContextId::Climb => crate::layers::MAIN_CHARACTER_NO_STATIC,
             _ => crate::layers::MAIN_CHARACTER,
@@ -282,6 +289,7 @@ struct HandMarker(usize);
 pub fn player_components(feet: Vec3, heading: f32) -> impl Bundle {
     (
         Player,
+        social::SocialHelper::default(),
         Locomotion { current: ActorContextId::Ground, previous: ActorContextId::Ground, just_switched: false },
         Body { feet, heading, grounded: true, ..default() },
         HumanDataBundle::default(),

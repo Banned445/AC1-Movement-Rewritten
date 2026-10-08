@@ -23,6 +23,8 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::time::TimeUpdateStrategy;
 
+pub(crate) mod ground_checks;
+
 use crate::anim::AnimPlayer;
 use crate::camera::CameraRig;
 use crate::ik::LimbIk;
@@ -178,11 +180,23 @@ impl Plugin for RecorderPlugin {
             .add_systems(PostUpdate, (record_state, save_bug).chain().after(bevy::transform::TransformSystems::Propagate));
         // PORT: scripted greybox checks use real context updates and the ordinary F9 recorder.
         if std::env::var_os("AC_REPLAY").is_none() {
+            if let Some(check) = CatchCheck::from_env() {
+                app.insert_resource(check)
+                    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(16_666_667)))
+                    .add_systems(PostStartup, place_catch_check.after(crate::map_menu::initialize))
+                    .add_systems(Update, drive_catch_check.before(record_input));
+            }
             if let Some(check) = FallCheck::from_env() {
                 app.insert_resource(check)
                     .add_systems(PostStartup, place_fall_check.after(crate::map_menu::initialize))
                     .add_systems(Update, drive_fall_check.before(record_input));
             }
+        }
+        if let Some(check)=ground_checks::GroundCheck::from_env() {
+            app.insert_resource(check)
+                .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(16_666_667)))
+                .add_systems(PostStartup, ground_checks::place.after(crate::map_menu::initialize).after(replay_place))
+                .add_systems(Update, ground_checks::drive.before(record_input));
         }
         if let Ok(dir) = std::env::var("AC_REPLAY") {
             let dir = std::path::PathBuf::from(dir);
@@ -198,6 +212,66 @@ impl Plugin for RecorderPlugin {
                 .add_systems(Update, replay_input.before(record_input))
                 .add_systems(Last, replay_advance);
         }
+    }
+}
+
+/// PORT: reproducible greybox air-catch checks using ordinary input and F9 capture.
+#[derive(Resource)]
+struct CatchCheck { name: String, start: Vec3, heading: f32 }
+impl CatchCheck {
+    fn from_env() -> Option<Self> {
+        let name=std::env::var("AC_AIR_CATCH_CHECK").ok()?;
+        let (start,heading)=match name.as_str() {
+            "ladder" | "ladder-no-hand" => (Vec3::new(50.0,3.2,62.9),std::f32::consts::PI),
+            "ladder-diagonal" => (Vec3::new(50.15,3.2,62.9),std::f32::consts::PI),
+            "ladder-target" => (Vec3::new(50.0,0.0,59.5),std::f32::consts::PI),
+            "native-beam" => (Vec3::ZERO,0.0),
+            "beam" => (Vec3::new(86.0,5.5,70.05),-std::f32::consts::FRAC_PI_2),
+            "beam-run" => (Vec3::new(79.0,4.0,70.0),-std::f32::consts::FRAC_PI_2),
+            "pilotis" => (Vec3::new(74.5,4.5,80.0),-std::f32::consts::FRAC_PI_2),
+            "swing" => (Vec3::new(60.0,1.2,85.0),std::f32::consts::PI),
+            _ => return None,
+        };
+        Some(Self{name,start,heading})
+    }
+}
+fn place_catch_check(check:Res<CatchCheck>,mut q:Query<&mut Body,With<Player>>,mut rig:ResMut<CameraRig>,
+    guidance:Res<crate::guidance::GuidanceWorld>,collision:Res<crate::collision::CollisionWorld>) {
+    let (mut start,mut heading)=(check.start,check.heading);
+    if check.name=="native-beam" {
+        let report=crate::guidance::beam_contacts::detect(&guidance,&collision,Vec3::ZERO,Vec3::splat(10000.0));
+        let beam=report.iter().filter(|b|b.p0.distance(b.p1)>0.8).filter(|b| {
+            let point=b.p0.lerp(b.p1,0.5);let axis=(b.p1-b.p0).with_y(0.0).normalize_or_zero();
+            crate::player::narrow::beam_catch_clear(point,axis,b.width(point),&collision) && collision.capsule_fits(point+Vec3::Y*1.5)
+        }).max_by(|a,b|a.p0.distance_squared(a.p1).total_cmp(&b.p0.distance_squared(b.p1)));
+        if let Some(beam)=beam {start=beam.p0.lerp(beam.p1,0.5)+Vec3::Y*1.5;heading=crate::player::heading_of((beam.p1-beam.p0).with_y(0.0).normalize());}
+        else {error!("native-beam check: no clear source contact");}
+    }
+    for mut b in &mut q {b.feet=start;b.heading=heading;}
+    rig.yaw=if check.name.starts_with("ladder") {std::f32::consts::PI-0.6} else if check.name=="swing" {std::f32::consts::FRAC_PI_2} else {-0.8};
+    rig.pitch=-0.25;rig.distance=6.0;
+}
+fn drive_catch_check(check:Res<CatchCheck>,time:Res<Time>,mut pad:ResMut<PadInput>,
+    q:Query<&Locomotion,With<Player>>,mut pressed:Local<bool>) {
+    pad.dir=Vec3::ZERO;pad.magnitude=0.0;pad.speed01=0.0;
+    pad.high_profile=false;pad.legs_held=false;pad.hand_held=false;
+    let air=q.single().is_ok_and(|l|l.current==crate::player::ActorContextId::InAir);
+    match check.name.as_str() {
+        "ladder" => pad.hand_held=air,
+        "ladder-no-hand" => pad.legs_held=air,
+        "ladder-diagonal" if air => {pad.hand_held=true;pad.dir=Vec3::new(-0.15,0.0,0.6).normalize();pad.magnitude=1.0;pad.speed01=1.0;},
+        "beam-run" if time.elapsed_secs()<3.0 => {
+            pad.dir=Vec3::X;pad.magnitude=1.0;pad.speed01=1.0;pad.high_profile=true;pad.legs_held=true;
+        },
+        "ladder-target" if time.elapsed_secs()<3.0 && q.single().is_ok_and(|l|l.current==crate::player::ActorContextId::Ground) => {
+            pad.dir=Vec3::Z;pad.magnitude=1.0;pad.speed01=1.0;pad.high_profile=true;
+            if time.elapsed_secs()>0.016 && !*pressed {pad.legs_pressed_ago=0.0;*pressed=true;}
+        },
+        "swing" if time.elapsed_secs()<2.5 => {
+            pad.dir=Vec3::Z;pad.magnitude=1.0;pad.speed01=1.0;pad.high_profile=true;
+            if time.elapsed_secs()>0.35 && !*pressed {pad.legs_pressed_ago=0.0;*pressed=true;}
+        },
+        _=>{},
     }
 }
 
@@ -314,6 +388,10 @@ fn record_state(
     let mut s = gameplay_key(frame, loco, body);
     let _ = write!(s, " | t={:.3} dt={:.4} vel={} gnd={}", time.elapsed_secs(), time.delta_secs(), v3(body.velocity), body.grounded as u8);
     let _ = write!(s, " ground={:?}", data.ground.sub_state);
+    let _=write!(s," extras={:?} crouch={:?} height={:?} speed={:.4} slide={:?}/{:.3}/{}",
+        data.ground.extra.map(|a|(a.mode,a.action.id,a.action.item)),
+        data.ground.crouch.map(|c|(c.mode,c.action.id,c.action.item)),body.proxy.height,data.ground.speed_param,
+        data.air.slope_slide.start_y,data.air.slope_slide.drop(body.feet.y),data.air.slope_slide.ragfall_required as u8);
     if let Some(l) = data.ground.last_landing {
         let _ = write!(s, " landing={:?}/{} fall={:.3} drop={:.3}", l.kind, l.damage, l.fall_height, l.total_drop);
     }
@@ -321,6 +399,14 @@ fn record_state(
         crate::player::ActorContextId::Ledge => {
             let l = &data.ledge;
             let _ = write!(s, " ledge={:?}/{:?}/\"{}\"", l.sub_state, l.hang_type, l.last_action);
+        }
+        crate::player::ActorContextId::Ladder => {
+            let l=&data.ladder;
+            let _=write!(s," ladder={:?}/{:?}@{:.3} height={:.3}",l.phase,l.action.map(|a|(a.id,a.item)),l.t,l.height);
+        }
+        crate::player::ActorContextId::NarrowObject => {
+            let n=&data.narrow;
+            let _=write!(s," narrow={:?}/{:?}/{:?}/{:?}@{:.3}",n.kind,n.state,n.entry_mode,n.action.map(|a|(a.id,a.item)),n.t);
         }
         crate::player::ActorContextId::Climb => {
             let c = &data.climb;
@@ -368,6 +454,7 @@ fn save_bug(
     rec: Res<Recorder>,
     replay: Option<Res<Replay>>,
     mut auto_done: Local<bool>,
+    check: Option<Res<ground_checks::GroundCheck>>,
 ) {
     if replay.is_some() {
         return;
@@ -388,6 +475,7 @@ fn save_bug(
     }
     let (feet, heading) = rec.start.unwrap_or((Vec3::ZERO, 0.0));
     let mut input = String::from("# ac_port recording v1: dt_nanos dir.x dir.y dir.z magnitude speed01 high legs legs_pressed_ago cam_yaw cam_pitch hand_pressed_ago hand_held\n");
+    if let Some(check)=check {let _=writeln!(input,"# ground_check {}",check.name);}
     let _ = writeln!(input, "start {:?} {:?} {:?} {:?}", feet.x, feet.y, feet.z, heading);
     for f in &rec.inputs {
         input.push_str(&f.to_line());

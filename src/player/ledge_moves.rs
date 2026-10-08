@@ -1269,6 +1269,39 @@ pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec
     }
 }
 
+/// `xx_h_hangwallfree_tr_hangwall`: what `HumanLedge__Pullup_Start` 0xDDBE80 plays instead of a pull-up from the
+/// wall-free hang (LedgeHangType 2, a free hang with a wall below): the hang type becomes Wall (+104 = 0) and the legs go
+/// onto the wall; when it is released the wall hang plays (flag 4, `Pullup_Tick` 0xDE2EE0) and the next pull-up is the
+/// wall one.
+pub const WALLFREE_TO_WALL: u32 = 0x0106_F2EA;
+
+/// The wall-free hang's "pull-up" (0xDDBE80 case 2): `WALLFREE_TO_WALL` into the wall hang. The game plays it from the
+/// animation (no root interpolator in that branch); the port follows the clip's displacement with a correction onto the
+/// wall hang's root.
+pub fn wallfree_to_wall_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) -> LedgeMove {
+    let a = single(WALLFREE_TO_WALL, 0);
+    let d = a.map(|a| a.duration()).unwrap_or(0.0);
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    LedgeMove {
+        kind: MoveKind::SwitchHang { to_wall: true },
+        seq: [a, None, None, None],
+        durations: [if d > 0.0 { d } else { SHIMMY_OPEN_TIME }, 0.0, 0.0, 0.0],
+        t: 0.0,
+        from,
+        to: super::ledge::hang_root(hand_l, hand_r, n, LedgeHangType::Wall),
+        facing_from: facing,
+        facing_to: facing,
+        follow_disp: d > 0.0,
+        lead: 0.0,
+        end_free: false,
+        end_wall: true,
+        end_stand: false,
+        hand_l,
+        hand_r,
+        normal: n,
+    }
+}
+
 // ---------------------------------------------------------------- pull-down (ground → hang)
 
 /// Pull-down table 0x1A2C3F0 (index side + 8·type; +4 = the descent action): the ground types have front

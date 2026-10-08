@@ -62,6 +62,8 @@ pub struct Contact {
 pub struct ProxyState {
     pub manifold: Vec<Contact>,
     pub layer: u8,
+    /// CharacterController__SetShapeHeight 0x52ED20. None keeps the normal 1.8 m capsule.
+    pub height: Option<f32>,
 }
 
 /// One solver plane (64 bytes: normal + distance, velocity, frictions, priority).
@@ -86,9 +88,9 @@ struct Interaction {
 
 /// The capsule for a proxy at `p` (`CharacterController__RebuildCapsule` 0x52E9C0): vertex A r above the position,
 /// B at the height (minus the lift when the step offset is on) − r, radius r − keep.
-fn shape(p: Vec3, lift: f32) -> (Vec3, Vec3, f32) {
+fn shape(p: Vec3, lift: f32, height: f32) -> (Vec3, Vec3, f32) {
     let r = CAPSULE_RADIUS;
-    let span = ((CAPSULE_HEIGHT - lift) - 2.0 * r).max(0.001);
+    let span = ((height - lift) - 2.0 * r).max(0.001);
     let a = p + Vec3::Y * r;
     (a, a + Vec3::Y * span, r - KEEP_DISTANCE)
 }
@@ -112,10 +114,10 @@ fn closest_on_segment_to_box(a: Vec3, b: Vec3, bx: &Aabb3) -> Vec3 {
 }
 
 /// Closest point between the shape at `p` and box `i`.
-fn closest(world: &CollisionWorld, i: usize, p: Vec3, lift: f32) -> Contact {
+fn closest(world: &CollisionWorld, i: usize, p: Vec3, lift: f32, height: f32) -> Contact {
     if i >= world.boxes.len() {
         let t = &world.triangles[i - world.boxes.len()];
-        let (a, b, rs) = shape(p, lift);
+        let (a, b, rs) = shape(p, lift, height);
         let (s, q) = t.segment_points(a, b);
         let d = s - q;
         let len = d.length();
@@ -123,7 +125,7 @@ fn closest(world: &CollisionWorld, i: usize, p: Vec3, lift: f32) -> Contact {
         return Contact { pos: q, normal, dist: len - rs, fraction: 0.0, body: i };
     }
     let bx = &world.boxes[i];
-    let (a, b, rs) = shape(p, lift);
+    let (a, b, rs) = shape(p, lift, height);
     let s = closest_on_segment_to_box(a, b, bx);
     let q = s.clamp(bx.min, bx.max);
     let d = s - q;
@@ -146,30 +148,30 @@ fn closest(world: &CollisionWorld, i: usize, p: Vec3, lift: f32) -> Contact {
 }
 
 /// The closest-point query of the shape (the start collector of 0x57B200): every box within the tolerance.
-fn closest_points(world: &CollisionWorld, layer: u8, p: Vec3, lift: f32) -> Vec<Contact> {
-    let (a, b, r) = shape(p, lift);
+fn closest_points(world: &CollisionWorld, layer: u8, p: Vec3, lift: f32, height: f32) -> Vec<Contact> {
+    let (a, b, r) = shape(p, lift, height);
     let margin = Vec3::splat(r + COLLISION_TOLERANCE);
     (0..world.boxes.len()).chain(world.triangle_candidates(a.min(b) - margin, a.max(b) + margin))
-        .filter(|&i| world.sees(layer, i)).map(|i| closest(world, i, p, lift)).filter(|c| c.dist < COLLISION_TOLERANCE).collect()
+        .filter(|&i| world.sees(layer, i)).map(|i| closest(world, i, p, lift, height)).filter(|c| c.dist < COLLISION_TOLERANCE).collect()
 }
 
 /// The linear cast of the shape from `p` by `disp` (0x57B200 with the cast collector), hits sorted by fraction
 /// (sub_FE4FC0). Each hit carries the fraction and the distance along its normal (−disp·n × fraction, 0x579870).
 /// PORT: conservative advancement against each box; boxes the shape already touches at the start are left to the
 /// closest-point query.
-fn linear_cast(world: &CollisionWorld, layer: u8, p: Vec3, disp: Vec3, lift: f32) -> Vec<Contact> {
+fn linear_cast(world: &CollisionWorld, layer: u8, p: Vec3, disp: Vec3, lift: f32, height: f32) -> Vec<Contact> {
     let len = disp.length();
     let mut hits = Vec::new();
     if len < 1e-7 {
         return hits;
     }
-    let (a, b, r) = shape(p, lift);
+    let (a, b, r) = shape(p, lift, height);
     let margin = Vec3::splat(r + COLLISION_TOLERANCE);
     let min = a.min(b).min(a + disp).min(b + disp) - margin;
     let max = a.max(b).max(a + disp).max(b + disp) + margin;
     for i in (0..world.boxes.len()).chain(world.triangle_candidates(min, max)).filter(|&i| world.sees(layer, i)) {
         let mut t = 0.0f32;
-        let mut c = closest(world, i, p, lift);
+        let mut c = closest(world, i, p, lift, height);
         if c.dist <= 0.0 {
             continue;
         }
@@ -183,7 +185,7 @@ fn linear_cast(world: &CollisionWorld, layer: u8, p: Vec3, disp: Vec3, lift: f32
             if t > 1.0 {
                 break;
             }
-            c = closest(world, i, p + disp * t, lift);
+            c = closest(world, i, p + disp * t, lift, height);
         }
         if hit {
             c.fraction = t;
@@ -517,6 +519,7 @@ pub struct Touched {
 /// ground) with `vel` over `dt`. Returns the new position and velocity.
 pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: Vec3, dt: f32, lift: f32) -> (Vec3, Vec3, Touched) {
     let up = Vec3::Y;
+    let height = state.height.unwrap_or(CAPSULE_HEIGHT);
     let mut pos = p;
     let mut remaining = dt;
     let mut planned = vel * dt;
@@ -526,15 +529,15 @@ pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: V
     let mut out_vel = vel;
     if dt > EPS {
         for _ in 0..MAX_ITERATIONS {
-            let start = closest_points(world, state.layer, pos, lift);
-            let cast = linear_cast(world, state.layer, pos, planned, lift);
+            let start = closest_points(world, state.layer, pos, lift, height);
+            let cast = linear_cast(world, state.layer, pos, planned, lift, height);
             update_manifold(&mut state.manifold, &start, &cast);
             let planes = planes_from(&state.manifold, moving);
             let (disp, v, used) = simplex_solve(&planes, vel, up, remaining, min_dt);
             out_vel = v;
             let mut moved = false;
             if (disp - planned).abs().max_element() > 0.001 {
-                let hits = linear_cast(world, state.layer, pos, disp, lift);
+                let hits = linear_cast(world, state.layer, pos, disp, lift, height);
                 if let Some(first) = hits.first() {
                     if find(&state.manifold, first).is_none() {
                         state.manifold.push(*first);
@@ -565,7 +568,7 @@ pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: V
     }
     // what is touching now (within a centimetre of the keep distance)
     let mut t = Touched::default();
-    for c in closest_points(world, state.layer, pos, lift) {
+    for c in closest_points(world, state.layer, pos, lift, height) {
         if c.dist - KEEP_DISTANCE > 0.01 {
             continue;
         }
@@ -584,10 +587,14 @@ pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: V
 /// by `lift`) is cast down by `reach + lift`; on the first hit flatter than 55° the shape rests on it at the keep
 /// distance along its normal, and the feet are there. Returns (feet height, the hit normal's up component).
 pub fn stick_to_ground(world: &CollisionWorld, feet: Vec3, lift: f32, reach: f32) -> Option<(f32, f32)> {
+    stick_to_ground_height(world,feet,lift,reach,CAPSULE_HEIGHT)
+}
+
+pub fn stick_to_ground_height(world:&CollisionWorld,feet:Vec3,lift:f32,reach:f32,height:f32)->Option<(f32,f32)> {
     let p = feet + Vec3::Y * lift;
     let cast = Vec3::NEG_Y * (reach + lift);
     // the Ground context's own cast: the character's layer (MainCharacter sees Static)
-    let hits = linear_cast(world, crate::layers::MAIN_CHARACTER, p, cast, lift);
+    let hits = linear_cast(world, crate::layers::MAIN_CHARACTER, p, cast, lift, height);
     let h = hits.iter().find(|h| h.normal.y >= STICK_MIN_UP)?;
     let rest = p + cast * h.fraction + Vec3::Y * (KEEP_DISTANCE / h.normal.y);
     Some((rest.y, h.normal.y))

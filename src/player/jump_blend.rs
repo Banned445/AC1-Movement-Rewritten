@@ -17,6 +17,25 @@ pub const TAKEOFF_RUN: [u32; 2] = [0x0A4C_8C0E, 0x0A4C_8C0F];
 pub const TAKEOFF_FREESTEP: [u32; 2] = [0x0112_B589, 0x0112_B5AC];
 /// Flights by target type, [footl, footr].
 pub const FLIGHT_FREESTEP: [u32; 2] = [0x010D_DAFA, 0x010D_F0D8]; // 1, 0x10000, 0x100, 0x200, 0x400, haystack
+/// `Human__UseBeamFreestepJumpVariants` 0xB145B0 (from 0xB1EC40): a target more than 0.4 m below the start (and a clear
+/// sweep toward it) swaps the free-step takeoff and flight for these (`xx_h_beam_freestep_*_to_air`,
+/// `xx_h_beam_air_*_to_freestep`, same 40-clip layouts). Live: the running jump without a target flies 0x118DA41C/D.
+pub const TAKEOFF_FREESTEP_DOWN: [u32; 2] = [0x118D_A41A, 0x118D_A41B];
+pub const FLIGHT_FREESTEP_DOWN: [u32; 2] = [0x118D_A41C, 0x118D_A41D];
+/// The drop below the start beyond which 0xB145B0 swaps to the down variants.
+pub const DOWN_VARIANT_DROP: f32 = 0.4;
+
+/// 0xB145B0: the down variants of the free-step takeoff / flight when the target is more than 0.4 m below the start.
+/// PORT: its clear-sweep test (`sub_E1C820`, layer 5 / 21) is not modelled: its filter is not decoded and on open ground
+/// it did not block in the game (the sweep toward a free-jump target dips below the floor 0.5 m out).
+pub fn down_variants(takeoff: u32, flight: u32, dz: f32) -> (u32, u32) {
+    if dz >= -DOWN_VARIANT_DROP {
+        return (takeoff, flight);
+    }
+    let t = match TAKEOFF_FREESTEP.iter().position(|x| *x == takeoff) { Some(i) => TAKEOFF_FREESTEP_DOWN[i], None => takeoff };
+    let f = match FLIGHT_FREESTEP.iter().position(|x| *x == flight) { Some(i) => FLIGHT_FREESTEP_DOWN[i], None => flight };
+    (t, f)
+}
 pub const FLIGHT_PASSOVER: [u32; 2] = super::passover::FLIGHT_PASSOVER; // 2
 pub const FLIGHT_ASSASSINATE: [u32; 2] = [0x21B4_DC3D, 0x21B4_DC3E]; // 0x8000
 pub const FLIGHT_SURFACE: [u32; 2] = [0x011E_555B, 0x011E_555C]; // 0x40, 0x1000, 0x2000, 0x4000
@@ -39,6 +58,7 @@ pub const LAND_DAMAGE_ROLL: u32 = 0x010D_D70B;
 pub const DUMPED_ACTIONS: &[u32] = &[
     TAKEOFF_RUN[0], TAKEOFF_RUN[1], TAKEOFF_FREESTEP[0], TAKEOFF_FREESTEP[1],
     FLIGHT_FREESTEP[0], FLIGHT_FREESTEP[1],
+    TAKEOFF_FREESTEP_DOWN[0], TAKEOFF_FREESTEP_DOWN[1], FLIGHT_FREESTEP_DOWN[0], FLIGHT_FREESTEP_DOWN[1],
     RECEPTION_FREESTEP[0], RECEPTION_FREESTEP[1],
     LAND_FORWARD_MOVE[0], LAND_FORWARD_MOVE[1], LAND_FORWARD_STOP[0], LAND_FORWARD_STOP[1],
     LAND_STRAIGHT_MOVE, LAND_STRAIGHT_STOP, LAND_DAMAGE, LAND_DAMAGE_ROLL,

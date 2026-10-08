@@ -10,6 +10,16 @@
 pub const GAME_SMOOTHING: bool = true;
 /// PORT comparison switch for the verified fall scalar/input corrections.
 pub const GAME_FALLS: bool = true;
+/// PORT comparison switch for the verified air-catch rules and beam contact detector.
+pub const AIR_CATCHES: bool = true;
+/// PORT comparison switch for the verified Ground extras state/contact rules (RE/02 §9).
+pub const GAME_GROUND_EXTRAS: bool = true;
+/// PORT comparison switch for the ground state tree's re-entry into the locomotion: Movement states 18 / 21 / 22 /
+/// 24 / 25, the start, and MoveBlend's transition path with the authored transition actions (RE/02 §4.6).
+pub const GAME_GROUND_TREE: bool = true;
+/// The skid turn's angle: the run stop turns into it, and it is left for Move within it (|HG+1532| ≤ 2.0943952,
+/// `HumanGround__RunStop_Update` 0xDA8D70, `HumanGround__Guard_RunTurnToMove` 0xD85390).
+pub const RUN_TURN_ANGLE: f32 = 2.094_395_2;
 
 // ---------------------------------------------------------------- input (RE/01 §6)
 /// Stick dead-zone; speed = (|stick| - 0.35) / 0.65.  GoAssassinActionInterpreter 0xEE65A0
@@ -39,6 +49,12 @@ pub const STICK_SPAN: f32 = 0.25;
 /// Player turn rate (rad/s): min 270°/s, max 360°/s; thresholds are 0 so effectively 360°/s.
 /// HumanGround__UpdateHeading 0xD95290 → RotateTowards 0xD94F30
 pub const PLAYER_TURN_RATE: f32 = std::f32::consts::TAU;
+/// The rates the player's interpreter writes every frame (GoAssassinActionInterpreter__ProcessGroundMovement
+/// 0xEE6D3F–0xEE6D91, IHumanGround vt952 / vt956 = HG+1752 / +1756): max 4.0 rad/s, 2.6 with Legs held. With the angle
+/// band left at 0 the max is always the rate (RE/02 §4.3). The 270 / 360 deg/s above is 0xD671C0's one-time default,
+/// overwritten every frame (GAME_GROUND_TREE comparison only).
+pub const PLAYER_TURN_RATE_GAME: f32 = 4.0;
+pub const PLAYER_TURN_RATE_LEGS: f32 = 2.6;
 
 /// Ground loss → InAir fall types by fall height 1 / 2 / 8 m and horizontal speed 2.5 m/s. 0xD8C380
 pub const FALL_TYPE_HEIGHTS: [f32; 3] = [1.0, 2.0, 8.0];
@@ -63,9 +79,11 @@ pub const FALL_FATAL: f32 = 7.0;
 /// landing blend. SetupToGround_Landing 0xE05940 (`player::jump_blend::landing`)
 pub const ROLL_DROP: f32 = 3.0;
 
-/// PORT: jump distance when no target is in range (the game always jumps to a target; vt28 resolves one,
-/// 0xD832F0). The jump itself uses the game's free-step blend.
-pub const FREE_JUMP_DISTANCE: f32 = 2.5;
+/// The free-jump target (`Human__BuildFreeJumpTarget` 0xB1E7F0, default mode, through IHuman vt68 when no target is
+/// found): this far along the jump direction and `FREE_JUMP_DOWN` below the start. The distance comes from a table keyed
+/// by the character scale (IHuman+2712); 8.0 read live for the player (scale 1.0).
+pub const FREE_JUMP_AHEAD: f32 = 8.0;
+pub const FREE_JUMP_DOWN: f32 = 3.0;
 
 // ---------------------------------------------------------------- jump targets (RE/01 §7b)
 /// Candidate must lie within a 45° cone of the wanted direction and no lower than -3 m. 0xE96BF0

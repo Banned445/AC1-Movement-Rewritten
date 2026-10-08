@@ -101,6 +101,10 @@ pub struct LadderEntry {
     pub chain: bool,
     /// The first item's clip weights (the target arrival takes the flight's: up / down / long).
     pub w: [f32; 3],
+    /// 0xE04100: approach-side root normal; the wait subsequently aligns to `n`.
+    pub catch_out: Option<Vec3>,
+    /// Controller speed for the catch blend (0xE0BB70).
+    pub catch_speed: f32,
 }
 
 #[derive(Debug, Default)]
@@ -128,6 +132,9 @@ pub struct HumanLadderData {
     pub rate: f32,
     /// The entry action's items play in order (`LadderEntry::chain`).
     chain: bool,
+    pub blend_time: f32,
+    /// Independent RootInterp timer (0xE23F70), preserved across action items.
+    warp: Option<(Vec3, Vec3, f32, f32, f32, f32)>,
 }
 
 fn blend(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -165,6 +172,18 @@ impl HumanLadderData {
         self.seq = self.seq.wrapping_add(1);
     }
 
+    /// 0xE23F70 / 0xE0BB70: interpolation advances independently of the action chain.
+    pub fn advance_catch_root(&mut self, body: &mut Body, dt: f32) {
+        if let Some((from,to,h0,h1,ref mut t,duration)) = self.warp {
+            *t += dt;
+            let k=(*t/duration).min(1.0);
+            body.feet=from.lerp(to,k);
+            let turn=(h1-h0+std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)-std::f32::consts::PI;
+            body.heading=h0+turn*k;
+            if k>=1.0 && self.phase==Some(LadderPhase::Wait) { self.warp=None; }
+        }
+    }
+
     fn wait(&mut self) {
         let h = self.height;
         let p = self.root_at(h);
@@ -173,6 +192,8 @@ impl HumanLadderData {
 
     /// `HumanLadder__StateEntry_Enter` 0xE266D0.
     pub fn enter(&mut self, e: LadderEntry) {
+        self.warp = None;
+        self.blend_time = 0.1;
         self.base = e.base;
         self.top = e.top;
         self.n = Vec3::new(e.n.x, 0.0, e.n.z).normalize_or_zero();
@@ -190,6 +211,15 @@ impl HumanLadderData {
                 Some(a) => {
                     let p = self.root_at(self.height);
                     self.play(LadderPhase::Entry, Some(a), e.from, p, false);
+                    if crate::tuning::AIR_CATCHES && matches!(a.id, CATCH_AIR | ARRIVE_TARGET) {
+                        let out = e.catch_out.unwrap_or(self.n);
+                        let to = self.base + Vec3::Y * self.height + out * ATTACH_OUT;
+                        // 0x724DB0: the shipped catch item's blend kind is NONE, so only this item's
+                        // duration is returned (DataPC ActionBlock HumanInAir, 0x156D623E).
+                        let duration = if a.id == CATCH_AIR { a.duration() + 0.2 } else { 0.2 };
+                        self.blend_time = if a.id == CATCH_AIR { super::air_catches::catch_blend(e.catch_speed) } else { 0.2 };
+                        self.warp = Some((e.from, to, super::heading_of(e.facing), super::heading_of(-out), 0.0, duration));
+                    }
                 }
                 None => self.wait(),
             }
@@ -217,7 +247,7 @@ impl HumanLadderData {
 /// `HumanInAir__FindLadderCatch` 0xE04100: the catch height is the hit's height on the ladder rounded down to 0.5 m; it
 /// must be at least 0.45 m and below the ladder's height − 1.95 m.
 pub fn catch_height(h: f32, len: f32) -> Option<f32> {
-    let h = (h * 2.0 + 1e-3).floor() * 0.5;
+    let h = if crate::tuning::AIR_CATCHES { (h * 2.0).trunc() * 0.5 } else { (h * 2.0 + 1e-3).floor() * 0.5 };
     (h >= 0.45 && h < len - 1.95).then_some(h)
 }
 
@@ -227,8 +257,7 @@ pub fn catch_height(h: f32, len: f32) -> Option<f32> {
 /// direction from the root to the ladder point, turned to the ladder's front. A box 0.6 m out and 1 m up (half 0.4 /
 /// 0.4 / 1.0) must be empty. The catch (action `CATCH_AIR`, blend (1 − min(speed / 10, 1))·0.14 + 0.06 s) interpolates
 /// the root to the point + 0.5 m out over the action + 0.2 s; Ladder EntryType 1 (state 2) waits for it, then the low
-/// wait (foot l). PORT: the root goes onto the ladder's own front (the game uses the approach direction, which the next
-/// climb move corrects).
+/// wait (foot l). PORT: ladder owner height/up are adapted from the imported line endpoints.
 pub fn find_ladder_catch(feet: Vec3, dir: Vec3, grab: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<LadderEntry> {
     let dir = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     if dir == Vec3::ZERO {
@@ -247,7 +276,7 @@ pub fn find_ladder_catch(feet: Vec3, dir: Vec3, grab: bool, guidance: &GuidanceW
     if !collision.obb_free(point + out * 0.6 + Vec3::Y, [super::right_of(-out), -out, Vec3::Y], Vec3::new(0.4, 0.4, 1.0)) {
         return None;
     }
-    Some(LadderEntry { base, top, n, from: feet, facing: -n, from_ledge: true, height: Some(h), action: Some(CATCH_AIR), chain: true, ..Default::default() })
+    Some(LadderEntry { base, top, n, from: feet, facing: -out, catch_out: Some(out), from_ledge: true, height: Some(h), action: Some(CATCH_AIR), chain: true, ..Default::default() })
 }
 
 /// The wall run's ladder (`GoAssassinActionInterpreter__WallingState` 0xEE05E0 with the Ladder ability `sub_D32600`):
@@ -366,8 +395,16 @@ pub fn update_ladder(
         } else {
             l.from.lerp(l.to, k)
         };
-        body.feet = p;
-        body.heading = super::heading_of(l.heading);
+        if l.warp.is_some() {
+            l.advance_catch_root(&mut body, dt);
+        } else if crate::tuning::AIR_CATCHES && phase == LadderPhase::Wait {
+            // 0xE226D0: constant-speed 2 m/s alignment after approach-side entry.
+            body.feet = body.feet.move_towards(p, 2.0 * dt);
+            body.heading = super::heading_of(l.heading);
+        } else {
+            body.feet = p;
+            body.heading = super::heading_of(l.heading);
+        }
 
         // The interpreter's ladder state (`GoAssassinActionInterpreter__LadderState` 0xEEB570): above the 0.35 dead
         // zone, a stick within 60° of the facing axis (|dot(d, right)| ≤ 0.866) asks to climb (IHumanLadder slot 0, ±up:
@@ -383,11 +420,16 @@ pub fn update_ladder(
             LadderPhase::EnterGround | LadderPhase::Entry => {
                 if done {
                     // the entry action's next item (a → b) at the reached root, then the wait
-                    let next = l.action.filter(|_| l.chain && phase == LadderPhase::Entry).and_then(|a| blend(a.id, a.item + 1, &[]));
+                    let excess = (l.t-dur).max(0.0);
+                    let next = l.action.filter(|_| l.chain && phase == LadderPhase::Entry).and_then(|a| blend(a.id, a.item + 1, if crate::tuning::AIR_CATCHES && a.id==ARRIVE_TARGET { a.weights() } else { &[] }));
                     match next {
                         Some(a) => {
                             let p = l.root_at(l.height);
                             l.play(LadderPhase::Entry, Some(a), p, p, false);
+                            if crate::tuning::AIR_CATCHES {
+                                l.t = excess;
+                                if matches!(a.id,CATCH_AIR|ARRIVE_TARGET) { l.blend_time=0.0; } // DataPC item blend NONE.
+                            }
                         }
                         None => l.wait(),
                     }
@@ -447,6 +489,9 @@ pub fn update_ladder(
                 // the step in progress finishes first
                 let stepping = matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done;
                 if !stepping {
+                    // the next step's foot. The game picks the exits, release and jump by the lower foot instead
+                    // (`Human__GetLowerFoot` 0xB188F0 in `HumanLadder__PlayExit` 0xE254C0): at every step seam and in the
+                    // waits that is this foot (the exit `climb_up_X_tr_…` starts where step X starts)
                     if phase != LadderPhase::Wait {
                         l.foot ^= 1;
                     }
@@ -528,7 +573,7 @@ pub fn update_ladder(
                     let dir = l.jump_dir.normalize_or(l.n);
                     leave = Some(TransitionSetup::ToInAir(match super::targets::find_jump_target(from, dir, &guidance, &collision) {
                         Some(target) => InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: l.foot == 0 },
-                        None => InAirEntry::FreeJump { from, dir, speed_param: 0.5 },
+                        None => InAirEntry::FreeJump { from, dir, speed_param: 0.5, foot_left: l.foot == 0 },
                     }));
                     body.heading = super::heading_of(dir);
                 }
@@ -537,5 +582,33 @@ pub fn update_ladder(
         if let Some(setup) = leave {
             switch_context(&mut loco, &mut data, setup);
         }
+    }
+}
+
+#[cfg(test)]
+mod catch_tests {
+    use super::*;
+    #[test]
+    fn rung_truncation_has_no_epsilon_and_strict_top_limit() {
+        assert_eq!(catch_height(0.49999,5.0),None);
+        assert_eq!(catch_height(0.5,5.0),Some(0.5));
+        assert_eq!(catch_height(0.99999,5.0),Some(0.5));
+        assert_eq!(catch_height(1.0,5.0),Some(1.0));
+        assert_eq!(catch_height(3.0,4.95),None);
+        assert_eq!(catch_height(3.0,4.951),Some(3.0));
+        assert_eq!(catch_height(-0.2,5.0),None);
+    }
+    #[test]
+    fn air_entry_has_approach_side_and_independent_current_item_warp() {
+        let mut l=HumanLadderData::default();
+        let from=Vec3::new(0.4,2.2,-0.5);let out=Vec3::new(0.4,0.0,-0.5).normalize();
+        l.enter(LadderEntry{base:Vec3::ZERO,top:Vec3::Y*5.0,n:Vec3::NEG_Z,from,facing:Vec3::Z,from_ledge:true,
+            action:Some(CATCH_AIR),height:Some(2.0),chain:true,catch_out:Some(out),catch_speed:5.0,..Default::default()});
+        let (_,to,_,_,_,duration)=l.warp.unwrap();
+        assert!(to.distance(Vec3::Y*2.0+out*0.5)<1e-6);
+        assert!((duration-l.action.unwrap().duration()-0.2).abs()<1e-6);
+        assert!((l.blend_time-0.13).abs()<1e-6);
+        let warp=l.warp;l.play(LadderPhase::Entry,blend(CATCH_AIR,1,&[]),to,to,false);
+        assert_eq!(l.warp,warp,"advancing the animation must not restart interpolation");
     }
 }

@@ -80,6 +80,73 @@ impl CollisionWorld {
         axes[0].abs() * half.x + axes[1].abs() * half.y + axes[2].abs() * half.z
     }
 
+    /// Layer-filtered ray used by 0xE044D0 / 0x116D960.
+    /// PORT: static analytic geometry replaces Havok; the player's own body is not in this world.
+    pub fn ray_distance(&self, origin: Vec3, direction: Vec3, max: f32, layer: u8) -> f32 {
+        let direction = direction.normalize_or_zero();
+        if direction == Vec3::ZERO { return 0.0; }
+        let mut nearest = max;
+        for (i, b) in self.boxes.iter().enumerate() {
+            if !self.sees(layer, i) { continue; }
+            let (mut lo, mut hi) = (0.0f32, nearest);
+            let mut hit = true;
+            for axis in 0..3 {
+                if direction[axis].abs() < 1e-8 {
+                    if origin[axis] < b.min[axis] || origin[axis] > b.max[axis] { hit = false; break; }
+                } else {
+                    let a = (b.min[axis] - origin[axis]) / direction[axis];
+                    let c = (b.max[axis] - origin[axis]) / direction[axis];
+                    lo = lo.max(a.min(c)); hi = hi.min(a.max(c));
+                    if lo > hi { hit = false; break; }
+                }
+            }
+            if hit { nearest = nearest.min(lo); }
+        }
+        let end = origin + direction * nearest;
+        self.triangles_in_bounds(origin.min(end), origin.max(end))
+            .filter(|t| layer == 0 || crate::layers::collides(layer, t.layer))
+            .filter_map(|t| t.ray(origin, direction, nearest)).fold(nearest, f32::min)
+    }
+
+    /// As `ray_distance`, with the surface normal at the hit (against the ray): the foot IK's ground ray
+    /// (`FootIK__RayDown` 0x432570). None when nothing is hit within `max`.
+    pub fn ray_hit(&self, origin: Vec3, direction: Vec3, max: f32, layer: u8) -> Option<(f32, Vec3)> {
+        let direction = direction.normalize_or_zero();
+        if direction == Vec3::ZERO { return None; }
+        let mut best: Option<(f32, Vec3)> = None;
+        for (i, b) in self.boxes.iter().enumerate() {
+            if !self.sees(layer, i) { continue; }
+            let (mut lo, mut hi, mut axis_lo) = (0.0f32, best.map_or(max, |h| h.0), usize::MAX);
+            let mut hit = true;
+            for axis in 0..3 {
+                if direction[axis].abs() < 1e-8 {
+                    if origin[axis] < b.min[axis] || origin[axis] > b.max[axis] { hit = false; break; }
+                } else {
+                    let a = (b.min[axis] - origin[axis]) / direction[axis];
+                    let c = (b.max[axis] - origin[axis]) / direction[axis];
+                    if a.min(c) > lo { lo = a.min(c); axis_lo = axis; }
+                    hi = hi.min(a.max(c));
+                    if lo > hi { hit = false; break; }
+                }
+            }
+            if hit && axis_lo != usize::MAX {
+                let mut n = Vec3::ZERO;
+                n[axis_lo] = -direction[axis_lo].signum();
+                best = Some((lo, n));
+            }
+        }
+        let reach = best.map_or(max, |h| h.0);
+        let end = origin + direction * reach;
+        for t in self.triangles_in_bounds(origin.min(end), origin.max(end)).filter(|t| layer == 0 || crate::layers::collides(layer, t.layer)) {
+            if let Some(d) = t.ray(origin, direction, best.map_or(max, |h| h.0)) {
+                if best.is_none_or(|h| d < h.0) {
+                    best = Some((d, if t.normal.dot(direction) > 0.0 { -t.normal } else { t.normal }));
+                }
+            }
+        }
+        best
+    }
+
     /// PORT: camera obstruction ray against imported static faces; native NavigationCamera remains open.
     pub fn camera_distance(&self, origin: Vec3, direction: Vec3, max: f32) -> f32 {
         let end = origin + direction * max;
@@ -89,6 +156,7 @@ impl CollisionWorld {
 
 pub struct MoveResult {
     pub position: Vec3,
+    pub velocity: Vec3,
     pub hit_wall: bool,
     pub hit_ceiling: bool,
     pub landed: bool,
@@ -118,8 +186,8 @@ impl CollisionWorld {
     pub fn move_capsule(&self, proxy: &mut crate::proxy::ProxyState, feet: Vec3, delta: Vec3, grounded: bool, dt: f32) -> MoveResult {
         let lift = if grounded { STEP_HEIGHT } else { 0.0 };
         let dt = dt.max(1e-4);
-        let (p, _, t) = crate::proxy::integrate(self, proxy, feet + Vec3::Y * lift, delta / dt, dt, lift);
-        MoveResult { position: p - Vec3::Y * lift, hit_wall: t.wall, hit_ceiling: t.ceiling, landed: t.floor }
+        let (p, velocity, t) = crate::proxy::integrate(self, proxy, feet + Vec3::Y * lift, delta / dt, dt, lift);
+        MoveResult { position: p - Vec3::Y * lift, velocity, hit_wall: t.wall, hit_ceiling: t.ceiling, landed: t.floor }
     }
 
     /// The stick-to-ground cast (`CharacterController__StickToGround` 0x57D240, `crate::proxy::stick_to_ground`): the
@@ -128,6 +196,12 @@ impl CollisionWorld {
     /// contact normal.
     pub fn support(&self, feet: Vec3) -> Option<Support> {
         crate::proxy::stick_to_ground(self, feet, STEP_HEIGHT, SNAP_DOWN).map(|(y, normal_y)| Support { y, normal_y })
+    }
+
+    /// Same stick/fall rule with the live shape height (crouch 0xD859D0).
+    pub fn ground_support_height(&self,feet:Vec3,height:f32)->Option<Support> {
+        let (y,normal_y)=crate::proxy::stick_to_ground_height(self,feet,STEP_HEIGHT,SNAP_DOWN,height)?;
+        (normal_y>=crate::proxy::MAX_SLOPE_COS || self.floor_below(feet,0.8)).then_some(Support{y,normal_y})
     }
 
     /// Height of the floor straight below `p` within `max` (a ray, no footprint).

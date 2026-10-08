@@ -103,6 +103,8 @@ pub struct ActItem {
 #[derive(Clone, Debug, Default)]
 pub struct Action {
     pub id: u32,
+    /// Serialized Action+8; native ActionBlock 0x6E9A30 indexes this, which may differ from the resource ID.
+    pub request_id: u32,
     pub block: String,
     pub items: Vec<ActItem>,
     /// +16: the transition used when entering this action; +20: the one used when leaving it (`sub_725950`).
@@ -200,7 +202,7 @@ fn read_blend(r: &mut R) -> Result<ActBlend, String> {
 fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
     match cls {
         CLASS_ACTION => {
-            let _action_id = r.u32()?;
+            let request_id = r.u32()?;
             let channel = match read_obj(r, c, true)? {
                 Obj::Ref(id) => id,
                 _ => 0,
@@ -229,7 +231,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                     _ => {}
                 }
             }
-            let a = Action { id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, channel };
+            let a = Action { id, request_id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, channel };
             c.actions.push(a.clone());
             Ok(Obj::Action(a))
         }
@@ -334,6 +336,7 @@ impl ActionGraph {
         let acts = parse_block(name, payload)?;
         let n = acts.len();
         for a in acts {
+            if a.request_id != a.id { self.actions.insert(a.request_id, a.clone()); }
             self.actions.insert(a.id, a);
         }
         Ok(n)
