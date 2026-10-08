@@ -79,9 +79,11 @@ pub const FALL_FATAL: f32 = 7.0;
 /// landing blend. SetupToGround_Landing 0xE05940 (`player::jump_blend::landing`)
 pub const ROLL_DROP: f32 = 3.0;
 
-/// PORT: jump distance when no target is in range (the game always jumps to a target; vt28 resolves one,
-/// 0xD832F0). The jump itself uses the game's free-step blend.
-pub const FREE_JUMP_DISTANCE: f32 = 2.5;
+/// The free-jump target (`Human__BuildFreeJumpTarget` 0xB1E7F0, default mode, through IHuman vt68 when no target is
+/// found): this far along the jump direction and `FREE_JUMP_DOWN` below the start. The distance comes from a table keyed
+/// by the character scale (IHuman+2712); 8.0 read live for the player (scale 1.0).
+pub const FREE_JUMP_AHEAD: f32 = 8.0;
+pub const FREE_JUMP_DOWN: f32 = 3.0;
 
 // ---------------------------------------------------------------- jump targets (RE/01 §7b)
 /// Candidate must lie within a 45° cone of the wanted direction and no lower than -3 m. 0xE96BF0

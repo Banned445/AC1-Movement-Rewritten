@@ -1040,7 +1040,7 @@ pub fn update_ground(
                 // leading foot: the playing locomotion item (footl item = left ahead) (hypothesis)
                 Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: g.blend.foot == 0 },
                 // vt28: free jump without a target
-                None => InAirEntry::FreeJump { from: body.feet, dir: forward, speed_param: g.speed_param },
+                None => InAirEntry::FreeJump { from: body.feet, dir: forward, speed_param: g.speed_param, foot_left: g.blend.foot == 0 },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;

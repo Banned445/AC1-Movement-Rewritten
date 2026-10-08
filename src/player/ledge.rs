@@ -557,7 +557,7 @@ pub fn update_ledge(
             limbs.feet = None;
             let entry = if pad.high_profile && dir == Some(LedgeDir::Down) {
                 // back eject: jump away from the wall (hypothesis: high profile + Legs + stick away)
-                InAirEntry::FreeJump { from: body.feet, dir: n, speed_param: 0.5 }
+                InAirEntry::FreeJump { from: body.feet, dir: n, speed_param: 0.5, foot_left: true }
             } else {
                 // let go (WantsLetGo 0xDCD4D0 â†’ LetGoToInAir)
                 let origin = if d.hang_type == LedgeHangType::Wall { FallOrigin::HangWall } else { FallOrigin::HangFree };

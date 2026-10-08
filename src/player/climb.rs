@@ -1114,7 +1114,7 @@ pub fn update_climb(
             let back = pad.high_profile && pad.speed01 > 0.0 && matches!(quantize(pad.dir, facing), 2 | 3 | 8 | 9);
             let entry = if back {
                 // back eject (TryBackEject 0xDF2F50) — hypothesis: high profile + Legs + stick away
-                InAirEntry::FreeJump { from: body.feet, dir: n, speed_param: 0.5 }
+                InAirEntry::FreeJump { from: body.feet, dir: n, speed_param: 0.5, foot_left: true }
             } else {
                 // release (StartRelease 0xDE96A0 → InAir, FallOrigin_Climb)
                 InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Climb, speed_param: 0.0 }

@@ -2311,22 +2311,30 @@ fn a_jump_that_clips_a_higher_roof_lip_steps_onto_it() {
 
 #[test]
 fn a_free_jump_enters_the_native_five_metre_drift_cap() {
-    // sprint off the 6 m block with nothing to land on
+    // sprint off the 6 m block with nothing to land on: the free jump runs down to its target 3 m below
+    // (0xB1E7F0), then falls; the fall never speeds up and stays under the 5 m/s drift cap
     let mut s = Sim::new(Vec3::new(-12.5, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, true, true);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir));
     let mut prev = s.body().feet;
     let mut last_h: Option<f32> = None;
+    let mut fell = false;
     while s.loco().current == ActorContextId::InAir {
         s.run(1.0 / 60.0 + 1e-4);
         let h = hspeed(prev, s.body().feet);
+        prev = s.body().feet;
+        if !matches!(s.data().air.mode, crate::player::air::AirMode::Fall { .. }) {
+            continue;
+        }
+        fell = true;
         if let Some(l) = last_h {
             // 0xE0F643 clamps excess drift immediately; no eased seam is present.
             if h > 0.1 { assert!(h <= l + 0.6, "unexpected acceleration {l:.2} -> {h:.2}"); }
         }
+        assert!(h <= 5.0 + 0.05, "fall drift {h:.2} over the cap");
         last_h = Some(h);
-        prev = s.body().feet;
     }
+    assert!(fell, "the jump never turned into a fall");
 }
 
 #[test]
@@ -3260,3 +3268,28 @@ fn holding_legs_free_runs_and_a_tap_jumps_when_let_go() {
     s.press_legs();
     assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "a tap jumps once let go");
 }
+
+#[test]
+fn a_running_jump_without_a_target_matches_the_live_game() {
+    // Human__BuildFreeJumpTarget 0xB1E7F0: 8 m ahead, 3 m down; 0xB145B0 swaps to the beam_air flight; the ground
+    // contact ends it. Live (CE, 2026-10-08): 0.656 s in the air, 4.81 m, apex 0.57 m, flight 0x118DA41C/D.
+    let mut s = Sim::new(Vec3::new(-60.0, 0.0, -40.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, true, false);
+    s.run(1.5);
+    s.press_legs();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir));
+    let flight = s.data().air.flight.map(|a| a.id).unwrap();
+    assert!(crate::player::jump_blend::FLIGHT_FREESTEP_DOWN.contains(&flight), "flight {flight:#x}");
+    let (start, mut apex, mut t) = (s.body().feet, 0.0f32, 0.0f32);
+    while s.loco().current == ActorContextId::InAir && t < 3.0 {
+        s.run(1.0 / 60.0 + 1e-4);
+        t += 1.0 / 60.0;
+        apex = apex.max(s.body().feet.y - start.y);
+    }
+    let d = (s.body().feet - start).with_y(0.0).length();
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    assert!((0.6..0.72).contains(&t), "air time {t}");
+    assert!((0.5..0.65).contains(&apex), "apex {apex}");
+    assert!((4.4..5.4).contains(&d), "distance {d}");
+}
+
