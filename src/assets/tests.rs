@@ -291,19 +291,31 @@ fn character_attachments_and_cloth_constraints_from_install() {
         assert!(span > 0.3 && span < 1.2, "{name}: weapon scale {span}");
     }
     let cloth = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap().cloth.as_ref().expect("cloth settings");
+    // All 56 modifiers the player's skeleton runs (RE/09 §8.16–8.17).
+    use crate::visual_pose::Group;
     assert_eq!(m.visual_rotation_copies.len(), 2);
-    assert_eq!(m.visual_compressions.len(), 1);
+    assert_eq!(m.visual_compressions.len(), 11);
     assert_eq!(m.visual_look_at.len(), 2);
-    assert_eq!(m.visual_hinges.len(), 20);
-    assert_eq!(m.visual_hinges.iter().filter(|h| h.equipment).count(), 4);
-    assert_eq!(m.visual_look_at.iter().filter(|v| v.equipment).count(), 1);
-    assert_eq!(m.visual_hinges.iter().filter(|h| h.soft_min > 0.0).count(), 1, "authored sword soft limit");
+    assert_eq!(m.visual_hinges.len(), 34);
+    assert_eq!((m.visual_rolls.len(), m.visual_springs.len()), (6, 1));
+    assert_eq!(m.visual_authored.len(), 56);
+    assert_eq!(m.visual_hinges.iter().filter(|h| h.group == Group::Equipment).count(), 4);
+    assert_eq!(m.visual_hinges.iter().filter(|h| h.group == Group::Body).count(), 14);
+    assert!(m.visual_hinges.iter().any(|h| h.constraints.len() == 2), "main-skeleton hinges with two constraints");
+    assert_eq!(m.visual_look_at.iter().filter(|v| v.group == Group::Equipment).count(), 1);
+    assert_eq!(m.visual_hinges.iter().filter(|h| h.group == Group::Equipment && h.constraints.iter().any(|c| c.soft_min > 0.0)).count(), 1, "authored sword soft limit");
     assert_eq!(m.visual_look_at.iter().filter(|m| m.aim_axis == 0).count(), 1, "hood aim frame");
-    assert!(m.visual_hinges.iter().all(|h| h.target >= m.skeleton.len() && h.min <= h.max && h.rest.rotation.is_finite()));
+    assert!(m.visual_hinges.iter().all(|h| (h.group == Group::Body || h.target >= m.skeleton.len())
+        && h.constraints.iter().all(|c| c.min <= c.max) && h.rest.rotation.is_finite()));
     assert!(m.visual_look_at.iter().all(|v| v.target >= m.skeleton.len()
         && v.aim < m.skeleton.len() + m.visual_bones.len() && v.target != v.aim));
     assert!(m.visual_look_at.iter().filter(|v| v.aim_axis == 2).all(|v| v.aim < m.skeleton.len()));
-    assert!(m.visual_compressions.iter().all(|c| c.target >= m.skeleton.len() && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
+    assert!(m.visual_compressions.iter().all(|c| (c.group == Group::Body || c.target >= m.skeleton.len())
+        && c.sources.iter().all(|s| *s < m.skeleton.len() + m.visual_bones.len())));
+    assert!(m.visual_compressions.iter().filter(|c| c.group == Group::Body).any(|c| c.rotation_offsets[0].angle_between(bevy::prelude::Quat::IDENTITY) > 0.1));
+    assert!(m.visual_rolls.iter().all(|r| r.target < m.skeleton.len() && r.mode <= 3 && (0.0..=1.0).contains(&r.weight)));
+    let spring = &m.visual_springs[0];
+    assert!((spring.stiffness, spring.damping) == (50.0, 15.0) && spring.min.cmple(spring.max).all());
     assert!(m.visual_rotation_copies.iter().all(|(target, source)| *target >= m.skeleton.len() && *source < m.skeleton.len() + m.visual_bones.len()));
     assert_eq!(cloth.pinned.len(), 146);
     let part = m.parts.iter().find(|p| p.name == "UCMA_Altair_Cloth").unwrap();
@@ -382,9 +394,9 @@ fn skirt_rotation_references_are_resolved_and_malformed_sources_rejected() {
     assert_eq!(hinges[0].target, 1689260203);
     assert_eq!((hinges[0].axis, hinges[0].direction), (2, 0));
     assert_eq!(hinges[0].force, bevy::prelude::Vec3::new(0.0, 0.0, -50.0));
-    assert_eq!(hinges[0].constraint_reference, Some(1971262097));
+    assert_eq!(hinges[0].constraints[0].reference, Some(1971262097));
     assert_eq!(hinges[0].target, hinges[1].target);
-    assert!(hinges[1].constraint_reference.is_none());
+    assert!(hinges[1].constraints[0].reference.is_none());
     let marker = payload.windows(4).position(|b| b == crc32("HingeBoneModifier").to_le_bytes()).unwrap();
     let mut invalid = payload.clone();
     invalid[marker + 10..marker + 14].copy_from_slice(&f32::NAN.to_le_bytes());

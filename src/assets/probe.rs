@@ -428,7 +428,7 @@ fn probe_robe_collision_frames() {
     for resource in game_fix().iter().filter(|r| r.class_hash == CLASS_ANIMATION) {
         if let Ok(clip) = decode(&resource.payload) {
             let (rotation, translation) = bone_tracks(&clip);
-            let skirt = m.visual_hinges.iter().filter(|h| !h.equipment).filter(|h| {
+            let skirt = m.visual_hinges.iter().filter(|h| h.group == crate::visual_pose::Group::Skirt).filter(|h| {
                 let b = m.skeleton.iter().chain(&m.visual_bones).nth(h.target).unwrap();
                 rotation.contains_key(&b.bone_id) || translation.contains_key(&b.bone_id)
             }).count();
@@ -442,7 +442,7 @@ fn probe_robe_collision_frames() {
     println!("rotation copies: {:?}", m.visual_rotation_copies);
     for h in &m.visual_hinges {
         let b = m.skeleton.iter().chain(&m.visual_bones).nth(h.target).unwrap();
-        println!("hinge target {} parent {:?} axis {} constraint {:?} animated clips {}", h.target, b.parent, h.axis, h.constraint_reference, animated.get(&b.bone_id).copied().unwrap_or(0));
+        println!("hinge target {} parent {:?} axis {} constraint {:?} animated clips {}", h.target, b.parent, h.axis, h.constraints.iter().map(|c| c.reference).collect::<Vec<_>>(), animated.get(&b.bone_id).copied().unwrap_or(0));
     }
     let root = Mat4::from_cols(Vec4::new(0.0, 0.0, -1.0, 0.0), Vec4::new(-1.0, 0.0, 0.0, 0.0), Vec4::new(0.0, 1.0, 0.0, 0.0), Vec4::new(0.0, -m.min_z, 0.0, 1.0));
     let mut global = Vec::new();
@@ -754,5 +754,58 @@ fn probe_cloth_force_fields() {
                 }
             }
         }
+    }
+}
+
+/// Every bone modifier authored in Rank 9's skeletons: class, owner BoneID and serialized base flag.
+#[test]
+#[ignore]
+fn probe_rank9_modifiers() {
+    let mut forge = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let entry = forge.find("Rank 9").cloned().unwrap();
+    let classes = ["HingeBoneModifier", "CompressBoneModifier", "RotationPasteModifier", "LookAtBoneModifier", "RollBoneModifier", "SpringBoxModifier",
+        "TranslationPasteModifier", "BoneModifier", "ScaleBoneModifier", "SpringBoneModifier", "TwistBoneModifier"];
+    for r in forge.resources(&entry).unwrap() {
+        if r.class_hash != super::forge::crc32("Skeleton") { continue; }
+        let d = &r.payload;
+        let bones = super::ac_formats::parse_skeleton(d);
+        let w = |p: usize| d.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+        let mut counts = std::collections::BTreeMap::new();
+        for p in 5..d.len().saturating_sub(4) {
+            if d[p - 5] != 0 { continue; }
+            for c in classes {
+                if w(p) != Some(super::forge::crc32(c)) { continue; }
+                *counts.entry(c).or_insert(0) += 1;
+                let owner = if d.get(p + 4) == Some(&2) { w(p + 5).and_then(|id| bones.iter().find(|b| b.object_id == id)).map(|b| b.bone_id) } else { None };
+                println!("  {} {c} @{p} owner {:?} flag {:?}", r.name, owner, d.get(p + 9));
+            }
+        }
+        println!("{}: {} bones, {:?}", r.name, bones.len(), counts);
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_main_skeleton_modifier_decoders() {
+    let mut forge = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let entry = forge.find("Rank 9").cloned().unwrap();
+    let r = forge.resources(&entry).unwrap().into_iter().find(|r| r.name == "UCMA_Altair" && r.class_hash == super::forge::crc32("Skeleton")).unwrap();
+    println!("hinges: {:?}", crate::skirt_hinge::decode_hinges(&r.payload).map(|v| v.len()));
+    println!("compress: {:?}", crate::visual_pose::decode_compressions(&r.payload).map(|v| v.len()));
+    let bones = super::ac_formats::parse_skeleton(&r.payload);
+    for (i, b) in bones.iter().enumerate() { println!("bone {i} id {} parent {:?} pos {:?}", b.bone_id, b.parent, b.global_pos); }
+}
+
+#[test]
+#[ignore]
+fn probe_dump_modifier_records() {
+    let mut forge = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let entry = forge.find("Rank 9").cloned().unwrap();
+    let res = forge.resources(&entry).unwrap();
+    for (name, at) in [("UCMA_Altair_Skirt", 955usize), ("UCMA_Altair", 306), ("UCMA_Altair", 3189), ("UCMA_Altair", 3350), ("UCMA_Altair", 9031),
+        ("UCMA_Altair_Skirt", 209), ("UCMA_Altair", 1629), ("UCMA_Altair", 4737), ("UCMA_Altair", 9913), ("UCMA_Altair", 8462), ("UCMA_Altair", 9450)] {
+        let d = &res.iter().find(|r| r.name == name && r.class_hash == super::forge::crc32("Skeleton")).unwrap().payload;
+        let hex: Vec<String> = d[at + 4..(at + 4 + 200).min(d.len())].iter().map(|b| format!("{b:02x}")).collect();
+        println!("{name}@{at}: {}", hex.join(""));
     }
 }
