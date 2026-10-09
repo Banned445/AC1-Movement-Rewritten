@@ -15,6 +15,7 @@ pub mod climb;
 pub mod collide;
 pub mod crouch;
 pub mod crowd;
+pub mod dead;
 pub mod ground;
 pub mod ground_extras;
 pub mod ground_tree;
@@ -55,6 +56,7 @@ pub enum ActorContextId {
     Walling = 11,
     NarrowObject = 12,
     Kiosk = 19,
+    Dead = 20,
     HayStack = 21,
 }
 
@@ -152,6 +154,7 @@ pub struct HumanDataBundle {
     pub narrow: narrow::HumanNarrowObjectData,
     pub ladder: ladder::HumanLadderData,
     pub kiosk: kiosk::HumanKioskData,
+    pub dead: dead::HumanDeadData,
 }
 
 /// Transition setup objects (`TransitionSetupDataToMovement` / `…ToInAir` …, RE/01 §4.2).
@@ -167,6 +170,7 @@ pub enum TransitionSetup {
     ToPassOver(passover::PassOverEntry),
     ToLadder(ladder::LadderEntry),
     ToKiosk(kiosk::KioskEntry),
+    ToDead(dead::DeadEntry),
 }
 
 /// Immediate context switch (0x55F7E0): exit old, apply setup to destination data, enter new.
@@ -218,6 +222,10 @@ pub fn switch_context(loco: &mut Locomotion, data: &mut HumanDataBundle, setup: 
             data.kiosk.enter(entry);
             ActorContextId::Kiosk
         }
+        TransitionSetup::ToDead(entry) => {
+            data.dead.enter(entry);
+            ActorContextId::Dead
+        }
     };
     loco.just_switched = true;
 }
@@ -250,7 +258,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(Startup, spawn_player)
             .add_systems(
                 Update,
-                (social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
+                (social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, dead::update_dead, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
                     .chain()
                     .in_set(PlayerSet),
             );

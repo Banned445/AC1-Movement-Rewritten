@@ -36,7 +36,7 @@ impl Sim {
             .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
             .insert_resource(SpawnPoint(SPAWN))
             .init_resource::<CameraRig>()
-            .add_systems(Update, (crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
+            .add_systems(Update, (crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::dead::update_dead, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
         let (c, g) = level::geometry();
         app.insert_resource(c).insert_resource(g);
         let player = app.world_mut().spawn(player_components(feet, heading)).id();
@@ -3558,4 +3558,20 @@ fn a_jump_at_a_kiosk_swings_through_its_frame_and_drops() {
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "never left the kiosk");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.body().feet);
     assert!(s.body().feet.y.abs() < 0.05, "on the street: {:?}", s.body().feet);
+}
+
+#[test]
+fn falling_into_deep_water_drowns() {
+    use crate::player::dead::DROWN;
+    // the water tank at (133, 3): dropping in from above (InAir event 2 → Dead, drowning; PORT trigger: the deep-water
+    // volume): the plain drowning for an upright body, the root carried up to the surface over 0.2 s (0xE3F9C0)
+    let mut s = Sim::new(Vec3::new(133.0, 4.0, 3.0), FACE_PZ);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Dead), "never drowned: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.data().dead.drown);
+    assert_eq!(s.data().dead.action.map(|a| a.id), Some(DROWN));
+    s.run(0.5);
+    assert!((s.body().feet.y - 1.8).abs() < 0.01, "at the surface: {:?}", s.body().feet);
+    // the fall into the water, then the drowning loop
+    s.run(1.5);
+    assert_eq!(s.data().dead.action.map(|a| (a.id, a.item)), Some((DROWN, 1)));
 }

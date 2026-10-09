@@ -75,6 +75,8 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     super::hay::HAYSTACK_DIVE[0], super::hay::HAYSTACK_DIVE[1],
     // the step off an edge backwards (event 68, 0xD9D1F0): `xx_fall_ground_back_tr_fall`
     0x935C_E89E,
+    // drowning (HumanDead 0xE3F3B0): the plain and the face down / up variants
+    super::dead::DROWN, super::dead::DROWN_FRONT, super::dead::DROWN_BACK,
     // the kiosk table (0xE3DAE0): entries, monkey bars, their falls
     super::kiosk::KIOSK_ACTIONS[0][0], super::kiosk::KIOSK_ACTIONS[0][1], super::kiosk::KIOSK_ACTIONS[0][2], super::kiosk::KIOSK_ACTIONS[0][3],
     super::kiosk::KIOSK_ACTIONS[1][0], super::kiosk::KIOSK_ACTIONS[1][1], super::kiosk::KIOSK_ACTIONS[2][0], super::kiosk::KIOSK_ACTIONS[2][1],

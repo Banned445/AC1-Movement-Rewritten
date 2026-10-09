@@ -1110,6 +1110,15 @@ pub fn update_ground(
             }
         }
 
+        // ---------------------------------------------------------------- deep water (event 113, drown)
+        // Ground event 113 (0xDB9890, every sub-state) → Dead with the water entity: drowning. PORT trigger: the
+        // feet inside a deep-water volume (the game's sender is the damage system, not traced).
+        if let Some(y) = super::dead::in_deep_water(body.feet, &guidance.water) {
+            let entry = super::dead::DeadEntry { drown: true, water_y: Some(y), from: body.feet, axis: body.forward() };
+            switch_context(&mut loco, &mut data, TransitionSetup::ToDead(entry));
+            continue;
+        }
+
         // ---------------------------------------------------------------- into a haystack (event 122)
         // The interpreter's last request (0xEE8E08, either profile): the stick past the dead zone and IHumanGround
         // vt1592 (event 122's guard 0xD8F0B0: touching a haystack, facing it within 100 degrees, the stick within 45

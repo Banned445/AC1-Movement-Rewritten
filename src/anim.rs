@@ -855,6 +855,13 @@ fn choose_clip(
                 p.sim_phase = Some(ph);
                 sim_request(&mut p, &lib, &b, 8_000_000 + data.walling.seq as u64 * 2 + (b.id == crate::player::walling::VERTICAL_END && b.item == 1) as u64, 0.08)
             }
+            // drowning (HumanDead 0xE3F9C0): the fall into the water, then the drowning loop
+            ActorContextId::Dead if data.dead.action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
+                let b = data.dead.action.unwrap();
+                let ph = data.dead.t / b.duration().max(1e-4);
+                p.sim_phase = Some(if b.item > 0 { ph.fract() } else { ph.min(1.0) });
+                sim_request(&mut p, &lib, &b, 5_800_000 + data.dead.seq as u64, 0.2)
+            }
             // kiosk (0xE3E790 / 0xE3DD40): the table's action for the stage, at the sim's time
             ActorContextId::Kiosk if data.kiosk.action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
                 let b = data.kiosk.action.unwrap();
