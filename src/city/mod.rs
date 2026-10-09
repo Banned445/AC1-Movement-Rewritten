@@ -152,7 +152,7 @@ const VOID_Y: f32 = -150.0;
 pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn: Res<crate::player::SpawnPoint>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>,
     mut guidance: ResMut<crate::guidance::GuidanceWorld>, mut players: Query<&mut crate::player::Body, With<crate::player::Player>>,
-    cams: Query<&GlobalTransform, With<crate::camera::MainCamera>>) {
+    cams: Query<(&GlobalTransform, Option<&Projection>), With<crate::camera::MainCamera>>) {
     let Some(state) = city.0.as_mut() else { return };
     let Ok(mut body) = players.single_mut() else { return };
     // PORT: falling out of the world (past the grid's ground) puts the player back at the spawn; the game's
@@ -167,10 +167,13 @@ pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn
         body.feet = start + dir * (speed * t);
         body.velocity = Vec3::ZERO;
     }
-    let (eye, view) = cams.iter().next().map_or((body.feet, Vec3::NEG_Z), |t| (t.translation(), t.forward().as_vec3()));
+    let (eye, view) = cams.iter().next().map_or((body.feet, Vec3::NEG_Z), |(t, _)| (t.translation(), t.forward().as_vec3()));
+    // 0xA2F890: renderer +684 = tan(fov_y / 2) · 2.414213, the LOD distance scale (1 at a 45° vertical field of view)
+    let fov = cams.iter().next().and_then(|(_, p)| match p { Some(Projection::Perspective(p)) => Some(p.fov), _ => None }).unwrap_or(std::f32::consts::FRAC_PI_4);
+    let lod_scale = (fov * 0.5).tan() * 2.414_213;
     let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, images: &mut images,
         collision: &mut collision, guidance: &mut guidance };
-    state.update(body.feet, eye, view, time.delta_secs(), &mut ctx);
+    state.update(body.feet, eye, view, lod_scale, time.delta_secs(), &mut ctx);
     // AC_CITY_LOG=<seconds>: log the streaming counters and frame times at that interval
     if let Some(every) = std::env::var("AC_CITY_LOG").ok().and_then(|v| v.parse::<f32>().ok()) {
         let log = &mut state.log;

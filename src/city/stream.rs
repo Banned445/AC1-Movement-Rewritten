@@ -185,7 +185,7 @@ impl CityState {
     pub fn is_loaded(&self, c: usize) -> bool { matches!(self.cells[c], Cell::Loaded { .. }) }
 
     /// Per frame: take finished cells, plan loads/unloads, switch LODs, move objects in and out of the physics window.
-    pub fn update(&mut self, player: Vec3, camera: Vec3, view: Vec3, dt: f32, ctx: &mut Ctx) {
+    pub fn update(&mut self, player: Vec3, camera: Vec3, view: Vec3, lod_scale: f32, dt: f32, ctx: &mut Ctx) {
         let mut phase = [0.0f32; 5];
         let mut clock = std::time::Instant::now();
         let mut lap = |k: usize, phase: &mut [f32; 5]| { phase[k] = clock.elapsed().as_secs_f32() * 1000.0; clock = std::time::Instant::now(); };
@@ -213,7 +213,7 @@ impl CityState {
         let waiting = (0..self.cells.len()).any(|c| self.has_content[c] && !self.is_loaded(c) && self.data.grid.cell_in_box(&self.data.grid.cells[c], p, near));
         self.hold = if waiting { Some(self.hold.unwrap_or(player)) } else { None };
         lap(1, &mut phase);
-        self.update_lods(camera, ctx, LOD_VERTEX_BUDGET);
+        self.update_lods(camera, lod_scale, ctx, LOD_VERTEX_BUDGET);
         lap(2, &mut phase);
         self.update_physics(player, ctx, PHYSICS_TRIANGLE_BUDGET);
         lap(3, &mut phase);
@@ -226,7 +226,7 @@ impl CityState {
     /// The first frame: every LOD and the whole physics window at once (no budgets).
     pub fn prime(&mut self, player: Vec3, camera: Vec3, ctx: &mut Ctx) {
         self.update_physics(player, ctx, usize::MAX);
-        self.update_lods(camera, ctx, usize::MAX);
+        self.update_lods(camera, 1.0, ctx, usize::MAX);
         self.refresh(ctx);
         self.count();
     }
@@ -339,15 +339,19 @@ impl CityState {
         for &e in self.fake_spans.get(&c).into_iter().flatten() { ctx.commands.entity(e).insert(Visibility::Inherited); }
     }
 
-    fn update_lods(&mut self, camera: Vec3, ctx: &mut Ctx, budget: usize) {
+    /// `LODSelectorInstance__Submit` 0xA90160: the LOD distance is the camera's distance to the object's box (the
+    /// visibility test 0xAC5CE0) times `lod_scale` = tan(fov_y / 2) · 2.414213 (0xA2F890: 1 at a 45° view).
+    /// PORT: the game cross-fades into the next LOD over each slot's fade width (LODBlend); the port switches.
+    fn update_lods(&mut self, camera: Vec3, lod_scale: f32, ctx: &mut Ctx, budget: usize) {
         // (distance, cell, object, wanted mesh) for every object whose drawn mesh must change
         let mut changes = Vec::new();
         for (c, cell) in self.cells.iter().enumerate() {
             let Cell::Loaded { objects, .. } = cell else { continue };
             for (k, o) in objects.iter().enumerate() {
                 if o.o.meshes.is_empty() { continue; }
-                let d = (o.o.center.distance(camera) - 0.0).max(0.0);
-                let want = o.o.lods.iter().find(|b| d < b.0).and_then(|b| b.1);
+                let b = &o.o.visual_bounds;
+                let d = camera.distance(camera.clamp(b.min, b.max)) * lod_scale;
+                let want = o.o.lod.pick(d).map(|m| m as usize).filter(|&m| m < o.o.meshes.len());
                 if want != o.shown { changes.push((d, c, k, want)); }
             }
         }

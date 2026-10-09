@@ -44,8 +44,10 @@ pub struct CityObject {
     /// Bevy-space bounds of everything the object brings (visual, collision, guidance).
     pub bounds: Aabb3,
     pub meshes: Vec<LodMesh>,
-    /// Distance bands, near to far: (end distance, mesh index). Hidden past the last end.
-    pub lods: Vec<(f32, Option<usize>)>,
+    /// Which mesh draws at a LOD distance (`LodTable::pick`); None = draws nothing.
+    pub lod: LodTable,
+    /// Bevy-space bounds of the drawn meshes: the LOD distance is measured from the camera to this box (0xAC5CE0).
+    pub visual_bounds: Aabb3,
     pub collision: Vec<Triangle>,
     pub edges: Vec<GuidanceEdge>,
     pub haystack: Option<Aabb3>,
@@ -236,7 +238,8 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     let placement = placement(b)?;
     let transform = TO_BEVY * placement;
     let mut o = CityObject { name: name.to_string(), transform, center: transform.w_axis.truncate(), radius: 0.0,
-        bounds: Aabb3 { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) }, meshes: Vec::new(), lods: Vec::new(),
+        bounds: Aabb3 { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) }, meshes: Vec::new(), lod: LodTable::default(),
+        visual_bounds: Aabb3 { min: Vec3::ZERO, max: Vec3::ZERO },
         collision: Vec::new(), edges: Vec::new(), haystack: None, pilotis: Vec::new() };
     // --- visual
     if let Some(&v) = visuals.first() {
@@ -245,7 +248,7 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
             if drawable != 0 {
                 if let Err(e) = visual(data, b, v, drawable, &mut o, materials) {
                     // the object keeps its collision and guidance without the visual
-                    o.meshes.clear(); o.lods.clear();
+                    o.meshes.clear(); o.lod = LodTable::default();
                     *skipped.entry(format!("visual: {e}")).or_default() += 1;
                 }
             }
@@ -322,44 +325,79 @@ pub fn mesh_bounds(mesh: &StaticMesh, transform: Mat4) -> Aabb3 {
     b
 }
 
-/// LODSelector descriptors (`{id, class LODDescriptor, graphic, f32 distance, f32, u8}` × 5 from payload 12).
-pub fn lod_descriptors(selector: &[u8]) -> Result<[(u32, f32); 5], String> {
+/// LODSelector payload (`LODSelector__Read` 0xA90FE0): 5 × LODDescriptor `{id, class, graphic, f32 distance, f32 fade
+/// width, u8}` (0xA8F720) from payload 12, then two bytes: selector flag bit 0 (keep empty slots) and bit 1 (no fade).
+pub fn lod_descriptors(selector: &[u8]) -> Result<([(u32, f32); 5], u8), String> {
     let mut out = [(0, 0.0); 5];
     for (k, d) in out.iter_mut().enumerate() {
         let p = 12 + 21 * k;
         if word(selector, p + 4)? != crc32("LODDescriptor") { return Err("LODSelector without LODDescriptors".into()); }
         *d = (word(selector, p + 8)?, f32::from_bits(word(selector, p + 12)?));
     }
-    Ok(out)
+    let flags = selector.get(12 + 105).copied().unwrap_or(0) & 1 | (selector.get(12 + 106).copied().unwrap_or(0) & 1) << 1;
+    Ok((out, flags))
 }
 
-/// The visible mesh slot per distance band (RE/17 §3.2, archive observation 2026-10-09). Slot i covers
-/// [distance i−1, distance i). A null slot is filler (the data puts 1 m bands like 100/101/102 on them): it shows the
-/// next non-null slot, and past the last non-null slot that mesh stays until the last distance (**hypothesis**: the
-/// selection function itself was not traced).
-pub fn lod_bands(desc: &[(u32, f32); 5]) -> Vec<(f32, Option<usize>)> {
-    let last = desc.iter().rposition(|d| d.0 != 0);
-    let mut bands: Vec<(f32, Option<usize>)> = Vec::new();
-    for i in 0..5 {
-        let slot = (i..5).find(|&j| desc[j].0 != 0).or(last.filter(|&l| l < i));
-        let end = desc[i].1;
-        if !(end > bands.last().map_or(0.0, |b| b.0)) { continue; }
-        match bands.last_mut() {
-            Some(b) if b.1 == slot => b.0 = end,
-            _ => bands.push((end, slot)),
+/// The game's per-selector LOD table (verified in IDA 2026-10-09, RE/17 §3.2): `LODSelector__BuildTable` 0xA90C30
+/// builds it after the read, `LODTable__Pick` 0xA8F510 looks it up when the instance is submitted
+/// (`LODSelectorInstance__Submit` 0xA90160).
+#[derive(Clone)]
+pub struct LodTable {
+    /// 255 / (last kept distance · 256 / 255).
+    pub scale: f32,
+    /// Mesh slot (descriptor index) per quantised distance; None = an empty kept slot (draws nothing).
+    pub entries: Option<Box<[Option<u8>; 256]>>,
+}
+
+impl Default for LodTable {
+    /// A drawable without a selector: slot 0 at every distance.
+    fn default() -> Self { Self { scale: 0.0, entries: None } }
+}
+
+impl LodTable {
+    /// `LODSelector__CollectLODs` 0xA90A10 + `LODSelector__BuildTable` 0xA90C30. Only the first four descriptors count (four LOD instances, 0xA90090). A slot with a
+    /// mesh is kept; a slot without one is kept too when flag bit 0 is set (it then draws nothing), otherwise, when a
+    /// mesh follows it, it pushes the previous kept slot's distance out to its own. The table then walks the distance in
+    /// 255 steps up to the last kept distance · 256/255, advancing at most one kept slot per step; past the end the last
+    /// kept slot stays (no LOD cut-off).
+    pub fn build(desc: &[(u32, f32); 5], flags: u8) -> Self {
+        let keep_empty = flags & 1 != 0;
+        let last_mesh = (0..4).rev().find(|&i| desc[i].0 != 0).unwrap_or(0);
+        let mut kept: Vec<(u8, f32)> = Vec::new();
+        for i in 0..4 {
+            if desc[i].0 != 0 || keep_empty { kept.push((i as u8, desc[i].1)); }
+            else if i < last_mesh { if let Some(k) = kept.last_mut() { k.1 = desc[i].1; } }
         }
+        let Some(&(_, last)) = kept.last() else { return Self { scale: 0.0, entries: Some(Box::new([None; 256])) } };
+        let max = last * 256.0 / 255.0;
+        let step = max / 255.0;
+        let mut entries = Box::new([None; 256]);
+        let (mut d, mut k) = (0.0f32, 0usize);
+        for e in entries.iter_mut() {
+            if d > kept[k].1 { k = (k + 1).min(kept.len() - 1); }
+            d += step;
+            let slot = kept[k].0;
+            *e = (desc[slot as usize].0 != 0).then_some(slot);
+        }
+        Self { scale: if max > 0.0 { 255.0 / max } else { f32::INFINITY }, entries: Some(entries) }
     }
-    bands
+
+    /// The descriptor slot drawn at LOD distance `d` (`LODTable__Pick` 0xA8F510: index = trunc(scale · d) clamped to 255).
+    pub fn pick(&self, d: f32) -> Option<u8> {
+        let Some(e) = &self.entries else { return Some(0) };
+        let i = (self.scale * d.max(0.0)).min(255.0) as usize;
+        e[i.min(255)]
+    }
 }
 
 fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject, materials: &mut HashMap<u32, Arc<MaterialData>>) -> Result<(), String> {
     let r = data.archives.get(drawable)?;
     // slot → mesh id
-    let (slots, bands): (Vec<u32>, Vec<(f32, Option<usize>)>) = if r.class_hash == crc32("LODSelector") {
-        let desc = lod_descriptors(&r.payload)?;
-        (desc.iter().map(|d| d.0).collect(), lod_bands(&desc))
+    let (slots, table): (Vec<u32>, LodTable) = if r.class_hash == crc32("LODSelector") {
+        let (desc, flags) = lod_descriptors(&r.payload)?;
+        (desc.iter().take(4).map(|d| d.0).collect(), LodTable::build(&desc, flags))
     } else if r.class_hash == crc32("Mesh") {
-        (vec![drawable], vec![(f32::INFINITY, Some(0))])
+        (vec![drawable], LodTable::default())
     } else if r.class_hash == crc32("DynamicMesh") {
         // A cloth (the rooftop gardens' tarps): the DynamicMesh resource is only a header; the entity's SoftBody
         // component references its source Mesh (reflection: SoftBody +372 Mesh). PORT: drawn in its rest shape, the
@@ -368,7 +406,7 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
         let mesh = (soft + 4..b.len().saturating_sub(4)).filter_map(|p| word(b, p).ok())
             .find(|&id| id != 0 && data.archives.contains(id) && data.archives.get(id).is_ok_and(|m| m.class_hash == crc32("Mesh")))
             .ok_or("cloth SoftBody without a Mesh")?;
-        (vec![mesh], vec![(f32::INFINITY, Some(0))])
+        (vec![mesh], LodTable::default())
     } else {
         return Err("unsupported drawable".into());
     };
@@ -400,14 +438,17 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
         index_of_slot.insert(slot, o.meshes.len());
         o.meshes.push(LodMesh { id, mesh, colors: col });
     }
-    o.lods = bands.into_iter().map(|(end, slot)| (end, slot.and_then(|s| index_of_slot.get(&s).copied()))).collect();
+    // descriptor slots → this object's mesh indices
+    o.lod = LodTable { scale: table.scale, entries: table.entries.map(|e| Box::new(e.map(|s| s.and_then(|s| index_of_slot.get(&(s as usize)).map(|&m| m as u8))))) };
     if let Some(first) = o.meshes.first() {
         let bounds = mesh_bounds(&first.mesh, o.transform);
         o.center = (bounds.min + bounds.max) * 0.5;
         o.radius = (bounds.max - bounds.min).length() * 0.5;
+        o.visual_bounds = bounds;
         for m in &o.meshes {
             let bb = mesh_bounds(&m.mesh, o.transform);
             o.bounds.min = o.bounds.min.min(bb.min); o.bounds.max = o.bounds.max.max(bb.max);
+            o.visual_bounds.min = o.visual_bounds.min.min(bb.min); o.visual_bounds.max = o.visual_bounds.max.max(bb.max);
         }
     }
     Ok(())
@@ -418,19 +459,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lod_bands_skip_filler_slots_and_keep_the_last_mesh() {
-        let m = |x| x;
-        // MM-M- 20/40/80/160/320: 0-20 slot0, 20-40 slot1, 40-160 slot3 (filler slot2 falls through), 160-320 slot3 kept
-        let d = [(m(1), 20.0), (2, 40.0), (0, 80.0), (4, 160.0), (0, 320.0)];
-        assert_eq!(lod_bands(&d), vec![(20.0, Some(0)), (40.0, Some(1)), (320.0, Some(3))]);
-        // M--M- 100/101/102/350/351
-        let d = [(1, 100.0), (0, 101.0), (0, 102.0), (4, 350.0), (0, 351.0)];
-        assert_eq!(lod_bands(&d), vec![(100.0, Some(0)), (351.0, Some(3))]);
-        // -M--- 9999/10000/...: an object shown only by its slot 1 mesh
-        let d = [(0, 9999.0), (1, 10000.0), (0, 10001.0), (0, 10002.0), (0, 10003.0)];
-        assert_eq!(lod_bands(&d), vec![(10003.0, Some(1))]);
-        // MMM-- 10/20/40/80/160
-        let d = [(1, 10.0), (2, 20.0), (3, 40.0), (0, 80.0), (0, 160.0)];
-        assert_eq!(lod_bands(&d), vec![(10.0, Some(0)), (20.0, Some(1)), (160.0, Some(2))]);
+    fn lod_table_follows_the_exe() {
+        // MM-M- 20/40/80/160/320: the empty slot 2 pushes slot 1 out to 80 m; slot 3 from there on, with no cut-off
+        let t = LodTable::build(&[(1, 20.0), (2, 40.0), (0, 80.0), (4, 160.0), (0, 320.0)], 0);
+        assert_eq!([t.pick(0.0), t.pick(19.0), t.pick(30.0), t.pick(70.0), t.pick(100.0), t.pick(400.0), t.pick(1e5)],
+            [Some(0), Some(0), Some(1), Some(1), Some(3), Some(3), Some(3)]);
+        // M--M- 100/101/102/350/351: slot 0 to 102 m, then slot 3
+        let t = LodTable::build(&[(1, 100.0), (0, 101.0), (0, 102.0), (4, 350.0), (0, 351.0)], 0);
+        assert_eq!([t.pick(90.0), t.pick(101.5), t.pick(110.0), t.pick(500.0)], [Some(0), Some(0), Some(3), Some(3)]);
+        // -M---: the leading empty slot is dropped, slot 1 at every distance
+        let t = LodTable::build(&[(0, 9999.0), (1, 10000.0), (0, 10001.0), (0, 10002.0), (0, 10003.0)], 0);
+        assert_eq!([t.pick(0.0), t.pick(5e4)], [Some(1), Some(1)]);
+        // flag bit 0 keeps empty slots: M---- 50/51/80/160 draws nothing past 50 m
+        let t = LodTable::build(&[(1, 50.0), (0, 51.0), (0, 80.0), (0, 160.0), (0, 320.0)], 1);
+        assert_eq!([t.pick(40.0), t.pick(60.0), t.pick(1e4)], [Some(0), None, None]);
+        // the fifth descriptor is never read
+        let t = LodTable::build(&[(1, 10.0), (0, 20.0), (0, 40.0), (0, 80.0), (5, 160.0)], 0);
+        assert_eq!(t.pick(1e4), Some(0));
     }
 }
