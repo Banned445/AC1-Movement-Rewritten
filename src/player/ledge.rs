@@ -427,6 +427,15 @@ pub fn update_ledge(
                     body.grounded = true;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });
                 }
+                super::passover::PassOverOut::PullDown { far, normal } => {
+                    // pull-down type 4 (0xDE0220): Ledge SubState 11 from the far edge
+                    data.ledge.pass_over = None;
+                    let entry = match ledge_moves::pulldown_passover(far, normal, body.feet, p.hand, p.w, &guidance, &collision) {
+                        Ok(moves) => super::ground::pulldown_ledge_entry(moves, normal, body.feet),
+                        Err(orient) => super::ground::pulldown_release_entry(orient, normal, body.feet),
+                    };
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
+                }
                 super::passover::PassOverOut::Fall(action) => {
                     data.ledge.pass_over = None;
                     let entry = super::air::InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 };

@@ -86,6 +86,10 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     (-104.0, -122.05, 5.2, 1.1, 1.2),
     (-106.05, -120.0, 1.1, 3.0, 1.2),
     (-101.95, -120.0, 1.1, 3.0, 1.2),
+    // the pass-over pull-down (type 4, 0xDE0220): a 4 m roof (x -122..-118, z -118..-113) with a 1 m parapet 0.3 m
+    // thick along its -Z edge (top 5 m, a 5 m drop beyond): free run at it, vault, hang on the far side
+    (-120.0, -115.5, 4.0, 5.0, 4.0),
+    (-120.0, -118.15, 4.0, 0.3, 5.0),
     // --- the climb's ledge grab (0xDF0980, RE/18 §7.3): a 7 m wall (x -130..-126, face z -135.3) whose bands start at
     //     3.0 m (CLIMB_WALLS): climbing down to the lowest band hangs from the one above it
     (-128.0, -135.0, 4.0, 0.6, 7.0),

@@ -3877,3 +3877,26 @@ fn a_pull_down_with_no_hands_on_the_edge_releases_into_a_fall() {
     assert_eq!(s.data().air.fall_origin, air::FallOrigin::HangWall);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "fell to the street");
 }
+
+#[test]
+fn vaulting_a_roofs_parapet_pulls_down_to_hang_on_the_far_side() {
+    use crate::player::ledge_moves::MoveKind;
+    use crate::player::passover::{PassOverPhase, PULLDOWN_ORIENT};
+    // A2 yard: a 4 m roof with a 1 m parapet (z -118.3..-118.0, top 5 m) over a 5 m drop. The vault finds the far
+    // edge, room at it and 3 m or more beyond (0xDD2BD0) → pull-down type 4 (0xDE0220), hanging on the far side
+    let mut s = Sim::new(Vec3::new(-120.0, 4.0, -113.4), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(0.4);
+    s.press_legs();
+    assert!(s.run_until(0.6, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.body().feet);
+    assert_eq!(s.data().air.target.map(|t| t.type_flags), Some(2), "pass-over target");
+    assert!(s.run_until(2.0, |s| s.data().ledge.pass_over.is_some_and(|p| p.phase == PassOverPhase::Vault)), "no vault: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::PullDown { stage: 1 })), "no pull-down: {:?} {:?}", s.loco().current, s.body().feet);
+    let m = s.data().ledge.mv.unwrap();
+    assert!(m.seq[0].is_some_and(|a| PULLDOWN_ORIENT.contains(&a.id)), "the pass-over orientation");
+    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_none() && s.data().ledge.queue.is_empty()), "never settled");
+    let l = &s.data().ledge;
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    assert!(l.normal.dot(Vec3::NEG_Z) > 0.99 && (l.hand_l.y - 5.0).abs() < 0.05, "hanging on the parapet's far face: {:?} {:?}", l.normal, l.hand_l);
+    assert!(s.body().feet.z < -118.3, "on the far side: {:?}", s.body().feet);
+}

@@ -34,6 +34,7 @@ pub const AREAS: &[Area] = &[
     at("Roofs and jumps", Vec3::new(7.0, 3.5, 12.0), EAST),
     at("Step-up box (free-run hop)", Vec3::new(9.0, 0.0, -3.0), NORTH),
     at("Pass-over railing", Vec3::new(40.0, 0.0, 8.4), SOUTH),
+    at("Pass-over parapet on a roof (vault, then hang on the far side)", Vec3::new(-120.0, 4.0, -113.5), SOUTH),
     at("Look-down and pull-down edge (walk into it and hold; E to hang)", Vec3::new(8.0, 3.5, 12.0), EAST),
     at("Falls and ledge stop (6 m block)", Vec3::new(-11.0, 6.0, 2.0), EAST),
     at("Walk / run off an edge (2 m and 3.2 m blocks)", Vec3::new(0.0, 2.0, 24.0), SOUTH),

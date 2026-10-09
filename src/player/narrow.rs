@@ -784,7 +784,7 @@ pub fn pull_down_edge(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
 }
 
 /// 0xB2E4F0: upright torso clearance followed by a box tilted 30° for the descent.
-fn pull_down_clear(feet: Vec3, edge: Vec3, outward: Vec3, collision: &CollisionWorld) -> bool {
+pub(crate) fn pull_down_clear(feet: Vec3, edge: Vec3, outward: Vec3, collision: &CollisionWorld) -> bool {
     let right = super::right_of(outward);
     let upright = (edge + outward * 0.25).with_y(feet.y + 1.075);
     if !collision.obb_free(upright, [right, Vec3::Y, outward], Vec3::new(0.3, 0.725, 0.75)) { return false; }

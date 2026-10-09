@@ -1530,6 +1530,22 @@ pub fn pulldown_wall_weights(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> 
 
 /// The pull-down with the type's orientation and descent actions (table 0x1A2C3F0).
 pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
+    pulldown_blend(p, n, from, single(orient_id, 0), single(descent_id, 0), 0.0, guidance, collision)
+}
+
+/// The pass-over pull-down (type 4, `HumanLedge__PassOverToPullDown` 0xDE0220): from the wall top's far edge after
+/// the vault with hand `hand` (0 left: the orientation `0x09A0B647`, else `0x09A0B649`; the descent `…48` / `…4A`),
+/// both blended [1 − w, w] by the thickness, and the orientation and descent roots pulled back 0.3·(1 − w) along
+/// the normal (0xDDE7FA / 0xDDED9E).
+pub fn pulldown_passover(p: Vec3, n: Vec3, from: Vec3, hand: usize, w: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
+    use super::passover::{PULLDOWN_DESCENT as D, PULLDOWN_ORIENT as O};
+    let blend = |id: u32| jump_blend::action_items(id).map(|_| ActionBlend::new(id, 0, &[1.0 - w, w]));
+    pulldown_blend(p, n, from, blend(O[hand.min(1)]), blend(D[hand.min(1)]), 0.3 * (1.0 - w), guidance, collision)
+}
+
+/// The pull-down's three stages with the orientation and descent actions given; `inset` pulls both roots back
+/// toward the wall.
+pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<ActionBlend>, descent_action: Option<ActionBlend>, inset: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
     let n = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let facing_out = n;
     let facing_in = -n;
@@ -1537,7 +1553,7 @@ pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u
     let hands = guidance.on_edge(p - r * 0.25, n, 0.3).zip(guidance.on_edge(p + r * 0.25, n, 0.3));
     let Some((hl, hr)) = hands.map(|(a, b)| (a.point, b.point)) else {
         // ReleaseToInAir: the orientation plays, then the let-go
-        let seq = [single(orient_id, 0), None, None, None];
+        let seq = [orient_action, None, None, None];
         let durations = seq_durations(&seq);
         return Err(LedgeMove {
             kind: MoveKind::PullDown { stage: 4 },
@@ -1545,7 +1561,7 @@ pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u
             durations: if durations.iter().sum::<f32>() > 0.0 { durations } else { [GRAB_TIME, 0.0, 0.0, 0.0] },
             t: 0.0,
             from,
-            to: p + n * 0.5,
+            to: p + n * (0.5 - inset),
             facing_from: facing_out,
             facing_to: facing_in,
             follow_disp: false,
@@ -1582,10 +1598,10 @@ pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u
         }
     };
     let item = |id: u32, i: usize, w: &[f32]| jump_blend::action_items(id).filter(|it| it.len() > i).map(|_| ActionBlend::new(id, i, w));
-    let p1 = Vec3::new(mid.x, mid.y, mid.z) + n * 0.5;
-    let orient = mk(1, [single(orient_id, 0), None, None, None], from, p1, facing_out, facing_in, false, false);
-    let p2 = mid + n * 1.0 - Vec3::Y * 0.8;
-    let descent = mk(2, [single(descent_id, 0), None, None, None], p1, p2, facing_in, facing_in, false, false);
+    let p1 = Vec3::new(mid.x, mid.y, mid.z) + n * (0.5 - inset);
+    let orient = mk(1, [orient_action, None, None, None], from, p1, facing_out, facing_in, false, false);
+    let p2 = mid + n * (1.0 - inset) - Vec3::Y * 0.8;
+    let descent = mk(2, [descent_action, None, None, None], p1, p2, facing_in, facing_in, false, false);
     let wall = hang_type_at(mid, n, collision) == LedgeHangType::Wall;
     let w = pulldown_wall_weights(mid, n, collision);
     let reception = if wall {
