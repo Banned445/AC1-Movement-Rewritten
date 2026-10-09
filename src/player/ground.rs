@@ -934,7 +934,7 @@ pub fn update_ground(
         // Guard 0xD9F4C0: a beam in the box ahead (±0.75 m, 0–1 m, ±0.53 m). PORT trigger: walking at it (the
         // decision layer's event 72 sender is not traced).
         if moving && !busy {
-            if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, body.forward(), &guidance) {
+            if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, body.forward(), &guidance, &collision) {
                 // Mode 1 retains the incoming locomotion action (0xF7AAA0).
                 if super::narrow::BEAM_COMPLETION {
                     entry.foot = g.blend.foot;

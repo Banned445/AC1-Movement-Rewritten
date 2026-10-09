@@ -303,4 +303,27 @@ mod tests {
         assert!(world.resource::<crate::collision::CollisionWorld>().triangles.is_empty());
         assert_eq!(world.resource::<MapMenu>().active,Map::Greybox);
     }
+
+    #[test]
+    fn damascus_switch_streams_the_city_and_leaves_no_loader_behind() {
+        let Some(game) = crate::assets::find_game_dir() else { return; };
+        if !game.join(crate::city::DAMASCUS.archive).is_file() { return; }
+        let mut world = scene_world();
+        world.init_resource::<crate::city::stream::City>();
+        let camera = world.spawn((crate::camera::MainCamera, Transform::default())).id();
+        switch(&mut world,Map::Greybox).unwrap();
+        let count = map_count(&mut world);
+        switch_from(&mut world,Map::Damascus,&game).unwrap();
+        assert_eq!(world.resource::<MapMenu>().active,Map::Damascus);
+        assert!(world.resource::<crate::city::stream::City>().0.is_some());
+        assert!(world.resource::<crate::collision::CollisionWorld>().index.is_some());
+        assert!(world.resource::<crate::collision::CollisionWorld>().support(world.resource::<SpawnPoint>().0 + Vec3::Y * 0.3).is_some());
+        assert!(map_count(&mut world) > 1000);
+        assert!(world.get::<DistanceFog>(camera).is_some());
+        switch(&mut world,Map::Greybox).unwrap();
+        assert!(world.resource::<crate::city::stream::City>().0.is_none());
+        assert!(world.get::<DistanceFog>(camera).is_none());
+        assert!(world.resource::<crate::collision::CollisionWorld>().index.is_none());
+        assert_eq!(map_count(&mut world),count);
+    }
 }

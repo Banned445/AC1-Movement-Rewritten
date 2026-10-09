@@ -267,3 +267,198 @@ fn damascus_leap_of_faith_lands_in_a_city_haystack() {
     }
     panic!("no Leap of Faith reached a haystack: {tried:#?}");
 }
+
+/// Walking from a roof onto one of the city's authored beams (guidance subtype Beam) mounts it and walks along it.
+#[test]
+fn damascus_walks_onto_a_city_beam() {
+    use crate::guidance::GuidanceSubType;
+    let mut tried = Vec::new();
+    for spawn in SPAWNS {
+        let Some(mut s) = CitySim::new(spawn) else { return };
+        let c = s.collision();
+        let mut spots = Vec::new();
+        // beams are HumanGuidance's runtime report: paired LedgeGrab contacts (RE/05, beam_contacts::detect)
+        let g = s.guidance();
+        let mut beams: Vec<(Vec3, Vec3)> = Vec::new();
+        for e in g.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.p0.distance(e.p1) > 2.5 && e.n0.y > 0.9) {
+            for b in crate::guidance::beam_contacts::detect(g, c, (e.p0 + e.p1) * 0.5, Vec3::new(1.5, 0.6, 1.5)) {
+                if b.p0.distance(b.p1) > 2.5 && (b.p1.y - b.p0.y).abs() < 0.3 && !beams.iter().any(|x| x.0.distance(b.p0) < 0.5) { beams.push((b.p0, b.p1)); }
+            }
+        }
+        for &(p0, p1) in &beams {
+            for (a, b) in [(p0, p1), (p1, p0)] {
+                let dir = (b - a).with_y(0.0).normalize();
+                let from = a - dir * 1.2;
+                let Some(floor) = c.floor_height_below(from + Vec3::Y * 0.4, 0.8) else { continue };
+                let feet = Vec3::new(from.x, floor, from.z);
+                if (floor - a.y).abs() > 0.3 || !c.capsule_fits(feet) || !c.capsule_fits(a.lerp(b, 0.5) + Vec3::Y * 0.05) { continue; }
+                if c.floor_height_below(a.lerp(b, 0.5) - Vec3::Y * 0.1, 1.5).is_some() { continue; } // a real gap under the beam
+                spots.push((feet, dir, a, b));
+            }
+        }
+        for &(feet, dir, a, b) in spots.iter().take(4) {
+            s.place(feet, dir);
+            s.run(0.2);
+            s.pad(dir, 1.0, false, false);
+            if s.run_until(3.0, |s| s.loco().current == ActorContextId::NarrowObject) {
+                let mut trace = Vec::new();
+                let walked = s.run_until(5.0, |s| (s.body().feet - a).dot(dir) > 1.0 || s.loco().current != ActorContextId::NarrowObject);
+                for _ in 0..3 { trace.push(format!("{:?} {:?} {}", s.loco().current, s.data().narrow.state, s.body().feet)); s.run(0.3); }
+                assert!(walked, "beam {a}->{b}: {trace:?}");
+                let f = s.body().feet;
+                let along = (f - a).dot(dir);
+                assert!(along > 0.3 && (f.y - a.lerp(b, (along / a.distance(b)).clamp(0.0, 1.0)).y).abs() < 0.15, "beam {a}->{b}: at {f}");
+                return;
+            }
+            tried.push(format!("{spawn} {a}->{b}: {:?} at {}", s.loco().current, s.body().feet));
+            s.pad(dir, 0.0, false, false); s.run(1.0);
+        }
+        if spots.is_empty() { tried.push(format!("{spawn}: {} beams, none with a roof at its end", beams.len())); }
+    }
+    panic!("no beam mounted: {tried:#?}");
+}
+
+/// Free running across a street gap: from one roof edge to the facing roof edge 1.5–3.5 m away.
+#[test]
+fn damascus_free_run_jumps_a_gap_between_roofs() {
+    use crate::guidance::GuidanceSubType;
+    let mut tried = Vec::new();
+    for spawn in SPAWNS {
+        let Some(mut s) = CitySim::new(spawn) else { return };
+        let c = s.collision();
+        let roofs: Vec<_> = s.guidance().edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.n0.y > 0.9 && e.n1.y.abs() < 0.3 && e.p0.distance(e.p1) > 2.0).cloned().collect();
+        let mut spots = Vec::new();
+        for a in &roofs {
+            let na = Vec3::new(a.n1.x, 0.0, a.n1.z).normalize_or_zero();
+            let qa = (a.p0 + a.p1) * 0.5;
+            for b in &roofs {
+                let nb = Vec3::new(b.n1.x, 0.0, b.n1.z).normalize_or_zero();
+                if na.dot(nb) > -0.95 { continue; }
+                let qb = b.closest_point(qa);
+                let gap = (qb - qa).dot(na);
+                if !(1.5..=3.5).contains(&gap) || (qb - qa - na * gap).with_y(0.0).length() > 0.5 || (qb.y - qa.y).abs() > 1.0 { continue; }
+                let start = qa - na * 5.0;
+                let Some(floor) = c.floor_height_below(start + Vec3::Y * 0.4, 0.8) else { continue };
+                let feet = Vec3::new(start.x, floor, start.z);
+                let path_ok = (1..10).all(|k| c.floor_height_below(qa - na * (k as f32 * 0.5) + Vec3::Y * 0.4, 0.8).is_some_and(|y| (y - qa.y).abs() < 0.3));
+                let land = c.floor_height_below(qb - na * -1.0 + Vec3::Y * 0.4, 0.8).is_some_and(|y| (y - qb.y).abs() < 0.3);
+                if (floor - qa.y).abs() > 0.3 || !path_ok || !land || !c.capsule_fits(feet) { continue; }
+                spots.push((feet, na, qb));
+            }
+        }
+        for &(feet, dir, far) in spots.iter().take(4) {
+            s.place(feet, dir);
+            s.run(0.2);
+            s.pad(dir, 1.0, true, true);
+            let jumped = s.run_until(4.0, |s| s.loco().current == ActorContextId::InAir);
+            let crossed = jumped && s.run_until(4.0, |s| {
+                let f = s.body().feet;
+                (f - far).dot(dir) > -0.2 && matches!(s.loco().current, ActorContextId::Ground | ActorContextId::Ledge | ActorContextId::Climb)
+            });
+            if crossed { return; }
+            tried.push(format!("{spawn} to {far}: jumped {jumped}, {:?} at {}", s.loco().current, s.body().feet));
+            s.pad(dir, 0.0, false, false); s.run(2.0);
+        }
+        if spots.is_empty() { tried.push(format!("{spawn}: no facing roofs")); }
+    }
+    panic!("no gap jump crossed: {tried:#?}");
+}
+
+#[test]
+#[ignore]
+fn damascus_guidance_census() {
+    let Some(s) = CitySim::new(SPAWNS[0]) else { return };
+    let mut hist = std::collections::BTreeMap::<String, usize>::new();
+    for e in &s.guidance().edges { *hist.entry(format!("{:?}", e.subtype)).or_default() += 1; }
+    eprintln!("{hist:?} haystacks {}", s.guidance().haystacks.len());
+    let c = s.collision();
+    for e in s.guidance().edges.iter().filter(|e| e.subtype == crate::guidance::GuidanceSubType::Beam).take(15) {
+        let mid = e.p0.lerp(e.p1, 0.5);
+        let f = |p: Vec3| c.floor_height_below(p + Vec3::Y * 0.4, 3.0).map(|y| y - p.y);
+        let dir = (e.p1 - e.p0).with_y(0.0).normalize_or_zero();
+        eprintln!("beam {} -> {} len {:.2} n0 {} n1 {} floor below mid {:?} before p0 {:?} after p1 {:?}", e.p0, e.p1, e.p0.distance(e.p1), e.n0, e.n1,
+            c.floor_height_below(mid - Vec3::Y * 0.05, 10.0).map(|y| y - mid.y), f(e.p0 - dir * 1.0), f(e.p1 + dir * 1.0));
+    }
+}
+
+/// Free running into a tall facade: the wall run or the climb takes over, and holding up climbs the authored holds.
+#[test]
+fn damascus_runs_up_and_climbs_a_tall_facade() {
+    use crate::guidance::GuidanceSubType;
+    let Some(mut s) = CitySim::new(SPAWNS[0]) else { return };
+    let spawn = s.body().feet;
+    let c = s.collision();
+    let mut spots = Vec::new();
+    for e in s.guidance().edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.n1.y.abs() < 0.3 && e.p0.distance(e.p1) > 1.0) {
+        let q = (e.p0 + e.p1) * 0.5;
+        let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+        let stand = q + n * 4.0;
+        let Some(floor) = c.floor_height_below(Vec3::new(stand.x, q.y - 1.5, stand.z), 4.0) else { continue };
+        let h = q.y - floor;
+        if !(2.6..=4.0).contains(&h) { continue; }
+        let feet = Vec3::new(stand.x, floor, stand.z);
+        // a clear run-up on level ground and a wall reaching well above the hold
+        let level = (0..8).all(|k| c.floor_height_below(Vec3::new(stand.x, floor + 0.4, stand.z) - n * (k as f32 * 0.45), 0.8).is_some_and(|y| (y - floor).abs() < 0.25));
+        let tall = c.ray_distance(q - n * 0.0 + n * 0.3 + Vec3::Y * 2.0, -n, 1.0, crate::layers::MAIN_CHARACTER) < 1.0;
+        if !level || !tall || !c.capsule_fits(feet) { continue; }
+        spots.push((feet.distance(spawn), feet, n, q));
+    }
+    spots.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert!(!spots.is_empty(), "no tall facade near the Souk");
+    let mut tried = Vec::new();
+    for &(_, feet, n, q) in spots.iter().take(6) {
+        s.place(feet, -n);
+        s.run(0.2);
+        s.pad(-n, 1.0, true, true);
+        s.press_legs();
+        let start_y = feet.y;
+        let on_wall = s.run_until(4.0, |s| matches!(s.loco().current, ActorContextId::Walling | ActorContextId::Climb | ActorContextId::Ledge));
+        if on_wall && s.run_until(6.0, |s| s.body().feet.y > start_y + 2.0) {
+            return;
+        }
+        tried.push(format!("{q}: {:?} at {}", s.loco().current, s.body().feet));
+        s.pad(n, 0.0, false, false); s.run(2.0);
+    }
+    panic!("no facade climbed: {tried:#?}");
+}
+
+/// Touring the districts: cells load and unload around the player, physics slots are reused rather than piling up,
+/// and the player always has native ground underfoot after the cells around them arrive.
+#[test]
+fn damascus_streaming_tour_loads_unloads_and_reuses_slots() {
+    let Some(mut s) = CitySim::new(SPAWNS[0]) else { return };
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let stops: Vec<(Vec3, f32)> = SPAWNS[1..].iter().chain([SPAWNS[0]].iter()).filter_map(|n| super::spawner(&w.globals, n)).collect();
+    let mut peak_slots = 0;
+    let mut peak_cells = 0;
+    let first_slots = s.collision().triangles.len();
+    for round in 0..2 {
+        for &(p, _) in &stops {
+            s.teleport(p + Vec3::Y * 0.05);
+            // the loader threads run on the wall clock, the sim on its own: wait in real time
+            let started = std::time::Instant::now();
+            let mut settled = false;
+            while started.elapsed().as_secs() < 60 {
+                s.step();
+                if s.app.world().resource::<super::stream::City>().0.as_ref().unwrap().settled(p, super::stream::LOAD_RADIUS) { settled = true; break; }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(settled, "cells around {p} never finished loading: {:?}", s.stats());
+            s.run(1.0);
+            let st = s.stats();
+            assert!(st.errors == 0, "{st:?}");
+            assert!(s.collision().support(s.body().feet + Vec3::Y * 0.3).is_some() || s.loco().current != ActorContextId::Ground, "no ground at {p}: {:?}", s.body().feet);
+            peak_slots = peak_slots.max(s.collision().triangles.len());
+            peak_cells = peak_cells.max(st.loaded);
+            // every loaded cell is near the player
+            let city = s.app.world().resource::<super::stream::City>();
+            let state = city.0.as_ref().unwrap();
+            assert!(state.cells_within(p, super::stream::LOAD_RADIUS + super::stream::UNLOAD_MARGIN + 1.0).len() >= st.loaded, "far cells still loaded at {p}: {st:?}");
+            eprintln!("round {round} at {p}: {st:?}, {} triangle slots", s.collision().triangles.len());
+        }
+    }
+    // slot storage is bounded by the largest window, not the sum of every window visited
+    assert!(peak_slots < first_slots * 4 + 400_000, "triangle slots grew to {peak_slots} (first window {first_slots})");
+    assert!(peak_cells < 260, "{peak_cells} cells loaded at once");
+}

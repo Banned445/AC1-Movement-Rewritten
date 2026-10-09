@@ -146,12 +146,18 @@ impl Plugin for CityPlugin {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>,
+/// Below the lowest Damascus terrain (about −70 m in the countryside ring).
+const VOID_Y: f32 = -150.0;
+
+pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn: Res<crate::player::SpawnPoint>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>,
     mut guidance: ResMut<crate::guidance::GuidanceWorld>, mut players: Query<&mut crate::player::Body, With<crate::player::Player>>,
     cams: Query<&GlobalTransform, With<crate::camera::MainCamera>>) {
     let Some(state) = city.0.as_mut() else { return };
     let Ok(mut body) = players.single_mut() else { return };
+    // PORT: falling out of the world (past the grid's ground) puts the player back at the spawn; the game's
+    // OutOfBounds / desynchronisation handling is not ported.
+    if body.feet.y < VOID_Y { body.feet = spawn.0; body.velocity = Vec3::ZERO; body.proxy.manifold.clear(); }
     // AC_CITY_TOUR=<m/s>: debug fly-through, 25 m above the spawn, straight across the grid (streaming / LOD stress)
     if let Some(speed) = std::env::var("AC_CITY_TOUR").ok().and_then(|v| v.parse::<f32>().ok()) {
         let height = std::env::var("AC_CITY_TOUR_HEIGHT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(25.0);

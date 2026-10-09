@@ -91,21 +91,24 @@ impl MeshCache {
     }
 }
 
-/// A mesh with bones (haystacks, scaffolds, stalls, trees …) drawn in its bind pose. Its CompiledMesh blob has the
-/// static layout (RE/14 §2: `{u32 format 22, u32 stride, vb, ib, 0, 0, draw count, group count, …}`, vertices,
-/// u16 indices, 20-byte draw records, then the material list after the blob) with the stride-32 skinned vertex of
-/// RE/09 §3.1: positions s16 / 2048 in model space, normal / tangent / binormal bytes, UV s16 / 2048.
-/// PORT: the props' skeletons and animations (swaying, breaking) are not played; the bind pose is drawn.
+/// Meshes the plain static reader does not take, drawn in their bind / rest pose: kind 0 or 1 with bones
+/// (haystacks, scaffolds, stalls, trees …) and kind 4 with inline SubMesh objects (cloth tarps, flags). Their
+/// CompiledMesh blob has the static layout (RE/14 §2: `{u32 format 22, u32 stride, vb, ib, 0, 0, draw count, group
+/// count, …}`, vertices, indices, 20-byte draw records, then the material list after the blob). Stride 24 is the
+/// GEN_Standard vertex (position s16 · |w| · 3.81e-6, RE/14 §2); stride 32 the skinned vertex of RE/09 §3.1 (model space
+/// at bind, s16 / 2048).
+/// PORT: the props' skeletons, animations (swaying, breaking) and cloth simulation are not played.
 fn bind_pose_mesh(d: &[u8]) -> Option<StaticMesh> {
     let cm = (20..d.len().saturating_sub(4)).find(|&o| word(d, o).ok() == Some(crate::assets::ac_formats::CLASS_COMPILED_MESH))?;
     let size = word(d, cm + 4).ok()? as usize;
     let blob = d.get(cm + 8..cm + 8 + size)?;
     let w = |p: usize| word(blob, p).ok();
-    if w(0)? != 22 || w(4)? != 32 { return None; }
+    let stride = w(4)? as usize;
+    if w(0)? != 22 || !(stride == 24 || stride == 32) { return None; }
     let (vb, ib, count) = (w(8)? as usize, w(12)? as usize, w(24)? as usize);
-    if vb % 32 != 0 || ib % 2 != 0 || count == 0 || count > 256 { return None; }
+    if vb % stride != 0 || ib % 2 != 0 || count == 0 || count > 256 { return None; }
     let vertices = blob.get(36..36 + vb)?;
-    let n = vb / 32;
+    let n = vb / stride;
     let tris: usize = (0..count).map(|k| w(36 + vb + ib + 20 * k + 16).map(|t| t as usize)).sum::<Option<usize>>()?;
     let bytes = blob.get(36 + vb..36 + vb + ib)?;
     let indices: Vec<u32> = if n > 0xFFFF && ib == tris * 12 { bytes.chunks_exact(4).map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]])).collect() }
@@ -114,13 +117,21 @@ fn bind_pose_mesh(d: &[u8]) -> Option<StaticMesh> {
     let short = |v: &[u8], p: usize| i16::from_le_bytes([v[p], v[p + 1]]) as f32;
     let dir = |v: &[u8], p: usize| (Vec3::new(v[p] as f32, v[p + 1] as f32, v[p + 2] as f32) / 127.5 - Vec3::ONE).normalize_or_zero();
     let mut out = StaticMesh { positions: Vec::with_capacity(n), normals: Vec::with_capacity(n), tangents: Vec::with_capacity(n), uvs: Vec::with_capacity(n),
-        colors: vec![[1.0; 4]; n], sections: Vec::new() };
-    for v in vertices.chunks_exact(32) {
-        out.positions.push(Vec3::new(short(v, 0), short(v, 2), short(v, 4)) * crate::assets::ac_formats::POS_SCALE);
-        let (nm, t, b) = (dir(v, 8), dir(v, 12), dir(v, 16));
+        colors: Vec::with_capacity(n), sections: Vec::new() };
+    for v in vertices.chunks_exact(stride) {
+        let (nm, t) = (dir(v, 8), dir(v, 12));
         out.normals.push(nm);
-        out.tangents.push(t.extend(if nm.cross(t).dot(b) < 0.0 { -1.0 } else { 1.0 }));
         out.uvs.push(Vec2::new(short(v, 20), short(v, 22)) * crate::assets::ac_formats::UV_SCALE);
+        if stride == 32 {
+            out.positions.push(Vec3::new(short(v, 0), short(v, 2), short(v, 4)) * crate::assets::ac_formats::POS_SCALE);
+            out.tangents.push(t.extend(if nm.cross(t).dot(dir(v, 16)) < 0.0 { -1.0 } else { 1.0 }));
+            out.colors.push([1.0; 4]);
+        } else {
+            let scale = short(v, 6).abs() * 3.814_813_7e-6;
+            out.positions.push(Vec3::new(short(v, 0), short(v, 2), short(v, 4)) * scale);
+            out.tangents.push(t.extend(short(v, 6).signum()));
+            out.colors.push([v[16] as f32 / 255.0, v[17] as f32 / 255.0, v[18] as f32 / 255.0, v[19] as f32 / 255.0]);
+        }
     }
     let tail = cm + 8 + size;
     if word(d, tail + 8).ok()? as usize != count { return None; }
@@ -177,7 +188,7 @@ pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> 
             out.stats.bodies += 1;
             let name = if body.as_ptr() == r.payload.as_ptr() { r.name.clone() } else { format!("{}/{:08x}", r.name, word(body, 0).unwrap_or(0)) };
             if EXCLUDED.iter().any(|x| name.contains(x)) { *out.stats.skipped.entry("excluded name".into()).or_default() += 1; continue; }
-            match decode_body(data, body, &name, &mut materials) {
+            match decode_body(data, body, &name, &mut materials, &mut out.stats.skipped) {
                 Ok(Some(o)) => {
                     out.stats.triangles += o.collision.len();
                     out.stats.edges += o.edges.len();
@@ -217,7 +228,7 @@ pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> 
 }
 
 /// One entity body → object (None when it has nothing static to show or collide with).
-fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u32, Arc<MaterialData>>) -> Result<Option<CityObject>, String> {
+fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u32, Arc<MaterialData>>, skipped: &mut HashMap<String, usize>) -> Result<Option<CityObject>, String> {
     let visuals = markers(b, "Visual");
     let rigid = markers(b, "RigidBody");
     let guidance = markers(b, "GuidanceSystem");
@@ -232,7 +243,11 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
         if b.get(v + 4) == Some(&1) {
             let drawable = word(b, v + 5)?;
             if drawable != 0 {
-                if let Err(e) = visual(data, b, v, drawable, &mut o, materials) { return Err(format!("visual: {e}")); }
+                if let Err(e) = visual(data, b, v, drawable, &mut o, materials) {
+                    // the object keeps its collision and guidance without the visual
+                    o.meshes.clear(); o.lods.clear();
+                    *skipped.entry(format!("visual: {e}")).or_default() += 1;
+                }
             }
         }
     }
@@ -345,6 +360,15 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
         (desc.iter().map(|d| d.0).collect(), lod_bands(&desc))
     } else if r.class_hash == crc32("Mesh") {
         (vec![drawable], vec![(f32::INFINITY, Some(0))])
+    } else if r.class_hash == crc32("DynamicMesh") {
+        // A cloth (the rooftop gardens' tarps): the DynamicMesh resource is only a header; the entity's SoftBody
+        // component references its source Mesh (reflection: SoftBody +372 Mesh). PORT: drawn in its rest shape, the
+        // soft-body simulation is not ported.
+        let soft = markers(b, "SoftBody").into_iter().find(|&p| p > v).ok_or("cloth without a SoftBody")?;
+        let mesh = (soft + 4..b.len().saturating_sub(4)).filter_map(|p| word(b, p).ok())
+            .find(|&id| id != 0 && data.archives.contains(id) && data.archives.get(id).is_ok_and(|m| m.class_hash == crc32("Mesh")))
+            .ok_or("cloth SoftBody without a Mesh")?;
+        (vec![mesh], vec![(f32::INFINITY, Some(0))])
     } else {
         return Err("unsupported drawable".into());
     };

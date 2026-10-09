@@ -32,6 +32,10 @@ use crate::input::PadInput;
 
 /// Fence the A2 beam completion changes for comparison with the previous port.
 pub const BEAM_COMPLETION: bool = true;
+/// The ground mount (event 72) on imported maps reads HumanGuidance's runtime beam report (paired LedgeGrab
+/// contacts, `beam_contacts::detect`) like the air catch and the support pass: imported maps author no Beam lines
+/// (Damascus has none; its beams are LedgeGrab pairs, RE/17 §8). Off: authored Beam lines only.
+pub const NATIVE_BEAM_MOUNT: bool = true;
 
 /// HumanNarrowObject block actions (by clip name).
 pub const BEAM_WAIT: [u32; 2] = [0x28A3_A8E2, 0x28A3_A8E3]; // xx_l_beam_crouchwait_foot{l,r}
@@ -494,13 +498,20 @@ fn pilotis_weights(l: f32) -> [f32; 3] {
 /// Movement event 72's guard 0xD9F4C0: a beam (guidance) in the box ahead of the feet: ±0.75 m sideways,
 /// 0–1.0 m ahead, ±0.53 m vertically (`sub_116E1A0`); the facing within 30° of the beam axis (straight entry,
 /// mode 2: |dot| ≥ 0.866, `TryMountBeam` 0xE52AD0). Side entries (mode 3) are not ported.
-pub fn try_mount_beam(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<BeamEntry> {
+pub fn try_mount_beam(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<BeamEntry> {
     let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let r = super::right_of(f);
-    for e in &guidance.edges {
-        if e.subtype != GuidanceSubType::Beam {
-            continue;
-        }
+    // 0xD9F4C0's query box (sub_116E1A0 over HumanGuidance's report, the same query as 0xE0B890): ±0.75 m sideways,
+    // 0–1 m ahead, ±0.53 m vertically.
+    let segments: Vec<(Vec3, Vec3)> = if NATIVE_BEAM_MOUNT && crate::tuning::AIR_CATCHES && !collision.triangles.is_empty() {
+        let centre = feet + f * 0.5;
+        crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs() * 0.75 + f.abs() * 0.5 + Vec3::Y * 0.53)
+            .into_iter().map(|b| (b.p0, b.p1)).collect()
+    } else {
+        guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::Beam).map(|e| (e.p0, e.p1)).collect()
+    };
+    for (p0, p1) in segments {
+        let e = crate::guidance::GuidanceEdge { p0, p1, n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::Beam };
         let axis = Vec3::new(e.p1.x - e.p0.x, 0.0, e.p1.z - e.p0.z).normalize_or_zero();
         let along = axis.dot(f);
         if along.abs() < 0.866 {

@@ -49,6 +49,7 @@ environment variable. Without the game, the level still runs with a capsule in p
 | G | Show climbable edges |
 | F1 | Toggle help |
 | F2 | Debug map menu |
+| F3 | City streaming counters (Damascus) |
 | F9 | Save a bug report |
 
 ## Maps
@@ -60,14 +61,23 @@ Press **F2** to open the map menu, then click a map or press a number key. Switc
 | 1 | Greybox test level (default) |
 | 2 | Masyaf roofs |
 | 3 | Masyaf village |
+| 4 | Damascus (the whole city) |
 
 Masyaf maps are imported from your install. They are bounded crops: surrounding terrain, props, NPCs and
 vegetation are absent, and materials are not exact.
 
+**Damascus** is the whole World from your install: every district, the walls, the countryside around the city,
+props, vegetation, collision and the climbable edges. It streams like the game does: the city's grid cells load
+around you on background threads, objects switch between their level-of-detail meshes with distance, and the
+merged low-detail "fake" meshes the game ships draw the rest of the city on the horizon. You start at the north
+gate (the arrival from the Kingdom). NPCs, crowds, sounds, missions and particles are not included, the lighting is a
+fixed sun and haze, and materials use a standard PBR shader rather than the game's.
+
 To start on a native map from the command line:
 
 ```powershell
-$env:AC_NATIVE_MAP = "masyaf-village"   # or "masyaf-roofs"; unset to use the greybox
+$env:AC_NATIVE_MAP = "damascus"   # or "masyaf-village" / "masyaf-roofs"; unset to use the greybox
+$env:AC_CITY_SPAWN = "Souk"       # Damascus only, optional: Bureau, Academy, Palace or Souk
 cargo run --release
 ```
 
