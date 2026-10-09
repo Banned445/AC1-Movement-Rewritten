@@ -11,7 +11,11 @@
 //!   - **Ground** (2, 0xE42420) / **FreeStep** (1, 0xE42190): one of `0x244CD280` / `0x244CFACB`
 //!     (`xx_h_freestep_footr_to_haystack_01/02`, picked by the game's LCG bit), the root interpolated to the
 //!     haystack over the action's length; Ground turns to face the haystack, FreeStep keeps the facing. Ground is
-//!     the Ground context's event 122 (IHumanGround vt1592 / vt1596, guard 0xD8F0B0).
+//!     the Ground context's event 122 (IHumanGround vt1592 / vt1596, guard 0xD8F0B0). FreeStep comes from
+//!     NarrowObject (`CheckSupportAndFall` 0xE51190: a haystack found by the support search while standing on a
+//!     narrow object, once the action is past 0.6). Live (RE/18 §9): walking into a rimmed haystack hops onto its
+//!     rim and drops in as FreeStep; the Leap of Faith lands as Top. PORT: the greybox haystack has no rim, so the
+//!     port enters it by the Ground rule; the rim route is not ported.
 //! - Wait (`ChooseWait` 0xE416B0 → `PlayWaitHigh` 0xE408C0): `0x23A9666D` `xx_h_haystack_wait`.
 //! - Hop out: event 3 in the wait (`Wait_HandleEvent` 0xE43BD0), guard `Guard_HopOut` 0xE434E0: the ray along
 //!   the wanted direction leaves the haystack's footprint; the exit point (+0.5 m along it, 1.25 m up) must

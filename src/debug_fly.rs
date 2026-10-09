@@ -1,7 +1,8 @@
 //! Debug fly (noclip): F5 toggles a free flight that ignores collision, for moving around a map quickly.
 //!
 //! It follows the game's own debug flight, the Human **Debug context** (ContextID_Debug = 3, `DebugContext`,
-//! RE/18 §2): entered by `GoDebugInputInterpreter` (pad buttons 14 + 15), it puts the capsule on collision layer
+//! RE/18 §2): entered by `GoDebugInputInterpreter` (pad buttons 14 + 15; that interpreter exists only when loaded
+//! data references it, and the retail game has none: checked live), it puts the capsule on collision layer
 //! 10 (NOTHING), plays action request 7 = 0x0006F88B "Ghost mode" (`Ghost_mode01` then the looping `Ghost_mode02`)
 //! and sets ActorState 38 (Debug) (enter 0xE46190); each frame the velocity is the input × 5 m/s, × 3 or × 10
 //! with the speed buttons (0xECDC50), with stick-to-ground and the step offset off, the body turned toward the

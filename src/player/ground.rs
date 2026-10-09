@@ -1487,7 +1487,8 @@ fn edge_report_drop(feet: Vec3, forward: Vec3, reach: f32, min_cos: f32, min_dro
 /// The step off an edge (event 68's action 0xD9D1F0, the parameter = 1.0 in high profile): facing more than 120 degrees
 /// from the edge normal plays `xx_fall_ground_back_tr_fall` 0x935CE89E (InAirData+520 = 0.4 s); otherwise a free jump
 /// at pos + (1 + 2·a·HG+1512)·dir − 3 m (HG+0x5E8 = the speed parameter), the direction the facing turned to within
-/// 60 degrees of the normal (`sub_B27180` kind 0).
+/// 60 degrees of the normal (`sub_B27180` kind 0). Live (RE/18 §9): every walk-off and high-profile run-off fires it;
+/// 1.80 m takes 0.44–0.49 s and 3.16 m 0.58–0.68 s, rising only 0.01–0.05 m first.
 fn step_off_entry(feet: Vec3, facing: Vec3, r: &super::jump_candidates::EdgeReport, high: bool, speed_param: f32, foot_left: bool) -> Option<InAirEntry> {
     let angle = signed_angle_y(r.normal, facing);
     if angle.abs() >= 120f32.to_radians() {

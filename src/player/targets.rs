@@ -97,7 +97,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
                 if let Some(h) = collision.ground_height(landing + Vec3::Y * 0.05, 0.2) {
                     let target = JumpTarget { position: Vec3::new(landing.x, h, landing.z), ..base };
                     // PORT: a thin wall top is a pass-over (type 2). The query gives a railing type 1 | 2 like a
-                    // roof; which of the two the game jumps at there is not established (LIVE:, RE/18 §9)
+                    // roof; which of the two the game jumps at there is not established (LIVE:, RE/18 §9 item 2)
                     if c.flags & 2 != 0 && c.sub == 4 {
                         if let Some((_, t)) = super::passover::far_edge(c.pos, -c.wall, guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS) {
                             let _ = t;
