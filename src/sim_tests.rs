@@ -836,7 +836,8 @@ fn pull_down_from_a_roof_edge_into_a_wall_hang() {
     // roof A: x 5..11, h 3.5; stand near its +X edge facing +X (over the drop)
     let mut s = Sim::new(Vec3::new(10.6, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
     s.run(0.2);
-    s.press_legs();
+    // the empty hand at the edge (interpreter 0xEE8A33: pressed within 0.2 s)
+    s.press_hand();
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
     let mv = s.data().ledge.mv.expect("orientation");
     assert_eq!(mv.kind, MoveKind::PullDown { stage: 1 });
@@ -862,6 +863,8 @@ fn walking_into_a_roof_edge_stops_then_steps_back() {
     s.pad(Vec3::X, 1.0, false, false);
     assert!(s.run_until(3.0, |s| s.ground().ledge_stop.is_some()), "never stopped: {:?}", s.body().feet);
     assert_eq!(s.ground().oneshot.map(|o| o.blend.id), Some(LEDGE_STOP_START));
+    // the stick let go during the start action: no pull-down, the end action steps back
+    s.pad(Vec3::X, 0.0, false, false);
     assert!(s.run_until(1.0, |s| s.ground().ledge_stop.is_some_and(|l| l.ending)));
     assert_eq!(s.ground().oneshot.map(|o| o.blend.id), Some(LEDGE_STOP_END));
     let at_end = s.body().feet;
@@ -870,15 +873,10 @@ fn walking_into_a_roof_edge_stops_then_steps_back() {
     // the end action steps back (~0.5 m), still on the roof, no fall
     assert!(s.body().feet.x < at_end.x - 0.3, "stepped back: {:?}", s.body().feet);
     assert_eq!(s.loco().current, ActorContextId::Ground);
-    // still pushing into the edge: no new stop until the stick lets go (PORT lock)
-    s.run(1.0);
-    assert!(s.ground().ledge_stop.is_none());
-    assert_eq!(s.loco().current, ActorContextId::Ground, "held at the edge, no fall");
-    assert!(s.body().feet.x < edge - 0.03, "held behind the edge: {:?}", s.body().feet);
-    s.pad(Vec3::X, 0.0, false, false);
-    s.run(0.1);
+    // walking in again stops again; holding on into the edge then hangs from it
     s.pad(Vec3::X, 1.0, false, false);
-    assert!(s.run_until(1.0, |s| s.ground().ledge_stop.is_some()), "stops again after letting go");
+    assert!(s.run_until(2.0, |s| s.ground().ledge_stop.is_some()), "stops again");
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ledge), "held into the edge: the pull-down");
 }
 
 #[test]
@@ -887,8 +885,8 @@ fn pull_down_from_the_ledge_stop_uses_the_edge_stop_orientation() {
     let mut s = Sim::new(Vec3::new(-11.0, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, false, false);
     assert!(s.run_until(3.0, |s| s.ground().ledge_stop.is_some()));
-    s.press_legs();
-    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
+    // still pushing into the edge when the start action is done (0xEE8977 / guard 0xD9D580): the pull-down
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
     let mv = s.data().ledge.mv.expect("orientation");
     assert_eq!(mv.kind, MoveKind::PullDown { stage: 1 });
     assert_eq!(mv.seq[0].map(|a| a.id), Some(PULLDOWN_ORIENT[0]));
@@ -1685,16 +1683,40 @@ fn obstacle_collision_with_a_knee_high_obstacle_is_the_foot_collide() {
 }
 
 #[test]
-fn standing_at_a_roof_edge_looks_down_toward_it() {
-    // roof A (x -3..3, top 3), standing 0.3 m from its +X edge facing -Z: the edge is on the right
-    let mut s = Sim::new(Vec3::new(2.7, 3.0, 12.0), 0.0);
-    s.run(0.3);
-    let ld = s.ground().look_down.expect("look-down");
+fn walking_into_a_roof_edge_halts_then_looks_down() {
+    // roof A (x -3..3, top 3: a 3 m drop, under the ledge stop's 5 m): walking into its +X edge in low profile halts
+    // at it (0xEE7C31); held there for more than 0.25 s the interpreter sends event 119 (0xEE87DE–0xEE8844)
+    let mut s = Sim::new(Vec3::new(-1.0, 3.0, 12.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(5.0, |s| s.ground().edge_halt_t > 0.0), "never halted: {:?}", s.body().feet);
+    s.run(0.15);
+    assert!(s.ground().look_down.is_none(), "not before 0.25 s");
+    assert!(s.run_until(0.3, |s| s.ground().look_down.is_some()), "no look-down");
+    let ld = s.ground().look_down.unwrap();
     let w = ld.action.weights();
-    assert!(w[2] > 0.95 && w[1] == 0.0, "right look-down: {w:?}");
+    assert!(w[0] > 0.9, "front look-down: {w:?}");
+    assert!(s.body().feet.x < 3.0 && s.loco().current == ActorContextId::Ground, "on the roof: {:?}", s.body().feet);
+    // letting go keeps it (the player sends no end event); turning the stick off the edge walks away
+    s.pad(Vec3::X, 0.0, false, false);
+    s.run(0.5);
+    assert!(s.ground().look_down.is_some(), "kept after letting go");
     s.pad(Vec3::NEG_X, 1.0, false, false);
-    s.run(0.1);
-    assert!(s.ground().look_down.is_none(), "the stick ends it");
+    assert!(s.run_until(0.5, |s| s.ground().look_down.is_none()), "walking away ends it");
+}
+
+#[test]
+fn the_empty_hand_does_not_pull_down_away_from_an_edge_and_legs_never_does() {
+    // the Wait pull-down's sender is the empty hand (0xEE8A33); Legs at the edge is not a pull-down (the old stand-in)
+    let mut s = Sim::new(Vec3::new(10.6, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
+    s.run(0.2);
+    s.press_legs();
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ground, "Legs: no pull-down");
+    let mut s = Sim::new(Vec3::new(8.0, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
+    s.run(0.2);
+    s.press_hand();
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ground, "no edge in reach: no pull-down");
 }
 
 // ---------------------------------------------------------------- pass-over (RE/04 §4.1.13)
@@ -3814,3 +3836,4 @@ fn walking_and_running_off_an_edge_land_in_the_live_times() {
         assert!(top - h < 0.15, "{h} m: rose {:.3} m", top - h);
     }
 }
+

@@ -303,8 +303,8 @@ fn place(sc: Res<Scenario>, mut q: Query<&mut Body, With<Player>>, mut rig: ResM
                 rig.distance = 5.0;
             }
             Scenario::LookDown => {
-                b.feet = Vec3::new(2.7, 3.0, 12.0);
-                b.heading = 0.0;
+                b.feet = Vec3::new(2.0, 3.0, 12.0);
+                b.heading = -std::f32::consts::FRAC_PI_2; // facing +X, toward the edge
                 rig.yaw = -0.6;
                 rig.distance = 6.0;
             }
@@ -467,8 +467,9 @@ fn autopilot(
             pad.magnitude = 0.0;
             pad.speed01 = 0.0;
             pad.high_profile = false;
+            // the empty hand at the edge (event 70, 0xEE8A33)
             if (0.5..0.52).contains(&t) {
-                pad.legs_pressed_ago = 0.0;
+                pad.hand_pressed_ago = 0.0;
             }
         }
         Scenario::Beam => {
@@ -515,8 +516,11 @@ fn autopilot(
             pad.speed01 = pad.magnitude;
         }
         Scenario::LookDown => {
-            pad.magnitude = 0.0;
-            pad.speed01 = 0.0;
+            // walk into the edge and keep pushing (the edge halt's latch, event 119 after 0.25 s), then let go
+            pad.high_profile = false;
+            pad.dir = Vec3::X;
+            pad.magnitude = if t > 0.5 && t < 3.0 { 1.0 } else { 0.0 };
+            pad.speed01 = pad.magnitude;
         }
         Scenario::Skid => {
             pad.high_profile = true;

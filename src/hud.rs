@@ -75,7 +75,7 @@ fn update_hud(
          last landing: {}\n\n\
          WASD move | RMB high profile | Space legs (hold with RMB = sprint/free-run; into a wall = wall run; E at a wall = climb;\n\
          while hanging or climbing: E = let go, RMB+Space = jump off (stick steers); up at a top edge = pull up) | Alt slow\n\
-         E empty hand (on a ladder: drop; RMB+Space = jump off; on a wall run: Space = push off)\n\
+         E empty hand (at a roof edge: pull down to a hang; on a ladder: drop; RMB+Space = jump off; on a wall run: Space = push off)\n\
          LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, Shift x3, Alt x10, Q strafe, F6 camera, E+F5 keep speed) | F4 test areas | F9 save a bug report | F1 hide | F2 maps",
         map.active.label(),
         model.0,
