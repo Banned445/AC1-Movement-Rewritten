@@ -79,6 +79,9 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     //     a climb wall (x 154.6..158.6, face z 9.7, bands to 5.4 m: CLIMB_WALLS), beyond the side move's reach
     (151.5, 10.0, 3.0, 0.6, 2.6),
     (156.6, 10.0, 4.0, 0.6, 6.0),
+    // --- the climb's ledge grab (0xDF0980, RE/18 §7.3): a 7 m wall (x 160..164, face z 9.7) whose bands start at
+    //     3.0 m (CLIMB_WALLS): climbing down to the lowest band hangs from the one above it
+    (162.0, 10.0, 4.0, 0.6, 7.0),
     // --- water tank (x 130..136, z 0..6, walls 2 m): deep water inside (WATER), the drowning (RE/18 §5)
     (133.0, 0.15, 6.0, 0.3, 2.0),
     (133.0, 5.85, 6.0, 0.3, 2.0),
@@ -212,6 +215,8 @@ const CLIMB_WALLS: &[((f32, f32), f32, (i32, i32))] = &[
     ((-133.95, -130.05), -10.5, (1, 11)),
     // the climb wall beside the 2.6 m ledge (the ledge side jump onto climb holds)
     ((154.65, 158.55), 9.7, (1, 9)),
+    // the climb's ledge grab: bands from 3.0 m only
+    ((160.05, 163.95), 9.7, (5, 11)),
 ];
 
 /// Climb walls facing ±X (face x, z range, outward normal x, band index range): the corner climbs.

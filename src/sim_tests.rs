@@ -3633,3 +3633,41 @@ fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
     let ends: Vec<u32> = (0..2).flat_map(|f| [LEDGE_JUMP_TABLE[f][2].1[2], LEDGE_JUMP_TABLE[f][3].1[2], LEDGE_JUMP_TABLE[f][6].1[2], LEDGE_JUMP_TABLE[f][7].1[2]]).collect();
     assert!(ends.iter().any(|&e| e != 0), "type-0 side entries exist");
 }
+
+#[test]
+fn climbing_down_past_the_lowest_holds_grabs_a_hang() {
+    use crate::player::climb::{ClimbEntry, ClimbEntryType, LEDGE_GRAB_DOWN};
+    use crate::player::{switch_context, TransitionSetup};
+    // TryLedgeGrab 0xDF0980 (down): the wall x 160..164 has bands from 3.0 m up. With the feet on the lowest band the
+    // SHORT move down finds no foot hold and nothing below to reach, so the band between the feet and the hands (row 3)
+    // becomes a wall hang (`LEDGE_GRAB_DOWN`, RE/18 §7.3)
+    let (hands, feet_y) = (Vec3::new(162.0, 4.8, 9.62), 3.6);
+    let mut s = Sim::new(Vec3::new(162.0, 3.5, 9.2), FACE_PZ);
+    {
+        let player = s.player;
+        let w = s.app.world_mut();
+        let mut q = w.query::<(&mut Locomotion, &mut HumanDataBundle)>();
+        let (mut loco, mut data) = q.get_mut(w, player).unwrap();
+        let foot = Vec3::new(hands.x, feet_y, hands.z);
+        let e = ClimbEntry {
+            entry_type: ClimbEntryType::Default,
+            hand_l: hands,
+            hand_r: hands,
+            foot_l: foot,
+            foot_r: foot,
+            normal: Vec3::NEG_Z,
+            from_feet: Vec3::new(162.0, 3.5, 9.2),
+            foot_right: false,
+            action: None,
+        };
+        switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
+    }
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Climb);
+    s.pad(Vec3::NEG_Z, 0.45, true, false);
+    assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ledge), "never hung: {} {:?}", s.data().climb.last_action, s.data().climb.foot_l);
+    assert_eq!(s.data().climb.last_action, "ledge grab");
+    let l = &s.data().ledge;
+    assert!((l.hand_l.y - 3.6).abs() < 0.05, "hanging from the 3.6 m band: {:?}", l.hand_l);
+    assert_eq!(l.mv.and_then(|m| m.seq[0]).map(|a| a.id), Some(LEDGE_GRAB_DOWN[0]), "the wall-hang grab plays");
+}

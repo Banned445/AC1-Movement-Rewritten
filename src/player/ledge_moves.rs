@@ -1259,6 +1259,12 @@ pub fn climb_jump_move(from: Vec3, cur_hands: Vec3, hand_l: Vec3, hand_r: Vec3, 
 /// `xx_h_climb_1m_u_overhangfree_{1lu,1ru}` plays (`action`, FROMAI) while the root is interpolated to the hang over
 /// its blended length (sub_711130).
 pub fn climb_overhang_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, action: u32, collision: &CollisionWorld) -> LedgeMove {
+    climb_to_hang_move(from, hand_l, hand_r, n, action, LedgeHangType::Free, collision)
+}
+
+/// The climb's transitions into a hang (the overhang 0xDF4BA0, the ledge grabs 0xDF0980): `action` plays (FROMAI)
+/// while the root is interpolated to the hang of type `hang` over its blended length (sub_711130).
+pub fn climb_to_hang_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, action: u32, hang: LedgeHangType, collision: &CollisionWorld) -> LedgeMove {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let seq = [single(action, 0), None, None, None];
     let durations = seq_durations(&seq);
@@ -1269,13 +1275,13 @@ pub fn climb_overhang_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, acti
         durations: if found { durations } else { [GRAB_TIME, 0.0, 0.0, 0.0] },
         t: 0.0,
         from,
-        to: hang_root_at(hand_l, hand_r, n, LedgeHangType::Free, collision),
+        to: hang_root_at(hand_l, hand_r, n, hang, collision),
         facing_from: facing,
         facing_to: facing,
         follow_disp: false,
         lead: 0.0,
-        end_free: true,
-        end_wall: false,
+        end_free: hang != LedgeHangType::Wall,
+        end_wall: hang == LedgeHangType::Wall,
         end_stand: false,
         hand_l,
         hand_r,

@@ -77,6 +77,12 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     0x935C_E89E,
     // drowning (HumanDead 0xE3F3B0): the plain and the face down / up variants
     super::dead::DROWN, super::dead::DROWN_FRONT, super::dead::DROWN_BACK,
+    // the climb's ledge grabs (TryLedgeGrab 0xDF0980): up, down, then left / right by row, [wall, free]
+    super::climb::LEDGE_GRAB_UP[0], super::climb::LEDGE_GRAB_UP[1], super::climb::LEDGE_GRAB_DOWN[0], super::climb::LEDGE_GRAB_DOWN[1],
+    super::climb::LEDGE_GRAB_SIDE[0][0][0], super::climb::LEDGE_GRAB_SIDE[0][0][1], super::climb::LEDGE_GRAB_SIDE[0][1][0],
+    super::climb::LEDGE_GRAB_SIDE[0][1][1], super::climb::LEDGE_GRAB_SIDE[0][2][0], super::climb::LEDGE_GRAB_SIDE[0][2][1],
+    super::climb::LEDGE_GRAB_SIDE[1][0][0], super::climb::LEDGE_GRAB_SIDE[1][0][1], super::climb::LEDGE_GRAB_SIDE[1][1][0],
+    super::climb::LEDGE_GRAB_SIDE[1][1][1], super::climb::LEDGE_GRAB_SIDE[1][2][0], super::climb::LEDGE_GRAB_SIDE[1][2][1],
     // the kiosk table (0xE3DAE0): entries, monkey bars, their falls
     super::kiosk::KIOSK_ACTIONS[0][0], super::kiosk::KIOSK_ACTIONS[0][1], super::kiosk::KIOSK_ACTIONS[0][2], super::kiosk::KIOSK_ACTIONS[0][3],
     super::kiosk::KIOSK_ACTIONS[1][0], super::kiosk::KIOSK_ACTIONS[1][1], super::kiosk::KIOSK_ACTIONS[2][0], super::kiosk::KIOSK_ACTIONS[2][1],
