@@ -50,6 +50,7 @@ environment variable. Without the game, the level still runs with a capsule in p
 | F1 | Toggle help |
 | F2 | Debug map menu |
 | F3 | City streaming counters (Damascus) |
+| F5 | Debug fly / noclip: WASD along the view, Space / Ctrl up / down, Shift fast, Alt slow. F5 again lands on the floor below |
 | F9 | Save a bug report |
 
 ## Maps

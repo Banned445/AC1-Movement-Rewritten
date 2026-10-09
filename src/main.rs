@@ -9,6 +9,7 @@ mod assets;
 mod camera;
 mod collision;
 mod debug_capture;
+mod debug_fly;
 mod guidance;
 mod hud;
 mod ik;
@@ -85,5 +86,7 @@ fn main() {
             wind::WindPlugin,
             city::CityPlugin,
         ))
+        // a tuple takes at most 15 plugins
+        .add_plugins(debug_fly::DebugFlyPlugin)
         .run();
 }
