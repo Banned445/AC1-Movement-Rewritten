@@ -327,67 +327,114 @@ pub fn mesh_bounds(mesh: &StaticMesh, transform: Mat4) -> Aabb3 {
 
 /// LODSelector payload (`LODSelector__Read` 0xA90FE0): 5 × LODDescriptor `{id, class, graphic, f32 distance, f32 fade
 /// width, u8}` (0xA8F720) from payload 12, then two bytes: selector flag bit 0 (keep empty slots) and bit 1 (no fade).
-pub fn lod_descriptors(selector: &[u8]) -> Result<([(u32, f32); 5], u8), String> {
-    let mut out = [(0, 0.0); 5];
+/// The five LODDescriptors (graphic, distance, fade width) and the trailing flags (selector +92: bit 0 keep empty slots,
+/// bit 1 no cross-fade; `LODSelector__Read` 0xA90FE0).
+pub fn lod_descriptors(selector: &[u8]) -> Result<([LodDescriptor; 5], u8), String> {
+    let mut out = [LodDescriptor::default(); 5];
     for (k, d) in out.iter_mut().enumerate() {
         let p = 12 + 21 * k;
         if word(selector, p + 4)? != crc32("LODDescriptor") { return Err("LODSelector without LODDescriptors".into()); }
-        *d = (word(selector, p + 8)?, f32::from_bits(word(selector, p + 12)?));
+        *d = LodDescriptor { mesh: word(selector, p + 8)?, distance: f32::from_bits(word(selector, p + 12)?), fade: f32::from_bits(word(selector, p + 16)?) };
     }
     let flags = selector.get(12 + 105).copied().unwrap_or(0) & 1 | (selector.get(12 + 106).copied().unwrap_or(0) & 1) << 1;
     Ok((out, flags))
 }
 
+#[derive(Clone, Copy, Default, Debug)]
+pub struct LodDescriptor {
+    /// Graphic (Mesh) id; 0 = empty slot.
+    pub mesh: u32,
+    pub distance: f32,
+    /// Cross-fade width in metres; 0.1 or less = 10 % of the band.
+    pub fade: f32,
+}
+
 /// The game's per-selector LOD table (verified in IDA 2026-10-09, RE/17 §3.2): `LODSelector__BuildTable` 0xA90C30
-/// builds it after the read, `LODTable__Pick` 0xA8F510 looks it up when the instance is submitted
-/// (`LODSelectorInstance__Submit` 0xA90160).
+/// builds it after the read, `LODTable__Pick` 0xA8F510 looks it up and `LODSelectorInstance__Submit` 0xA90160 draws
+/// the picked slot and cross-fades the next one in.
 #[derive(Clone)]
 pub struct LodTable {
     /// 255 / (last kept distance · 256 / 255).
     pub scale: f32,
-    /// Mesh slot (descriptor index) per quantised distance; None = an empty kept slot (draws nothing).
-    pub entries: Option<Box<[Option<u8>; 256]>>,
+    /// Descriptor slot per quantised distance (selector +100).
+    pub entries: Option<Box<[u8; 256]>>,
+    /// What each descriptor slot draws (an index into the object's meshes once `visual` remaps it); None = nothing.
+    pub mesh: [Option<u8>; 4],
+    /// The kept slot each slot fades into (selector +168, 2 bits per slot).
+    pub next: [u8; 4],
+    /// Fade-in alpha of the next slot = a · d + b, per slot (selector +172).
+    pub fade: [(f32, f32); 4],
+    /// Flag bit 1: no cross-fade.
+    pub no_fade: bool,
 }
 
 impl Default for LodTable {
     /// A drawable without a selector: slot 0 at every distance.
-    fn default() -> Self { Self { scale: 0.0, entries: None } }
+    fn default() -> Self { Self { scale: 0.0, entries: None, mesh: [Some(0), None, None, None], next: [0; 4], fade: [(0.0, 0.0); 4], no_fade: true } }
 }
 
 impl LodTable {
-    /// `LODSelector__CollectLODs` 0xA90A10 + `LODSelector__BuildTable` 0xA90C30. Only the first four descriptors count (four LOD instances, 0xA90090). A slot with a
-    /// mesh is kept; a slot without one is kept too when flag bit 0 is set (it then draws nothing), otherwise, when a
-    /// mesh follows it, it pushes the previous kept slot's distance out to its own. The table then walks the distance in
-    /// 255 steps up to the last kept distance · 256/255, advancing at most one kept slot per step; past the end the last
-    /// kept slot stays (no LOD cut-off).
-    pub fn build(desc: &[(u32, f32); 5], flags: u8) -> Self {
+    /// `LODSelector__CollectLODs` 0xA90A10 + `LODSelector__BuildTable` 0xA90C30. Only the first four descriptors count
+    /// (four LOD instances, 0xA90090). A slot with a mesh is kept; a slot without one is kept too when flag bit 0 is set
+    /// (it then draws nothing), otherwise, when a mesh follows it, it pushes the previous kept slot's distance out to its
+    /// own. The table then walks the distance in 255 steps up to the last kept distance · 256/255, advancing at most one
+    /// kept slot per step; past the end the last kept slot stays (no LOD cut-off). Every kept slot but the last fades
+    /// into the next kept one over the width w before its distance: w = the descriptor's fade width when > 0.1, else
+    /// 10 % of (its distance − the previous kept mesh's distance).
+    pub fn build(desc: &[LodDescriptor; 5], flags: u8) -> Self {
         let keep_empty = flags & 1 != 0;
-        let last_mesh = (0..4).rev().find(|&i| desc[i].0 != 0).unwrap_or(0);
+        let mesh = std::array::from_fn(|i| (desc[i].mesh != 0).then_some(i as u8));
+        let last_mesh = (0..4).rev().find(|&i| desc[i].mesh != 0).unwrap_or(0);
         let mut kept: Vec<(u8, f32)> = Vec::new();
         for i in 0..4 {
-            if desc[i].0 != 0 || keep_empty { kept.push((i as u8, desc[i].1)); }
-            else if i < last_mesh { if let Some(k) = kept.last_mut() { k.1 = desc[i].1; } }
+            if desc[i].mesh != 0 || keep_empty { kept.push((i as u8, desc[i].distance)); }
+            else if i < last_mesh { if let Some(k) = kept.last_mut() { k.1 = desc[i].distance; } }
         }
-        let Some(&(_, last)) = kept.last() else { return Self { scale: 0.0, entries: Some(Box::new([None; 256])) } };
+        let mut table = Self { scale: 0.0, entries: Some(Box::new([0; 256])), mesh, next: [0; 4], fade: [(0.0, 0.0); 4], no_fade: flags & 2 != 0 };
+        let Some(&(_, last)) = kept.last() else { return table };
         let max = last * 256.0 / 255.0;
         let step = max / 255.0;
-        let mut entries = Box::new([None; 256]);
+        let entries = table.entries.as_mut().unwrap();
         let (mut d, mut k) = (0.0f32, 0usize);
         for e in entries.iter_mut() {
             if d > kept[k].1 { k = (k + 1).min(kept.len() - 1); }
             d += step;
-            let slot = kept[k].0;
-            *e = (desc[slot as usize].0 != 0).then_some(slot);
+            *e = kept[k].0;
         }
-        Self { scale: if max > 0.0 { 255.0 / max } else { f32::INFINITY }, entries: Some(entries) }
+        table.scale = if max > 0.0 { 255.0 / max } else { f32::INFINITY };
+        let mut previous = 0.0;
+        for (i, &(slot, distance)) in kept.iter().enumerate() {
+            if i + 1 == kept.len() { break; }
+            table.next[slot as usize] = kept[i + 1].0;
+            let fade = desc[slot as usize].fade;
+            let w = if fade > 0.1 { fade } else { (distance - previous) * 0.1 };
+            if w > 0.0 { table.fade[slot as usize] = (1.0 / w, -(distance - w) / w); }
+            if desc[slot as usize].mesh != 0 { previous = distance; }
+        }
+        table
     }
 
-    /// The descriptor slot drawn at LOD distance `d` (`LODTable__Pick` 0xA8F510: index = trunc(scale · d) clamped to 255).
+    /// The descriptor slot's mesh drawn at LOD distance `d` (`LODTable__Pick` 0xA8F510: index = trunc(scale · d)
+    /// clamped to 255).
     pub fn pick(&self, d: f32) -> Option<u8> {
-        let Some(e) = &self.entries else { return Some(0) };
-        let i = (self.scale * d.max(0.0)).min(255.0) as usize;
-        e[i.min(255)]
+        let Some(e) = &self.entries else { return self.mesh[0] };
+        self.mesh[e[self.index(d)] as usize]
     }
+
+    /// The mesh fading in on top of `pick(d)` and its blend factor (`LODSelectorInstance__Submit` 0xA90160): alpha =
+    /// clamp(a · d + b, 0, 1) of the picked slot, kept as a byte; nothing when the byte is 0, the picked slot draws
+    /// nothing, the next slot is empty or the selector has flag bit 1.
+    pub fn fade(&self, d: f32) -> Option<(u8, f32)> {
+        let e = self.entries.as_ref().filter(|_| !self.no_fade)?;
+        let slot = e[self.index(d)] as usize;
+        self.mesh[slot]?;
+        let (a, b) = self.fade[slot];
+        let byte = ((a * d + b).clamp(0.0, 1.0) * 255.0) as u8;
+        if byte == 0 { return None; }
+        Some((self.mesh[self.next[slot] as usize]?, byte as f32 / 255.0))
+    }
+
+    fn index(&self, d: f32) -> usize { (self.scale * d.max(0.0)).min(255.0) as usize }
 }
 
 fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject, materials: &mut HashMap<u32, Arc<MaterialData>>) -> Result<(), String> {
@@ -395,7 +442,7 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
     // slot → mesh id
     let (slots, table): (Vec<u32>, LodTable) = if r.class_hash == crc32("LODSelector") {
         let (desc, flags) = lod_descriptors(&r.payload)?;
-        (desc.iter().take(4).map(|d| d.0).collect(), LodTable::build(&desc, flags))
+        (desc.iter().take(4).map(|d| d.mesh).collect(), LodTable::build(&desc, flags))
     } else if r.class_hash == crc32("Mesh") {
         (vec![drawable], LodTable::default())
     } else if r.class_hash == crc32("DynamicMesh") {
@@ -439,7 +486,7 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
         o.meshes.push(LodMesh { id, mesh, colors: col });
     }
     // descriptor slots → this object's mesh indices
-    o.lod = LodTable { scale: table.scale, entries: table.entries.map(|e| Box::new(e.map(|s| s.and_then(|s| index_of_slot.get(&(s as usize)).map(|&m| m as u8))))) };
+    o.lod = LodTable { mesh: std::array::from_fn(|i| table.mesh[i].and_then(|_| index_of_slot.get(&i).map(|&m| m as u8))), ..table };
     if let Some(first) = o.meshes.first() {
         let bounds = mesh_bounds(&first.mesh, o.transform);
         o.center = (bounds.min + bounds.max) * 0.5;
@@ -458,23 +505,61 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
 mod tests {
     use super::*;
 
+    fn d(v: [(u32, f32); 5]) -> [LodDescriptor; 5] { v.map(|(mesh, distance)| LodDescriptor { mesh, distance, fade: 0.0 }) }
+
     #[test]
     fn lod_table_follows_the_exe() {
         // MM-M- 20/40/80/160/320: the empty slot 2 pushes slot 1 out to 80 m; slot 3 from there on, with no cut-off
-        let t = LodTable::build(&[(1, 20.0), (2, 40.0), (0, 80.0), (4, 160.0), (0, 320.0)], 0);
+        let t = LodTable::build(&d([(1, 20.0), (2, 40.0), (0, 80.0), (4, 160.0), (0, 320.0)]), 0);
         assert_eq!([t.pick(0.0), t.pick(19.0), t.pick(30.0), t.pick(70.0), t.pick(100.0), t.pick(400.0), t.pick(1e5)],
             [Some(0), Some(0), Some(1), Some(1), Some(3), Some(3), Some(3)]);
         // M--M- 100/101/102/350/351: slot 0 to 102 m, then slot 3
-        let t = LodTable::build(&[(1, 100.0), (0, 101.0), (0, 102.0), (4, 350.0), (0, 351.0)], 0);
+        let t = LodTable::build(&d([(1, 100.0), (0, 101.0), (0, 102.0), (4, 350.0), (0, 351.0)]), 0);
         assert_eq!([t.pick(90.0), t.pick(101.5), t.pick(110.0), t.pick(500.0)], [Some(0), Some(0), Some(3), Some(3)]);
         // -M---: the leading empty slot is dropped, slot 1 at every distance
-        let t = LodTable::build(&[(0, 9999.0), (1, 10000.0), (0, 10001.0), (0, 10002.0), (0, 10003.0)], 0);
+        let t = LodTable::build(&d([(0, 9999.0), (1, 10000.0), (0, 10001.0), (0, 10002.0), (0, 10003.0)]), 0);
         assert_eq!([t.pick(0.0), t.pick(5e4)], [Some(1), Some(1)]);
         // flag bit 0 keeps empty slots: M---- 50/51/80/160 draws nothing past 50 m
-        let t = LodTable::build(&[(1, 50.0), (0, 51.0), (0, 80.0), (0, 160.0), (0, 320.0)], 1);
+        let t = LodTable::build(&d([(1, 50.0), (0, 51.0), (0, 80.0), (0, 160.0), (0, 320.0)]), 1);
         assert_eq!([t.pick(40.0), t.pick(60.0), t.pick(1e4)], [Some(0), None, None]);
         // the fifth descriptor is never read
-        let t = LodTable::build(&[(1, 10.0), (0, 20.0), (0, 40.0), (0, 80.0), (5, 160.0)], 0);
+        let t = LodTable::build(&d([(1, 10.0), (0, 20.0), (0, 40.0), (0, 80.0), (5, 160.0)]), 0);
         assert_eq!(t.pick(1e4), Some(0));
+        // nothing kept: draws nothing
+        let t = LodTable::build(&d([(0, 10.0), (0, 20.0), (0, 40.0), (0, 80.0), (0, 160.0)]), 0);
+        assert_eq!([t.pick(0.0), t.pick(1e4)], [None, None]);
+    }
+
+    #[test]
+    fn lod_fade_follows_the_exe() {
+        // MMM-- 10/20/40: slot 0 fades into 1 over 10 % of 0..10 m, slot 1 into 2 over 10 % of 10..20 m; the last
+        // kept slot never fades
+        let t = LodTable::build(&d([(1, 10.0), (2, 20.0), (3, 40.0), (0, 80.0), (0, 160.0)]), 0);
+        assert_eq!(t.fade(8.9), None);
+        let (m, a) = t.fade(9.5).unwrap();
+        assert_eq!(m, 1);
+        assert!((a - 0.5).abs() < 0.01, "{a}");
+        let (m, a) = t.fade(19.5).unwrap();
+        assert_eq!(m, 2);
+        assert!((a - 0.5).abs() < 0.01, "{a}");
+        assert_eq!(t.fade(30.0), None);
+        assert_eq!(t.fade(1e4), None);
+        // an explicit width wins over 10 %
+        let mut desc = d([(1, 10.0), (2, 20.0), (3, 40.0), (0, 80.0), (0, 160.0)]);
+        desc[0].fade = 4.0;
+        let t = LodTable::build(&desc, 0);
+        let (_, a) = t.fade(7.0).unwrap();
+        assert!((a - 0.25).abs() < 0.01, "{a}");
+        // filler slot: M-M with the empty slot pushing slot 0 to 30 m; the width is 10 % of 0..30 m
+        let t = LodTable::build(&d([(1, 10.0), (0, 30.0), (3, 60.0), (0, 80.0), (0, 160.0)]), 0);
+        let (m, a) = t.fade(28.5).unwrap();
+        assert_eq!(m, 2);
+        assert!((a - 0.5).abs() < 0.01, "{a}");
+        // flag bit 1: no cross-fade
+        let t = LodTable::build(&d([(1, 10.0), (2, 20.0), (3, 40.0), (0, 80.0), (0, 160.0)]), 2);
+        assert_eq!(t.fade(9.5), None);
+        // flag bit 0: fading into an empty slot draws nothing extra
+        let t = LodTable::build(&d([(1, 10.0), (0, 20.0), (0, 40.0), (0, 80.0), (0, 160.0)]), 1);
+        assert_eq!(t.fade(9.5), None);
     }
 }

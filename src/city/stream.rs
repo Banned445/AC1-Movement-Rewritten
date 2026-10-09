@@ -19,7 +19,7 @@ use std::{collections::{HashMap, VecDeque}, sync::{mpsc, Arc, Condvar, Mutex}};
 use bevy::{asset::RenderAssetUsages, image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor}, light::NotShadowCaster,
     mesh::{Indices, PrimitiveTopology}, prelude::*, render::render_resource::{Extent3d, TextureDimension}};
 
-use super::{decode::{decode_cell, CityData, CityObject, DecodedCell}, fakes::FakeBlock, material::{MaterialData, TextureData}};
+use super::{decode::{decode_cell, CityData, CityObject, DecodedCell, LodMesh}, fakes::FakeBlock, material::{MaterialData, TextureData}};
 use crate::{collision::CollisionWorld, guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld}};
 
 /// `GridStreamer__RequestCellsInBox` priority weight (dword_18D6780).
@@ -32,6 +32,12 @@ const LOD_VERTEX_BUDGET: usize = 400_000;
 const PHYSICS_TRIANGLE_BUDGET: usize = 40_000;
 /// PORT: objects past this camera distance draw without casting shadows.
 const SHADOW_DISTANCE: f32 = 90.0;
+/// PORT: the cross-fade's blend factor is kept in this many steps (each step is a shared material) instead of the
+/// exe's 255.
+const FADE_LEVELS: usize = 16;
+/// PORT: depth bias of the fading-in LOD toward the camera (the fade pass 0xABE770 uses D3D depth bias −1e-5 and slope
+/// bias 1.00005, dword_1950BA4 / dword_1950BA8); here in depth-buffer steps.
+const FADE_DEPTH_BIAS: f32 = 4096.0;
 /// Freed guidance slots are parked here (far outside every world) until reused.
 const PARKED: f32 = 1.0e7;
 
@@ -88,7 +94,18 @@ struct Obj {
     o: CityObject,
     shown: Option<usize>,
     entities: Vec<Entity>,
+    /// The next LOD drawn on top of `shown` while the distance is inside the fade width.
+    fade: Option<FadeIn>,
     physics: Option<Physics>,
+}
+
+struct FadeIn {
+    mesh: usize,
+    level: u8,
+    /// (entity, material id) per drawn section
+    sections: Vec<(Entity, u32)>,
+    /// Every section of the mesh is drawn (none had a material that cannot fade), so it can become `shown` as is.
+    complete: bool,
 }
 
 enum Cell {
@@ -101,6 +118,10 @@ struct GpuMaterial {
     handle: Handle<StandardMaterial>,
     textures: Vec<u32>,
     refs: u32,
+    /// Opaque materials can fade; the water material is already translucent.
+    fadeable: bool,
+    /// Translucent copies per fade level (created on first use).
+    fades: Vec<Option<Handle<StandardMaterial>>>,
 }
 
 /// Counters for the debug overlay and tests.
@@ -110,6 +131,8 @@ pub struct CityStats {
     pub loading: usize,
     pub objects: usize,
     pub drawn: usize,
+    /// Objects cross-fading into their next LOD.
+    pub fading: usize,
     pub physics_objects: usize,
     pub physics_triangles: usize,
     pub physics_edges: usize,
@@ -140,6 +163,10 @@ pub struct CityState {
     pub tour: Option<Vec3>,
     /// A cell under the near box is still loading: the player is held at this position (0x55D810).
     pub hold: Option<Vec3>,
+    /// Draw the LOD cross-fade (`AC_LOD_FADE=1`). Off like the retail exe: its fade pass (0xABE770) only runs while
+    /// renderer +94 is set, which needs `byte_1A25846` — zero-initialised and never written (the `LODBlend` INI value,
+    /// GraphicsSettings +0x52, is loaded but never read).
+    pub lod_fade: bool,
 }
 
 #[derive(Resource, Default)]
@@ -169,7 +196,8 @@ impl CityState {
         let n = data.grid.cells.len();
         Self { loader: Loader::new(data.clone(), threads), data, cells: (0..n).map(|_| Cell::Unloaded).collect(), has_content,
             materials: HashMap::new(), textures: HashMap::new(), fake_spans: HashMap::new(), edge_free: Vec::new(),
-            pilotis_dirty: true, haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None }
+            pilotis_dirty: true, haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None,
+            lod_fade: std::env::var("AC_LOD_FADE").is_ok_and(|v| v == "1") }
     }
 
     /// The cells the streamer wants with the player at `focus` (Bevy space), in request order.
@@ -283,7 +311,7 @@ impl CityState {
             self.materials.get_mut(id).unwrap().refs += 1;
             used.push(*id);
         }
-        let objects = d.objects.into_iter().map(|o| Obj { o, shown: None, entities: Vec::new(), physics: None }).collect();
+        let objects = d.objects.into_iter().map(|o| Obj { o, shown: None, entities: Vec::new(), fade: None, physics: None }).collect();
         self.cells[d.cell] = Cell::Loaded { objects, materials: used };
         for &e in self.fake_spans.get(&d.cell).into_iter().flatten() { ctx.commands.entity(e).insert(Visibility::Hidden); }
     }
@@ -309,7 +337,7 @@ impl CityState {
             StandardMaterial { base_color_texture: diffuse, normal_map_texture: normal, flip_normal_map_y: true,
                 perceptual_roughness: 0.9, double_sided: true, cull_mode: None, alpha_mode: AlphaMode::Mask(0.5), ..default() }
         };
-        Some(GpuMaterial { handle: ctx.materials.add(material), textures, refs: 0 })
+        Some(GpuMaterial { handle: ctx.materials.add(material), textures, refs: 0, fadeable: !m.water, fades: Vec::new() })
     }
 
     fn release_material(&mut self, id: u32, ctx: &mut Ctx) {
@@ -318,6 +346,7 @@ impl CityState {
         if m.refs > 0 { return; }
         let m = self.materials.remove(&id).unwrap();
         ctx.materials.remove(&m.handle);
+        for h in m.fades.iter().flatten() { ctx.materials.remove(h); }
         for t in m.textures {
             let Some(e) = self.textures.get_mut(&t) else { continue };
             e.1 -= 1;
@@ -333,6 +362,7 @@ impl CityState {
         let Cell::Loaded { objects, materials } = std::mem::replace(&mut self.cells[c], Cell::Unloaded) else { return };
         for mut o in objects {
             for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
+            for (e, _) in o.fade.take().into_iter().flat_map(|f| f.sections) { ctx.commands.entity(e).despawn(); }
             if let Some(p) = o.physics.take() { self.remove_physics(p, ctx); self.haystacks_dirty |= o.o.haystack.is_some(); self.pilotis_dirty |= !o.o.pilotis.is_empty(); }
         }
         for m in materials { self.release_material(m, ctx); }
@@ -340,10 +370,16 @@ impl CityState {
     }
 
     /// `LODSelectorInstance__Submit` 0xA90160: the LOD distance is the camera's distance to the object's box (the
-    /// visibility test 0xAC5CE0) times `lod_scale` = tan(fov_y / 2) · 2.414213 (0xA2F890: 1 at a 45° view).
-    /// PORT: the game cross-fades into the next LOD over each slot's fade width (LODBlend); the port switches.
+    /// visibility test 0xAC5CE0) times `lod_scale` = tan(fov_y / 2) · 2.414213 (0xA2F890: 1 at a 45° view). The picked
+    /// LOD draws as usual; inside the fade width before its distance the next LOD is queued on top of it with blend
+    /// factor alpha (`LodTable::fade`). The exe's fade pass (0xABE770, after the opaque pass) would draw it depth-biased
+    /// toward the camera with src · alpha + dst · (1 − alpha) (D3D blend factor, 0xA4A580 mode 4), only on the pixels
+    /// the picked LOD covered (each fading pair gets a stencil reference, 0xABB0E0); in the retail exe that pass is
+    /// switched off (`lod_fade`), so the LOD switches at the distance.
+    /// PORT (with `lod_fade`): Bevy has no per-draw stencil reference, so the fading LOD also blends where the picked one
+    /// did not draw; the blend factor is kept in `FADE_LEVELS` steps.
     fn update_lods(&mut self, camera: Vec3, lod_scale: f32, ctx: &mut Ctx, budget: usize) {
-        // (distance, cell, object, wanted mesh) for every object whose drawn mesh must change
+        // (distance, cell, object, wanted mesh, wanted fade) for every object whose drawn meshes must change
         let mut changes = Vec::new();
         for (c, cell) in self.cells.iter().enumerate() {
             let Cell::Loaded { objects, .. } = cell else { continue };
@@ -352,28 +388,60 @@ impl CityState {
                 let b = &o.o.visual_bounds;
                 let d = camera.distance(camera.clamp(b.min, b.max)) * lod_scale;
                 let want = o.o.lod.pick(d).map(|m| m as usize).filter(|&m| m < o.o.meshes.len());
-                if want != o.shown { changes.push((d, c, k, want)); }
+                let fade = want.filter(|_| self.lod_fade).and(o.o.lod.fade(d)).map(|(m, a)| (m as usize, fade_level(a)))
+                    .filter(|&(m, _)| m < o.o.meshes.len() && Some(m) != want);
+                if want != o.shown || fade != o.fade.as_ref().map(|f| (f.mesh, f.level)) { changes.push((d, c, k, want, fade)); }
             }
         }
         changes.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut budget = budget;
-        for (d, c, k, want) in changes {
+        for (d, c, k, want, fade) in changes {
             let Cell::Loaded { objects, .. } = &mut self.cells[c] else { continue };
             let o = &mut objects[k];
-            let cost = want.map_or(0, |m| o.o.meshes[m].mesh.positions.len());
-            if cost > budget && want.is_some() { continue; }
-            budget = budget.saturating_sub(cost);
-            for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
-            o.shown = want;
-            let Some(m) = want else { continue };
-            let lod = &o.o.meshes[m];
             let transform = Transform::from_matrix(o.o.transform);
-            for section in &lod.mesh.sections {
-                let Some(material) = self.materials.get(&section.material) else { continue };
-                let mesh = section_mesh(&lod.mesh, lod.colors.as_deref().map(|c| c.as_slice()), &section.indices);
-                let mut e = ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(ctx.meshes.add(mesh)), MeshMaterial3d(material.handle.clone()), transform));
-                if d > SHADOW_DISTANCE { e.insert(NotShadowCaster); }
-                o.entities.push(e.id());
+            if want != o.shown {
+                // the LOD that was fading in becomes the drawn one: keep its entities, give them the opaque materials
+                let promote = want.is_some() && o.fade.as_ref().is_some_and(|f| Some(f.mesh) == want && f.complete);
+                let cost = if promote { 0 } else { want.map_or(0, |m| o.o.meshes[m].mesh.positions.len()) };
+                if cost > budget && want.is_some() { continue; }
+                budget = budget.saturating_sub(cost);
+                for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
+                o.shown = want;
+                if promote {
+                    for (e, id) in o.fade.take().unwrap().sections {
+                        let Some(m) = self.materials.get(&id) else { ctx.commands.entity(e).despawn(); continue };
+                        let mut e = ctx.commands.entity(e);
+                        e.insert(MeshMaterial3d(m.handle.clone()));
+                        if d <= SHADOW_DISTANCE { e.remove::<NotShadowCaster>(); }
+                        o.entities.push(e.id());
+                    }
+                } else if let Some(m) = want {
+                    let lod = &o.o.meshes[m];
+                    let handles: Vec<_> = lod.mesh.sections.iter().map(|s| self.materials.get(&s.material).map(|m| m.handle.clone())).collect();
+                    o.entities = spawn_lod(lod, &handles, transform, d <= SHADOW_DISTANCE, ctx).into_iter().map(|(e, _)| e).collect();
+                }
+            }
+            if o.shown != want { continue; }
+            match (fade, &mut o.fade) {
+                (None, None) => {}
+                (Some((m, level)), Some(f)) if f.mesh == m => {
+                    if f.level == level { continue; }
+                    f.level = level;
+                    for &(e, id) in &f.sections {
+                        if let Some(h) = fade_material(&mut self.materials, ctx.materials, id, level) { ctx.commands.entity(e).insert(MeshMaterial3d(h)); }
+                    }
+                }
+                (fade, current) => {
+                    for (e, _) in current.take().into_iter().flat_map(|f| f.sections) { ctx.commands.entity(e).despawn(); }
+                    let Some((m, level)) = fade else { continue };
+                    let lod = &o.o.meshes[m];
+                    let cost = lod.mesh.positions.len();
+                    if cost > budget { continue; }
+                    budget -= cost;
+                    let handles: Vec<_> = lod.mesh.sections.iter().map(|s| fade_material(&mut self.materials, ctx.materials, s.material, level)).collect();
+                    let complete = handles.iter().all(Option::is_some);
+                    o.fade = Some(FadeIn { mesh: m, level, sections: spawn_lod(lod, &handles, transform, false, ctx), complete });
+                }
             }
         }
     }
@@ -426,6 +494,7 @@ impl CityState {
                     s.objects += objects.len();
                     for o in objects {
                         s.drawn += o.shown.is_some() as usize;
+                        s.fading += o.fade.is_some() as usize;
                         if let Some(p) = &o.physics { s.physics_objects += 1; s.physics_triangles += p.triangles.len(); s.physics_edges += p.edges.len(); }
                     }
                 }
@@ -507,6 +576,35 @@ fn remove_physics(edge_free: &mut Vec<usize>, p: Physics, ctx: &mut Ctx) {
 }
 
 /// One mesh section with only the vertices it uses.
+/// One entity per mesh section that has a material; returns (entity, material id).
+fn spawn_lod(lod: &LodMesh, materials: &[Option<Handle<StandardMaterial>>], transform: Transform, shadow: bool, ctx: &mut Ctx) -> Vec<(Entity, u32)> {
+    let mut out = Vec::with_capacity(lod.mesh.sections.len());
+    for (section, material) in lod.mesh.sections.iter().zip(materials) {
+        let Some(material) = material else { continue };
+        let mesh = section_mesh(&lod.mesh, lod.colors.as_deref().map(|c| c.as_slice()), &section.indices);
+        let mut e = ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(ctx.meshes.add(mesh)), MeshMaterial3d(material.clone()), transform));
+        if !shadow { e.insert(NotShadowCaster); }
+        out.push((e.id(), section.material));
+    }
+    out
+}
+
+/// The cross-fade's blend factor as one of `FADE_LEVELS` steps (1..=FADE_LEVELS).
+fn fade_level(alpha: f32) -> u8 { ((alpha * FADE_LEVELS as f32).round() as u8).clamp(1, FADE_LEVELS as u8) }
+
+/// The translucent copy of a material for a fade level: the blend factor as alpha, drawn depth-biased toward the camera.
+fn fade_material(materials: &mut HashMap<u32, GpuMaterial>, assets: &mut Assets<StandardMaterial>, id: u32, level: u8) -> Option<Handle<StandardMaterial>> {
+    let m = materials.get_mut(&id).filter(|m| m.fadeable)?;
+    if m.fades.is_empty() { m.fades = vec![None; FADE_LEVELS]; }
+    let slot = &mut m.fades[level as usize - 1];
+    if slot.is_none() {
+        let base = assets.get(&m.handle)?.clone();
+        let alpha = level as f32 / FADE_LEVELS as f32;
+        *slot = Some(assets.add(StandardMaterial { base_color: base.base_color.with_alpha(alpha), alpha_mode: AlphaMode::Blend, depth_bias: FADE_DEPTH_BIAS, ..base }));
+    }
+    slot.clone()
+}
+
 fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: Option<&[[u8; 4]]>, indices: &[u32]) -> Mesh {
     let mut map = vec![u32::MAX; m.positions.len()];
     let (mut pos, mut nor, mut tan, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::with_capacity(indices.len()));

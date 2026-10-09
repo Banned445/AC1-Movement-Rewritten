@@ -432,6 +432,7 @@ fn damascus_streaming_tour_loads_unloads_and_reuses_slots() {
     let stops: Vec<(Vec3, f32)> = SPAWNS[1..].iter().chain([SPAWNS[0]].iter()).filter_map(|n| super::spawner(&w.globals, n)).collect();
     let mut peak_slots = 0;
     let mut peak_cells = 0;
+    let mut peak_fading = 0;
     let first_slots = s.collision().triangles.len();
     for round in 0..2 {
         for &(p, _) in &stops {
@@ -451,6 +452,7 @@ fn damascus_streaming_tour_loads_unloads_and_reuses_slots() {
             assert!(s.collision().support(s.body().feet + Vec3::Y * 0.3).is_some() || s.loco().current != ActorContextId::Ground, "no ground at {p}: {:?}", s.body().feet);
             peak_slots = peak_slots.max(s.collision().triangles.len());
             peak_cells = peak_cells.max(st.loaded);
+            peak_fading = peak_fading.max(st.fading);
             // every loaded cell is near the player
             let city = s.app.world().resource::<super::stream::City>();
             let state = city.0.as_ref().unwrap();
@@ -464,4 +466,19 @@ fn damascus_streaming_tour_loads_unloads_and_reuses_slots() {
     // slot storage is bounded by the largest window, not the sum of every window visited
     assert!(peak_slots < first_slots * 4 + 400_000, "triangle slots grew to {peak_slots} (first window {first_slots})");
     assert!(peak_cells < 260, "{peak_cells} cells loaded at once");
+    // the retail exe never draws the LOD cross-fade (RE/17 §3.2)
+    assert_eq!(peak_fading, 0);
+}
+
+#[test]
+fn damascus_lod_cross_fade_draws_the_next_lod_on_top() {
+    // AC_LOD_FADE: objects inside a fade width draw their next LOD on top (0xA90160); leaving the width removes it
+    let Some(mut s) = CitySim::new(SPAWNS[0]) else { return };
+    s.app.world_mut().resource_mut::<super::stream::City>().0.as_mut().unwrap().lod_fade = true;
+    s.run(1.0);
+    let st = s.stats();
+    assert!(st.errors == 0 && st.fading > 0 && st.fading <= st.drawn, "{st:?}");
+    s.app.world_mut().resource_mut::<super::stream::City>().0.as_mut().unwrap().lod_fade = false;
+    s.run(0.5);
+    assert_eq!(s.stats().fading, 0);
 }

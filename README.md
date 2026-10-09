@@ -78,6 +78,7 @@ To start on a native map from the command line:
 ```powershell
 $env:AC_NATIVE_MAP = "damascus"   # or "masyaf-village" / "masyaf-roofs"; unset to use the greybox
 $env:AC_CITY_SPAWN = "Souk"       # Damascus only, optional: Bureau, Academy, Palace or Souk
+$env:AC_LOD_FADE = "1"            # optional: cross-fade between LODs (the retail game switches them)
 cargo run --release
 ```
 
