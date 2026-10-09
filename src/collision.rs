@@ -43,12 +43,127 @@ pub struct CollisionWorld {
     /// PORT: conservative bounds rejection, not Havok MOPP. Disable for comparison with
     /// AC_NATIVE_QUERY_CULLING=0; exact collision tests and authored geometry are unchanged.
     pub native_query_culling: bool,
+    /// PORT: uniform XZ bucket grid over `triangles` for streamed worlds (RE/17 §5), standing in for Havok's broadphase
+    /// + MOPP. None = the linear scan. Candidates come back in ascending slot order, so every query returns what the
+    /// linear scan returns.
+    pub index: Option<TriangleGrid>,
 }
 
 impl Default for CollisionWorld {
     fn default() -> Self {
         Self { boxes: Vec::new(), triangles: Vec::new(), layers: Vec::new(),
-            native_query_culling: std::env::var("AC_NATIVE_QUERY_CULLING").as_deref() != Ok("0") }
+            native_query_culling: std::env::var("AC_NATIVE_QUERY_CULLING").as_deref() != Ok("0"), index: None }
+    }
+}
+
+/// Streamed triangle storage: slots stay put while their owner is loaded (the proxy's contacts and the contexts keep
+/// triangle indices); freed slots hold an inert triangle far outside the world until reused.
+pub struct TriangleGrid {
+    cell: f32,
+    buckets: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    /// Triangles spanning more than `LARGE_BUCKETS` buckets, checked by every query.
+    large: Vec<u32>,
+    free: Vec<u32>,
+    /// Highest triangle point inserted (bounds the point-inside parity ray).
+    max_y: f32,
+}
+
+const LARGE_BUCKETS: i64 = 64;
+/// Where freed triangles are parked.
+const PARKED: f32 = 1.0e7;
+
+impl TriangleGrid {
+    fn range(&self, min: Vec3, max: Vec3) -> (i32, i32, i32, i32) {
+        let f = |v: f32| (v / self.cell).floor().clamp(-1.0e6, 1.0e6) as i32;
+        (f(min.x), f(max.x), f(min.z), f(max.z))
+    }
+    fn insert(&mut self, slot: u32, t: &crate::triangles::Triangle) {
+        let (x0, x1, z0, z1) = self.range(t.bounds.min, t.bounds.max);
+        if (x1 - x0 + 1) as i64 * (z1 - z0 + 1) as i64 > LARGE_BUCKETS { self.large.push(slot); }
+        else { for x in x0..=x1 { for z in z0..=z1 { self.buckets.entry((x, z)).or_default().push(slot); } } }
+        self.max_y = self.max_y.max(t.bounds.max.y);
+    }
+    /// Slots whose bounds may overlap [min, max], ascending and unique.
+    fn candidates(&self, min: Vec3, max: Vec3, all: usize) -> Vec<u32> {
+        let (x0, x1, z0, z1) = self.range(min, max);
+        if (x1 as i64 - x0 as i64 + 1) * (z1 as i64 - z0 as i64 + 1) > 4096 { return (0..all as u32).collect(); }
+        let mut out = self.large.clone();
+        for x in x0..=x1 { for z in z0..=z1 { if let Some(b) = self.buckets.get(&(x, z)) { out.extend_from_slice(b); } } }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+impl CollisionWorld {
+    /// Index the triangles (and every later `add_triangles`) in a grid of `cell`-metre buckets.
+    pub fn enable_index(&mut self, cell: f32) {
+        let mut grid = TriangleGrid { cell, buckets: Default::default(), large: Vec::new(), free: Vec::new(), max_y: f32::NEG_INFINITY };
+        for (i, t) in self.triangles.iter().enumerate() { grid.insert(i as u32, t); }
+        self.index = Some(grid);
+    }
+
+    /// Add streamed triangles; returns their slots (stable until `remove_triangles`).
+    pub fn add_triangles(&mut self, triangles: Vec<crate::triangles::Triangle>) -> Vec<u32> {
+        let mut slots = Vec::with_capacity(triangles.len());
+        for t in triangles {
+            let slot = match self.index.as_mut().and_then(|g| g.free.pop()) {
+                Some(s) => { self.triangles[s as usize] = t; s }
+                None => { self.triangles.push(t); (self.triangles.len() - 1) as u32 }
+            };
+            if let Some(g) = self.index.as_mut() { g.insert(slot, &self.triangles[slot as usize]); }
+            slots.push(slot);
+        }
+        slots
+    }
+
+    /// Free streamed triangle slots: they are unlinked from the grid and parked as inert triangles for reuse.
+    pub fn remove_triangles(&mut self, slots: &[u32]) {
+        if slots.is_empty() { return; }
+        let gone: std::collections::HashSet<u32> = slots.iter().copied().collect();
+        if let Some(g) = self.index.as_mut() {
+            let mut touched = std::collections::HashSet::new();
+            for &s in slots {
+                let t = &self.triangles[s as usize];
+                let (x0, x1, z0, z1) = g.range(t.bounds.min, t.bounds.max);
+                if (x1 - x0 + 1) as i64 * (z1 - z0 + 1) as i64 > LARGE_BUCKETS { continue; }
+                for x in x0..=x1 { for z in z0..=z1 { touched.insert((x, z)); } }
+            }
+            for key in touched {
+                if let Some(b) = g.buckets.get_mut(&key) {
+                    b.retain(|s| !gone.contains(s));
+                    if b.is_empty() { g.buckets.remove(&key); }
+                }
+            }
+            g.large.retain(|s| !gone.contains(s));
+            g.free.extend(slots.iter().copied());
+        }
+        let parked = Vec3::splat(PARKED);
+        for &s in slots {
+            self.triangles[s as usize] = crate::triangles::Triangle { vertices: [parked; 3], bounds: Aabb3 { min: parked, max: parked },
+                normal: Vec3::Y, layer: crate::layers::NOTHING };
+        }
+    }
+
+    /// Triangles whose bounds overlap [min, max] exactly (no rounding margin).
+    pub fn triangles_overlapping(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = &crate::triangles::Triangle> {
+        let slots = self.index.as_ref().map(|g| g.candidates(min, max, self.triangles.len()));
+        SlotIter::new(&self.triangles, slots).filter(move |t| t.overlaps(min, max))
+    }
+}
+
+/// Every triangle, or only the listed slots.
+struct SlotIter<'a> { all: &'a [crate::triangles::Triangle], slots: Option<std::vec::IntoIter<u32>>, next: usize }
+impl<'a> SlotIter<'a> {
+    fn new(all: &'a [crate::triangles::Triangle], slots: Option<Vec<u32>>) -> Self { Self { all, slots: slots.map(Vec::into_iter), next: 0 } }
+}
+impl<'a> Iterator for SlotIter<'a> {
+    type Item = &'a crate::triangles::Triangle;
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.slots {
+            Some(s) => s.next().map(|i| &self.all[i as usize]),
+            None => { let t = self.all.get(self.next); self.next += 1; t }
+        }
     }
 }
 
@@ -65,12 +180,18 @@ impl CollisionWorld {
     }
 
     pub fn triangle_candidates(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = usize> + '_ {
-        self.triangles.iter().enumerate().filter(move |(_, t)| t.overlaps(min, max)).map(|(i, _)| self.boxes.len() + i)
+        let slots: Box<dyn Iterator<Item = usize>> = match &self.index {
+            Some(g) => Box::new(g.candidates(min, max, self.triangles.len()).into_iter().map(|i| i as usize)),
+            None => Box::new(0..self.triangles.len()),
+        };
+        slots.filter(move |&i| self.triangles[i].overlaps(min, max)).map(|i| self.boxes.len() + i)
     }
 
     fn triangles_in_bounds(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = &crate::triangles::Triangle> {
         // Include boundary contacts despite floating-point projection/ray rounding.
-        self.triangles.iter().filter(move |t| {
+        let slots = self.index.as_ref().filter(|_| self.native_query_culling)
+            .map(|g| g.candidates(min - Vec3::splat(0.01), max + Vec3::splat(0.01), self.triangles.len()));
+        SlotIter::new(&self.triangles, slots).filter(move |t| {
             let epsilon = Vec3::splat(0.0001) + (t.bounds.max - t.bounds.min) * 0.000002;
             !self.native_query_culling || t.overlaps(min - epsilon, max + epsilon)
         })
@@ -242,7 +363,13 @@ impl CollisionWorld {
         // PORT: parity ray for closed authored mesh volumes, replacing Havok's point query.
         let dir = Vec3::new(0.437, 0.731, 0.527).normalize();
         let inverse = dir.recip();
-        let mut hits: Vec<f32> = self.triangles.iter().filter(|t| {
+        // With the grid, only triangles under the ray's climb to the highest triangle can be crossed.
+        let slots = self.index.as_ref().filter(|g| self.native_query_culling && g.max_y.is_finite()).map(|g| {
+            let reach = ((g.max_y - p.y).max(0.0) / dir.y + 0.1).min(1.0e5);
+            let end = p + dir * reach;
+            g.candidates(p.min(end) - Vec3::splat(0.01), p.max(end) + Vec3::splat(0.01), self.triangles.len())
+        });
+        let mut hits: Vec<f32> = SlotIter::new(&self.triangles, slots).filter(|t| {
             if !self.native_query_culling { return true; }
             let epsilon = Vec3::splat(0.0001) + (t.bounds.max - t.bounds.min) * 0.000002;
             // The fixed parity ray has positive components: entry/exit intervals need no axis swap.

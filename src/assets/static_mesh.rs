@@ -25,9 +25,10 @@ fn float(d: &[u8], p: usize) -> Result<f32, String> {
     if v.is_finite() { Ok(v) } else { Err("non-finite static geometry".into()) }
 }
 
-/// Static, unskinned Mesh category 0, no inline SubMesh objects / bones.
+/// Static, unskinned Mesh category 0 (or 4: the city's merged distant fake meshes, same layout, RE/17 §6),
+/// no inline SubMesh objects / bones.
 pub fn parse_static_mesh(d: &[u8]) -> Result<StaticMesh, String> {
-    if word(d, 4)? != crc32("Mesh") || word(d, 8)? != 0 || word(d, 12)? != 0 || word(d, 16)? != 0 {
+    if word(d, 4)? != crc32("Mesh") || !matches!(word(d, 8)?, 0 | 4) || word(d, 12)? != 0 || word(d, 16)? != 0 {
         return Err("unsupported static mesh category".into());
     }
     if d.get(20) != Some(&0) || word(d, 26)? != crc32("CompiledMesh") {
@@ -42,8 +43,7 @@ pub fn parse_static_mesh(d: &[u8]) -> Result<StaticMesh, String> {
     let groups = word(blob, 28)? as usize;
     if vb % 24 != 0 || ib % 6 != 0 || count > 256 || groups > count { return Err("invalid static mesh counts".into()); }
     let vertices = blob.get(36..36 + vb).ok_or("truncated static vertices")?;
-    let index_bytes = blob.get(36 + vb..36 + vb + ib).ok_or("truncated static indices")?;
-    let indices: Vec<u32> = index_bytes.chunks_exact(2).map(|p| u16::from_le_bytes(p.try_into().unwrap()) as u32).collect();
+    let indices = index_buffer(blob, vb, ib, count)?;
     if indices.iter().any(|&i| i as usize >= vertices.len() / 24) { return Err("static index outside vertex buffer".into()); }
     let mut mesh = StaticMesh { positions: Vec::new(), normals: Vec::new(), tangents: Vec::new(), uvs: Vec::new(), colors: Vec::new(), sections: Vec::new() };
     for v in vertices.chunks_exact(24) {
@@ -74,6 +74,18 @@ pub fn parse_static_mesh(d: &[u8]) -> Result<StaticMesh, String> {
         mesh.sections.push(StaticSection { indices: section, material: word(d, tail + 12 + 4 * k)? });
     }
     Ok(mesh)
+}
+
+/// The CompiledMesh index buffer: u16, or u32 when the mesh has more vertices than u16 can address (the city's merged
+/// fake meshes, RE/17 §6). The draw records' triangle counts fix the width: `ib = 3 · Σ tris · width`.
+pub(crate) fn index_buffer(blob: &[u8], vb: usize, ib: usize, count: usize) -> Result<Vec<u32>, String> {
+    let bytes = blob.get(36 + vb..36 + vb + ib).ok_or("truncated static indices")?;
+    let tris: usize = (0..count).map(|k| word(blob, 36 + vb + ib + 20 * k + 16).map(|t| t as usize)).sum::<Result<usize, String>>()?;
+    Ok(if tris > 0 && ib == tris * 12 && vb / 24 > 0xFFFF {
+        bytes.chunks_exact(4).map(|p| u32::from_le_bytes(p.try_into().unwrap())).collect()
+    } else {
+        bytes.chunks_exact(2).map(|p| u16::from_le_bytes(p.try_into().unwrap()) as u32).collect()
+    })
 }
 
 pub struct CollisionMesh {

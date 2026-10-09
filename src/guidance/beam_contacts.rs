@@ -102,7 +102,7 @@ fn trim(beam:BeamContact, world:&CollisionWorld) -> Vec<BeamContact> {
     };
     // PORT: static collision meshes/boxes adapt GuidanceWorkspace's live component triangle lists.
     let min=beam.p0.min(beam.p1)-Vec3::splat(2.0); let max=beam.p0.max(beam.p1)+Vec3::splat(2.0);
-    for t in &world.triangles { if t.overlaps(min,max) {visit(t.vertices,t.normal);} }
+    for t in world.triangles_overlapping(min,max) {visit(t.vertices,t.normal);}
     for b in &world.boxes {
         if !b.min.cmple(max).all() || !b.max.cmpge(min).all() {continue;}
         for axis in 0..3 { for high in [false,true] {

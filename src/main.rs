@@ -29,6 +29,7 @@ mod sim_tests;
 mod tuning;
 mod triangles;
 mod native_map;
+mod city;
 mod map_menu;
 mod wind;
 
@@ -82,6 +83,7 @@ fn main() {
             debug_capture::ShotsPlugin,
             recorder::RecorderPlugin,
             wind::WindPlugin,
+            city::CityPlugin,
         ))
         .run();
 }

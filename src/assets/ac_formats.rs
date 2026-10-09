@@ -285,6 +285,23 @@ pub fn parse_texture(d: &[u8]) -> Option<AcTexture> {
     None
 }
 
+/// A TextureMap's BC mip chain kept compressed (for GPU upload): (width, height, mips, bc3, blocks of all mips).
+pub fn parse_texture_blocks(d: &[u8]) -> Option<(u32, u32, u32, bool, Vec<u8>)> {
+    let w = u32_at(d, 8)?;
+    let h = u32_at(d, 12)?;
+    let mips = u32_at(d, 0x20)?;
+    if !(1..=4096).contains(&w) || !(1..=4096).contains(&h) || !(1..=13).contains(&mips) {
+        return None;
+    }
+    for (block, bc3) in [(8u32, false), (16u32, true)] {
+        let size = chain_size(w, h, block, mips);
+        if let Some(off) = (0x20..0x100.min(d.len().saturating_sub(4))).find(|&o| u32_at(d, o) == Some(size)) {
+            return Some((w, h, mips, bc3, d.get(off + 4..off + 4 + size as usize)?.to_vec()));
+        }
+    }
+    None
+}
+
 fn rgb565(c: u16) -> [u8; 3] {
     let r = ((c >> 11) & 31) as u32;
     let g = ((c >> 5) & 63) as u32;
@@ -292,7 +309,7 @@ fn rgb565(c: u16) -> [u8; 3] {
     [(r * 255 / 31) as u8, (g * 255 / 63) as u8, (b * 255 / 31) as u8]
 }
 
-pub(super) fn decode_bc(src: &[u8], w: u32, h: u32, bc3: bool) -> Vec<u8> {
+pub(crate) fn decode_bc(src: &[u8], w: u32, h: u32, bc3: bool) -> Vec<u8> {
     let (w, h) = (w as usize, h as usize);
     let mut out = vec![0u8; w * h * 4];
     let bw = w.div_ceil(4);

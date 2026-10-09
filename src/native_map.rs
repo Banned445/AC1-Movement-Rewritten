@@ -222,7 +222,7 @@ pub(crate) fn village_simulation_fixture() -> Option<(CollisionWorld, GuidanceWo
     Some((map.collision,map.guidance,map.spawn))
 }
 
-fn filter_accepts(g: &crate::assets::world::NativeGuidance, a: Vec3, b: Vec3) -> bool {
+pub(crate) fn filter_accepts(g: &crate::assets::world::NativeGuidance, a: Vec3, b: Vec3) -> bool {
     let cos = g.filter_cos_angle;
     let wall = |n: Vec3| n.y.abs() < cos;
     let floor_wall = (a.y > cos && wall(b)) || (b.y > cos && wall(a));
