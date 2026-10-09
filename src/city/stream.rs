@@ -1,11 +1,14 @@
 //! Runtime streaming of a city world (RE/17 §5): grid cells load and unload around the player on loader threads,
 //! objects switch LOD meshes by camera distance, and the distant city is drawn by the World's fake meshes.
 //!
-//! Game-side rules used: the 6-level grid and its cells (§1), the LODSelector distance bands (§3.2) and the fake
-//! index spans per finest cell (§6). The exe's loading distances, LOD scale and fake switching were not traced, so
-//! the radii below are stand-ins:
-//! PORT: `LOAD_RADIUS` 160 m (the data's RegionCellDataLoadingDistance resources are named "LR - Portal (160m)"),
-//! unload 32 m further; a cell of any level loads when the player is within the radius of its rectangle.
+//! The exe's rules (`GridStreamer__Update` 0x55D810, verified 2026-10-09, RE/17 §1.1): every frame the streamer wants
+//! the cells under a square box of half-size `GridPartition__LoadingRadiusAt` (the byte map: 64 m inside Damascus) around
+//! the player — the finest cells under it and all their parents — requests them nearest-and-ahead first
+//! (`GridStreamer__RequestCellsInBox` 0x55D210: 0.6 · (1 − cos view angle) + 0.4 · d² / cell²), and unloads every cell it
+//! does not want. While a cell under the half-cell box around the player is still loading, the player is held. A loaded
+//! finest cell hides its fake spans; unloading shows them (`GridPartition__OnCellLoaded` 0x68B620 /
+//! `FakeEntities__SetCellLoaded` 0x5E4AB0).
+//! PORT: decoding runs on loader threads and the plan is refreshed every 0.25 s instead of every frame.
 //! PORT: movement only sees objects within `PHYSICS_RADIUS` (40 m) of the player (their triangles, guidance edges, haystacks
 //! and posts enter the shared CollisionWorld / GuidanceWorld in stable slots). Every movement query reaches far less
 //! than that radius, so their answers are those of the whole city; this replaces Havok's broadphase and the guidance
@@ -19,8 +22,8 @@ use bevy::{asset::RenderAssetUsages, image::{ImageAddressMode, ImageSampler, Ima
 use super::{decode::{decode_cell, CityData, CityObject, DecodedCell}, fakes::FakeBlock, material::{MaterialData, TextureData}};
 use crate::{collision::CollisionWorld, guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld}};
 
-pub const LOAD_RADIUS: f32 = 160.0;
-pub const UNLOAD_MARGIN: f32 = 32.0;
+/// `GridStreamer__RequestCellsInBox` priority weight (dword_18D6780).
+const VIEW_WEIGHT: f32 = 0.6;
 pub const PHYSICS_RADIUS: f32 = 40.0;
 pub const PHYSICS_MARGIN: f32 = 12.0;
 /// PORT: per-frame budget of mesh vertices built for LOD switches (spreads the cost of entering a district).
@@ -135,6 +138,8 @@ pub struct CityState {
     pub log: (f32, u32, f32),
     /// AC_CITY_TOUR start point
     pub tour: Option<Vec3>,
+    /// A cell under the near box is still loading: the player is held at this position (0x55D810).
+    pub hold: Option<Vec3>,
 }
 
 #[derive(Resource, Default)]
@@ -142,10 +147,6 @@ pub struct City(pub Option<Box<CityState>>);
 
 /// The game coordinates (x, y) of a Bevy position.
 fn game_xy(p: Vec3) -> Vec2 { Vec2::new(p.x, -p.z) }
-
-fn rect_distance(p: Vec2, (min, max): (Vec2, Vec2)) -> f32 {
-    (p - p.clamp(min, max)).length()
-}
 
 fn xz_distance(p: Vec3, b: &crate::collision::Aabb3) -> f32 {
     let q = Vec2::new(p.x, p.z);
@@ -168,16 +169,23 @@ impl CityState {
         let n = data.grid.cells.len();
         Self { loader: Loader::new(data.clone(), threads), data, cells: (0..n).map(|_| Cell::Unloaded).collect(), has_content,
             materials: HashMap::new(), textures: HashMap::new(), fake_spans: HashMap::new(), edge_free: Vec::new(),
-            pilotis_dirty: true, haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None }
+            pilotis_dirty: true, haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None }
     }
 
-    /// Cells with content within `radius` of `focus` (Bevy space), nearest first.
-    pub fn cells_within(&self, focus: Vec3, radius: f32) -> Vec<usize> {
-        cells_within(&self.data, &self.has_content, focus, radius)
+    /// The cells the streamer wants with the player at `focus` (Bevy space), in request order.
+    pub fn wanted(&self, focus: Vec3, view: Option<Vec3>) -> Vec<usize> {
+        wanted_cells(&self.data, &self.has_content, focus, view)
     }
+
+    /// Is every wanted cell around `p` loaded?
+    pub fn settled(&self, p: Vec3) -> bool {
+        self.wanted(p, None).iter().all(|&c| matches!(self.cells[c], Cell::Loaded { .. }))
+    }
+
+    pub fn is_loaded(&self, c: usize) -> bool { matches!(self.cells[c], Cell::Loaded { .. }) }
 
     /// Per frame: take finished cells, plan loads/unloads, switch LODs, move objects in and out of the physics window.
-    pub fn update(&mut self, player: Vec3, camera: Vec3, dt: f32, ctx: &mut Ctx) {
+    pub fn update(&mut self, player: Vec3, camera: Vec3, view: Vec3, dt: f32, ctx: &mut Ctx) {
         let mut phase = [0.0f32; 5];
         let mut clock = std::time::Instant::now();
         let mut lap = |k: usize, phase: &mut [f32; 5]| { phase[k] = clock.elapsed().as_secs_f32() * 1000.0; clock = std::time::Instant::now(); };
@@ -197,8 +205,13 @@ impl CityState {
         self.plan_timer -= dt;
         if self.plan_timer <= 0.0 {
             self.plan_timer = 0.25;
-            self.plan(player, ctx);
+            self.plan(player, view, ctx);
         }
+        // the half-cell box around the player (0x55D810's first request): hold while any of it is still loading
+        let p = game_xy(player);
+        let near = (self.data.grid.cell_size * 0.5) as i32;
+        let waiting = (0..self.cells.len()).any(|c| self.has_content[c] && !self.is_loaded(c) && self.data.grid.cell_in_box(&self.data.grid.cells[c], p, near));
+        self.hold = if waiting { Some(self.hold.unwrap_or(player)) } else { None };
         lap(1, &mut phase);
         self.update_lods(camera, ctx, LOD_VERTEX_BUDGET);
         lap(2, &mut phase);
@@ -237,23 +250,21 @@ impl CityState {
         }
     }
 
-    fn plan(&mut self, player: Vec3, ctx: &mut Ctx) {
-        let p = game_xy(player);
-        let mut wanted = Vec::new();
+    fn plan(&mut self, player: Vec3, view: Vec3, ctx: &mut Ctx) {
+        let order = self.wanted(player, Some(view));
+        let mut want = vec![false; self.cells.len()];
+        for &c in &order { want[c] = true; }
+        // 0x55D810: every cell not wanted this frame unloads (no hysteresis)
         for c in 0..self.cells.len() {
-            if !self.has_content[c] { continue; }
-            let d = rect_distance(p, self.data.grid.cell_rect(&self.data.grid.cells[c]));
             match self.cells[c] {
-                Cell::Unloaded if d < LOAD_RADIUS => wanted.push((d, c)),
-                Cell::Loading if d < LOAD_RADIUS + UNLOAD_MARGIN => wanted.push((d, c)),
-                Cell::Loading => self.cells[c] = Cell::Unloaded,
-                Cell::Loaded { .. } if d > LOAD_RADIUS + UNLOAD_MARGIN => self.unload(c, ctx),
+                Cell::Loading if !want[c] => self.cells[c] = Cell::Unloaded,
+                Cell::Loaded { .. } if !want[c] => self.unload(c, ctx),
                 _ => {}
             }
         }
-        wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for &(_, c) in &wanted { self.cells[c] = Cell::Loading; }
-        self.loader.request(wanted.into_iter().map(|w| w.1).collect());
+        let requests: Vec<usize> = order.into_iter().filter(|&c| !self.is_loaded(c)).collect();
+        for &c in &requests { self.cells[c] = Cell::Loading; }
+        self.loader.request(requests);
     }
 
     pub fn integrate(&mut self, d: DecodedCell, ctx: &mut Ctx) {
@@ -453,10 +464,6 @@ impl CityState {
         }
     }
 
-    /// Is every cell within `radius` of `p` loaded?
-    pub fn settled(&self, p: Vec3, radius: f32) -> bool {
-        self.cells_within(p, radius).iter().all(|&c| matches!(self.cells[c], Cell::Loaded { .. }))
-    }
 }
 
 /// Which grid cells have a non-empty stored file (empty cells are 104-byte files).
@@ -466,11 +473,22 @@ pub fn content_mask(data: &CityData) -> Vec<bool> {
     }).collect()
 }
 
-/// Cells with content within `radius` of `focus` (Bevy space), nearest first.
-pub fn cells_within(data: &CityData, has_content: &[bool], focus: Vec3, radius: f32) -> Vec<usize> {
+/// The cells `GridStreamer__Update` 0x55D810 wants with the player at `focus` (Bevy space): every cell (with content)
+/// under the square box of the loading radius at the player's cell, ordered as 0x55D210 requests them — by
+/// 0.6 · (1 − cos(angle between the view and the cell centre)) + 0.4 · d² / cell² (d to the cell centre, the view
+/// flattened; without a view only the distance term counts).
+pub fn wanted_cells(data: &CityData, has_content: &[bool], focus: Vec3, view: Option<Vec3>) -> Vec<usize> {
+    let g = &data.grid;
     let p = game_xy(focus);
-    let mut v: Vec<(f32, usize)> = (0..data.grid.cells.len()).filter(|&c| has_content[c])
-        .map(|c| (rect_distance(p, data.grid.cell_rect(&data.grid.cells[c])), c)).filter(|d| d.0 < radius).collect();
+    let r = g.loading_radius(p) as i32;
+    let dir = view.map(|v| game_xy(v).normalize_or_zero());
+    let mut v: Vec<(f32, usize)> = (0..g.cells.len()).filter(|&c| has_content[c] && g.cell_in_box(&g.cells[c], p, r)).map(|c| {
+        let (min, max) = g.cell_rect(&g.cells[c]);
+        let to = (min + max) * 0.5 - p;
+        let d2 = to.length_squared();
+        let cos = match dir { Some(d) if d2 > 0.0 => d.dot(to / d2.sqrt()), _ => 1.0 };
+        ((1.0 - cos) * VIEW_WEIGHT + (1.0 - VIEW_WEIGHT) * d2 / (g.cell_size * g.cell_size), c)
+    }).collect();
     v.sort_by(|a, b| a.0.total_cmp(&b.0));
     v.into_iter().map(|d| d.1).collect()
 }

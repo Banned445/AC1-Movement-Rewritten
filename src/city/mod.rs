@@ -39,9 +39,9 @@ pub fn open(game: &Path, world: &CityWorld, bc: bool) -> Result<OpenedWorld, Str
     let mut globals: Vec<Arc<Resource>> = file.values().cloned().collect();
     globals.sort_by_key(|r| r.id);
     let w = globals.iter().find(|r| r.class_hash == crc32("World")).ok_or("no World resource")?;
-    let (size, origin, width) = grid::parse_layout(&w.payload)?;
+    let (size, origin, width, radius) = grid::parse_layout(&w.payload)?;
     let partition = globals.iter().find(|r| r.class_hash == crc32("GridPartition")).ok_or("no GridPartition")?;
-    let grid = grid::parse_partition(&partition.payload, size, origin, width)?;
+    let grid = grid::parse_partition(&partition.payload, size, origin, width, radius)?;
     let data = CityData { archives, grid, meshes: Default::default(), materials: Default::default(), bc, resident: Mutex::default() };
     Ok(OpenedWorld { data: Arc::new(data), globals })
 }
@@ -80,7 +80,7 @@ pub fn prepare(game: &Path, world: &CityWorld, bc: bool, spawn: &str) -> Result<
     let (feet, heading) = spawner(&opened.globals, spawn).ok_or_else(|| format!("{} has no {spawn}", world.world))?;
     let fakes = fakes::parse(&opened.data, &opened.globals)?;
     // every cell within the load radius, decoded on all cores
-    let wanted = stream::cells_within(&opened.data, &stream::content_mask(&opened.data), feet, stream::LOAD_RADIUS);
+    let wanted = stream::wanted_cells(&opened.data, &stream::content_mask(&opened.data), feet, None);
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).max(2);
     let data = &opened.data;
     let chunks: Vec<Vec<usize>> = (0..threads).map(|t| wanted.iter().copied().skip(t).step_by(threads).collect()).collect();
@@ -141,7 +141,7 @@ impl Plugin for CityPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<stream::City>()
             .add_systems(Startup, spawn_overlay)
-            .add_systems(Update, (update_city.before(crate::player::PlayerSet), update_overlay));
+            .add_systems(Update, (update_city.before(crate::player::PlayerSet), hold_player.after(crate::player::PlayerSet), update_overlay));
     }
 }
 
@@ -167,10 +167,10 @@ pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn
         body.feet = start + dir * (speed * t);
         body.velocity = Vec3::ZERO;
     }
-    let eye = cams.iter().next().map_or(body.feet, |t| t.translation());
+    let (eye, view) = cams.iter().next().map_or((body.feet, Vec3::NEG_Z), |t| (t.translation(), t.forward().as_vec3()));
     let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, images: &mut images,
         collision: &mut collision, guidance: &mut guidance };
-    state.update(body.feet, eye, time.delta_secs(), &mut ctx);
+    state.update(body.feet, eye, view, time.delta_secs(), &mut ctx);
     // AC_CITY_LOG=<seconds>: log the streaming counters and frame times at that interval
     if let Some(every) = std::env::var("AC_CITY_LOG").ok().and_then(|v| v.parse::<f32>().ok()) {
         let log = &mut state.log;
@@ -180,6 +180,13 @@ pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn
             *log = (0.0, 0, 0.0);
         }
     }
+}
+
+/// `GridStreamer__Update` 0x55D810 holds the player while a cell under the half-cell box around them is still
+/// loading. PORT: the port keeps the position (and drops the velocity) instead of the game's loading state.
+pub(crate) fn hold_player(city: Res<stream::City>, mut players: Query<&mut crate::player::Body, With<crate::player::Player>>) {
+    let Some(hold) = city.0.as_ref().and_then(|c| c.hold) else { return };
+    for mut body in &mut players { body.feet = hold; body.velocity = Vec3::ZERO; }
 }
 
 #[derive(Component)]

@@ -88,7 +88,7 @@ impl CitySim {
             .init_resource::<super::stream::City>()
             .add_systems(Update, (super::update_city, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,
                 crate::player::air::update_air, crate::player::ledge::update_ledge, crate::player::climb::update_climb, crate::player::hay::update_hay,
-                crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
+                crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, super::hold_player).chain());
         let player = app.world_mut().spawn((crate::player::player_components(prepared.spawn, prepared.heading), Transform::default())).id();
         app.world_mut().run_system_once_with(super::spawn, prepared).unwrap();
         app.update();
@@ -441,7 +441,7 @@ fn damascus_streaming_tour_loads_unloads_and_reuses_slots() {
             let mut settled = false;
             while started.elapsed().as_secs() < 60 {
                 s.step();
-                if s.app.world().resource::<super::stream::City>().0.as_ref().unwrap().settled(p, super::stream::LOAD_RADIUS) { settled = true; break; }
+                if s.app.world().resource::<super::stream::City>().0.as_ref().unwrap().settled(p) { settled = true; break; }
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             assert!(settled, "cells around {p} never finished loading: {:?}", s.stats());
@@ -454,7 +454,10 @@ fn damascus_streaming_tour_loads_unloads_and_reuses_slots() {
             // every loaded cell is near the player
             let city = s.app.world().resource::<super::stream::City>();
             let state = city.0.as_ref().unwrap();
-            assert!(state.cells_within(p, super::stream::LOAD_RADIUS + super::stream::UNLOAD_MARGIN + 1.0).len() >= st.loaded, "far cells still loaded at {p}: {st:?}");
+            // exactly the cells the exe's box rule wants (0x55D810), nothing else
+            let wanted = state.wanted(p, None);
+            assert_eq!(wanted.len(), st.loaded, "loaded cells differ from the wanted box at {p}: {st:?}");
+            assert!(wanted.iter().all(|&c| state.is_loaded(c)));
             eprintln!("round {round} at {p}: {st:?}, {} triangle slots", s.collision().triangles.len());
         }
     }
