@@ -800,9 +800,20 @@ pub fn update_air(
                     }
                 }
             }
-            if ladder_on.is_none() && hang_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
+            if ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
                 let ahead = super::air_catches::target_ahead(body.feet, air.target, &collision);
                 if !ahead { narrow_on = narrow_catch(body.feet, body.forward(), foot, &guidance, &collision); }
+                // the knee catch (type 0, 0xE0D58B): an edge at the feet with a drop in front of it and room on top
+                if narrow_on.is_none() && !ahead && body.velocity.y <= 0.0 {
+                    if let Some((edge, n)) = super::air_catches::knee_catch(body.feet, body.forward(), &guidance, &collision) {
+                        let action = super::air_catches::KNEE_CATCH[(fall_height >= 3.0) as usize];
+                        let (knee, stand) = super::ledge_moves::knee_catch_moves(action, body.feet, edge, n);
+                        let mut e = LedgeEntry::at(edge, n, body.feet, LedgeSubState::Pullup);
+                        e.entry_move = Some(knee);
+                        e.entry_rest = [Some(stand), None];
+                        hang_on = Some(e);
+                    }
+                }
             }
         }
 

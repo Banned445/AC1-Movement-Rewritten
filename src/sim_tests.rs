@@ -3737,13 +3737,23 @@ fn landing_on_a_roofs_lip_steps_off_the_edge() {
     use crate::player::air_catches::STEP_OFF;
     // InAir sub-state 3 (0xE0D684): a flat landing with the feet within 0.15 m of the roof edge (roof x 38..44, z
     // 9..15, 3 m) → the step-off action, then the fall to the street
+    // facing the drop (-Z): `step_off_back` (its root steps 0.48 m forward), then the fall to the street
     let from = Vec3::new(41.0, 5.0, 9.1);
-    let mut s = Sim::new(from, FACE_PZ);
+    let mut s = Sim::new(from, 0.0);
     force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
     s.pad(Vec3::ZERO, 0.0, false, false);
     assert!(s.run_until(1.5, |s| s.data().air.edge_landed), "no edge landing: {:?} {:?}", s.loco().current, s.body().feet);
-    assert!(s.data().air.flight.is_some_and(|a| STEP_OFF.contains(&a.id)), "a step-off action");
+    assert_eq!(s.data().air.flight.map(|a| a.id), Some(STEP_OFF[1]), "step_off_back");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "never reached the street: {:?}", s.body().feet);
+    // facing into the roof (+Z): `step_off_front` steps 0.48 m backward off the lip; falling in front of the face with
+    // its top at the feet, the knee catch (type 0) takes the edge again and stands up
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.5, |s| s.data().air.edge_landed), "no edge landing facing the roof");
+    assert_eq!(s.data().air.flight.map(|a| a.id), Some(STEP_OFF[0]), "step_off_front");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood again");
+    assert!((s.body().feet.y - 3.0).abs() < 0.05, "back on the roof: {:?}", s.body().feet);
 }
 
 
@@ -3760,3 +3770,20 @@ fn edge_landing_finds_the_roof_edge_at_the_feet() {
     // well inside the roof: nothing
     assert!(edge_landing(Vec3::new(41.0, 3.0, 12.0), Vec3::Z, &guidance, &collision).is_none());
 }
+
+#[test]
+fn falling_in_front_of_a_knee_high_top_catches_it_and_stands_up() {
+    use crate::player::air_catches::KNEE_CATCH;
+    // CheckAirCatch type 0 (sub_E04630 / sub_B2E240): falling just in front of the 3 m roof's south face (x 38..44, z
+    // 9..15) with its top at the feet → the knee catch, then the stand-up onto the roof
+    let from = Vec3::new(41.0, 4.0, 8.62);
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ledge), "no knee catch: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.data().ledge.mv.and_then(|m| m.seq[0]).is_some_and(|a| KNEE_CATCH.contains(&a.id)), "the knee catch plays");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood up: {:?}", s.loco().current);
+    let f = s.body().feet;
+    assert!((f.y - 3.0).abs() < 0.05 && f.z > 9.0, "standing on the roof: {f:?}");
+}
+

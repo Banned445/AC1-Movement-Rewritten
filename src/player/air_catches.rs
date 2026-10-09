@@ -167,6 +167,58 @@ pub fn ledge_search(
     None
 }
 
+/// The knee catch (type 0), `xx_fall_tr_hangknee_min_a` / `_max_a` [fall < 3 m, ≥ 3 m].
+pub const KNEE_CATCH: [u32; 2] = [0x1F0C_05A7, 0x1F0C_05A6];
+
+/// The knee catch (`CheckAirCatch` 0xE0D58B, type 0; ordinary falls and jumps only, under 9 m, after the post and beam
+/// catches): `sub_E04630` takes the edges near the feet (the `sub_E008C0` box), keeps those within 45° of the facing
+/// seen from the feet + 0.15 m − 0.2 m back (`sub_1173B10`), and the nearest point to the feet + 0.5 m − 0.2 m back on
+/// one facing the character within 70° (`sub_116FF40`, step 0.1, mask 386); no jump target may be ahead, and the drop
+/// in front of the edge (`Human__MeasureDropBeyondEdge` 0.7 / 0.3) must exceed 0.5 m. `sub_B2E240` then wants room on
+/// the top (two sweeps from 1.075 m and 0.95 m above it, 0.3 m clear past 1.0 / 0.6 m). Returns the edge point and its
+/// wall normal. PORT: the drop is one ray down 0.3 m out from the edge; the room on top is the capsule fitting 0.35 m in.
+pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
+    let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
+    let r = super::right_of(f);
+    let centre = feet + Vec3::Y * 0.15;
+    let eye = feet + Vec3::Y * 0.15 - f * 0.2;
+    let reference = feet + Vec3::Y * 0.5 - f * 0.2;
+    let mut best: Option<(f32, Vec3, Vec3)> = None;
+    for e in guidance.edges.iter().filter(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab) {
+        let n = Vec3::new(e.n1.x, 0.0, e.n1.z);
+        if n.length_squared() < 1e-6 {
+            continue;
+        }
+        let n = n.normalize();
+        if n.dot(f) > -70f32.to_radians().cos() {
+            continue;
+        }
+        let p = e.closest_point(reference);
+        let l = p - centre;
+        if l.dot(r).abs() > 0.4 || l.dot(f).abs() > 0.4 || l.y.abs() > 0.35 {
+            continue;
+        }
+        // the feet in front of the face, not over its top (hypothesis: the drop is measured from the feet's side)
+        if (feet - p).dot(n) <= 0.0 {
+            continue;
+        }
+        let to = Vec3::new(p.x - eye.x, 0.0, p.z - eye.z).normalize_or_zero();
+        if to.dot(f) < 45f32.to_radians().cos() {
+            continue;
+        }
+        let d = p.distance(reference);
+        if best.is_none_or(|b| d < b.0) {
+            best = Some((d, p, n));
+        }
+    }
+    let (_, p, n) = best?;
+    let below = collision.ground_height(p + n * 0.3 + Vec3::Y * 0.05, 10.0).map(|h| p.y - h).unwrap_or(10.0);
+    if below <= 0.5 {
+        return None;
+    }
+    collision.capsule_fits(p - n * 0.35 + Vec3::Y * 0.05).then_some((p, n))
+}
+
 /// InAir sub-state 3, the edge landing (`CheckAirCatch` LABEL_140, 0xE0D684): at a flat ground contact
 /// (`HumanInAir__GetGroundContactType` = 1) with guidance edges near the feet (`sub_E008C0`: a box ±0.4 × ±0.4 ×
 /// ±0.35 m round the feet + 0.15 m, along the facing; `HumanInAir__AverageNearbyEdges` 0xE01FA0: each edge whose

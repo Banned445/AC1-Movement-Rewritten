@@ -1055,6 +1055,48 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
     (base, stand)
 }
 
+/// The knee catch from a fall (`CheckAirCatch` type 0, RE/19 §2.4): the catch action plays while the root is
+/// interpolated onto the edge (sub_711130 over the action), then the stand-up onto the top as the climb-out's
+/// (`ACT_KNEE_TO_FREESTEP`, PORT: Ground). Returns the catch move and the step onto the top.
+pub fn knee_catch_moves(action: u32, from: Vec3, edge: Vec3, n: Vec3) -> (LedgeMove, LedgeMove) {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let seq = [single(action, 0), None, None, None];
+    let durations = seq_durations(&seq);
+    let durations = if durations.iter().sum::<f32>() > 0.0 { durations } else { [0.2, 0.0, 0.0, 0.0] };
+    let r = right_of(facing);
+    let (hand_l, hand_r) = (edge - r * HAND_SPACING * 0.5, edge + r * HAND_SPACING * 0.5);
+    let knee = edge + facing * 0.1;
+    let base = LedgeMove {
+        kind: MoveKind::Pullup,
+        seq,
+        durations,
+        t: 0.0,
+        from,
+        to: knee,
+        facing_from: facing,
+        facing_to: facing,
+        follow_disp: false,
+        lead: 0.0,
+        end_free: false,
+        end_wall: false,
+        end_stand: false,
+        hand_l,
+        hand_r,
+        normal: n,
+    };
+    let step = [single(ACT_KNEE_TO_FREESTEP[0], 0), None, None, None];
+    let d = seq_durations(&step);
+    let stand = LedgeMove {
+        seq: step,
+        durations: if d[0] > 0.0 { d } else { [0.4, 0.0, 0.0, 0.0] },
+        from: knee,
+        to: edge - n * PULLUP_IN,
+        end_stand: true,
+        ..base
+    };
+    (base, stand)
+}
+
 // ---------------------------------------------------------------- jumps into a hang
 
 /// Pull-up chain pieces: hangwaist → hangknee (`xx_h_hangwaist_tr_hangknee_footl`), hangknee → wait.
