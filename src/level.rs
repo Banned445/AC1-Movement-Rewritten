@@ -71,6 +71,14 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     // platform C (x 98..102) and a beam from it into wall Y (x 109..112, 8 m): the wall run from a beam (RE/05 §2.10)
     (100.0, 70.0, 4.0, 4.0, 4.0),
     (110.5, 70.0, 3.0, 4.0, 8.0),
+    // --- hang → ladder side jump (0xDD55F0, RE/18 §7.1): a 2.6 m wall (x 140..143) whose ledge ends 1 m before a
+    //     ladder wall (x 144..147, ladder at x 144.4 on its -Z face z 9.7)
+    (141.5, 10.0, 3.0, 0.6, 2.6),
+    (145.5, 10.0, 3.0, 0.6, 6.0),
+    // --- ledge → climb side jump (0xDDD490 type 0, RE/18 §7.2): a 2.6 m wall (x 150..153) whose ledge ends 1.6 m before
+    //     a climb wall (x 154.6..158.6, face z 9.7, bands to 5.4 m: CLIMB_WALLS), beyond the side move's reach
+    (151.5, 10.0, 3.0, 0.6, 2.6),
+    (156.6, 10.0, 4.0, 0.6, 6.0),
     // --- water tank (x 130..136, z 0..6, walls 2 m): deep water inside (WATER), the drowning (RE/18 §5)
     (133.0, 0.15, 6.0, 0.3, 2.0),
     (133.0, 5.85, 6.0, 0.3, 2.0),
@@ -128,6 +136,7 @@ pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
     (Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.0, 63.5), Vec3::NEG_Z),
     (Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), Vec3::NEG_Z),
     (Vec3::new(-129.4, 0.0, -10.5), Vec3::new(-129.4, 7.0, -10.5), Vec3::NEG_Z),
+    (Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.0, 9.7), Vec3::NEG_Z),
 ];
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
@@ -201,6 +210,8 @@ const CLIMB_WALLS: &[((f32, f32), f32, (i32, i32))] = &[
     ((-117.95, -114.05), -10.5, (6, 11)),
     // wall X, its holds ending 0.65 m short of the ladder at x -129.4
     ((-133.95, -130.05), -10.5, (1, 11)),
+    // the climb wall beside the 2.6 m ledge (the ledge side jump onto climb holds)
+    ((154.65, 158.55), 9.7, (1, 9)),
 ];
 
 /// Climb walls facing ±X (face x, z range, outward normal x, band index range): the corner climbs.

@@ -351,9 +351,11 @@ pub fn try_corner(
     })
 }
 
-/// `HumanLedge__TrySideJumpToLedge` 0xDDD490 (hang → hang, table types 1 / 2): from the hands' midpoint
-/// (highest hand) + 0.9·move, search up to 1.6 m further at hand-height offsets 0, +0.6, −0.6 (radius 0.35,
-/// vertical 0.3) for an edge on the same side of the wall. `long` = distance / 1.6 ≥ 0.5.
+/// `HumanLedge__TrySideJumpToLedge` 0xDDD490 (table types 0 / 1 / 2): from the hands' midpoint (highest hand)
+/// + 0.9·move, search up to 1.6 m further at hand-height offsets 0, +0.6, −0.6 (radius 0.35, vertical 0.3) for an
+/// edge on the same side of the wall. `long` = distance / 1.6 ≥ 0.5. Feet on climb holds 1.2 m below the new edge →
+/// type 0: the start and loop play here, the end item in the Climb context (the returned `ClimbEntry`, as
+/// `try_jump_up_to_climb`); otherwise a hang (1 wall, 2 free).
 pub fn try_side_jump(
     right: bool,
     hand_l: Vec3,
@@ -363,7 +365,7 @@ pub fn try_side_jump(
     hang: LedgeHangType,
     guidance: &GuidanceWorld,
     collision: &CollisionWorld,
-) -> Option<LedgeMove> {
+) -> Option<(LedgeMove, Option<super::climb::ClimbEntry>)> {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let side = if right { right_of(facing) } else { -right_of(facing) };
     let mut base = (hand_l + hand_r) * 0.5;
@@ -383,6 +385,63 @@ pub fn try_side_jump(
                     // nearest point, the other one HAND_SPACING further along the move
                     let c = hit.point + side * HAND_SPACING * 0.5;
                     let (hl, hr) = (c - r * HAND_SPACING * 0.5, c + r * HAND_SPACING * 0.5);
+                    // `TrySideJumpToLedge` 0xDDD490 classifies the landing by the feet search 1.2 m below the hands
+                    // (the three passes, feet −1.2 / −0.6 / −1.8 from the hand base): feet on climb holds → type 0
+                    // (the climb pose from the holds, `Human__ComputeClimbPoseFromHolds` 0xB1CC20), on a wall surface →
+                    // 1, none → 2 (RE/18 §7.2). PORT: the feet holds are a guidance probe, as in `try_climb_reach`.
+                    let feet_hold = guidance
+                        .probe(hit.point - Vec3::Y * 1.2, 0.35, 0.3, Some(facing), 45f32.to_radians())
+                        .filter(|f| (f.point.y - (hit.point.y - 1.2)).abs() <= 0.3 && f.wall_normal.dot(nn) > 0.9);
+                    if let Some(f) = feet_hold {
+                        let fc = f.point + side * HAND_SPACING * 0.5;
+                        let (fl, fr) = (fc - r * HAND_SPACING * 0.5, fc + r * HAND_SPACING * 0.5);
+                        let target = super::climb::climb_root_at(hl, hr, fl, fr, nn);
+                        if !collision.capsule_cast_free(root - facing * 0.15, 1.8, 0.35, target - root) {
+                            return None;
+                        }
+                        let dist = Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length();
+                        let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
+                        let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][long as usize * 4 + 2 + right as usize];
+                        let [st, lp, end] = entry.1;
+                        let seq = [single(st, 0), single(lp, 0), None, None];
+                        let durations = seq_durations(&seq);
+                        let found = durations.iter().sum::<f32>() > 0.0;
+                        // the end item plays in the climb (as `try_jump_up_to_climb`, 0xDD8CF0): the jump part ends
+                        // where the end item's own displacement starts
+                        let end_disp = single(end, 0).map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
+                        let fto = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
+                        let to = target - (right_of(fto) * end_disp[0] + fto * end_disp[1] + Vec3::Y * end_disp[2]);
+                        let mv = LedgeMove {
+                            kind: MoveKind::SideJump { long },
+                            seq,
+                            durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
+                            t: 0.0,
+                            from: root,
+                            to,
+                            facing_from: facing,
+                            facing_to: fto,
+                            follow_disp: found,
+                            lead: 0.0,
+                            end_free: false,
+                            end_wall: false,
+                            end_stand: false,
+                            hand_l: hl,
+                            hand_r: hr,
+                            normal: nn,
+                        };
+                        let climb = super::climb::ClimbEntry {
+                            entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
+                            hand_l: hl,
+                            hand_r: hr,
+                            foot_l: fl,
+                            foot_r: fr,
+                            normal: nn,
+                            from_feet: to,
+                            foot_right: false,
+                            action: Some(end),
+                        };
+                        return Some((mv, Some(climb)));
+                    }
                     let new_hang = hang_type_at(c, nn, collision);
                     let to = hang_root_at(hl, hr, nn, new_hang, collision);
                     if !collision.capsule_fits(to + Vec3::Y * 0.05) {
@@ -395,7 +454,7 @@ pub fn try_side_jump(
                     let seq = [single(entry.1[0], 0), single(entry.1[1], 0), single(entry.1[2], 0), None];
                     let durations = seq_durations(&seq);
                     let found = durations.iter().sum::<f32>() > 0.0;
-                    return Some(LedgeMove {
+                    return Some((LedgeMove {
                         kind: MoveKind::SideJump { long },
                         seq,
                         durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
@@ -412,7 +471,7 @@ pub fn try_side_jump(
                         hand_l: hl,
                         hand_r: hr,
                         normal: nn,
-                    });
+                    }, None));
                 }
             }
             s += 0.1;
@@ -815,6 +874,72 @@ pub fn try_free_hang_drop(
         normal: nn,
     };
     Some((mv, climb))
+}
+
+/// `HumanLedge__TrySideJumpToLadder` 0xDD55F0 (RE/18 §7.1), tried before the ledge side jump when the shimmy is blocked
+/// or the edge ends (`HumanLedge__TryJumpUpOrTurnCorner` 0xDE05E0). The probe point is the root + 1.7 m to the side,
+/// then −0.5 up + 0.35 forward (wall hang) or +0.5 up − 0.15 forward (free hang). A ladder piece is searched in the
+/// box ±0.8 sideways, ±0.5 forward, ±0.5 up there (`Guidance__ProbeBox`, mask 8, any angle, step 0.1); the ladder
+/// must lie along the wall (|n·forward| > 0.7071). Hands ±0.15 m across the ladder, 1 m up from the hit point.
+/// A capsule (r 0.35, 1.8 m) from the root 0.15 m back from the wall must sweep to the ladder point 0.5 m out
+/// (`Human__CapsuleCastFree` 0xB136E0). Ledge-jump table type 3 (ladder), weight = flat distance to the hand / 1.6.
+/// The jump's end action (`…_ladder_*` 0x52557360..63) hands over to the Ladder context.
+pub fn try_side_jump_to_ladder(
+    right: bool,
+    n: Vec3,
+    root: Vec3,
+    hang: LedgeHangType,
+    guidance: &GuidanceWorld,
+    collision: &CollisionWorld,
+) -> Option<(LedgeMove, super::ladder::LadderEntry)> {
+    use super::ladder::LadderEntry;
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let side = if right { right_of(facing) } else { -right_of(facing) };
+    let free = hang != LedgeHangType::Wall;
+    let centre = root + side * 1.7 + if free { Vec3::Y * 0.5 - facing * 0.15 } else { -Vec3::Y * 0.5 + facing * 0.35 };
+    let hit = guidance.probe_box(centre, right_of(facing), facing, Vec3::Y, Vec3::new(0.8, 0.5, 0.5), centre, std::f32::consts::PI, 0.1, 8)?;
+    let e = &guidance.edges[hit.edge];
+    let ln = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+    if ln.dot(facing).abs() <= std::f32::consts::FRAC_1_SQRT_2 {
+        return None;
+    }
+    let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
+    // the body's point on the ladder: 0.5 m out from the hit (the hands 1 m above it)
+    let q = Vec3::new(hit.point.x, hit.point.y, hit.point.z);
+    let to = q + ln * super::ladder::ATTACH_OUT;
+    let back = root - facing * 0.15;
+    if !collision.capsule_cast_free(back, 1.8, 0.35, to - root) {
+        return None;
+    }
+    let across = right_of(-ln);
+    let hand = q + Vec3::Y;
+    let w = (Vec2::new(hand.x - root.x, hand.z - root.z).length() / 1.6).clamp(0.0, 1.0);
+    let long = w >= 0.5;
+    let entry = LEDGE_JUMP_TABLE[free as usize][(3 * 2 + long as usize) * 4 + 2 + right as usize];
+    let seq = [single(entry.1[0], 0), single(entry.1[1], 0), single(entry.1[2], 0), None];
+    let durations = seq_durations(&seq);
+    let found = durations.iter().sum::<f32>() > 0.0;
+    let mv = LedgeMove {
+        kind: MoveKind::SideJump { long },
+        seq,
+        durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
+        t: 0.0,
+        from: root,
+        to,
+        facing_from: facing,
+        facing_to: -ln,
+        follow_disp: false,
+        lead: 0.0,
+        end_free: false,
+        end_wall: false,
+        end_stand: false,
+        hand_l: hand - across * 0.15,
+        hand_r: hand + across * 0.15,
+        normal: ln,
+    };
+    let height = (to.y - base.y).clamp(0.0, (top.y - base.y).max(0.0));
+    let ladder = LadderEntry { base, top, n: ln, from: to, facing: -ln, from_top: false, high: false, foot: right as usize, from_ledge: true, height: Some(height), action: None, ..Default::default() };
+    Some((mv, ladder))
 }
 
 /// `HumanLedge__TrySideMoveToLadder` 0xDD4CD0 (stick left/right, tried first after ProbeLateral). A ladder edge

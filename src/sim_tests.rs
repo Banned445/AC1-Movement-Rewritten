@@ -3592,3 +3592,35 @@ fn the_ability_stack_gates_the_jump() {
         assert_eq!(jumped, allowed);
     }
 }
+
+#[test]
+fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_a_ladder() {
+    // the 2.6 m wall x 140..143 (face z 9.7) and the ladder at x 144.4 beside it: shimmying left (+X, facing +Z) to the
+    // edge's end, `TryJumpUpOrTurnCorner` 0xDE05E0 tries the ladder before a ledge (0xDD55F0): ledge-jump type 3, then
+    // the Ladder context (RE/18 §7.1)
+    let mut s = hang_at(Vec3::new(142.2, 2.6, 9.7), Vec3::NEG_Z);
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(6.0, |s| s.loco().current == ActorContextId::Ladder), "never reached the ladder: {:?} ledge {}", s.loco().current, s.data().ledge.last_action);
+    assert_eq!(s.data().ledge.last_action, "side jump to ladder");
+    let f = s.body().feet;
+    assert!((f.x - 144.4).abs() < 0.1 && (f.z - 9.2).abs() < 0.1, "on the ladder: {f:?}");
+}
+
+#[test]
+fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
+    use crate::player::ledge_moves::LEDGE_JUMP_TABLE;
+    // the 2.6 m wall x 150..153 (face z 9.7) and the climb wall x 154.6..158.6 beside it: shimmying left (+X, facing +Z)
+    // to the edge's end, the side jump (0xDDD490) finds the 2.4 m band with the 1.2 m band below it for the feet →
+    // type 0: the start and loop in the Ledge context, the end item in the Climb context (RE/18 §7.2)
+    let mut s = hang_at(Vec3::new(152.2, 2.6, 9.7), Vec3::NEG_Z);
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(6.0, |s| s.loco().current == ActorContextId::Climb), "never reached the climb: {:?} ledge {}", s.loco().current, s.data().ledge.last_action);
+    assert_eq!(s.data().ledge.last_action, "side jump to climb");
+    s.pad(Vec3::X, 0.0, false, false);
+    s.run(2.0);
+    let c = &s.data().climb;
+    assert_eq!(s.loco().current, ActorContextId::Climb);
+    assert!(c.hand_l.x > 154.6 && (c.hand_l.y - 2.4).abs() < 0.05 && (c.foot_l.y - 1.2).abs() < 0.05, "on the climb wall: {:?} {:?}", c.hand_l, c.foot_l);
+    let ends: Vec<u32> = (0..2).flat_map(|f| [LEDGE_JUMP_TABLE[f][2].1[2], LEDGE_JUMP_TABLE[f][3].1[2], LEDGE_JUMP_TABLE[f][6].1[2], LEDGE_JUMP_TABLE[f][7].1[2]]).collect();
+    assert!(ends.iter().any(|&e| e != 0), "type-0 side entries exist");
+}
