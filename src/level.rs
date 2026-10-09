@@ -71,6 +71,29 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     // platform C (x 98..102) and a beam from it into wall Y (x 109..112, 8 m): the wall run from a beam (RE/05 §2.10)
     (100.0, 70.0, 4.0, 4.0, 4.0),
     (110.5, 70.0, 3.0, 4.0, 8.0),
+    // --- hang → ladder side jump (0xDD55F0, RE/18 §7.1): a 2.6 m wall (x 140..143) whose ledge ends 1 m before a
+    //     ladder wall (x 144..147, ladder at x 144.4 on its -Z face z 9.7)
+    (141.5, 10.0, 3.0, 0.6, 2.6),
+    (145.5, 10.0, 3.0, 0.6, 6.0),
+    // --- ledge → climb side jump (0xDDD490 type 0, RE/18 §7.2): a 2.6 m wall (x -140..-137) whose ledge ends 1.6 m
+    //     before a climb wall (x -135.4..-131.4, face z -135.3, bands to 5.4 m: CLIMB_WALLS), beyond the side move's reach
+    (-138.5, -135.0, 3.0, 0.6, 2.6),
+    (-133.4, -135.0, 4.0, 0.6, 6.0),
+    // --- the climb's ledge grab (0xDF0980, RE/18 §7.3): a 7 m wall (x -130..-126, face z -135.3) whose bands start at
+    //     3.0 m (CLIMB_WALLS): climbing down to the lowest band hangs from the one above it
+    (-128.0, -135.0, 4.0, 0.6, 7.0),
+    // --- the climb's side ledge grab (0xDF22C0, RE/18 §7.4): wall Y (x -120..-116, face z -135.5, bands to 6.6 m) and on its
+    //     left (+X) block Z, square to the face and 2 m deep toward the climber, top 3.6 m: its top edge is at the
+    //     hands' height with nothing for the feet
+    (-118.0, -135.0, 4.0, 1.0, 7.0),
+    (-115.0, -136.5, 2.0, 2.0, 3.6),
+    // --- water tank (x 130..136, z 0..6, walls 2 m): deep water inside (WATER), the drowning (RE/18 §5)
+    (133.0, 0.15, 6.0, 0.3, 2.0),
+    (133.0, 5.85, 6.0, 0.3, 2.0),
+    (130.15, 3.0, 0.3, 5.4, 2.0),
+    (135.85, 3.0, 0.3, 5.4, 2.0),
+    // --- kiosk (HumanKiosk, RE/18 §4): a 4.5 m roof (x 118..122, z 18..22) with a kiosk frame 3 m out (KIOSKS)
+    (120.0, 20.0, 4.0, 4.0, 4.5),
     // --- pilotis (RE/05 §2.8): 0.5 m posts 2.5 m apart between two 3 m platforms, along +X at z 80 ---
     (70.0, 80.0, 4.0, 4.0, 3.0),
     (74.5, 80.0, 0.5, 0.5, 3.0),
@@ -121,6 +144,7 @@ pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
     (Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.0, 63.5), Vec3::NEG_Z),
     (Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), Vec3::NEG_Z),
     (Vec3::new(-129.4, 0.0, -10.5), Vec3::new(-129.4, 7.0, -10.5), Vec3::NEG_Z),
+    (Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.0, 9.7), Vec3::NEG_Z),
 ];
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
@@ -140,9 +164,16 @@ pub const BEAMS: &[(Vec3, Vec3)] = &[
 /// one sits 4.5 m off the high block's +X face (roof 9.5 m): the Leap of Faith test.
 pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[(37.5, 26.0, 2.2, 2.2, 1.5)];
 
+/// Deep water (min, max; the top is the surface): the port's drown trigger (RE/18 §5), not solid.
+pub const WATER: &[(Vec3, Vec3)] = &[(Vec3::new(130.3, 0.0, 0.3), Vec3::new(135.7, 1.8, 5.7))];
+
+/// Kiosk frames (p0, p1 of the top bar, the side facing the roofs): guidance subtype Kiosk (8), not solid.
+pub const KIOSKS: &[(Vec3, Vec3, Vec3)] = &[(Vec3::new(118.5, 3.0, 25.0), Vec3::new(121.5, 3.0, 25.0), Vec3::NEG_Z)];
+
 /// Floating slabs (centre x, top y, centre z, size x, size z, thickness): free-hang ledges.
 const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
-    (2.0, 3.0, 36.0, 6.0, 1.2, 0.3),
+    // the free-hang balcony: 2.9 m, inside the tap jump's 3.0 m reach zone (JumpZones slot 3, RE/18 §1.2)
+    (2.0, 2.9, 36.0, 6.0, 1.2, 0.3),
     (64.5, 2.6, 50.0, 3.0, 0.6, 0.3), // overhang continuing wall F's ledge (hang-type switch test)
     (60.0, 3.4, 90.0, 3.0, 0.2, 0.2), // swing bars 3.5 m apart
     (60.0, 3.4, 93.5, 3.0, 0.2, 0.2),
@@ -187,6 +218,12 @@ const CLIMB_WALLS: &[((f32, f32), f32, (i32, i32))] = &[
     ((-117.95, -114.05), -10.5, (6, 11)),
     // wall X, its holds ending 0.65 m short of the ladder at x -129.4
     ((-133.95, -130.05), -10.5, (1, 11)),
+    // the climb wall beside the 2.6 m ledge (the ledge side jump onto climb holds)
+    ((-135.35, -131.45), -135.3, (1, 9)),
+    // the climb's ledge grab: bands from 3.0 m only
+    ((-129.95, -126.05), -135.3, (5, 11)),
+    // wall Y, the side ledge grab onto block Z
+    ((-119.95, -116.05), -135.5, (1, 11)),
 ];
 
 /// Climb walls facing ±X (face x, z range, outward normal x, band index range): the corner climbs.
@@ -266,6 +303,12 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
         for n in [side, -side] {
             guidance.edges.push(GuidanceEdge { p0: p0 + n * 0.1, p1: p1 + n * 0.1, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::LedgeGrab });
         }
+    }
+    for &(min, max) in WATER {
+        guidance.water.push(Aabb3 { min, max });
+    }
+    for &(p0, p1, n) in KIOSKS {
+        guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::Kiosk });
     }
     for &(x, z, sx, sz, h) in HAYSTACKS {
         guidance.haystacks.push(Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) });
@@ -368,6 +411,18 @@ pub(crate) fn build_level(
     let hay_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.85, 0.72, 0.30), perceptual_roughness: 1.0, ..default() });
     for &(x, z, sx, sz, h) in HAYSTACKS {
         commands.spawn((crate::map_menu::MapEntity,Mesh3d(meshes.add(Cuboid::new(sx, h, sz))), MeshMaterial3d(hay_mat.clone()), Transform::from_xyz(x, h * 0.5, z)));
+    }
+    let water_mat = materials.add(StandardMaterial { base_color: Color::srgba(0.15, 0.35, 0.55, 0.6), alpha_mode: AlphaMode::Blend, perceptual_roughness: 0.2, ..default() });
+    for &(min, max) in WATER {
+        let size = max - min;
+        commands.spawn((crate::map_menu::MapEntity, Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))), MeshMaterial3d(water_mat.clone()), Transform::from_translation((min + max) * 0.5)));
+    }
+    // kiosk frames: the top bar only (PORT: the greybox draws no awning or posts; not solid)
+    let kiosk_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.55, 0.35, 0.2), perceptual_roughness: 0.9, ..default() });
+    for &(p0, p1, _) in KIOSKS {
+        let len = p0.distance(p1);
+        let rot = Quat::from_rotation_arc(Vec3::X, (p1 - p0).normalize_or(Vec3::X));
+        commands.spawn((crate::map_menu::MapEntity, Mesh3d(meshes.add(Cuboid::new(len, 0.08, 0.08))), MeshMaterial3d(kiosk_mat.clone()), Transform::from_translation((p0 + p1) * 0.5).with_rotation(rot)));
     }
     let beam_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.45, 0.32, 0.2), perceptual_roughness: 0.9, ..default() });
     for &(p0, p1) in BEAMS {

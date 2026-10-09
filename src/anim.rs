@@ -624,8 +624,10 @@ fn choose_clip(
     pad: Res<crate::input::PadInput>,
     collision: Res<crate::collision::CollisionWorld>,
     mut q: Query<(&Locomotion, &HumanDataBundle, &crate::player::Body, &mut AnimPlayer)>,
+    fly: Option<Res<crate::debug_fly::DebugFly>>,
 ) {
     use crate::player::air::AirMode;
+    let flying = fly.is_some_and(|f| f.active);
     use crate::player::ledge::{LedgeHangType, LedgeSubState};
     let dt = time.delta_secs();
     for (loco, data, body, mut p) in &mut q {
@@ -642,6 +644,8 @@ fn choose_clip(
             p.hold = None;
         }
         let req = match loco.current {
+            // the debug flight is the game's Debug context (3, 0xE46190): action request 7, Ghost mode
+            _ if flying => action(&lib, &[crate::debug_fly::GHOST_MODE], true, 1_900_000, Some(0.2), None),
             ActorContextId::Ground if g.crouch.is_some() => {
                 let c=g.crouch.unwrap();p.sim_phase=Some(c.phase());
                 sim_request(&mut p,&lib,&c.action,1_800_000+c.sequence as u64,c.fade)
@@ -850,6 +854,19 @@ fn choose_clip(
                 let (b, ph) = data.walling.current().unwrap();
                 p.sim_phase = Some(ph);
                 sim_request(&mut p, &lib, &b, 8_000_000 + data.walling.seq as u64 * 2 + (b.id == crate::player::walling::VERTICAL_END && b.item == 1) as u64, 0.08)
+            }
+            // drowning (HumanDead 0xE3F9C0): the fall into the water, then the drowning loop
+            ActorContextId::Dead if data.dead.action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
+                let b = data.dead.action.unwrap();
+                let ph = data.dead.t / b.duration().max(1e-4);
+                p.sim_phase = Some(if b.item > 0 { ph.fract() } else { ph.min(1.0) });
+                sim_request(&mut p, &lib, &b, 5_800_000 + data.dead.seq as u64, 0.2)
+            }
+            // kiosk (0xE3E790 / 0xE3DD40): the table's action for the stage, at the sim's time
+            ActorContextId::Kiosk if data.kiosk.action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
+                let b = data.kiosk.action.unwrap();
+                p.sim_phase = Some((data.kiosk.t / b.duration().max(1e-4)).min(1.0));
+                sim_request(&mut p, &lib, &b, 5_500_000 + data.kiosk.seq as u64, 0.13)
             }
             // haystack (0xE43140): entry action, then the wait, at the sim's time
             ActorContextId::HayStack if data.hay.action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {

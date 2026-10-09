@@ -14,7 +14,7 @@ use super::climb::{ClimbEntry, ClimbEntryType};
 
 use super::jump_blend::{self, ActionBlend};
 use super::move_blend::MoveBlend;
-use super::targets::{edge_ahead, find_jump_target, JumpTarget};
+use super::targets::JumpTarget;
 use super::{
     heading_of, switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, SpawnPoint, TransitionSetup,
 };
@@ -508,8 +508,14 @@ pub fn update_ground(
     guidance: Res<GuidanceWorld>,
     spawn: Res<SpawnPoint>,
     mut rig: ResMut<CameraRig>,
+    abilities: Option<Res<super::abilities::AbilitySet>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>), With<Player>>,
 ) {
+    use super::abilities::Ability;
+    let ab = super::abilities::of(abilities.as_deref());
+    // PassOver (checked by the ground interpreter at 0xEE72DA before it sets +0x1128; that this flag is the pass-over
+    // request is a hypothesis): without it a pass-over target (type 2) is not taken
+    let pass_ok = |t: &super::targets::JumpTarget| t.pass.is_none() || ab.allows(Ability::PassOver);
     let dt = time.delta_secs().min(1.0 / 20.0);
     for (mut loco, mut body, mut data, anim) in &mut q {
         let g = &mut data.ground;
@@ -903,7 +909,7 @@ pub fn update_ground(
         } else if let Some(mut ld) = g.look_down {
             ld.t += dt;
             g.look_down = Some(ld);
-        } else if let Some((p, n)) = look_down_edge(body.feet, body.forward(), &guidance, &collision) {
+        } else if let Some((p, n)) = ab.allows(Ability::LookDown).then(|| look_down_edge(body.feet, body.forward(), &guidance, &collision)).flatten() {
             let w = look_down_weights(body.feet, body.forward(), p, n);
             if let Some(a) = jump_blend::action_items(LOOK_DOWN[(g.blend.foot != 0) as usize]).map(|_| ActionBlend::new(LOOK_DOWN[(g.blend.foot != 0) as usize], 0, &w)) {
                 g.pose_seq = g.pose_seq.wrapping_add(1);
@@ -919,13 +925,26 @@ pub fn update_ground(
         // and within 60 degrees of the facing (`flt_1694AC8`), then the same guard (RE/02 4.7).
         let pressed = pad.jump_buffered() && pad.dir.dot(body.forward()) >= 45f32.to_radians().cos();
         let held = pad.legs_held && pad.magnitude > crate::tuning::STICK_DEADZONE && pad.dir.dot(body.forward()) >= 60f32.to_radians().cos();
-        if g.high_profile && moving && (pressed || held) {
+        if g.high_profile && moving && (pressed || held) && ab.allows(Ability::Walling) {
             if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
                 if pressed {
                     pad.consume_jump();
                 }
                 let from = body.feet;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
+                continue;
+            }
+        }
+
+        // ---------------------------------------------------------------- free-run target jump (0xEE7F7A)
+        // No press: high profile, the stick past the dead zone, the Jump ability, IHumanGround vt16 (CanHandleEvent
+        // 45) → IHuman vt56 with kind 4 (Legs held) / 3, ladders left out, then the scorer (mode 1) → vt24. Its box
+        // only reaches 0.45–1.3 m up and 0.5–2.0 m (1.3 m) ahead: the game's hop onto low obstacles (RE/18 §1.5).
+        if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
+            if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision).filter(pass_ok) {
+                jump_log("free-run target jump", body.feet, Some(&target));
+                let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 continue;
             }
         }
@@ -957,7 +976,7 @@ pub fn update_ground(
         // facing it; from the top, low profile + Legs at its top facing out over it.
         {
             let top_req = !g.high_profile && pad.jump_buffered();
-            if (moving || top_req) && !busy {
+            if (moving || top_req) && !busy && ab.allows(Ability::Ladder) {
                 if let Some((base, top, n, from_top)) = super::ladder::find_ladder(body.feet, body.forward(), 0.8, &guidance) {
                     if from_top == top_req {
                         if from_top {
@@ -975,7 +994,7 @@ pub fn update_ground(
         // Climbing from the ground is the empty-hand press (0xEE7255: the Climb ability, `Pad__JustPressed(3)` ->
         // IHumanGround vt840 = CanHandleEvent(50) -> vt844, event 50 -> the Climb context, fill 0xD83950; RE/02 4.7).
         let forward = body.forward();
-        if pad.hand_just_pressed() {
+        if pad.hand_just_pressed() && ab.allows(Ability::Climb) {
             // leading foot (Human__GetLeadingFoot 0xB18850): the playing locomotion item, footl = left ahead
             if let Some(entry) = climb_start_entry(body.feet, forward, g.blend.foot != 0, &guidance) {
                 pad.consume_hand();
@@ -983,19 +1002,6 @@ pub fn update_ground(
                 continue;
             }
         }
-        // The straight jump at a ledge while moving (event 68, IHumanGround vt736 guard 0xD84190 / vt740, sent from
-        // 0xEE88E9 under a probe flag and interpreter +0x112F, not fully decoded; the free-run target jump 0xEE7F7A is
-        // not ported either). PORT: high profile + Legs held, moving at the ledge; after the wall run above, so it only
-        // plays at walls the wall run refuses (below its 1.3 m ray). Standing still, the stationary free run's release
-        // jump (0xEE84CC, `ground_extras`) is the game's own path to a hand target.
-        if g.high_profile && pad.legs_held && moving {
-            if let Some(target) = straight_hand_target(body.feet, forward, &guidance, &collision, false) {
-                pad.consume_jump();
-                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from: body.feet, target, speed_param: 0.0, foot_left: true }));
-                continue;
-            }
-        }
-
         // ---------------------------------------------------------------- ledge stop (event 69 / sub-state 38)
         if let Some(ls) = g.ledge_stop {
             // pull-down EdgeStop (LedgeStop_HandleEvent 0xDA4D90, event 70): only while the start action plays
@@ -1054,21 +1060,83 @@ pub fn update_ground(
         // `GoAssassinActionInterpreter__ReadInput` 0xEEDF80, cleared 0.3 s after it) **with Legs no longer held**, and
         // the stick past the dead zone: a tap jumps when it is let go, holding Legs free-runs instead. While Legs is held
         // the free run jumps at an edge (`v142`, 0xEE7DCE: an edge report within 0.25 m with a drop over 0.5 m, within
-        // 80° of the stick, Legs held or HG+588). PORT: the edge test is `edge_ahead` (no floor 0.6 m ahead).
+        // 80° of the stick, Legs held or HG+588). The edge test is the vt136 report below.
         let forward = body.forward();
+        // the foot-level edge reports (IHuman vt132 0xB1BC50: 0.75 m, drops of 0.45 m or more) and the one along the
+        // facing (vt136, any angle): the free run's edge jump `v142`, the edge jump and event 68 below read it
+        let reports = super::jump_candidates::edge_reports(body.feet, 0.75, 0.45, &guidance, &collision);
+        let facing_report = super::jump_candidates::pick_report(&reports, body.feet, forward, 0.75, std::f32::consts::PI);
+        // v142 (0xEE7DCE): a report with a drop over 0.5 m within 0.25 m, its normal within 80 degrees of the stick,
+        // Legs held
+        let edge_jump = facing_report.is_some_and(|r| r.drop > 0.5 && r.dist < 0.25 && r.normal.dot(pad.dir) > 0.173_648_18) && pad.legs_held;
         let want_jump = g.high_profile
             && moving
-            && ((pad.jump_buffered() && !pad.legs_held) || (pad.legs_held && edge_ahead(body.feet, forward, &collision)));
-        if want_jump && !busy {
+            && ((pad.jump_buffered() && !pad.legs_held) || edge_jump);
+        if want_jump && !busy && ab.allows(Ability::Jump) {
             pad.consume_jump();
-            let entry = match find_jump_target(body.feet, if moving { pad.dir } else { forward }, &guidance, &collision) {
+            // the candidates, then the Leap of Faith search under its ability (0xEE8239: `sub_D32760`, IHuman vt76)
+            let want = if moving { pad.dir } else { forward };
+            let found = super::targets::find_target(body.feet, want, want, &super::jump_candidates::Query::TAP, false, &guidance, &collision).filter(pass_ok)
+                .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, &guidance)).flatten());
+            jump_log("tap jump", body.feet, found.as_ref());
+            let entry = match found {
                 // leading foot: the playing locomotion item (footl item = left ahead) (hypothesis)
                 Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: g.blend.foot == 0 },
                 // vt28: free jump without a target
-                None => InAirEntry::FreeJump { from: body.feet, dir: forward, speed_param: g.speed_param, foot_left: g.blend.foot == 0 },
+                None => InAirEntry::FreeJump { from: body.feet, dir: forward, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot == 0 },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;
+        }
+
+        // ---------------------------------------------------------------- at an edge: the edge jump, event 68
+        if !busy {
+            if let Some(r) = facing_report {
+                // The edge jump (0xEE8679): at or past the edge (+52 < 0.01), the stick past the dead zone and both
+                // the stick and the facing within 45 degrees of the edge normal → IHuman vt56 kind 2 (high) / 1 along
+                // the facing, with beams; scorer mode 1 with the far-behind flag (a7 = 1). It sets +4399, which skips
+                // event 68 this frame.
+                let flat_fwd = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+                if r.dist < 0.01 && moving && ab.allows(Ability::Jump) && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
+                    if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision).filter(pass_ok) {
+                        jump_log("edge jump", body.feet, Some(&target));
+                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+                        continue;
+                    }
+                }
+                // Event 68 `HumanGround__Guard_Event68_JumpToEdge` 0xD84190: a drop of 0.53 m or more, the feet 1 cm
+                // past the edge, room for the body beyond it (0xB2E7A0) → `ToInAir_JumpToEdge` 0xDA7A10 / 0xD9D1F0:
+                // the step off the edge. PORT: HG+609 bit 0 (set by some state enters) is taken to be clear outside
+                // one-shot actions.
+                if r.drop >= 0.53 && r.dist < -0.01 && super::jump_candidates::room_past_edge(&r, &collision) {
+                    if let Some(entry) = step_off_entry(body.feet, flat_fwd, &r, g.high_profile, g.speed_param, g.blend.foot == 0) {
+                        jump_log("step off (event 68)", body.feet, None);
+                        switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- deep water (event 113, drown)
+        // Ground event 113 (0xDB9890, every sub-state) → Dead with the water entity: drowning. PORT trigger: the
+        // feet inside a deep-water volume (the game's sender is the damage system, not traced).
+        if let Some(y) = super::dead::in_deep_water(body.feet, &guidance.water) {
+            let entry = super::dead::DeadEntry { drown: true, water_y: Some(y), from: body.feet, axis: body.forward() };
+            switch_context(&mut loco, &mut data, TransitionSetup::ToDead(entry));
+            continue;
+        }
+
+        // ---------------------------------------------------------------- into a haystack (event 122)
+        // The interpreter's last request (0xEE8E08, either profile): the stick past the dead zone and IHumanGround
+        // vt1592 (event 122's guard 0xD8F0B0: touching a haystack, facing it within 100 degrees, the stick within 45
+        // degrees into it) → vt1596 → HumanHayStack, entry Ground (0xD84F80).
+        if moving && !busy {
+            if let Some(e) = super::hay::ground_entry(body.feet, body.forward(), pad.dir, &guidance.haystacks) {
+                switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
+                continue;
+            }
         }
 
         // ---------------------------------------------------------------- move (blended clip root motion)
@@ -1427,6 +1495,37 @@ fn edge_report_drop(feet: Vec3, forward: Vec3, reach: f32, min_cos: f32, min_dro
     let drop = hit.point.y - below;
     (drop > min_drop).then_some((hit.point, n, drop))
 }
+
+/// The step off an edge (event 68's action 0xD9D1F0, the parameter = 1.0 in high profile): facing more than 120 degrees
+/// from the edge normal plays `xx_fall_ground_back_tr_fall` 0x935CE89E (InAirData+520 = 0.4 s); otherwise a free jump
+/// at pos + (1 + 2·a·HG+1512)·dir − 3 m (HG+0x5E8 = the speed parameter), the direction the facing turned to within
+/// 60 degrees of the normal (`sub_B27180` kind 0).
+fn step_off_entry(feet: Vec3, facing: Vec3, r: &super::jump_candidates::EdgeReport, high: bool, speed_param: f32, foot_left: bool) -> Option<InAirEntry> {
+    let angle = signed_angle_y(r.normal, facing);
+    if angle.abs() >= 120f32.to_radians() {
+        let action = jump_blend::action_items(STEP_OFF_BACK).map(|_| ActionBlend::new(STEP_OFF_BACK, 0, &[1.0]))?;
+        return Some(InAirEntry::OnPlace { from: feet, fwd: facing, action, fall: None });
+    }
+    let dir = if angle.abs() <= 60f32.to_radians() { facing } else { Quat::from_rotation_y(60f32.to_radians() * angle.signum()) * r.normal };
+    let a = if high { 1.0 } else { 0.0 };
+    Some(InAirEntry::FreeJump { from: feet, dir, ahead: 1.0 + 2.0 * a * speed_param, speed_param, foot_left })
+}
+
+/// `AC_JUMP_LOG=1`: which of the ground's jump paths fired, from where, at what target.
+fn jump_log(what: &str, feet: Vec3, target: Option<&JumpTarget>) {
+    if std::env::var_os("AC_JUMP_LOG").is_some() {
+        eprintln!("jump: {what} from {feet:.2} -> {:?}", target.map(|t| (t.type_flags, t.position)));
+    }
+}
+
+/// The signed angle about +Y from `from` to `to` (both flat).
+fn signed_angle_y(from: Vec3, to: Vec3) -> f32 {
+    let c = from.cross(to).y;
+    c.atan2(from.dot(to))
+}
+
+/// `xx_fall_ground_back_tr_fall` (0xD9D1F0, backing off an edge).
+const STEP_OFF_BACK: u32 = 0x935C_E89E;
 
 /// An edge to look down at while standing: a LedgeGrab edge within 0.6 m of the feet, not behind the character
 /// (|angle| ≤ 90°), with more than 2 m of drop beyond it (the ledge stop's report rules).

@@ -724,6 +724,41 @@ fn side_column_holds(g: &GuidanceWorld, d: &HumanClimbData, facing: Vec3, dir: u
     Some((probe(k)?, probe(k + 2)?))
 }
 
+/// `HumanClimb__TrySideLedgeGrab` 0xDF22C0 (dirs 4–9, ChooseMove: near after the corner moves onto the ground, far after
+/// the outside corner; flags 4610 / 4611 + 2920): the side columns' hand row alone (record 4 up, 3 level, 2 down: the
+/// corner climb's hand row) becomes a hang on that wall. Both hands on the hold, +2940 = the dir. Two foot probes 1 m
+/// below it, 0.2 m to either side and 0.5 m out (`sub_11718B0`, box 0.25 / 0.625 / 0.15) → both found: a wall hang
+/// (`sub_B157B0`, `Human__WallHangBodyBoxFree`, lateral path 1.8 × 1.1 m), else a free hang (`sub_B15AD0`,
+/// `Human__FreeHangBodyBoxesFree`, 1.8 × 2.4 m). The Ledge fill (`HumanClimb__FillLedge_FromClimb` 0xDEEAC0, SubState 9)
+/// plays `CLIMB_TO_HANG[wall / free][+2940]` while the root goes to the hang.
+/// PORT: the foot probes are the collision foot rays (`hang_type_at`); the lateral path is `lateral_path_free`.
+fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize, near: bool) -> Option<LedgeEntry> {
+    let (side, row) = corner_side(dir)?;
+    let base = feet_base(d);
+    let toward = right_of(facing) * side as f32;
+    let (v, centre0, depth) = if near { (toward, base + toward * 0.5 - facing * 0.6, 0.5) } else { (-toward, base + toward * 0.1 + facing * 0.3, 0.6) };
+    let centre = centre0 + Vec3::Y * (-0.6 + CLIMB_ROW * (3 + row) as f32);
+    let h = g.probe_box(centre, right_of(v), v, Vec3::Y, Vec3::new(0.25, depth, CLIMB_PROBE_VTOL), centre - v * CLIMB_PROBE_BACK, 0.872_664_6, CLIMB_PROBE_STEP, crate::guidance::MASK_CLIMB_HOLDS)?;
+    let n = h.wall_normal;
+    let hf = -Vec3::new(n.x, 0.0, n.z).normalize_or(v);
+    let e = LedgeEntry::at(g.fit_hands(h.point, n), n, root, LedgeSubState::TransitionInFromClimb);
+    let hang = super::ledge::hang_type_at((e.hand_l + e.hand_r) * 0.5, n, collision);
+    let wall = hang == super::ledge::LedgeHangType::Wall;
+    let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, n, hang, collision);
+    if !hang_boxes_free(collision, to, hf, wall) || !lateral_path_free(collision, root, facing, to, hf) {
+        return None;
+    }
+    let mv = super::ledge_moves::climb_to_hang_move(root, e.hand_l, e.hand_r, n, CLIMB_TO_HANG[!wall as usize][dir], hang, collision);
+    Some(LedgeEntry { entry_move: Some(mv), ..e })
+}
+
+/// The Ledge fill's actions by +2940 (`dword_1A2CC90` wall hang / `dword_1A2CCB8` free hang, written by 0xDE4F80):
+/// dirs 0 / 1 `xx_l_climb_1m_u_hang…`, 2 / 3 `_d_`, 4 `_l_`, 5 `_r_`, 6 `_ul_`, 7 `_ur_`, 8 `_dl_`, 9 `_dr_` (FROMAI).
+pub const CLIMB_TO_HANG: [[u32; 10]; 2] = [
+    [0x01C9_230A, 0x01C9_230A, 0x01C9_230B, 0x01C9_230B, 0x01B7_094B, 0x01B7_094E, 0x01B7_094A, 0x01B7_094D, 0x01B7_094C, 0x01B7_094F],
+    [0x01C9_2308, 0x01C9_2308, 0x01C9_2309, 0x01C9_2309, 0x01A2_7180, 0x01A2_7183, 0x01A2_717F, 0x01A2_7182, 0x01A2_7181, 0x01A2_7184],
+];
+
 /// `Human__ClimbBodyBoxesFree` 0xB2DF90 at a climb pose (S = F × U): a box at root + 0.5·U (half extents 0.375 / 0.25 /
 /// 0.5 along S / F / U) and one at root + 1.4·U (0.15 / 0.15 / 0.4) hold nothing. A sideways LONG move (`side` ±1)
 /// widens the first box to 0.575 and moves it 0.05·side against S.
@@ -969,6 +1004,57 @@ fn overhang_hang(d: &HumanClimbData, sides: [Option<(Hold, Hold)>; 2], dir: usiz
     }
     let n = (normals[0] + normals[1]).normalize_or(d.normal);
     Some((hl, hr, n, OVERHANG_TO_HANG[left_lower as usize]))
+}
+
+/// `HumanClimb__TryLedgeGrab` 0xDF0980 (ChooseMove, after the grid moves, the corner moves and the reaches): a hold in
+/// the grid where the failed move would have put a hand becomes a hang (flag 2921 → the Ledge context, fill
+/// `sub_DEEAC0`, SubState 9). The cells are the grid's "present" bytes (+196 + 8·row + column; +220 / +228 / +236 =
+/// rows 3 / 4 / 5, the column from the pose's left foot `dword_1A2CD80`):
+/// - up (dirs 0 / 1): row 5 (one row above the hands), that column or, when the pose's sides are a column apart, the
+///   next; not from an uneven pose (`dword_1A2CD7C`);
+/// - down (dirs 2 / 3): row 3 (between the feet and the hands), the same columns;
+/// - left / right (4 / 5): the next column to that side, rows 5, 4, 3 in that order; diagonals never.
+/// Both hands go onto that hold. Feet supports on the wall below (`sub_B16130`) → a wall hang (`sub_B157B0`, body box
+/// `sub_B2DC80`, lateral path 1.8 × 1.1 m `Human__LateralPathFree` 0xB2A410), LedgeData +104 = 0; otherwise a free
+/// hang (`sub_B15AD0`, boxes `sub_B2DD50`, lateral path 1.8 × 2.4 m), +104 = 1. The action plays while the root is
+/// interpolated to the hang (sub_711130). Returns the hold, the hang type and the action.
+pub fn ledge_grab(grid: &HoldGrid, pose: usize, dir: usize) -> Option<(Hold, [u32; 2])> {
+    let (pl, pr) = POSES[pose];
+    let col = pl.0;
+    let both = |row: i32| grid.hold(col, row).or_else(|| if pl.0 != pr.0 { grid.hold(col + 1, row) } else { None });
+    match dir {
+        0 | 1 if pl.1 == pr.1 => both(5).map(|h| (h, LEDGE_GRAB_UP)),
+        2 | 3 if pl.1 == pr.1 => both(3).map(|h| (h, LEDGE_GRAB_DOWN)),
+        4 | 5 => {
+            let right = dir == 5;
+            let c = col + if right { 1 } else { -1 };
+            [5, 4, 3].iter().enumerate().find_map(|(k, &row)| grid.hold(c, row).map(|h| (h, LEDGE_GRAB_SIDE[right as usize][k])))
+        }
+        _ => None,
+    }
+}
+
+/// TryLedgeGrab's actions, [wall hang, free hang] (FROMAI): up 29958922 / 29958920, down 29958923 / 29958921.
+pub const LEDGE_GRAB_UP: [u32; 2] = [0x01C9_230A, 0x01C9_2308];
+pub const LEDGE_GRAB_DOWN: [u32; 2] = [0x01C9_230B, 0x01C9_2309];
+/// [left, right] × the row found (5, 4, 3) × [wall, free]: left 28772682..84 / 27423103..05, right 28772685..87 /
+/// 27423106..08.
+pub const LEDGE_GRAB_SIDE: [[[u32; 2]; 3]; 2] = [
+    [[0x01B7_094A, 0x01A2_717F], [0x01B7_094B, 0x01A2_7180], [0x01B7_094C, 0x01A2_7181]],
+    [[0x01B7_094D, 0x01A2_7182], [0x01B7_094E, 0x01A2_7183], [0x01B7_094F, 0x01A2_7184]],
+];
+
+/// The hang's body boxes (axes: right, facing into the wall, up): wall `sub_B2DC80` one box from the root to 1.3 m up,
+/// half 0.375 / 0.25 / 0.65; free `sub_B2DD50` 2.4 m tall 0.5 m out from the root (half 0.375 / 0.25 / 1.2), then
+/// half 0.375 / 0.22 / 0.6 at 0.8 m up, 0.25 m out.
+pub fn hang_boxes_free(collision: &crate::collision::CollisionWorld, root: Vec3, facing: Vec3, wall: bool) -> bool {
+    let axes = [right_of(facing), facing, Vec3::Y];
+    if wall {
+        collision.obb_free(root + Vec3::Y * 0.65, axes, Vec3::new(0.375, 0.25, 0.65))
+    } else {
+        collision.obb_free(root - facing * 0.5 + Vec3::Y * 1.2, axes, Vec3::new(0.375, 0.25, 1.2))
+            && collision.obb_free(root - facing * 0.25 + Vec3::Y * 0.8, axes, Vec3::new(0.375, 0.22, 0.6))
+    }
 }
 
 /// IsGridMoveValid 0xDECD70: every moving side needs a foot hold and a hand hold two rows up, and the body must fit at
@@ -1238,6 +1324,17 @@ pub fn update_climb(
                 }
             }
             let hold = from_grid.or_else(|| corner_from_candidates(&guidance, d, facing, dir).filter(|h| corner_clearance(&collision, body.feet, facing, h, side)));
+            // TrySideLedgeGrab 0xDF22C0 near (flag 4610), after the inside corner. PORT: ChooseMove tries it before the
+            // side candidates; the port takes the ground move first (the candidates sit level with the feet, the grab at
+            // the hands)
+            if hold.is_none() {
+                if let Some(e) = side_ledge_grab(&guidance, &collision, d, body.feet, facing, dir, true) {
+                    d.look = None;
+                    d.last_action = "side ledge grab";
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
+                    continue;
+                }
+            }
             if let Some(h) = hold {
                 let fc = -Vec3::new(h.normal.x, 0.0, h.normal.z).normalize_or(-n);
                 // StartMove 0xDFA0C0 (+4612): the `_90` variant when the new facing turns 45° or more
@@ -1308,9 +1405,41 @@ pub fn update_climb(
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                 continue;
             }
-            // round an outside corner (TrySideJump 0xDF29E0 far, flag 4609)
+        }
+        // TryLedgeGrab 0xDF0980: the hold the failed move reached for becomes a hang. (ChooseMove tries it between its two
+        // TryReachOtherSurface passes, before the outside corner; the port's reaches are one pass, above.)
+        if let Some((h, actions)) = ledge_grab(&grid, d.pose, dir) {
+            let hn = h.normal;
+            let hf = -Vec3::new(hn.x, 0.0, hn.z).normalize_or(facing);
+            let e0 = LedgeEntry::at(guidance.fit_hands(h.pos, hn), hn, body.feet, LedgeSubState::TransitionInFromClimb);
+            // PORT: the feet supports (sub_B16130) are the collision foot rays (`hang_type_at`)
+            let hang = super::ledge::hang_type_at((e0.hand_l + e0.hand_r) * 0.5, hn, &collision);
+            let wall = hang == super::ledge::LedgeHangType::Wall;
+            let root = super::ledge::hang_root_at(e0.hand_l, e0.hand_r, hn, hang, &collision);
+            // PORT: the game's test that keeps a climber near the ground from hanging is not identified; the port wants
+            // the hang's feet 0.3 m clear of the floor (LIVE: RE/18 §7.3). The lateral path tests are not modelled.
+            let off_floor = collision.floor_height_below(root + Vec3::Y * 0.05, 0.35).is_none();
+            if off_floor && hang_boxes_free(&collision, root, hf, wall) {
+                let action = actions[!wall as usize];
+                let mv = super::ledge_moves::climb_to_hang_move(body.feet, e0.hand_l, e0.hand_r, hn, action, hang, &collision);
+                let e = LedgeEntry { entry_move: Some(mv), ..e0 };
+                d.look = None;
+                d.last_action = "ledge grab";
+                switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
+                continue;
+            }
+        }
+        // round an outside corner (TrySideJump 0xDF29E0 far, flag 4609)
+        if dir >= 4 {
             if let Some(c) = corner_climb(&guidance, &collision, d, body.feet, facing, dir, false) {
                 start_corner_climb(d, body.heading, body.feet, c, "corner climb out");
+                continue;
+            }
+            // TrySideLedgeGrab 0xDF22C0 far (flag 4611): a hang round the outside corner
+            if let Some(e) = side_ledge_grab(&guidance, &collision, d, body.feet, facing, dir, false) {
+                d.look = None;
+                d.last_action = "side ledge grab (far)";
+                switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                 continue;
             }
         }

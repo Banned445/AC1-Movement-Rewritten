@@ -573,7 +573,7 @@ pub fn update_ladder(
                     let dir = l.jump_dir.normalize_or(l.n);
                     leave = Some(TransitionSetup::ToInAir(match super::targets::find_jump_target(from, dir, &guidance, &collision) {
                         Some(target) => InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: l.foot == 0 },
-                        None => InAirEntry::FreeJump { from, dir, speed_param: 0.5, foot_left: l.foot == 0 },
+                        None => InAirEntry::FreeJump { from, dir, ahead: crate::tuning::FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: l.foot == 0 },
                     }));
                     body.heading = super::heading_of(dir);
                 }

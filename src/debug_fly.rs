@@ -1,10 +1,17 @@
 //! Debug fly (noclip): F5 toggles a free flight that ignores collision, for moving around a map quickly.
-//! PORT: a port-only debug tool, not a game state. While it is on the player contexts do not run (`PlayerSet` is
-//! skipped); the body is moved directly and plays the Ground idle.
+//!
+//! It follows the game's own debug flight, the Human **Debug context** (ContextID_Debug = 3, `DebugContext`,
+//! RE/18 §2): entered by `GoDebugInputInterpreter` (pad buttons 14 + 15), it puts the capsule on collision layer
+//! 10 (NOTHING), plays action request 7 = 0x0006F88B "Ghost mode" (`Ghost_mode01` then the looping `Ghost_mode02`)
+//! and sets ActorState 38 (Debug) (enter 0xE46190); each frame the velocity is the input × 5 m/s, × 3 or × 10
+//! with the speed buttons (0xECDC50), with stick-to-ground and the step offset off, the body turned toward the
+//! horizontal motion (0xE46DF0).
+//! PORT: while it is on the player contexts do not run (`PlayerSet` is skipped); the body is moved directly.
+//! Leaving puts the feet on the floor straight below (the game's exit 0xE467B0 plays request 33
+//! `xx_h_jump_falling01` and falls in InAir with the flight's velocity); with no floor below, InAir falls.
 //!
 //! Keyboard: WASD = move along the camera's view (looking down + W descends), Space = up, Left Ctrl = down,
-//! Left Shift = fast, Left Alt = slow. Gamepad: left stick = move, A = up, LT = down, RT = fast.
-//! Leaving (F5 again) puts the feet on the floor straight below and enters Ground; with no floor below, InAir falls.
+//! Left Shift = × 3, Left Alt = × 10. Gamepad: left stick = move, A = up, LT = down, RT = × 3, RB = × 10.
 
 use bevy::input::gamepad::{Gamepad, GamepadButton};
 use bevy::prelude::*;
@@ -15,9 +22,13 @@ use crate::input::PadInput;
 use crate::player::air::{FallOrigin, InAirEntry};
 use crate::player::{switch_context, Body, HumanDataBundle, LimbTargets, Locomotion, Player, PlayerSet, TransitionSetup};
 
-const FLY_SPEED: f32 = 10.0;
-const FLY_FAST: f32 = 4.0;
-const FLY_SLOW: f32 = 0.25;
+/// The Debug context's speed: the input × 5 m/s (`GoDebugInputInterpreter` 0xECDC50).
+const FLY_SPEED: f32 = 5.0;
+/// × 3 and × 10 with pad buttons 12 / 13 (0xECDC50).
+const FLY_FAST: f32 = 3.0;
+const FLY_FASTER: f32 = 10.0;
+/// Action request 7 (HumanGround): `Ghost_mode01` (0.93 s), `Ghost_mode02` (2.27 s, looping).
+pub const GHOST_MODE: u32 = 0x0006_F88B;
 /// How far below the exit point a floor is looked for.
 const EXIT_FLOOR_REACH: f32 = 1000.0;
 
@@ -39,6 +50,17 @@ impl Plugin for DebugFlyPlugin {
                     .before(PlayerSet)
                     .run_if(|menu: Res<crate::map_menu::MapMenu>| !menu.open),
             );
+        // AC_GHOST=1: the flight turns itself on after 1 s (for captures of the Ghost mode animation)
+        if std::env::var_os("AC_GHOST").is_some() {
+            app.add_systems(Update, ghost_autostart.before(toggle_fly));
+        }
+    }
+}
+
+fn ghost_autostart(time: Res<Time>, mut keys: ResMut<ButtonInput<KeyCode>>, mut done: Local<bool>) {
+    if !*done && time.elapsed_secs() >= 1.0 {
+        *done = true;
+        keys.press(KeyCode::F5);
     }
 }
 
@@ -101,15 +123,17 @@ fn fly(
     let key = |k: KeyCode| keys.pressed(k) as i32 as f32;
     let mut stick = Vec2::new(key(KeyCode::KeyD) - key(KeyCode::KeyA), key(KeyCode::KeyW) - key(KeyCode::KeyS));
     let mut lift = key(KeyCode::Space) - key(KeyCode::ControlLeft);
-    let mut scale = if keys.pressed(KeyCode::ShiftLeft) { FLY_FAST } else if keys.pressed(KeyCode::AltLeft) { FLY_SLOW } else { 1.0 };
+    let mut scale = if keys.pressed(KeyCode::AltLeft) { FLY_FASTER } else if keys.pressed(KeyCode::ShiftLeft) { FLY_FAST } else { 1.0 };
     for gp in &gamepads {
         let s = gp.left_stick();
         if s.length() > stick.length() {
             stick = s;
         }
         lift += gp.pressed(GamepadButton::South) as i32 as f32 - gp.pressed(GamepadButton::LeftTrigger2) as i32 as f32;
-        if gp.pressed(GamepadButton::RightTrigger2) {
-            scale = FLY_FAST;
+        if gp.pressed(GamepadButton::RightTrigger) {
+            scale = FLY_FASTER;
+        } else if gp.pressed(GamepadButton::RightTrigger2) {
+            scale = scale.max(FLY_FAST);
         }
     }
     let stick = stick.clamp_length_max(1.0);
@@ -118,8 +142,13 @@ fn fly(
     let flat = Vec3::new(-rig.yaw.sin(), 0.0, -rig.yaw.cos());
     let right = crate::player::right_of(flat);
     let wish = view * stick.y + right * stick.x + Vec3::Y * lift.clamp(-1.0, 1.0);
-    body.feet += wish.clamp_length_max(1.0) * FLY_SPEED * scale * time.delta_secs();
-    body.heading = crate::player::heading_of(flat);
+    let v = wish.clamp_length_max(1.0) * FLY_SPEED * scale;
+    body.feet += v * time.delta_secs();
+    // the body turns toward the horizontal motion (0xE46DF0: when its square exceeds 0.1)
+    let h = Vec3::new(v.x, 0.0, v.z);
+    if h.length_squared() > 0.1 {
+        body.heading = crate::player::heading_of(h.normalize());
+    }
     body.velocity = Vec3::ZERO;
     body.grounded = false;
     // `sync_visuals` is in the skipped PlayerSet
@@ -190,7 +219,7 @@ mod tests {
             step(&mut app, &[KeyCode::KeyW, KeyCode::ControlLeft]);
         }
         let feet = player(&mut app).1.feet;
-        assert!(feet.z > 5.0 && feet.y < y, "{feet}");
+        assert!(feet.z > 3.0 && feet.y < y, "{feet}");
         step(&mut app, &[KeyCode::F5]);
         assert!(!app.world().resource::<DebugFly>().active);
         let (loco, body) = player(&mut app);

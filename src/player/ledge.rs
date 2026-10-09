@@ -728,10 +728,20 @@ pub fn update_ledge(
                         let right_dir = dir == LedgeDir::Right;
                         if let Some(mv) = ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
                             start_move(d, mv, "corner (inner)");
-                        } else if let Some(mv) = ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
-                            let (mv, tail) = ledge_moves::second_hand_grab(mv, &guidance, &collision);
-                            start_move(d, mv, "side jump");
-                            d.queue = tail.into_iter().collect();
+                        } else if let Some((mv, e)) = ledge_moves::try_side_jump_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision) {
+                            // the ladder is tried before the ledge side jump (0xDE05E0)
+                            start_move(d, mv, "side jump to ladder");
+                            d.then_ladder = Some(e);
+                        } else if let Some((mv, climb)) = ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                            if climb.is_some() {
+                                // onto climb holds (type 0): the Climb context takes over at the end
+                                start_move(d, mv, "side jump to climb");
+                                d.then_climb = climb;
+                            } else {
+                                let (mv, tail) = ledge_moves::second_hand_grab(mv, &guidance, &collision);
+                                start_move(d, mv, "side jump");
+                                d.queue = tail.into_iter().collect();
+                            }
                         } else {
                             d.last_action = "shimmy blocked (obstacle / inner corner)";
                         }
@@ -771,13 +781,25 @@ pub fn update_ledge(
                             continue;
                         }
                     }
-                    // end of the edge: inner corner, side jump, outer corner (Movement_ChooseAction 0xDE29E0 order)
+                    // end of the edge: inner corner, side jump (to a ladder first, 0xDE05E0), outer corner
+                    // (Movement_ChooseAction 0xDE29E0 order)
+                    if ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision).is_none() {
+                        if let Some((mv, e)) = ledge_moves::try_side_jump_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision) {
+                            start_move(d, mv, "side jump to ladder");
+                            d.then_ladder = Some(e);
+                            continue;
+                        }
+                    }
                     let mv = ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision)
-                        .map(|m| (m, "corner (inner)"))
-                        .or_else(|| ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision).map(|m| (m, "side jump")))
-                        .or_else(|| ledge_moves::try_corner(false, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision).map(|m| (m, "corner (outer)")));
+                        .map(|m| (m, "corner (inner)", None))
+                        .or_else(|| ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision).map(|(m, c)| (m, if c.is_some() { "side jump to climb" } else { "side jump" }, c)))
+                        .or_else(|| ledge_moves::try_corner(false, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision).map(|m| (m, "corner (outer)", None)));
                     match mv {
-                        Some((mv, what)) => {
+                        Some((mv, what, Some(climb))) => {
+                            start_move(d, mv, what);
+                            d.then_climb = Some(climb);
+                        }
+                        Some((mv, what, None)) => {
                             // a long jump into a free hang lands on one hand, then the second hand reaches (state 17)
                             let (mv, tail) = ledge_moves::second_hand_grab(mv, &guidance, &collision);
                             start_move(d, mv, what);

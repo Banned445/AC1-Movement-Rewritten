@@ -48,6 +48,10 @@ enum Scenario {
     WallRun,
     /// Run off the high block's +X edge into the haystack (Leap of Faith), wait, hop out.
     Faith,
+    /// Run across the kiosk roof (x 120, z 20) and tap-jump at the kiosk frame: entry, monkey bar, drop (RE/18 §4).
+    Kiosk,
+    /// Walk into the haystack: the dive from the ground (event 122, RE/18 §3).
+    HayDive,
     /// Free-run onto the first pilotis, hop along the posts, land on the far platform.
     Pilotis,
     /// Running jump onto the free beam, walk under the slab, impulsion, jump at its ledge.
@@ -114,6 +118,8 @@ impl Plugin for DebugCapturePlugin {
                 "pulldown" => Scenario::PullDown,
                 "ledgestop" => Scenario::LedgeStop,
                 "faith" => Scenario::Faith,
+                "kiosk" => Scenario::Kiosk,
+                "haydive" => Scenario::HayDive,
                 "wallrun" => Scenario::WallRun,
                 "beam" => Scenario::Beam,
                 "pilotis" => Scenario::Pilotis,
@@ -324,6 +330,18 @@ fn place(sc: Res<Scenario>, mut q: Query<&mut Body, With<Player>>, mut rig: ResM
             Scenario::WallRun => {
                 b.feet = Vec3::new(76.0, 0.0, 57.9);
                 b.heading = std::f32::consts::PI; // facing +Z, at the wall
+                rig.yaw = std::f32::consts::FRAC_PI_2;
+                rig.distance = 6.0;
+            }
+            Scenario::Kiosk => {
+                b.feet = Vec3::new(120.0, 4.5, 19.0);
+                b.heading = std::f32::consts::PI;
+                rig.yaw = std::f32::consts::FRAC_PI_2;
+                rig.distance = 7.0;
+            }
+            Scenario::HayDive => {
+                b.feet = Vec3::new(37.5, 0.0, 21.5);
+                b.heading = std::f32::consts::PI;
                 rig.yaw = std::f32::consts::FRAC_PI_2;
                 rig.distance = 6.0;
             }
@@ -688,6 +706,22 @@ fn autopilot(
                 pad.magnitude = 0.0;
                 pad.speed01 = 0.0;
             }
+        }
+        Scenario::Kiosk => {
+            // run toward +Z, the Legs tap at 0.8 s (released at once: the tap jump, 0xEE817E)
+            pad.dir = Vec3::Z;
+            let run = t < 1.4;
+            pad.magnitude = if run { 1.0 } else { 0.0 };
+            pad.speed01 = pad.magnitude;
+            pad.high_profile = run;
+            if (0.8..0.8 + 1.0 / 60.0).contains(&t) {
+                pad.legs_pressed_ago = 0.0;
+            }
+        }
+        Scenario::HayDive => {
+            pad.dir = Vec3::Z;
+            pad.magnitude = if t < 3.0 { 1.0 } else { 0.0 };
+            pad.speed01 = pad.magnitude;
         }
         Scenario::Faith => {
             pad.dir = Vec3::X;

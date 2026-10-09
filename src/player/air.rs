@@ -108,7 +108,9 @@ pub enum InAirEntry {
     JumpToTarget { from: Vec3, target: JumpTarget, speed_param: f32, foot_left: bool },
     /// No target found: the free-jump target (`Human__MakeFreeJumpTarget` 0xB13630 → 0xB1E7F0, `FREE_JUMP_AHEAD` along
     /// `dir`, `FREE_JUMP_DOWN` below), jumped at like any target (type 1) and ended by the ground contact.
-    FreeJump { from: Vec3, dir: Vec3, speed_param: f32, foot_left: bool },
+    /// `ahead` = how far along `dir` the target lies (`FREE_JUMP_AHEAD`; the step off an edge, event 68, aims
+    /// 1 + 2·profile·speed m ahead, 0xD9D1F0).
+    FreeJump { from: Vec3, dir: Vec3, ahead: f32, speed_param: f32, foot_left: bool },
     /// A free-step jump (jump kind 1: the `freestep_*_to_air` takeoff) from a beam or a pilotis to a target
     /// (NarrowObject event 4 → `Human__SetupJumpToTarget` 0xB20200 with kind 1, 0xE4D950).
     FreeStepJump { from: Vec3, target: JumpTarget, foot_left: bool },
@@ -287,7 +289,7 @@ impl HumanInAirData {
                 let d = action.duration().max(0.1);
                 self.mode = AirMode::Jump { from, clip_end, aim: clip_end, apex: 0.0, duration: d, t: 0.0, then_fall_to: Some(clip_end), real: true, t_takeoff: 0.0, fwd };
             }
-            InAirEntry::FreeJump { from, dir, speed_param, foot_left } => {
+            InAirEntry::FreeJump { from, dir, ahead, speed_param, foot_left } => {
                 self.start_y = from.y;
                 self.start = from;
                 self.apex_y = from.y;
@@ -298,7 +300,7 @@ impl HumanInAirData {
                 // `Human__SetupJumpToTarget` like any target; on open ground the contact ends the jump long before
                 // it (live: 0.66 s, 4.8 m), off a roof it falls on from there
                 let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
-                let aim = from + flat * FREE_JUMP_AHEAD - Vec3::Y * FREE_JUMP_DOWN;
+                let aim = from + flat * ahead - Vec3::Y * FREE_JUMP_DOWN;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
                 self.free_target = true;
             }
@@ -476,9 +478,12 @@ pub fn update_air(
     pad: Res<PadInput>,
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
+    abilities: Option<Res<super::abilities::AbilitySet>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
+    // the InAir empty-hand catch needs Grasp (0xEDBC26)
+    let grasp = super::abilities::of(abilities.as_deref()).allows(super::abilities::Ability::Grasp);
     for (mut loco, mut body, mut data) in &mut q {
         if loco.current != ActorContextId::InAir {
             continue;
@@ -514,6 +519,7 @@ pub fn update_air(
         let mut on_target = false;
         let mut hang_on: Option<LedgeEntry> = None;
         let mut hay_on: Option<super::hay::HayStackEntry> = None;
+        let mut kiosk_on: Option<super::kiosk::KioskEntry> = None;
         let mut narrow_on: Option<TransitionSetup> = None;
         let mut pass_on: Option<super::passover::PassOverEntry> = None;
         let mut swing_on = false;
@@ -595,6 +601,16 @@ pub fn update_air(
                         }
                         ladder_on = Some(e);
                     }
+                    // kiosk target (0x400): 0xE07D00 sets InAir+225 bit 8, entry FreeStep and the side, then
+                    // `HumanInAir__RequestKiosk` 0xE015A0 → context 19 (RE/18 §4)
+                    if air.target_flags == 0x400 {
+                        if let Some(t) = air.target {
+                            if let Some(axis) = super::kiosk::kiosk_axis(t.position, &guidance) {
+                                let dir = Vec3::new(t.position.x - air.start.x, 0.0, t.position.z - air.start.z).normalize_or(fwd);
+                                kiosk_on = Some(super::kiosk::KioskEntry { from: body.feet, target: t.position, axis, dir });
+                            }
+                        }
+                    }
                     // pass-over target (type 2): 0xE07D00 case 2 → Ledge HandPassOver
                     if let Some((edge, normal)) = air.target.and_then(|t| t.pass) {
                         let mut fw = [0.0f32; 5];
@@ -610,9 +626,9 @@ pub fn update_air(
                             let p = body.feet;
                             p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3
                         }) {
-                            // arrival on a haystack target (0xE07D00 → RequestHayStack 0xE01AF0)
-                            let faith = air.flight.is_some_and(|f| f.id == jump_blend::FLIGHT_FAITH);
-                            hay_on = Some(super::hay::HayStackEntry { stack: *stack, faith, from: body.feet, speed: body.velocity.length() });
+                            // arrival on a haystack target (0xE07D00 clears InAir+340 → RequestHayStack 0xE01AF0 →
+                            // 0xE00E30: entry Top, the faith landing, for every target arrival)
+                            hay_on = Some(super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
                         }
                     }
                     // a jump without a real target (on the spot / free jump) can come down on a beam or a pilotis
@@ -620,7 +636,7 @@ pub fn update_air(
                         narrow_on = narrow_catch(body.feet, fwd, foot, &guidance, &collision);
                     }
                     match then_fall_to {
-                        _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() || ladder_on.is_some() => {}
+                        _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() || ladder_on.is_some() || kiosk_on.is_some() => {}
                         Some(p) if collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_none() => {
                             air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
                         }
@@ -720,12 +736,13 @@ pub fn update_air(
                         body.velocity.y < 0.0 && previous.y >= stack.max.y && next.y <= stack.max.y
                             && next.x >= stack.min.x && next.x <= stack.max.x
                             && next.z >= stack.min.z && next.z <= stack.max.z
-                    }).map(|stack| super::hay::HayStackEntry { stack: *stack, faith: false, from: body.feet, speed: body.velocity.length() });
+                    // a hit through the top: contact normal more than 0.9 up → entry Top (0xE05490 / 0xE00E30)
+                    }).map(|stack| super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
                 }
                 if narrow_on.is_some() || hay_on.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 {
                     landed_at = Some(body.feet.y);
-                } else if !AIR_CATCHES && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
+                } else if !AIR_CATCHES && grasp && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
                     // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
                     // in reach
                     if let Some(e) = super::ladder::find_ladder_catch(body.feet, body.forward(), true, &guidance, &collision) {
@@ -743,7 +760,7 @@ pub fn update_air(
 
         if AIR_CATCHES && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
             let fall_height = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
-            let manual = super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
+            let manual = grasp && super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
             let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), air.target.map(|t| t.type_flags), body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
             // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
             let reach = if manual && pad.speed01 > 0.0 { pad.dir } else { body.forward() };
@@ -777,6 +794,16 @@ pub fn update_air(
         air.prev_y = body.feet.y;
         body.grounded = false;
 
+        // into deep water: InAir event 2 → Dead, drowning (0xE09C20 → 0xE00690). PORT trigger: the feet inside a
+        // deep-water volume (the game's sender, the damage system's drown, is not traced)
+        if let Some(y) = super::dead::in_deep_water(body.feet, &guidance.water) {
+            air.mode = AirMode::Idle;
+            let entry = super::dead::DeadEntry { drown: true, water_y: Some(y), from: body.feet, axis: body.forward() };
+            body.velocity = Vec3::ZERO;
+            switch_context(&mut loco, &mut data, TransitionSetup::ToDead(entry));
+            continue;
+        }
+
         if let Some(e) = ladder_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
@@ -805,6 +832,10 @@ pub fn update_air(
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, setup);
             if AIR_CATCHES { data.narrow.advance_catch_root(&mut body, dt); }
+        } else if let Some(e) = kiosk_on {
+            air.mode = AirMode::Idle;
+            body.velocity = Vec3::ZERO;
+            switch_context(&mut loco, &mut data, TransitionSetup::ToKiosk(e));
         } else if let Some(e) = hay_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
@@ -862,7 +893,7 @@ mod fall_tests {
         let mut air = HumanInAirData::default();
         let start = 0.0f32; // facing −Z
         let dir = Quat::from_rotation_y(-0.75) * Vec3::NEG_Z; // 43° to the right
-        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, speed_param: 0.5, foot_left: true });
+        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
         air.begin_turn(start);
         let AirMode::Jump { t_takeoff, fwd, from, clip_end, .. } = air.mode else { panic!("not a jump") };
         assert!(t_takeoff > 0.1, "{t_takeoff}");

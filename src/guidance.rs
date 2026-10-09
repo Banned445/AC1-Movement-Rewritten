@@ -51,6 +51,8 @@ pub struct GuidanceWorld {
     pub haystacks: Vec<crate::collision::Aabb3>,
     /// PORT: derived once after loading an immutable native map; never populated for editable greybox worlds.
     pub jump_pilotis: Option<Vec<Vec3>>,
+    /// Deep water (the box's top = the surface): the port's drown trigger (`dead::in_deep_water`, RE/18 §5).
+    pub water: Vec<crate::collision::Aabb3>,
 }
 
 /// A hit from a guidance query: closest point on an edge plus that edge's data.

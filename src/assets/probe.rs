@@ -668,6 +668,27 @@ fn probe_find_actions() {
     }
 }
 
+/// Actions whose clips' names contain `PROBE_CLIP` (comma list): block, action id, request id, items.
+#[test]
+#[ignore]
+fn probe_actions_by_clip() {
+    use super::ac_actions::{ActionGraph, CLASS_ACTION_BLOCK};
+    let res = game_fix();
+    let mut graph = ActionGraph::default();
+    for r in res.iter().filter(|r| r.class_hash == CLASS_ACTION_BLOCK) {
+        graph.add_block(&r.name, &r.payload).unwrap();
+    }
+    let names: HashMap<u32, &str> = res.iter().filter(|r| r.class_hash == CLASS_ANIMATION).map(|r| (r.id, r.name.as_str())).collect();
+    let pats: Vec<String> = std::env::var("PROBE_CLIP").unwrap_or_default().split(',').map(String::from).collect();
+    let mut acts: Vec<_> = graph.actions.values().filter(|a| a.items.iter().any(|it| it.animations.iter().any(|x| names.get(x).is_some_and(|n| pats.iter().any(|p| n.contains(p.as_str())))))).collect();
+    acts.sort_by_key(|a| a.id);
+    acts.dedup_by_key(|a| a.id);
+    for a in acts {
+        let items: Vec<Vec<&str>> = a.items.iter().map(|it| it.animations.iter().map(|x| names.get(x).copied().unwrap_or("?")).collect()).collect();
+        println!("{:#010x} req {} [{}] {:?}", a.id, a.request_id, a.block, items);
+    }
+}
+
 /// Which action id space the cloth action table uses (ClothActionSettings__GetStrength 0x6C71E0 keys on Action+8).
 #[test]
 #[ignore]

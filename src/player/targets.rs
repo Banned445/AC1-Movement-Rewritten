@@ -1,18 +1,13 @@
-//! Jump-target selection — reduced port of the candidate scorer 0xE96BF0 (RE/01 §7b).
-//!
-//! Game rules used here:
-//! - candidates within a 45° cone of the wanted direction, height difference dz > -3 m;
-//! - per target type, height/distance bands from Human__ComputeJumpAnimBlend 0xB1EC40:
-//!   roof edges (free-step type 1): max up 1.3 m, far 7 m; ledges (hang targets, flag 0x40): max up 3.0 m, far 8 m;
-//! - among candidates in front, prefer the **highest**, ties → nearest.
-//! Simplification: candidates are points on LedgeGrab edges that face the player. Ground targets
-//! land `LAND_INSET` onto the roof; ledge targets hang from the edge (aim = hang root).
+//! Jump targets: the game's candidate query 0xE18970 and scorer 0xE96BF0 (`jump_candidates`, RE/18 §1), turned into
+//! the port's `JumpTarget`s. Ground targets land `LAND_INSET` onto the roof; ledge targets hang from the edge (aim =
+//! hang root).
 
 use bevy::prelude::*;
 
 use super::ledge::{hang_root, LedgeHangType};
 use crate::collision::CollisionWorld;
 use crate::guidance::{GuidanceSubType, GuidanceWorld};
+use super::jump_candidates::{self, Candidate, Query};
 use crate::tuning::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -63,205 +58,96 @@ pub(crate) fn pilotis_for_edges<'a>(edges: impl Iterator<Item = &'a crate::guida
     pilotis
 }
 
+/// The tap jump's target (the interpreter's jump branch 0xEE817E): the game's candidate query with beams
+/// (`jump_candidates::query`, kind 0) and the scorer 0xE96BF0 (mode 1). With no candidate, the Leap of Faith search
+/// (IHuman vt76, the haystacks) follows, as in the interpreter (0xEE8239).
 pub fn find_jump_target(
     feet: Vec3,
     want_dir: Vec3,
     guidance: &GuidanceWorld,
     collision: &CollisionWorld,
 ) -> Option<JumpTarget> {
+    find_target(feet, want_dir, want_dir, &Query::TAP, false, guidance, collision).or_else(|| haystack_target(feet, want_dir, guidance))
+}
+
+/// Query + scorer + the port's target for the chosen candidate. `facing` = the actor's forward (the scorer's frame),
+/// `want` = the wanted direction.
+pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+    let cands = jump_candidates::query(feet, want, q, guidance, collision);
+    let (i, ty) = jump_candidates::select(&cands, feet, facing, want, 1, behind_far)?;
+    to_target(&cands[i], ty, feet, guidance, collision)
+}
+
+/// The port's jump target for a candidate and the scorer's jump type.
+pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+    let base = JumpTarget { position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None };
+    match ty {
+        1 | 0x10000 => {
+            // beams and far-edge landings already lie on the surface
+            if c.ty == 4 || (c.ty == 2 && c.sub == 1) {
+                return Some(base);
+            }
+            // PORT: a roof edge's landing is `LAND_INSET` onto its top (the game aims at the edge and 0xB1EC40 pulls
+            // the target back); a narrower top (posts) takes a shallower inset
+            // a top narrower than two insets (a post) is landed on in its middle
+            let narrow = super::passover::far_edge(c.pos, -c.wall, guidance).map(|(_, t)| t).filter(|t| *t < 2.0 * LAND_INSET);
+            let insets: &[f32] = match narrow { Some(t) => &[t * 0.5][..], None => &[LAND_INSET, 0.25, 0.1][..] };
+            for &inset in insets {
+                let landing = c.pos - c.wall * inset;
+                if let Some(h) = collision.ground_height(landing + Vec3::Y * 0.05, 0.2) {
+                    let target = JumpTarget { position: Vec3::new(landing.x, h, landing.z), ..base };
+                    // PORT: a thin wall top is a pass-over (type 2). The query gives a railing type 1 | 2 like a
+                    // roof; which of the two the game jumps at there is not established (LIVE:, RE/18 §9)
+                    if c.flags & 2 != 0 && c.sub == 4 {
+                        if let Some((_, t)) = super::passover::far_edge(c.pos, -c.wall, guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS) {
+                            let _ = t;
+                            return Some(JumpTarget { position: c.pos + c.wall * 0.5, type_flags: 2, pass: Some((c.pos, c.wall)), ..base });
+                        }
+                    }
+                    return Some(target);
+                }
+            }
+            None
+        }
+        2 => Some(JumpTarget { position: c.pos + c.wall * 0.5, pass: Some((c.pos, c.wall)), ..base }),
+        TARGET_LEDGE | TARGET_LEDGE_FREE => {
+            // hang targets need an edge (poles, type 32, are cut content in v1.02: RE/05 §3.5)
+            if c.ty == 32 {
+                return None;
+            }
+            let e = &guidance.edges[c.edge?];
+            let on_edge = guidance.fit_hands(c.pos, e.n1);
+            let hang = if ty == TARGET_LEDGE { LedgeHangType::Wall } else { LedgeHangType::Free };
+            Some(JumpTarget { position: hang_root(on_edge, on_edge, e.n1, hang), hang: Some((on_edge, e.n1)), ..base })
+        }
+        TARGET_LADDER => {
+            let e = &guidance.edges[c.edge?];
+            let (bottom, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
+            let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+            if Vec3::new(feet.x - bottom.x, 0.0, feet.z - bottom.z).dot(n) <= 0.0 {
+                return None;
+            }
+            // the air catch's rung rule (0xE04100) at the candidate's height
+            let h = super::ladder::catch_height(c.pos.y - bottom.y + 0.0005, top.y - bottom.y)?;
+            let pos = bottom + n * super::ladder::ATTACH_OUT + Vec3::Y * h;
+            let entry = super::ladder::LadderEntry { base: bottom, top, n, from: pos, facing: -n, from_ledge: true, height: Some(h), action: Some(super::ladder::ARRIVE_TARGET), chain: true, ..Default::default() };
+            Some(JumpTarget { position: pos, ladder: Some(entry), ..base })
+        }
+        // a kiosk's piece (0x400): its middle (0xE18970), handed to the Kiosk context on arrival (0xE07D00)
+        0x400 => Some(base),
+        // horse (0x200) targets have no port context
+        _ => None,
+    }
+}
+
+/// The Leap of Faith search (IHuman vt76, ability LeapOfFaith): a haystack's top in the 45-degree cone; a Leap of
+/// Faith when it lies 3 m or more below (bands -30 m / 7.5 m), else the haystack free-step bands (-3 m / 6 m)
+/// (0xB1EC40). PORT: vt76 itself is not traced (RE/04 §4.1.12).
+pub fn haystack_target(feet: Vec3, want_dir: Vec3, guidance: &GuidanceWorld) -> Option<JumpTarget> {
     let want = Vec3::new(want_dir.x, 0.0, want_dir.z).normalize_or_zero();
     if want == Vec3::ZERO {
         return None;
     }
-    let horizontally_reachable = |pos: Vec3, far: f32| {
-        let flat = Vec3::new(pos.x-feet.x,0.0,pos.z-feet.z);
-        (0.6..=far).contains(&flat.length()) && flat.normalize().dot(want).clamp(-1.0,1.0).acos() <= TARGET_CONE
-    };
-    let mut best: Option<(JumpTarget, f32, f32)> = None; // (target, dz, dist)
-    // PORT: the game's guidance candidates for beams and pilotis (IHuman vt56/64/68) are not traced; the port
-    // offers free-step targets (type 1) on them: the beam line (≥ 0.3 m from its ends) and the pilotis tops
-    // (0xB2B600), whose arrivals mount them (0xE07D00 → 0xE50190 / 0xE52AD0).
-    let pilotis = guidance.jump_pilotis.as_ref().filter(|_| collision.native_query_culling)
-        .cloned().unwrap_or_else(|| find_jump_pilotis(guidance,collision));
-    let mut narrow: Vec<Vec3> = pilotis.clone();
-    for e in &guidance.edges {
-        if e.subtype != GuidanceSubType::Beam {
-            continue;
-        }
-        let len = (e.p1 - e.p0).length();
-        if len < 0.6 {
-            continue;
-        }
-        let ahead = feet + want * 4.0;
-        let q = e.closest_point(Vec3::new(ahead.x, e.p0.y, ahead.z));
-        let u = ((q - e.p0).length() / len).clamp(0.3 / len, 1.0 - 0.3 / len);
-        narrow.push(e.p0.lerp(e.p1, u));
-    }
-    for pos in narrow {
-        let target = JumpTarget { position: pos, type_flags: TARGET_GROUND, hang: None, straight: None, pass: None, ladder: None };
-        let flat = Vec3::new(pos.x - feet.x, 0.0, pos.z - feet.z);
-        let dist = flat.length();
-        let dz = pos.y - feet.y;
-        if !(0.6..=GROUND_FAR).contains(&dist) || dz > GROUND_MAX_UP || dz < TARGET_MIN_DZ {
-            continue;
-        }
-        if flat.normalize().dot(want).clamp(-1.0, 1.0).acos() > TARGET_CONE {
-            continue;
-        }
-        // a gap must lie between (not the beam / post we stand on)
-        let low = feet.y.min(pos.y);
-        let crosses_gap = [0.25f32, 0.5, 0.75].iter().any(|&t| {
-            let s = feet.lerp(pos, t);
-            collision.ground_height(Vec3::new(s.x, low + 0.05, s.z), 0.5).is_none()
-        });
-        if !crosses_gap {
-            continue;
-        }
-        let better = match &best {
-            None => true,
-            Some((_, bdz, bd)) => dz > bdz + 0.25 || ((dz - bdz).abs() <= 0.25 && dist < *bd),
-        };
-        if better {
-            best = Some((target, dz, dist));
-        }
-    }
-    for e in &guidance.edges {
-        if e.subtype != GuidanceSubType::LedgeGrab {
-            continue;
-        }
-        // a pilotis' own edges are not roof edges
-        if pilotis.iter().any(|p| Vec2::new(e.p0.x - p.x, e.p0.z - p.z).length() < 0.6 && (e.p0.y - p.y).abs() < 0.05) {
-            continue;
-        }
-        // the edge must face us (its wall normal points back toward the player)
-        let to_player = Vec3::new(feet.x - e.p0.x, 0.0, feet.z - e.p0.z);
-        if e.n1.dot(to_player) <= 0.0 {
-            continue;
-        }
-        let ahead = feet + want * 4.0;
-        let on_edge = e.closest_point(Vec3::new(ahead.x, e.p0.y, ahead.z));
-        let edge_dz = on_edge.y - feet.y;
-        // PORT: reject unreachable edges before the expensive clearance / hang / opposite-edge probes.
-        // Keep slack for roof inset, hang offset and hand fitting; final scoring still uses the exact target.
-        let reach = GROUND_FAR.max(LEDGE_JUMP_FAR) + 2.0 + Vec2::new(e.n1.x,e.n1.z).length() * 0.5;
-        if collision.native_query_culling && Vec2::new(on_edge.x-feet.x,on_edge.z-feet.z).length_squared() > reach * reach {
-            continue;
-        }
-
-        if collision.native_query_culling && edge_dz <= GROUND_MAX_UP
-            && !horizontally_reachable(on_edge + Vec3::new(e.n1.x,0.0,e.n1.z).normalize_or_zero()*0.5,GROUND_FAR)
-            && !horizontally_reachable(on_edge-e.n1*LAND_INSET,GROUND_FAR) { continue; }
-        let thin = if edge_dz <= GROUND_MAX_UP || !collision.native_query_culling {
-            super::passover::far_edge(on_edge, -Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero(), guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS)
-        } else { None };
-        let candidate = if edge_dz <= GROUND_MAX_UP && thin.is_some() {
-            // pass-over target (type 2) on a thin wall top. PORT: the game's type-2 guidance candidates are not traced;
-            // the port offers wall tops ≤ 1 m thick (the vault's 30 ↔ 100 cm blend range, 0xDDB800). The target sits
-            // 0.5 m before the edge (0xB1EC40 pulls targets back 0.5·h), the reception carries the root onto it.
-            let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
-            Some(JumpTarget { position: on_edge + n * 0.5, type_flags: 2, hang: None, straight: None, pass: Some((on_edge, n)), ladder: None })
-        } else if edge_dz <= GROUND_MAX_UP {
-            // ground target: land on top of the roof
-            let landing = on_edge - e.n1 * LAND_INSET;
-            let Some(h) = collision.ground_height(landing + Vec3::Y * 0.05, 0.2) else { continue };
-            let pos = Vec3::new(landing.x, h, landing.z);
-            Some(JumpTarget { position: pos, type_flags: TARGET_GROUND, hang: None, straight: None, pass: None, ladder: None })
-        } else if edge_dz <= LEDGE_MAX_UP + WALL_HANG_DROP {
-            // ledge target: hang from the edge (wall hang if there is wall below), both hands on the edge
-            let on_edge = guidance.fit_hands(on_edge, e.n1);
-            if collision.native_query_culling
-                && !horizontally_reachable(on_edge+e.n1*WALL_HANG_OUT,LEDGE_JUMP_FAR)
-                && !horizontally_reachable(on_edge+e.n1*FREE_HANG_OUT,LEDGE_JUMP_FAR) { continue; }
-            let hang =if collision.point_inside(on_edge - e.n1 * 0.15 - Vec3::Y * 0.9) {
-                LedgeHangType::Wall
-            } else {
-                LedgeHangType::Free
-            };
-            let pos = hang_root(on_edge, on_edge, e.n1, hang);
-            if pos.y - feet.y > LEDGE_MAX_UP {
-                continue;
-            }
-            let flags = if hang == LedgeHangType::Wall { TARGET_LEDGE } else { TARGET_LEDGE_FREE };
-            Some(JumpTarget { position: pos, type_flags: flags, hang: Some((on_edge, e.n1)), straight: None, pass: None, ladder: None })
-        } else {
-            None
-        };
-        let Some(target) = candidate else { continue };
-        let flat = Vec3::new(target.position.x - feet.x, 0.0, target.position.z - feet.z);
-        let dist = flat.length();
-        let far = match target.hang {
-            Some(_) if target.position.y - feet.y > LEDGE_JUMP_UP_RISE => LEDGE_JUMP_FAR_UP,
-            Some(_) => LEDGE_JUMP_FAR,
-            None => GROUND_FAR,
-        };
-        if !(0.6..=far).contains(&dist) {
-            continue;
-        }
-        if flat.normalize().dot(want).clamp(-1.0, 1.0).acos() > TARGET_CONE {
-            continue;
-        }
-        let dz = target.position.y - feet.y;
-        if dz < TARGET_MIN_DZ {
-            continue;
-        }
-        if target.type_flags == TARGET_GROUND {
-            // must actually cross a gap or a step (not a point on the roof we are standing on)
-            let low = feet.y.min(target.position.y);
-            let crosses_gap = [0.25f32, 0.5, 0.75].iter().any(|&t| {
-                let s = feet.lerp(target.position, t);
-                collision.ground_height(Vec3::new(s.x, low + 0.05, s.z), 0.5).is_none()
-            });
-            if !crosses_gap && dz.abs() < 0.3 {
-                continue;
-            }
-        }
-        let better = match &best {
-            None => true,
-            // "highest in front", ties (within 0.25 m) → nearest
-            Some((_, bdz, bd)) => dz > bdz + 0.25 || ((dz - bdz).abs() <= 0.25 && dist < *bd),
-        };
-        if better {
-            best = Some((target, dz, dist));
-        }
-    }
-    // ladders (type 0x1000, the surface bands 2.5 / −3 / 5.5 / 7.5 m). PORT: the game's ladder candidates (IHuman
-    // vt56) are not traced; the port offers each ladder 1 m above the jumper's feet snapped to 0.5 m, within the air
-    // catch's range (0.45 m … height − 1.95 m, 0xE04100), the root 0.5 m out on its front.
-    for e in &guidance.edges {
-        if e.subtype != GuidanceSubType::Ladder {
-            continue;
-        }
-        let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
-        let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
-        // PORT: retain the existing target-candidate rounding slack; incidental catches use exact truncation.
-        let Some(h) = super::ladder::catch_height(feet.y + 1.0 - base.y + 0.0005, top.y - base.y) else { continue };
-        if Vec3::new(feet.x - base.x, 0.0, feet.z - base.z).dot(n) <= 0.0 {
-            continue;
-        }
-        let pos = base + n * super::ladder::ATTACH_OUT + Vec3::Y * h;
-        let flat = Vec3::new(pos.x - feet.x, 0.0, pos.z - feet.z);
-        let dist = flat.length();
-        let dz = pos.y - feet.y;
-        let (max_up, min_dz, _, _, far) = super::jump_blend::bands(TARGET_LADDER);
-        if !(0.6..=far).contains(&dist) || dz > max_up || dz < min_dz {
-            continue;
-        }
-        if flat.normalize().dot(want).clamp(-1.0, 1.0).acos() > TARGET_CONE {
-            continue;
-        }
-        let entry = super::ladder::LadderEntry { base, top, n, from: pos, facing: -n, from_ledge: true, height: Some(h), action: Some(super::ladder::ARRIVE_TARGET), chain: true, ..Default::default() };
-        let target = JumpTarget { position: pos, type_flags: TARGET_LADDER, hang: None, straight: None, pass: None, ladder: Some(entry) };
-        let better = match &best {
-            None => true,
-            Some((_, bdz, bd)) => dz > bdz + 0.25 || ((dz - bdz).abs() <= 0.25 && dist < *bd),
-        };
-        if better {
-            best = Some((target, dz, dist));
-        }
-    }
-    // haystacks (type 0x800): the top centre; a Leap of Faith when ≥ 3 m below (bands −30 m / 7.5 m), else the
-    // haystack free-step bands (−3 m / 6 m) (0xB1EC40). PORT: a haystack in the cone wins over roof targets
-    // (the game's LeapOfFaith ability path, IHuman vt1540/1544, is not traced).
     for s in &guidance.haystacks {
         let top = Vec3::new((s.min.x + s.max.x) * 0.5, s.max.y, (s.min.z + s.max.z) * 0.5);
         let flat = Vec3::new(top.x - feet.x, 0.0, top.z - feet.z);
@@ -277,7 +163,7 @@ pub fn find_jump_target(
         }
         return Some(JumpTarget { position: top, type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None });
     }
-    best.map(|b| b.0)
+    None
 }
 
 /// True when there is no floor a short way ahead (approaching a roof edge).
@@ -303,7 +189,7 @@ pub fn jump_off_wall_dir(stick: Option<Vec3>, away: Vec3) -> Option<Vec3> {
 pub fn jump_off_wall_entry(from: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> super::air::InAirEntry {
     match find_jump_target(from, dir, guidance, collision) {
         Some(target) => super::air::InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true },
-        None => super::air::InAirEntry::FreeJump { from, dir, speed_param: 0.5, foot_left: true },
+        None => super::air::InAirEntry::FreeJump { from, dir, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true },
     }
 }
 
