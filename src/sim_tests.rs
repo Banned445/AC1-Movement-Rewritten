@@ -3591,6 +3591,15 @@ fn the_ability_stack_gates_the_jump() {
         let jumped = s.run_until(0.6, |s| s.loco().current == ActorContextId::InAir);
         assert_eq!(jumped, allowed);
     }
+    // Grasp gates the InAir empty-hand catch (0xEDBC26): the same fall past a ladder with the hand held
+    for allowed in [false, true] {
+        let mut s = Sim::new(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
+        let flags = if allowed { u64::MAX } else { !(1u64 << Ability::Grasp as u32) };
+        s.app.world_mut().insert_resource(AbilitySet { flags, max_speed: 4, all_actions: true });
+        s.pad(Vec3::ZERO, 0.0, false, false);
+        s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
+        assert_eq!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ladder), allowed);
+    }
 }
 
 #[test]

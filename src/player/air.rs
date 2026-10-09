@@ -478,9 +478,12 @@ pub fn update_air(
     pad: Res<PadInput>,
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
+    abilities: Option<Res<super::abilities::AbilitySet>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
+    // the InAir empty-hand catch needs Grasp (0xEDBC26)
+    let grasp = super::abilities::of(abilities.as_deref()).allows(super::abilities::Ability::Grasp);
     for (mut loco, mut body, mut data) in &mut q {
         if loco.current != ActorContextId::InAir {
             continue;
@@ -739,7 +742,7 @@ pub fn update_air(
                 if narrow_on.is_some() || hay_on.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 {
                     landed_at = Some(body.feet.y);
-                } else if !AIR_CATCHES && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
+                } else if !AIR_CATCHES && grasp && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
                     // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
                     // in reach
                     if let Some(e) = super::ladder::find_ladder_catch(body.feet, body.forward(), true, &guidance, &collision) {
@@ -757,7 +760,7 @@ pub fn update_air(
 
         if AIR_CATCHES && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
             let fall_height = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
-            let manual = super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
+            let manual = grasp && super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
             let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), air.target.map(|t| t.type_flags), body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
             // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
             let reach = if manual && pad.speed01 > 0.0 { pad.dir } else { body.forward() };

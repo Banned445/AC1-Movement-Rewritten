@@ -513,6 +513,9 @@ pub fn update_ground(
 ) {
     use super::abilities::Ability;
     let ab = super::abilities::of(abilities.as_deref());
+    // PassOver (checked by the ground interpreter at 0xEE72DA before it sets +0x1128; that this flag is the pass-over
+    // request is a hypothesis): without it a pass-over target (type 2) is not taken
+    let pass_ok = |t: &super::targets::JumpTarget| t.pass.is_none() || ab.allows(Ability::PassOver);
     let dt = time.delta_secs().min(1.0 / 20.0);
     for (mut loco, mut body, mut data, anim) in &mut q {
         let g = &mut data.ground;
@@ -938,7 +941,7 @@ pub fn update_ground(
         // 45) → IHuman vt56 with kind 4 (Legs held) / 3, ladders left out, then the scorer (mode 1) → vt24. Its box
         // only reaches 0.45–1.3 m up and 0.5–2.0 m (1.3 m) ahead: the game's hop onto low obstacles (RE/18 §1.5).
         if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
-            if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
+            if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision).filter(pass_ok) {
                 jump_log("free-run target jump", body.feet, Some(&target));
                 let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
@@ -1073,7 +1076,7 @@ pub fn update_ground(
             pad.consume_jump();
             // the candidates, then the Leap of Faith search under its ability (0xEE8239: `sub_D32760`, IHuman vt76)
             let want = if moving { pad.dir } else { forward };
-            let found = super::targets::find_target(body.feet, want, want, &super::jump_candidates::Query::TAP, false, &guidance, &collision)
+            let found = super::targets::find_target(body.feet, want, want, &super::jump_candidates::Query::TAP, false, &guidance, &collision).filter(pass_ok)
                 .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, &guidance)).flatten());
             jump_log("tap jump", body.feet, found.as_ref());
             let entry = match found {
@@ -1095,7 +1098,7 @@ pub fn update_ground(
                 // event 68 this frame.
                 let flat_fwd = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
                 if r.dist < 0.01 && moving && ab.allows(Ability::Jump) && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
-                    if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision) {
+                    if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision).filter(pass_ok) {
                         jump_log("edge jump", body.feet, Some(&target));
                         let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
