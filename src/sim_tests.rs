@@ -3618,10 +3618,10 @@ fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_a_ladder() {
 #[test]
 fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
     use crate::player::ledge_moves::LEDGE_JUMP_TABLE;
-    // the 2.6 m wall x 150..153 (face z 9.7) and the climb wall x 154.6..158.6 beside it: shimmying left (+X, facing +Z)
+    // the 2.6 m wall x -140..-137 (face z -135.3) and the climb wall x -135.4..-131.4 beside it: shimmying left (+X, facing +Z)
     // to the edge's end, the side jump (0xDDD490) finds the 2.4 m band with the 1.2 m band below it for the feet →
     // type 0: the start and loop in the Ledge context, the end item in the Climb context (RE/18 §7.2)
-    let mut s = hang_at(Vec3::new(152.2, 2.6, 9.7), Vec3::NEG_Z);
+    let mut s = hang_at(Vec3::new(-137.8, 2.6, -135.3), Vec3::NEG_Z);
     s.pad(Vec3::X, 1.0, false, false);
     assert!(s.run_until(6.0, |s| s.loco().current == ActorContextId::Climb), "never reached the climb: {:?} ledge {}", s.loco().current, s.data().ledge.last_action);
     assert_eq!(s.data().ledge.last_action, "side jump to climb");
@@ -3629,7 +3629,7 @@ fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
     s.run(2.0);
     let c = &s.data().climb;
     assert_eq!(s.loco().current, ActorContextId::Climb);
-    assert!(c.hand_l.x > 154.6 && (c.hand_l.y - 2.4).abs() < 0.05 && (c.foot_l.y - 1.2).abs() < 0.05, "on the climb wall: {:?} {:?}", c.hand_l, c.foot_l);
+    assert!(c.hand_l.x > -135.4 && (c.hand_l.y - 2.4).abs() < 0.05 && (c.foot_l.y - 1.2).abs() < 0.05, "on the climb wall: {:?} {:?}", c.hand_l, c.foot_l);
     let ends: Vec<u32> = (0..2).flat_map(|f| [LEDGE_JUMP_TABLE[f][2].1[2], LEDGE_JUMP_TABLE[f][3].1[2], LEDGE_JUMP_TABLE[f][6].1[2], LEDGE_JUMP_TABLE[f][7].1[2]]).collect();
     assert!(ends.iter().any(|&e| e != 0), "type-0 side entries exist");
 }
@@ -3638,11 +3638,11 @@ fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
 fn climbing_down_past_the_lowest_holds_grabs_a_hang() {
     use crate::player::climb::{ClimbEntry, ClimbEntryType, LEDGE_GRAB_DOWN};
     use crate::player::{switch_context, TransitionSetup};
-    // TryLedgeGrab 0xDF0980 (down): the wall x 160..164 has bands from 3.0 m up. With the feet on the lowest band the
+    // TryLedgeGrab 0xDF0980 (down): the wall x -130..-126 has bands from 3.0 m up. With the feet on the lowest band the
     // SHORT move down finds no foot hold and nothing below to reach, so the band between the feet and the hands (row 3)
     // becomes a wall hang (`LEDGE_GRAB_DOWN`, RE/18 §7.3)
-    let (hands, feet_y) = (Vec3::new(162.0, 4.8, 9.62), 3.6);
-    let mut s = Sim::new(Vec3::new(162.0, 3.5, 9.2), FACE_PZ);
+    let (hands, feet_y) = (Vec3::new(-128.0, 4.8, -135.38), 3.6);
+    let mut s = Sim::new(Vec3::new(-128.0, 3.5, -135.8), FACE_PZ);
     {
         let player = s.player;
         let w = s.app.world_mut();
@@ -3656,7 +3656,7 @@ fn climbing_down_past_the_lowest_holds_grabs_a_hang() {
             foot_l: foot,
             foot_r: foot,
             normal: Vec3::NEG_Z,
-            from_feet: Vec3::new(162.0, 3.5, 9.2),
+            from_feet: Vec3::new(-128.0, 3.5, -135.8),
             foot_right: false,
             action: None,
         };
@@ -3670,4 +3670,26 @@ fn climbing_down_past_the_lowest_holds_grabs_a_hang() {
     let l = &s.data().ledge;
     assert!((l.hand_l.y - 3.6).abs() < 0.05, "hanging from the 3.6 m band: {:?}", l.hand_l);
     assert_eq!(l.mv.and_then(|m| m.seq[0]).map(|a| a.id), Some(LEDGE_GRAB_DOWN[0]), "the wall-hang grab plays");
+}
+
+#[test]
+fn climbing_sideways_hangs_from_a_wall_top_at_the_hands() {
+    use crate::player::climb::CLIMB_TO_HANG;
+    // TrySideLedgeGrab 0xDF22C0 (near): block Z stands square to wall Y on the left (+X), its top edge (3.6 m, facing -X)
+    // level with the hands and no holds for the feet: pushing left hangs from it (`xx_l_climb_1m_l_hangwall`)
+    let mut s = Sim::new(Vec3::new(-116.9, 0.0, -136.4), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
+    s.pad(Vec3::Z, 0.45, true, false);
+    let level = |s: &Sim| {
+        let c = &s.data().climb;
+        c.moving.is_none() && (c.foot_l.y - 2.4).abs() < 0.01 && (c.foot_r.y - 2.4).abs() < 0.01
+    };
+    assert!(s.run_until(10.0, level), "feet never reached 2.4 m: {:?}", s.data().climb.foot_l);
+    s.pad(Vec3::X, 0.45, true, false);
+    assert!(s.run_until(6.0, |s| s.loco().current == ActorContextId::Ledge), "never hung: {} {:?}", s.data().climb.last_action, s.data().climb.foot_l);
+    assert_eq!(s.data().climb.last_action, "side ledge grab");
+    let l = &s.data().ledge;
+    assert!(l.normal.x < -0.99 && (l.hand_l.y - 3.6).abs() < 0.05, "on block Z's edge: {:?} {:?}", l.normal, l.hand_l);
+    assert_eq!(l.mv.and_then(|m| m.seq[0]).map(|a| a.id), Some(CLIMB_TO_HANG[0][4]), "`_l_hangwall`");
 }

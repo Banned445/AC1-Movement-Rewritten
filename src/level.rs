@@ -75,13 +75,18 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     //     ladder wall (x 144..147, ladder at x 144.4 on its -Z face z 9.7)
     (141.5, 10.0, 3.0, 0.6, 2.6),
     (145.5, 10.0, 3.0, 0.6, 6.0),
-    // --- ledge → climb side jump (0xDDD490 type 0, RE/18 §7.2): a 2.6 m wall (x 150..153) whose ledge ends 1.6 m before
-    //     a climb wall (x 154.6..158.6, face z 9.7, bands to 5.4 m: CLIMB_WALLS), beyond the side move's reach
-    (151.5, 10.0, 3.0, 0.6, 2.6),
-    (156.6, 10.0, 4.0, 0.6, 6.0),
-    // --- the climb's ledge grab (0xDF0980, RE/18 §7.3): a 7 m wall (x 160..164, face z 9.7) whose bands start at
+    // --- ledge → climb side jump (0xDDD490 type 0, RE/18 §7.2): a 2.6 m wall (x -140..-137) whose ledge ends 1.6 m
+    //     before a climb wall (x -135.4..-131.4, face z -135.3, bands to 5.4 m: CLIMB_WALLS), beyond the side move's reach
+    (-138.5, -135.0, 3.0, 0.6, 2.6),
+    (-133.4, -135.0, 4.0, 0.6, 6.0),
+    // --- the climb's ledge grab (0xDF0980, RE/18 §7.3): a 7 m wall (x -130..-126, face z -135.3) whose bands start at
     //     3.0 m (CLIMB_WALLS): climbing down to the lowest band hangs from the one above it
-    (162.0, 10.0, 4.0, 0.6, 7.0),
+    (-128.0, -135.0, 4.0, 0.6, 7.0),
+    // --- the climb's side ledge grab (0xDF22C0, RE/18 §7.4): wall Y (x -120..-116, face z -135.5, bands to 6.6 m) and on its
+    //     left (+X) block Z, square to the face and 2 m deep toward the climber, top 3.6 m: its top edge is at the
+    //     hands' height with nothing for the feet
+    (-118.0, -135.0, 4.0, 1.0, 7.0),
+    (-115.0, -136.5, 2.0, 2.0, 3.6),
     // --- water tank (x 130..136, z 0..6, walls 2 m): deep water inside (WATER), the drowning (RE/18 §5)
     (133.0, 0.15, 6.0, 0.3, 2.0),
     (133.0, 5.85, 6.0, 0.3, 2.0),
@@ -214,9 +219,11 @@ const CLIMB_WALLS: &[((f32, f32), f32, (i32, i32))] = &[
     // wall X, its holds ending 0.65 m short of the ladder at x -129.4
     ((-133.95, -130.05), -10.5, (1, 11)),
     // the climb wall beside the 2.6 m ledge (the ledge side jump onto climb holds)
-    ((154.65, 158.55), 9.7, (1, 9)),
+    ((-135.35, -131.45), -135.3, (1, 9)),
     // the climb's ledge grab: bands from 3.0 m only
-    ((160.05, 163.95), 9.7, (5, 11)),
+    ((-129.95, -126.05), -135.3, (5, 11)),
+    // wall Y, the side ledge grab onto block Z
+    ((-119.95, -116.05), -135.5, (1, 11)),
 ];
 
 /// Climb walls facing ±X (face x, z range, outward normal x, band index range): the corner climbs.
