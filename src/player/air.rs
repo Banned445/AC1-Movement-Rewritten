@@ -607,7 +607,7 @@ pub fn update_air(
                         if let Some(t) = air.target {
                             if let Some(axis) = super::kiosk::kiosk_axis(t.position, &guidance) {
                                 let dir = Vec3::new(t.position.x - air.start.x, 0.0, t.position.z - air.start.z).normalize_or(fwd);
-                                kiosk_on = Some(super::kiosk::KioskEntry { from: body.feet, target: t.position, axis, dir });
+                                kiosk_on = Some(super::kiosk::KioskEntry { from: body.feet, target: t.position, axis, dir, facing: body.forward() });
                             }
                         }
                     }

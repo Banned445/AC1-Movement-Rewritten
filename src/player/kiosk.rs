@@ -56,11 +56,15 @@ pub struct KioskEntry {
     pub axis: Vec3,
     /// The jump's direction.
     pub dir: Vec3,
+    /// The player's facing at the arrival (the entity's forward row, `sub_4C2F90`).
+    pub facing: Vec3,
 }
 
-/// The entry side (0xE08680): `d` = axis·dir; d > cos 10° → LateralLeft, d < −cos 10° → LateralRight; otherwise by
-/// the second dot (PORT: the axis against the jump direction's right side, hypothesis) FrontLeft / FrontRight.
-pub fn entry_side(axis: Vec3, dir: Vec3) -> KioskSide {
+/// The entry side (0xE08672): `d` = axis·dir (the kiosk entity's forward row against the jump direction);
+/// d > cos 10° → LateralLeft, d < −cos 10° → LateralRight; otherwise axis·facing (the player's forward row) < 0 →
+/// FrontLeft, else FrontRight. Verified live (RE/18 §4): the kiosk's forward runs along the bar; a front jump came in
+/// exactly across it (d = 0.000, facing·axis 0.54 → FrontRight), a side jump at d = −0.987 → LateralRight.
+pub fn entry_side(axis: Vec3, dir: Vec3, facing: Vec3) -> KioskSide {
     let a = Vec3::new(axis.x, 0.0, axis.z).normalize_or_zero();
     let d = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     let k = a.dot(d);
@@ -68,7 +72,7 @@ pub fn entry_side(axis: Vec3, dir: Vec3) -> KioskSide {
         KioskSide::LateralLeft
     } else if k < -LATERAL_COS {
         KioskSide::LateralRight
-    } else if a.dot(super::right_of(d)) < 0.0 {
+    } else if a.dot(Vec3::new(facing.x, 0.0, facing.z)) < 0.0 {
         KioskSide::FrontLeft
     } else {
         KioskSide::FrontRight
@@ -112,7 +116,7 @@ fn action(id: u32) -> Option<ActionBlend> {
 impl HumanKioskData {
     pub fn enter(&mut self, e: KioskEntry) {
         self.seq = self.seq.wrapping_add(1);
-        self.side = entry_side(e.axis, e.dir);
+        self.side = entry_side(e.axis, e.dir, e.facing);
         self.stage = 0;
         self.axis = e.axis;
         self.dir = Vec3::new(e.dir.x, 0.0, e.dir.z).normalize_or(Vec3::NEG_Z);
@@ -199,9 +203,11 @@ mod tests {
 
     #[test]
     fn sides_follow_the_kiosk_axis() {
-        assert_eq!(entry_side(Vec3::Z, Vec3::Z), KioskSide::LateralLeft);
-        assert_eq!(entry_side(Vec3::Z, Vec3::NEG_Z), KioskSide::LateralRight);
-        assert!(!entry_side(Vec3::Z, Vec3::X).lateral());
-        assert_ne!(entry_side(Vec3::Z, Vec3::X), entry_side(Vec3::NEG_Z, Vec3::X));
+        assert_eq!(entry_side(Vec3::Z, Vec3::Z, Vec3::Z), KioskSide::LateralLeft);
+        assert_eq!(entry_side(Vec3::Z, Vec3::NEG_Z, Vec3::NEG_Z), KioskSide::LateralRight);
+        assert!(!entry_side(Vec3::Z, Vec3::X, Vec3::X).lateral());
+        // across the bar, the facing's lean along the axis picks the front side
+        assert_eq!(entry_side(Vec3::Z, Vec3::X, Vec3::new(1.0, 0.0, 0.5)), KioskSide::FrontRight);
+        assert_eq!(entry_side(Vec3::Z, Vec3::X, Vec3::new(1.0, 0.0, -0.5)), KioskSide::FrontLeft);
     }
 }
