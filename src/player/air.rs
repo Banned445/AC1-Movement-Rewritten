@@ -195,6 +195,8 @@ pub struct HumanInAirData {
     pub drop: Option<(usize, usize, Option<Vec3>)>,
     /// First steep contact and rag-fall requirement (0xE038A0 / 0xE05200).
     pub slope_slide: super::ground_extras::SlopeSlide,
+    /// `HumanInAir__AntiStuckNudge` 0xE0B1E0.
+    pub anti_stuck: super::falls::AntiStuck,
     /// A run jump turns from the takeoff facing to its destination over the takeoff (set up on the first update).
     turn_pending: bool,
     /// (takeoff heading, destination heading) of that turn.
@@ -216,6 +218,7 @@ impl HumanInAirData {
         self.free_target = false;
         self.drop = None;
         self.slope_slide = default();
+        self.anti_stuck.reset(self.seq.wrapping_mul(2_654_435_761));
         self.entry_velocity = None;
         self.release_hold = None;
         self.edge_landed = false;
@@ -711,11 +714,13 @@ pub fn update_air(
                 if !AIR_CATCHES && body.velocity.y <= 0.0 && air.apex_y - body.feet.y < 9.0 && air.time_in_air > 0.1 {
                     narrow_on = narrow_catch(body.feet + body.velocity * dt, body.forward(), foot, &guidance, &collision);
                 }
+                let before = body.feet;
+                air.anti_stuck.tick(dt);
                 let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, b.velocity * dt, false, dt) };
                 body.feet = r.position;
-                // PORT: static proxy contacts have no character bodies. The 0.3 m / Data+528
-                // rejection gate (0xE038A0) is inactive until native AntiStuckNudge (0xE0B1C0)
-                // arms it; that recovery path is not yet ported.
+                // PORT: static proxy contacts have no character bodies. While the anti-stuck nudge's gate runs,
+                // contacts within 0.3 m below the start do not count (0xE038A0, Data+528)
+                let gated = air.anti_stuck.ignores_contacts(air.start_y, body.feet.y);
                 let contact = if GAME_GROUND_EXTRAS {
                     super::ground_extras::ground_contact(body.proxy.manifold.iter().map(|c| c.normal.y))
                 } else { super::ground_extras::GroundContact::None };
@@ -758,8 +763,15 @@ pub fn update_air(
                     step_off = super::air_catches::edge_landing(body.feet, body.forward(), &guidance, &collision);
                 }
                 if narrow_on.is_some() || hay_on.is_some() || step_off.is_some() {
-                } else if r.landed && body.velocity.y <= 0.0 {
+                } else if r.landed && body.velocity.y <= 0.0 && !gated {
                     landed_at = Some(body.feet.y);
+                } else if let Some(v) = (dt > 0.0).then(|| (body.feet - before) / dt).and_then(|moved| {
+                    // `HumanInAir__AntiStuckNudge` 0xE0B1E0: after every landing check failed, a body held still (or
+                    // sliding sideways on a contact) for 0.5 s is pushed out
+                    let has_contacts = !body.proxy.manifold.is_empty();
+                    air.anti_stuck.update(dt, moved, air.target.is_some(), has_contacts, body.feet, body.forward(), |p| collision.capsule_fits(p))
+                }) {
+                    body.velocity = v;
                 } else if !AIR_CATCHES && grasp && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
                     // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
                     // in reach
