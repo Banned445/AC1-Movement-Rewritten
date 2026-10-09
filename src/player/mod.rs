@@ -22,6 +22,7 @@ pub mod falls;
 pub mod hay;
 pub mod item_flags;
 pub mod jump_blend;
+pub mod jump_candidates;
 pub mod jump_clips;
 pub mod ladder;
 pub mod ledge;

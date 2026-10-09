@@ -108,7 +108,9 @@ pub enum InAirEntry {
     JumpToTarget { from: Vec3, target: JumpTarget, speed_param: f32, foot_left: bool },
     /// No target found: the free-jump target (`Human__MakeFreeJumpTarget` 0xB13630 → 0xB1E7F0, `FREE_JUMP_AHEAD` along
     /// `dir`, `FREE_JUMP_DOWN` below), jumped at like any target (type 1) and ended by the ground contact.
-    FreeJump { from: Vec3, dir: Vec3, speed_param: f32, foot_left: bool },
+    /// `ahead` = how far along `dir` the target lies (`FREE_JUMP_AHEAD`; the step off an edge, event 68, aims
+    /// 1 + 2·profile·speed m ahead, 0xD9D1F0).
+    FreeJump { from: Vec3, dir: Vec3, ahead: f32, speed_param: f32, foot_left: bool },
     /// A free-step jump (jump kind 1: the `freestep_*_to_air` takeoff) from a beam or a pilotis to a target
     /// (NarrowObject event 4 → `Human__SetupJumpToTarget` 0xB20200 with kind 1, 0xE4D950).
     FreeStepJump { from: Vec3, target: JumpTarget, foot_left: bool },
@@ -287,7 +289,7 @@ impl HumanInAirData {
                 let d = action.duration().max(0.1);
                 self.mode = AirMode::Jump { from, clip_end, aim: clip_end, apex: 0.0, duration: d, t: 0.0, then_fall_to: Some(clip_end), real: true, t_takeoff: 0.0, fwd };
             }
-            InAirEntry::FreeJump { from, dir, speed_param, foot_left } => {
+            InAirEntry::FreeJump { from, dir, ahead, speed_param, foot_left } => {
                 self.start_y = from.y;
                 self.start = from;
                 self.apex_y = from.y;
@@ -298,7 +300,7 @@ impl HumanInAirData {
                 // `Human__SetupJumpToTarget` like any target; on open ground the contact ends the jump long before
                 // it (live: 0.66 s, 4.8 m), off a roof it falls on from there
                 let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
-                let aim = from + flat * FREE_JUMP_AHEAD - Vec3::Y * FREE_JUMP_DOWN;
+                let aim = from + flat * ahead - Vec3::Y * FREE_JUMP_DOWN;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
                 self.free_target = true;
             }
@@ -862,7 +864,7 @@ mod fall_tests {
         let mut air = HumanInAirData::default();
         let start = 0.0f32; // facing −Z
         let dir = Quat::from_rotation_y(-0.75) * Vec3::NEG_Z; // 43° to the right
-        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, speed_param: 0.5, foot_left: true });
+        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
         air.begin_turn(start);
         let AirMode::Jump { t_takeoff, fwd, from, clip_end, .. } = air.mode else { panic!("not a jump") };
         assert!(t_takeoff > 0.1, "{t_takeoff}");

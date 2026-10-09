@@ -142,7 +142,8 @@ pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[(37.5, 26.0, 2.2, 2.2, 1.5
 
 /// Floating slabs (centre x, top y, centre z, size x, size z, thickness): free-hang ledges.
 const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
-    (2.0, 3.0, 36.0, 6.0, 1.2, 0.3),
+    // the free-hang balcony: 2.9 m, inside the tap jump's 3.0 m reach zone (JumpZones slot 3, RE/18 §1.2)
+    (2.0, 2.9, 36.0, 6.0, 1.2, 0.3),
     (64.5, 2.6, 50.0, 3.0, 0.6, 0.3), // overhang continuing wall F's ledge (hang-type switch test)
     (60.0, 3.4, 90.0, 3.0, 0.2, 0.2), // swing bars 3.5 m apart
     (60.0, 3.4, 93.5, 3.0, 0.2, 0.2),
