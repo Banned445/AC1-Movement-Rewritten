@@ -1110,6 +1110,17 @@ pub fn update_ground(
             }
         }
 
+        // ---------------------------------------------------------------- into a haystack (event 122)
+        // The interpreter's last request (0xEE8E08, either profile): the stick past the dead zone and IHumanGround
+        // vt1592 (event 122's guard 0xD8F0B0: touching a haystack, facing it within 100 degrees, the stick within 45
+        // degrees into it) → vt1596 → HumanHayStack, entry Ground (0xD84F80).
+        if moving && !busy {
+            if let Some(e) = super::hay::ground_entry(body.feet, body.forward(), pad.dir, &guidance.haystacks) {
+                switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
+                continue;
+            }
+        }
+
         // ---------------------------------------------------------------- move (blended clip root motion)
         let stopping = g.oneshot.is_some_and(|o| jump_blend::RUN_STOP.contains(&o.blend.id) || jump_blend::RUN_STOP_TO_WAIT.contains(&o.blend.id));
         let (delta, speed) = if let Some(mut os) = g.oneshot {

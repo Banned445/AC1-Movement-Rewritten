@@ -1,10 +1,17 @@
 //! HumanHayStack (context 21): landing in a haystack after a Leap of Faith, waiting inside, hopping out
 //! (RE/04 §4.1.12).
 //!
-//! - Entry (`HumanHayStack__Enter` 0xE43140): from a faith jump `EnterTop_FaithLanding` 0xE41D50 plays
-//!   `0x23A9666C` `xx_h_faith_jump_landing` (blend 0.3 s), other entries from the air `EnterFromAir` 0xE42700
-//!   play `0x7750D212` `xx_h_air_to_haystack` (0.1 s). Both move the root to the haystack's position with the
-//!   interpolator (`sub_711130`) over clamp(distance / speed, 0.1, 0.4) s.
+//! - Entry (`HumanHayStack__Enter` 0xE43140, `HumanHayStackEntryType`, RE/18 §3):
+//!   - **Top** (0): `EnterTop_FaithLanding` 0xE41D50 plays `0x23A9666C` `xx_h_faith_jump_landing` (blend 0.3 s).
+//!     InAir gives it on every arrival at a haystack target (0xE07D00 clears InAir+340) and on a ballistic hit
+//!     whose contact normal is more than 0.9 up (`CheckHayStackEntry` 0xE05490).
+//!   - **SideJump** (3): `EnterFromAir` 0xE42700 plays `0x7750D212` `xx_h_air_to_haystack` (0.1 s): a ballistic hit
+//!     on the side. Top and SideJump move the root to the haystack's position with the interpolator (`sub_711130`)
+//!     over clamp(distance / speed, 0.1, 0.4) s.
+//!   - **Ground** (2, 0xE42420) / **FreeStep** (1, 0xE42190): one of `0x244CD280` / `0x244CFACB`
+//!     (`xx_h_freestep_footr_to_haystack_01/02`, picked by the game's LCG bit), the root interpolated to the
+//!     haystack over the action's length; Ground turns to face the haystack, FreeStep keeps the facing. Ground is
+//!     the Ground context's event 122 (IHumanGround vt1592 / vt1596, guard 0xD8F0B0).
 //! - Wait (`ChooseWait` 0xE416B0 → `PlayWaitHigh` 0xE408C0): `0x23A9666D` `xx_h_haystack_wait`.
 //! - Hop out: event 3 in the wait (`Wait_HandleEvent` 0xE43BD0), guard `Guard_HopOut` 0xE434E0: the ray along
 //!   the wanted direction leaves the haystack's footprint; the exit point (+0.5 m along it, 1.25 m up) must
@@ -23,14 +30,31 @@ pub const HAYSTACK_WAIT: u32 = 0x23A9_666D;
 pub const HAYSTACK_FROM_AIR: u32 = 0x7750_D212;
 pub const HAYSTACK_HOP_OUT: u32 = 0x2C4C_2431;
 
+pub const HAYSTACK_DIVE: [u32; 2] = [0x244C_D280, 0x244C_FACB];
+
+/// `HumanHayStackEntryType` (desc 0x195F010).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HayEntry {
+    #[default]
+    Top,
+    FreeStep,
+    Ground,
+    SideJump,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct HayStackEntry {
     pub stack: Aabb3,
-    /// Arrived by a Leap of Faith (faith landing) rather than another air entry.
-    pub faith: bool,
+    pub kind: HayEntry,
     pub from: Vec3,
     /// Speed at arrival (the interpolator time is distance / speed).
     pub speed: f32,
+}
+
+/// The game's random bit for the dive clip (`dword_1A1FC3C` LCG: x = 1664525·x + 1013904223, bit 0).
+fn dive_pick(state: &mut u32) -> usize {
+    *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    (*state & 1) as usize
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,6 +76,10 @@ pub struct HumanHayStackData {
     /// Root interpolation time (0xE41D50: clamp(dist / speed, 0.1, 0.4)).
     pub interp: f32,
     pub seq: u32,
+    /// The entry's facing (Ground: toward the haystack).
+    pub face: Option<Vec3>,
+    pub kind: HayEntry,
+    rng: u32,
 }
 
 impl HumanHayStackData {
@@ -59,15 +87,54 @@ impl HumanHayStackData {
         self.seq = self.seq.wrapping_add(1);
         self.stack = Some(e.stack);
         self.phase = HayPhase::Entering;
-        let id = if e.faith { HAYSTACK_FAITH_LANDING } else { HAYSTACK_FROM_AIR };
-        self.action = single(id);
+        self.kind = e.kind;
         self.t = 0.0;
         self.from = e.from;
         // the haystack entity's position: its base centre
         self.to = Vec3::new((e.stack.min.x + e.stack.max.x) * 0.5, e.stack.min.y, (e.stack.min.z + e.stack.max.z) * 0.5);
-        let d = (self.to - e.from).length();
-        self.interp = if e.speed > 5e-4 { (d / e.speed).clamp(0.1, 0.4) } else { 0.1 };
+        self.face = None;
+        match e.kind {
+            HayEntry::Top | HayEntry::SideJump => {
+                self.action = single(if e.kind == HayEntry::Top { HAYSTACK_FAITH_LANDING } else { HAYSTACK_FROM_AIR });
+                let d = (self.to - e.from).length();
+                self.interp = if e.speed > 5e-4 { (d / e.speed).clamp(0.1, 0.4) } else { 0.1 };
+            }
+            HayEntry::Ground | HayEntry::FreeStep => {
+                let id = HAYSTACK_DIVE[dive_pick(&mut self.rng)];
+                self.action = single(id);
+                self.interp = self.action.map(|a| a.duration()).unwrap_or(0.8).max(0.1);
+                if e.kind == HayEntry::Ground {
+                    let f = Vec3::new(self.to.x - e.from.x, 0.0, self.to.z - e.from.z).normalize_or_zero();
+                    self.face = (f != Vec3::ZERO).then_some(f);
+                }
+            }
+        }
     }
+}
+
+/// Ground event 122's guard (0xD8F0B0): a controller contact with a haystack (entity descriptor 8; 9 = hiding place),
+/// the facing within 100 degrees of the contact (dot > -0.1736) and the stick within 45 degrees into it (dot >
+/// 0.7071). PORT: haystacks are not solid in the port, so the contact is the capsule (radius 0.4) touching the
+/// haystack's side at foot height.
+pub fn ground_entry(feet: Vec3, facing: Vec3, stick: Vec3, stacks: &[Aabb3]) -> Option<HayStackEntry> {
+    for s in stacks {
+        if feet.y < s.min.y - 0.3 || feet.y > s.max.y - 0.3 {
+            continue;
+        }
+        let q = Vec3::new(feet.x.clamp(s.min.x, s.max.x), feet.y, feet.z.clamp(s.min.z, s.max.z));
+        let d = Vec3::new(feet.x - q.x, 0.0, feet.z - q.z);
+        // a contact on the haystack's side: the body outside its footprint, within the capsule's radius
+        if d.length() > 0.45 || d.length_squared() < 1e-8 {
+            continue;
+        }
+        // the contact normal points from the haystack to the body
+        let n = d.normalize();
+        if (-n).dot(facing) <= -0.173_648_18 || (-n).dot(stick) <= std::f32::consts::FRAC_1_SQRT_2 {
+            continue;
+        }
+        return Some(HayStackEntry { stack: *s, kind: HayEntry::Ground, from: feet, speed: 0.0 });
+    }
+    None
 }
 
 fn single(id: u32) -> Option<ActionBlend> {
@@ -114,6 +181,9 @@ pub fn update_hay(
         match h.phase {
             HayPhase::Entering => {
                 body.feet = h.from.lerp(h.to, (h.t / h.interp).min(1.0));
+                if let Some(f) = h.face {
+                    body.heading = super::heading_of(f);
+                }
                 let dur = h.action.map(|a| a.duration()).unwrap_or(0.5);
                 if h.t >= dur.max(h.interp) {
                     h.phase = HayPhase::Waiting;

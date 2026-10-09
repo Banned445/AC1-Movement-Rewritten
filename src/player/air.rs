@@ -612,9 +612,9 @@ pub fn update_air(
                             let p = body.feet;
                             p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3
                         }) {
-                            // arrival on a haystack target (0xE07D00 → RequestHayStack 0xE01AF0)
-                            let faith = air.flight.is_some_and(|f| f.id == jump_blend::FLIGHT_FAITH);
-                            hay_on = Some(super::hay::HayStackEntry { stack: *stack, faith, from: body.feet, speed: body.velocity.length() });
+                            // arrival on a haystack target (0xE07D00 clears InAir+340 → RequestHayStack 0xE01AF0 →
+                            // 0xE00E30: entry Top, the faith landing, for every target arrival)
+                            hay_on = Some(super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
                         }
                     }
                     // a jump without a real target (on the spot / free jump) can come down on a beam or a pilotis
@@ -722,7 +722,8 @@ pub fn update_air(
                         body.velocity.y < 0.0 && previous.y >= stack.max.y && next.y <= stack.max.y
                             && next.x >= stack.min.x && next.x <= stack.max.x
                             && next.z >= stack.min.z && next.z <= stack.max.z
-                    }).map(|stack| super::hay::HayStackEntry { stack: *stack, faith: false, from: body.feet, speed: body.velocity.length() });
+                    // a hit through the top: contact normal more than 0.9 up → entry Top (0xE05490 / 0xE00E30)
+                    }).map(|stack| super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
                 }
                 if narrow_on.is_some() || hay_on.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 {

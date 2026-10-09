@@ -71,6 +71,10 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     // Leap of Faith and the haystack (RE/04 §4.1.12)
     TAKEOFF_FAITH[0], TAKEOFF_FAITH[1], FLIGHT_FAITH, FALL_FAITH,
     super::hay::HAYSTACK_FAITH_LANDING, super::hay::HAYSTACK_WAIT, super::hay::HAYSTACK_FROM_AIR, super::hay::HAYSTACK_HOP_OUT,
+    // the dives into a haystack from the ground / a free step (0xE42420 / 0xE42190)
+    super::hay::HAYSTACK_DIVE[0], super::hay::HAYSTACK_DIVE[1],
+    // the step off an edge backwards (event 68, 0xD9D1F0): `xx_fall_ground_back_tr_fall`
+    0x935C_E89E,
 ];
 
 /// Run stop (HumanGround state 18, enter 0xD98E30): [left-foot item playing, right] = `xx_h_{jog,run,sprint}stop_foot{l,r}`

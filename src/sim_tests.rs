@@ -3099,7 +3099,8 @@ fn flat_fall_height_scenarios_reach_the_expected_player_bands() {
 fn an_ordinary_ballistic_fall_enters_hay_without_ground_damage() {
     let mut s=Sim::new(Vec3::new(37.5,13.0,26.0),0.0);
     assert!(s.run_until(4.0, |s| s.loco().current==ActorContextId::HayStack));
-    assert_eq!(s.data().hay.action.map(|a|a.id),Some(crate::player::hay::HAYSTACK_FROM_AIR));
+    // a drop straight onto the top: contact normal more than 0.9 up → entry Top (0xE05490 / 0xE00E30)
+    assert_eq!(s.data().hay.action.map(|a|a.id),Some(crate::player::hay::HAYSTACK_FAITH_LANDING));
     assert!(s.ground().last_landing.is_none());
     assert!(s.run_until(3.0, |s| s.data().hay.phase==crate::player::hay::HayPhase::Waiting));
 }
@@ -3517,3 +3518,21 @@ fn walking_off_a_low_ledge_steps_off_it() {
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "never landed");
     assert!(s.body().feet.y.abs() < 0.05 && s.body().feet.z < 49.5, "{:?}", s.body().feet);
 }
+
+#[test]
+fn walking_into_a_haystack_dives_in() {
+    use crate::player::hay::{HayEntry, HayPhase, HAYSTACK_DIVE};
+    // the haystack at (37.5, 26), 2.2 m square, 1.5 m high: walking into it pushes event 122 (guard 0xD8F0B0) and
+    // dives in with the Ground entry (0xE42420): one of the two dive clips, the root carried to the haystack
+    let mut s = Sim::new(Vec3::new(37.5, 0.0, 22.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::HayStack), "never dived in: {:?}", s.body().feet);
+    let h = &s.data().hay;
+    assert_eq!(h.kind, HayEntry::Ground);
+    assert!(h.action.is_some_and(|a| HAYSTACK_DIVE.contains(&a.id)));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().hay.phase == HayPhase::Waiting), "never settled");
+    let f = s.body().feet;
+    assert!((f.x - 37.5).abs() < 0.05 && (f.z - 26.0).abs() < 0.05, "inside the haystack: {f:?}");
+}
+
