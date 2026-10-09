@@ -161,6 +161,10 @@ pub struct HumanInAirData {
     pub time_in_air: f32,
     /// Last catch (fall height ≥ 3 m selects the long catch animations in the game, 0xE0BB70).
     pub long_catch: bool,
+    /// InAirData +0x190: the hold let go of (a ledge or climb release); catches must be 0.5 m below it (0xE0A990).
+    pub release_hold: Option<Vec3>,
+    /// The edge landing (InAir +225 bit 2) has played in this air stay.
+    pub edge_landed: bool,
     pub mode: AirMode,
     /// JumpApexPosition (+0xD0): where descent started — the fall-height reference.
     pub apex_y: f32,
@@ -213,6 +217,8 @@ impl HumanInAirData {
         self.drop = None;
         self.slope_slide = default();
         self.entry_velocity = None;
+        self.release_hold = None;
+        self.edge_landed = false;
         match entry {
             InAirEntry::JumpToTarget { from, target, speed_param, foot_left } => {
                 self.speed_ratio = speed_param;
@@ -524,6 +530,9 @@ pub fn update_air(
         let mut pass_on: Option<super::passover::PassOverEntry> = None;
         let mut swing_on = false;
         let mut ladder_on: Option<super::ladder::LadderEntry> = None;
+        let mut climb_on: Option<super::climb::ClimbEntry> = None;
+        let mut catch_hang: Option<(u32, bool, Option<bool>)> = None;
+        let mut step_off: Option<(u32, Vec3)> = None;
         let foot = (!air.foot_left) as usize;
         match air.mode {
             AirMode::Jump { from, clip_end, aim, apex, duration, t, then_fall_to, real, t_takeoff, fwd } => {
@@ -739,7 +748,16 @@ pub fn update_air(
                     // a hit through the top: contact normal more than 0.9 up → entry Top (0xE05490 / 0xE00E30)
                     }).map(|stack| super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
                 }
-                if narrow_on.is_some() || hay_on.is_some() {
+                // InAir sub-state 3, the edge landing (0xE0D684): a flat contact with edges at the feet, under 9 m
+                let fall_h = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
+                if AIR_CATCHES && narrow_on.is_none() && hay_on.is_none() && r.landed && body.velocity.y <= 0.0 && !air.edge_landed
+                    // PORT: the proxy's contact list is empty on the landing frame; a landing that is not a steep
+                    // contact is the flat contact (GetGroundContactType = 1)
+                    && fall_h < 9.0 && contact != super::ground_extras::GroundContact::Steep
+                {
+                    step_off = super::air_catches::edge_landing(body.feet, body.forward(), &guidance, &collision);
+                }
+                if narrow_on.is_some() || hay_on.is_some() || step_off.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 {
                     landed_at = Some(body.feet.y);
                 } else if !AIR_CATCHES && grasp && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
@@ -769,11 +787,16 @@ pub fn update_air(
                     e.facing = body.forward();
                     e.catch_speed = body.velocity.length();
                     ladder_on = Some(e);
-                } else if manual {
-                    // PORT: the pre-existing generic ledge adapter is outside this catch-geometry pass.
-                    if let Some(h) = find_air_catch(body.feet, reach, &guidance) {
-                        air.long_catch = fall_height >= 3.0;
-                        hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception) });
+                } else if let Some(found) = super::air_catches::ledge_search(body.feet, reach, body.forward(), fall_height, manual, air.release_hold, &guidance, &collision) {
+                    // CheckAirCatch 0xE0BB70: the ledge, climb and free-hang catches (RE/19 §2)
+                    air.long_catch = fall_height >= 3.0;
+                    match found {
+                        super::air_catches::CatchFound::Climb(e) => climb_on = Some(e),
+                        super::air_catches::CatchFound::Hang { mid, normal, wall, action, one_hand } => {
+                            let sub = if wall { LedgeSubState::HangWallReception } else { LedgeSubState::HangFreeReception };
+                            hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(mid, normal, body.feet, sub) });
+                            catch_hang = Some((action, wall, one_hand));
+                        }
                     }
                 }
             }
@@ -794,7 +817,25 @@ pub fn update_air(
         air.prev_y = body.feet.y;
         body.grounded = false;
 
-        if let Some(e) = ladder_on {
+        if let Some(e) = climb_on {
+            // the climb catch (type 1): the catch action plays as the climb's entry while the root goes to the holds'
+            // pose. PORT: the game enters the Ledge context (SubState 13, catch type 1) first.
+            air.mode = AirMode::Idle;
+            body.velocity = Vec3::ZERO;
+            switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
+        } else if let Some((action, facing)) = step_off {
+            // the edge landing: the step-off action, then the fall (request 33), facing the chosen way
+            body.heading = super::heading_of(facing);
+            body.velocity.y = 0.0;
+            let blend = super::ledge_moves::single_item(action, 0);
+            let fall = super::ledge_moves::single_item(action, 1);
+            if let Some(a) = blend {
+                let release = air.release_hold;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::OnPlace { from: body.feet, fwd: facing, action: a, fall }));
+                data.air.edge_landed = true;
+                data.air.release_hold = release;
+            }
+        } else if let Some(e) = ladder_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
@@ -804,6 +845,11 @@ pub fn update_air(
             body.velocity = Vec3::ZERO;
             let flight = air.flight;
             switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
+            if let Some((action, wall, one_hand)) = catch_hang {
+                data.ledge.catch_action = Some(action);
+                data.ledge.catch_free = !wall;
+                data.ledge.catch_one_hand = one_hand;
+            }
             if swing_on {
                 let n = entry.normal;
                 let root = super::ledge::hang_root_at(entry.hand_l, entry.hand_r, n, super::ledge::LedgeHangType::Free, &collision);

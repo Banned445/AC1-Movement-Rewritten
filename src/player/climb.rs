@@ -1125,9 +1125,11 @@ pub fn update_climb(
             limbs.hands = None;
             limbs.feet = None;
             d.last_action = "lost grip";
+            let hold = (d.hand_l + d.hand_r) * 0.5;
             let entry = InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Climb, speed_param: 0.0 };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             data.air.fall_action = super::ledge_moves::single_item(LOST_GRIP, 0);
+            data.air.release_hold = Some(hold);
             continue;
         }
         let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
@@ -1220,7 +1222,9 @@ pub fn update_climb(
             pad.consume_hand();
             limbs.hands = None;
             limbs.feet = None;
+            let hold = (d.hand_l + d.hand_r) * 0.5;
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Climb, speed_param: 0.0 }));
+            data.air.release_hold = Some(hold);
             continue;
         }
         // ... and high profile with the Legs buffer jumps off (event 2, the ledge rule; verified live)

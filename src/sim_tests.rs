@@ -3696,3 +3696,67 @@ fn free_running_onto_a_haystack_carts_rim_drops_into_the_haystack() {
     assert!(on_rim.get(), "landed on the rim first");
     assert_eq!(s.data().hay.kind, HayEntry::FreeStep);
 }
+
+#[test]
+fn falling_past_climb_holds_with_the_hand_held_catches_into_the_climb() {
+    use crate::player::air_catches::CLIMB_CATCH;
+    // CheckAirCatch 0xE0BB70 → FindLedgeCatch 0xE0A990 (hands at the feet + 1.4 m) with holds for the feet 1.2 m below
+    // (sub_E0A810) → the climb catch, type 1: the Climb context (the tower face z 27, bands every 0.6 m)
+    let from = Vec3::new(-20.0, 6.0, 26.45);
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "no climb catch: {:?} {:?}", s.loco().current, s.body().feet);
+    let c = &s.data().climb;
+    assert!((c.hand_l.y - c.foot_l.y - 1.2).abs() < 0.05, "hands 1.2 m above the feet: {:?} {:?}", c.hand_l, c.foot_l);
+    assert!(c.move_action.is_some_and(|a| CLIMB_CATCH.contains(&a)), "the climb catch plays: {:?}", c.move_action);
+}
+
+#[test]
+fn a_long_fall_beside_a_free_hang_edge_catches_one_handed_to_the_side() {
+    use crate::player::air_catches::FREE_CATCH_SIDE;
+    // sub_DFFE30 (fall of 3 m or more): one hold at the feet + 1.95 m, ahead along the reach; the balcony slab's south
+    // edge (z 35.4, 2.9 m, no wall below) lies 90° to the side of the facing → the side free-hang catch, one hand
+    // facing +X, the stick toward the slab (+Z): the manual grab's box lies along the stick, 0.5 m ahead
+    let from = Vec3::new(1.0, 5.2, 34.9);
+    let mut s = Sim::new(from, -std::f32::consts::FRAC_PI_2);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::Z, 0.6, false, false);
+    s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ledge), "no catch: {:?} {:?}", s.loco().current, s.body().feet);
+    s.run(0.05);
+    let l = &s.data().ledge;
+    assert!(l.catch_action.is_some_and(|a| FREE_CATCH_SIDE.contains(&a)), "a side catch: {:?}", l.catch_action.map(|a| format!("{a:#x}")));
+    assert!(l.catch_one_hand.is_some());
+    assert_eq!(l.hang_type, crate::player::ledge::LedgeHangType::Free);
+}
+
+#[test]
+fn landing_on_a_roofs_lip_steps_off_the_edge() {
+    use crate::player::air_catches::STEP_OFF;
+    // InAir sub-state 3 (0xE0D684): a flat landing with the feet within 0.15 m of the roof edge (roof x 38..44, z
+    // 9..15, 3 m) → the step-off action, then the fall to the street
+    let from = Vec3::new(41.0, 5.0, 9.1);
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.5, |s| s.data().air.edge_landed), "no edge landing: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.data().air.flight.is_some_and(|a| STEP_OFF.contains(&a.id)), "a step-off action");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "never reached the street: {:?}", s.body().feet);
+}
+
+
+#[test]
+fn edge_landing_finds_the_roof_edge_at_the_feet() {
+    use crate::player::air_catches::{edge_landing, STEP_OFF};
+    let (collision, guidance) = crate::level::geometry();
+    // the roof x 38..44, z 9..15, 3 m: feet 0.1 m inside its south edge (normal -Z), facing +Z (away from the drop)
+    let got = edge_landing(Vec3::new(41.0, 3.0, 9.1), Vec3::Z, &guidance, &collision);
+    assert!(got.is_some(), "no edge at the feet");
+    let (id, face) = got.unwrap();
+    assert_eq!(id, STEP_OFF[0], "facing away from the drop: step_off_front");
+    assert!(face.z > 0.9, "keeps facing away from the drop: {face:?}");
+    // well inside the roof: nothing
+    assert!(edge_landing(Vec3::new(41.0, 3.0, 12.0), Vec3::Z, &guidance, &collision).is_none());
+}

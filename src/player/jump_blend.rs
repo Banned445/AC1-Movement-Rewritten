@@ -75,6 +75,9 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     super::hay::HAYSTACK_DIVE[0], super::hay::HAYSTACK_DIVE[1],
     // the step off an edge backwards (event 68, 0xD9D1F0): `xx_fall_ground_back_tr_fall`
     0x935C_E89E,
+    // the air catches (CheckAirCatch 0xE0BB70): the climb catch, the ≥ 3 m side free-hang catch, the edge landing
+    super::air_catches::CLIMB_CATCH[0], super::air_catches::CLIMB_CATCH[1], super::air_catches::FREE_CATCH_SIDE[0], super::air_catches::FREE_CATCH_SIDE[1],
+    super::air_catches::STEP_OFF[0], super::air_catches::STEP_OFF[1], super::air_catches::STEP_OFF[2], super::air_catches::STEP_OFF[3],
     // the climb's ledge grabs (TryLedgeGrab 0xDF0980): up, down, then left / right by row, [wall, free]
     super::climb::LEDGE_GRAB_UP[0], super::climb::LEDGE_GRAB_UP[1], super::climb::LEDGE_GRAB_DOWN[0], super::climb::LEDGE_GRAB_DOWN[1],
     super::climb::LEDGE_GRAB_SIDE[0][0][0], super::climb::LEDGE_GRAB_SIDE[0][0][1], super::climb::LEDGE_GRAB_SIDE[0][1][0],

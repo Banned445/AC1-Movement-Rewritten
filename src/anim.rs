@@ -905,7 +905,8 @@ fn choose_clip(
                     "grab" if loco.previous == ActorContextId::InAir && l.moving() && p.caught != Some(token) => {
                         p.caught = Some(token);
                         let hi = data.air.long_catch as usize;
-                        let mut r = action(&lib, &[if wall { ACT_CATCH_WALL[hi] } else { ACT_CATCH_FREE[hi] }], false, token, None, Some(if wall { "catch_wall" } else { "catch_free" }));
+                        let id = l.catch_action.unwrap_or(if wall { ACT_CATCH_WALL[hi] } else { ACT_CATCH_FREE[hi] });
+                        let mut r = action(&lib, &[id], false, token, None, Some(if wall { "catch_wall" } else { "catch_free" }));
                         // CheckAirCatch snaps the 3-way wall catch (straight / 30° out / 45° in) to the dominant angle
                         // class; the port's ledges are straight
                         if let Some(r) = r.as_mut().filter(|_| wall) {
