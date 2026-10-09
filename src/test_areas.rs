@@ -33,6 +33,8 @@ pub const AREAS: &[Area] = &[
     at("Open ground (walk, run, sprint, pivots)", Vec3::new(-60.0, 0.0, -40.0), EAST),
     at("Roofs and jumps", Vec3::new(7.0, 3.5, 12.0), EAST),
     at("Step-up box (free-run hop)", Vec3::new(9.0, 0.0, -3.0), NORTH),
+    at("Static jump at a 2.6 m wall top (stand still, high profile, tap Space)", Vec3::new(12.0, 0.0, 41.1), NORTH),
+    at("Straight jump bands (knee-high block, 2.2 m wall)", Vec3::new(53.0, 0.0, 48.8), NORTH),
     at("Pass-over railing", Vec3::new(40.0, 0.0, 8.4), SOUTH),
     at("Pass-over parapet on a roof (vault, then hang on the far side)", Vec3::new(-120.0, 4.0, -113.5), SOUTH),
     at("Look-down and pull-down edge (walk into it and hold; E to hang)", Vec3::new(8.0, 3.5, 12.0), EAST),

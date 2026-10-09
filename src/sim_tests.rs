@@ -3900,3 +3900,18 @@ fn vaulting_a_roofs_parapet_pulls_down_to_hang_on_the_far_side() {
     assert!(l.normal.dot(Vec3::NEG_Z) > 0.99 && (l.hand_l.y - 5.0).abs() < 0.05, "hanging on the parapet's far face: {:?} {:?}", l.normal, l.hand_l);
     assert!(s.body().feet.z < -118.3, "on the far side: {:?}", s.body().feet);
 }
+
+#[test]
+fn a_static_jump_at_a_wall_top_hangs_from_it() {
+    // the jump-up wall (x 8..16, face z 41.7, top 2.6 m): standing at it in high profile, the static request finds
+    // the top through 0xE165D0 (type 128: no wall above, a wall below) and jumps up into a wall hang
+    let mut s = Sim::new(Vec3::new(12.0, 0.0, 41.1), FACE_PZ);
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    s.press_legs();
+    s.run(0.4);
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ledge), "no hang: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.run_until(2.0, |s| s.data().ledge.mv.is_none()), "never settled");
+    let l = &s.data().ledge;
+    assert!((l.hand_l.y - 2.6).abs() < 0.05 && l.normal.dot(Vec3::NEG_Z) > 0.99, "hanging on the wall top: {:?} {:?}", l.hand_l, l.normal);
+}
