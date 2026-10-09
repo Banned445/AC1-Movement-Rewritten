@@ -1,0 +1,412 @@
+//! Grid cell → static city objects (RE/17 §3). Runs on loader threads; everything it returns is in Bevy space
+//! (game (x, y, z) → (x, z, −y), as in RE/14).
+//!
+//! An entity body is `{u32 id, u32 class Entity, 64-byte placement, components…}` (Entity__Read 0x450E90). An
+//! EntityGroup keeps its members inline, each starting `{u32 id, u32 Entity}` (RE/15 §3); every member is decoded as
+//! its own object with its own (world) placement. Components are found by their class markers, as in RE/14 (PORT:
+//! the complete reflection-driven component graph is not decoded):
+//! - `Visual` → `{u8 active, u32 drawable}`: a `Mesh` or a `LODSelector` (5 × LODDescriptor `{graphic, f32 distance,
+//!   f32, u8}`); one `MeshInstanceData` per drawn mesh, each followed by its `CompiledMeshInstance` colours.
+//! - `InertComponent` / `RigidBodyComponent` → `RigidBody` `{+8 CollisionFilterInfo (+12 layer & 0x3F),
+//!   +20 shape id, +40 matrix}`; shapes MeshShape / BoxShape / BarrelShape / CapsuleShape / ListShape.
+//! - `GuidanceSystem` (RE/06, RE/14 §2) in the entity's frame.
+//! - `BhvHayStack` marks a haystack.
+
+use std::{collections::HashMap, sync::{Arc, Mutex, Weak}};
+
+use bevy::prelude::*;
+
+use super::{archive::Archives, grid::Grid, material::{MaterialCache, MaterialData, TextureData}, shapes::parse_shape};
+use crate::{assets::{forge::{crc32, Resource}, static_mesh::{parse_static_mesh, word, StaticMesh}, world::{parse_guidance, NativePlacement}},
+    collision::Aabb3, guidance::GuidanceEdge, triangles::Triangle};
+
+/// Game (Z up) → Bevy (Y up).
+pub const TO_BEVY: Mat4 = Mat4::from_cols(Vec4::X, Vec4::new(0.0, 0.0, -1.0, 0.0), Vec4::Y, Vec4::W);
+pub fn to_bevy(p: Vec3) -> Vec3 { Vec3::new(p.x, p.z, -p.y) }
+
+/// PORT: entity names left out, after AC1-rs's list (RE/15 §3): mission/debug helpers and markers.
+const EXCLUDED: [&str; 4] = ["GP_MARK", "PositionHelper", "PillarDust", "OutOfBound"];
+
+pub struct LodMesh {
+    pub id: u32,
+    pub mesh: Arc<StaticMesh>,
+    /// The placement's baked per-vertex colours (BGRA → RGBA), when they match the mesh.
+    pub colors: Option<Arc<Vec<[u8; 4]>>>,
+}
+
+pub struct CityObject {
+    pub name: String,
+    /// Bevy-space placement (TO_BEVY · entity matrix).
+    pub transform: Mat4,
+    /// Bevy-space bounding sphere of the most detailed mesh (LOD distances are measured to its centre).
+    pub center: Vec3,
+    pub radius: f32,
+    /// Bevy-space bounds of everything the object brings (visual, collision, guidance).
+    pub bounds: Aabb3,
+    pub meshes: Vec<LodMesh>,
+    /// Distance bands, near to far: (end distance, mesh index). Hidden past the last end.
+    pub lods: Vec<(f32, Option<usize>)>,
+    pub collision: Vec<Triangle>,
+    pub edges: Vec<GuidanceEdge>,
+    pub haystack: Option<Aabb3>,
+    /// Posts among the object's ledge edges (`targets::pilotis_for_edges`), found against its own cell's geometry
+    /// on the loader thread.
+    pub pilotis: Vec<Vec3>,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct CellStats {
+    pub bodies: usize,
+    pub objects: usize,
+    pub triangles: usize,
+    pub edges: usize,
+    pub skipped: HashMap<String, usize>,
+}
+
+pub struct DecodedCell {
+    pub cell: usize,
+    pub objects: Vec<CityObject>,
+    pub materials: Vec<(u32, Arc<MaterialData>)>,
+    /// Textures the cell needs that were not on the GPU when it was decoded.
+    pub textures: Vec<(u32, bool, Arc<TextureData>)>,
+    pub stats: CellStats,
+}
+
+/// Decoded static meshes, shared while any loaded cell uses them.
+#[derive(Default)]
+pub struct MeshCache(Mutex<HashMap<u32, Weak<StaticMesh>>>);
+
+impl MeshCache {
+    pub fn get(&self, archives: &Archives, id: u32) -> Result<Arc<StaticMesh>, String> {
+        if let Some(m) = self.0.lock().unwrap().get(&id).and_then(Weak::upgrade) { return Ok(m); }
+        let r = archives.get(id)?;
+        if r.class_hash != crc32("Mesh") { return Err(format!("{} is not a Mesh", r.name)); }
+        let m = match parse_static_mesh(&r.payload) {
+            Ok(m) => m,
+            Err(_) => bind_pose_mesh(&r.payload).ok_or_else(|| format!("{}: unsupported mesh", r.name))?,
+        };
+        let m = Arc::new(m);
+        self.0.lock().unwrap().insert(id, Arc::downgrade(&m));
+        Ok(m)
+    }
+}
+
+/// A mesh with bones (haystacks, scaffolds, stalls, trees …) drawn in its bind pose. Its CompiledMesh blob has the
+/// static layout (RE/14 §2: `{u32 format 22, u32 stride, vb, ib, 0, 0, draw count, group count, …}`, vertices,
+/// u16 indices, 20-byte draw records, then the material list after the blob) with the stride-32 skinned vertex of
+/// RE/09 §3.1: positions s16 / 2048 in model space, normal / tangent / binormal bytes, UV s16 / 2048.
+/// PORT: the props' skeletons and animations (swaying, breaking) are not played; the bind pose is drawn.
+fn bind_pose_mesh(d: &[u8]) -> Option<StaticMesh> {
+    let cm = (20..d.len().saturating_sub(4)).find(|&o| word(d, o).ok() == Some(crate::assets::ac_formats::CLASS_COMPILED_MESH))?;
+    let size = word(d, cm + 4).ok()? as usize;
+    let blob = d.get(cm + 8..cm + 8 + size)?;
+    let w = |p: usize| word(blob, p).ok();
+    if w(0)? != 22 || w(4)? != 32 { return None; }
+    let (vb, ib, count) = (w(8)? as usize, w(12)? as usize, w(24)? as usize);
+    if vb % 32 != 0 || ib % 2 != 0 || count == 0 || count > 256 { return None; }
+    let vertices = blob.get(36..36 + vb)?;
+    let n = vb / 32;
+    let tris: usize = (0..count).map(|k| w(36 + vb + ib + 20 * k + 16).map(|t| t as usize)).sum::<Option<usize>>()?;
+    let bytes = blob.get(36 + vb..36 + vb + ib)?;
+    let indices: Vec<u32> = if n > 0xFFFF && ib == tris * 12 { bytes.chunks_exact(4).map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]])).collect() }
+        else { bytes.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]]) as u32).collect() };
+    if indices.iter().any(|&i| i as usize >= n) { return None; }
+    let short = |v: &[u8], p: usize| i16::from_le_bytes([v[p], v[p + 1]]) as f32;
+    let dir = |v: &[u8], p: usize| (Vec3::new(v[p] as f32, v[p + 1] as f32, v[p + 2] as f32) / 127.5 - Vec3::ONE).normalize_or_zero();
+    let mut out = StaticMesh { positions: Vec::with_capacity(n), normals: Vec::with_capacity(n), tangents: Vec::with_capacity(n), uvs: Vec::with_capacity(n),
+        colors: vec![[1.0; 4]; n], sections: Vec::new() };
+    for v in vertices.chunks_exact(32) {
+        out.positions.push(Vec3::new(short(v, 0), short(v, 2), short(v, 4)) * crate::assets::ac_formats::POS_SCALE);
+        let (nm, t, b) = (dir(v, 8), dir(v, 12), dir(v, 16));
+        out.normals.push(nm);
+        out.tangents.push(t.extend(if nm.cross(t).dot(b) < 0.0 { -1.0 } else { 1.0 }));
+        out.uvs.push(Vec2::new(short(v, 20), short(v, 22)) * crate::assets::ac_formats::UV_SCALE);
+    }
+    let tail = cm + 8 + size;
+    if word(d, tail + 8).ok()? as usize != count { return None; }
+    for k in 0..count {
+        let p = 36 + vb + ib + 20 * k;
+        let (first, tris) = (w(p + 12)? as usize, w(p + 16)? as usize);
+        out.sections.push(crate::assets::static_mesh::StaticSection { indices: indices.get(first..first + 3 * tris)?.to_vec(), material: word(d, tail + 12 + 4 * k).ok()? });
+    }
+    Some(out)
+}
+
+/// Everything the loader threads share.
+pub struct CityData {
+    pub archives: Arc<Archives>,
+    pub grid: Grid,
+    pub meshes: MeshCache,
+    pub materials: MaterialCache,
+    /// Upload BC blocks as they are (the adapter supports BC).
+    pub bc: bool,
+    /// Textures currently on the GPU (the main thread keeps this up to date).
+    pub resident: Mutex<std::collections::HashSet<u32>>,
+}
+
+fn markers(b: &[u8], class: &str) -> Vec<usize> {
+    let h = crc32(class).to_le_bytes();
+    b.windows(4).enumerate().filter(|(_, w)| *w == h).map(|(p, _)| p).collect()
+}
+
+/// Split a resource payload into entity bodies (one for an Entity, the group's own plus each member for a group).
+pub fn bodies(r: &Resource) -> Vec<&[u8]> {
+    let mut starts = vec![0usize];
+    if r.class_hash == crc32("EntityGroup") {
+        let h = crc32("Entity").to_le_bytes();
+        starts.extend((12..r.payload.len().saturating_sub(4)).filter(|&p| r.payload[p..p + 4] == h).map(|p| p - 4));
+    }
+    starts.iter().enumerate().map(|(k, &s)| &r.payload[s..starts.get(k + 1).copied().unwrap_or(r.payload.len())]).collect()
+}
+
+pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> {
+    let c = &data.grid.cells[cell];
+    let mut out = DecodedCell { cell, objects: Vec::new(), materials: Vec::new(), textures: Vec::new(), stats: CellStats::default() };
+    let Some((archive, file)) = data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else {
+        return Err(format!("cell {cell}: datablock {:#x} not in the archives", c.datablock));
+    };
+    let a = data.archives.names.iter().position(|n| *n == archive).unwrap();
+    let entry = data.archives.find(a, &file).ok_or("cell file vanished")?;
+    let resources = data.archives.file(a, entry)?;
+    // Keep the archive order (TOC order) so object order, and with it slot order, is deterministic.
+    let mut list: Vec<&Arc<Resource>> = resources.values().filter(|r| r.class_hash == crc32("Entity") || r.class_hash == crc32("EntityGroup")).collect();
+    list.sort_by_key(|r| r.id);
+    let mut materials = HashMap::new();
+    for r in list {
+        for body in bodies(r) {
+            out.stats.bodies += 1;
+            let name = if body.as_ptr() == r.payload.as_ptr() { r.name.clone() } else { format!("{}/{:08x}", r.name, word(body, 0).unwrap_or(0)) };
+            if EXCLUDED.iter().any(|x| name.contains(x)) { *out.stats.skipped.entry("excluded name".into()).or_default() += 1; continue; }
+            match decode_body(data, body, &name, &mut materials) {
+                Ok(Some(o)) => {
+                    out.stats.triangles += o.collision.len();
+                    out.stats.edges += o.edges.len();
+                    out.objects.push(o);
+                }
+                Ok(None) => {}
+                Err(e) => { *out.stats.skipped.entry(e).or_default() += 1; }
+            }
+        }
+    }
+    out.stats.objects = out.objects.len();
+    // PORT: posts are looked for among the cell's own geometry (the game's candidates come from guidance queries at
+    // jump time, RE/04 §4.1); a post whose neighbourhood spans two cells is judged on its own cell.
+    if out.objects.iter().any(|o| o.edges.iter().any(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab)) {
+        let mut collision = crate::collision::CollisionWorld::default();
+        collision.enable_index(8.0);
+        collision.add_triangles(out.objects.iter().flat_map(|o| o.collision.iter().cloned()).collect());
+        let guidance = crate::guidance::GuidanceWorld { edges: out.objects.iter().flat_map(|o| o.edges.iter().cloned()).collect(), ..Default::default() };
+        for o in &mut out.objects {
+            if o.edges.iter().any(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab) {
+                o.pilotis = crate::player::targets::pilotis_for_edges(o.edges.iter(), &guidance, &collision);
+            }
+        }
+    }
+    let resident = data.resident.lock().unwrap().clone();
+    for (id, m) in materials {
+        for (tex, linear) in m.diffuse.map(|d| (d, false)).into_iter().chain(m.normal.map(|n| (n, true))) {
+            if resident.contains(&tex) || out.textures.iter().any(|t| t.0 == tex) { continue; }
+            match data.materials.texture(&data.archives, tex, linear, data.bc) {
+                Ok(t) => out.textures.push((tex, linear, t)),
+                Err(e) => { *out.stats.skipped.entry(format!("texture: {e}")).or_default() += 1; }
+            }
+        }
+        out.materials.push((id, m));
+    }
+    Ok(out)
+}
+
+/// One entity body → object (None when it has nothing static to show or collide with).
+fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u32, Arc<MaterialData>>) -> Result<Option<CityObject>, String> {
+    let visuals = markers(b, "Visual");
+    let rigid = markers(b, "RigidBody");
+    let guidance = markers(b, "GuidanceSystem");
+    if visuals.is_empty() && rigid.is_empty() && guidance.is_empty() { return Ok(None); }
+    let placement = placement(b)?;
+    let transform = TO_BEVY * placement;
+    let mut o = CityObject { name: name.to_string(), transform, center: transform.w_axis.truncate(), radius: 0.0,
+        bounds: Aabb3 { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) }, meshes: Vec::new(), lods: Vec::new(),
+        collision: Vec::new(), edges: Vec::new(), haystack: None, pilotis: Vec::new() };
+    // --- visual
+    if let Some(&v) = visuals.first() {
+        if b.get(v + 4) == Some(&1) {
+            let drawable = word(b, v + 5)?;
+            if drawable != 0 {
+                if let Err(e) = visual(data, b, v, drawable, &mut o, materials) { return Err(format!("visual: {e}")); }
+            }
+        }
+    }
+    // --- collision
+    for &p in &rigid {
+        if word(b, p + 8)? != crc32("CollisionFilterInfo") { continue; }
+        let layer = (word(b, p + 12)? & 0x3f) as u8;
+        let shape_id = word(b, p + 20)?;
+        if shape_id == 0 { continue; }
+        let shape = data.archives.get(shape_id).map_err(|e| format!("shape: {e}"))?;
+        let (mesh, _) = parse_shape(&shape.payload).map_err(|e| format!("shape: {e}"))?;
+        let mut m = [0.0; 16];
+        for (i, x) in m.iter_mut().enumerate() { *x = f32::from_bits(word(b, p + 40 + 4 * i)?); }
+        let rb = Mat4::from_cols_array(&m);
+        if !rb.is_finite() || m[3] != 0.0 || m[7] != 0.0 || m[11] != 0.0 || m[15] != 1.0 { return Err("collision: invalid rigid-body matrix".into()); }
+        let world = transform * rb;
+        for t in mesh.indices.chunks_exact(3) {
+            let v = [0, 1, 2].map(|k| world.transform_point3(mesh.vertices[t[k] as usize]));
+            if let Some(t) = Triangle::new(v, layer) { o.collision.push(t); }
+        }
+    }
+    // --- guidance
+    for &g in &guidance {
+        let Some(start) = g.checked_sub(4) else { continue };
+        let Ok(parsed) = parse_guidance(&b[start..]) else { continue };
+        let p = NativePlacement { id: parsed.id, name: name.to_string(), transform: placement, guidance: parsed };
+        for (active, mut edge) in p.world_edges() {
+            if !active { continue; }
+            // movement probes expect n1 to be the lower face normal (0x66BB40)
+            if edge.n1.y > edge.n0.y { std::mem::swap(&mut edge.n0, &mut edge.n1); }
+            if p.guidance.check_world_orientation && !crate::native_map::filter_accepts(&p.guidance, edge.n0, edge.n1) { continue; }
+            o.edges.push(edge);
+        }
+    }
+    let grow = |a: &mut Aabb3, p: Vec3| { a.min = a.min.min(p); a.max = a.max.max(p); };
+    for t in &o.collision { grow(&mut o.bounds, t.bounds.min); grow(&mut o.bounds, t.bounds.max); }
+    for e in &o.edges { grow(&mut o.bounds, e.p0); grow(&mut o.bounds, e.p1); }
+    if !markers(b, "BhvHayStack").is_empty() {
+        // PORT: the haystack volume is the hay mesh's bounds; BhvHayStack's own fields are not decoded.
+        let visual = o.meshes.first().map(|m| mesh_bounds(&m.mesh, o.transform));
+        o.haystack = visual.or(Some(o.bounds)).filter(|b| b.min.is_finite());
+    }
+    if o.meshes.is_empty() && o.collision.is_empty() && o.edges.is_empty() { return Ok(None); }
+    if !o.bounds.min.is_finite() { o.bounds = Aabb3 { min: o.center, max: o.center }; }
+    Ok(Some(o))
+}
+
+/// An Entity or EntityGroup body's placement (Entity__Read 0x450E90 → 0x4D9C10): 16 floats after the id/class.
+/// Some authored matrices carry w = 0.99999994; accept affine within 1e-4.
+pub fn placement(b: &[u8]) -> Result<Mat4, String> {
+    let class = word(b, 4)?;
+    if class != crc32("Entity") && class != crc32("EntityGroup") { return Err("placement: not an entity".into()); }
+    let mut m = [0.0; 16];
+    for (i, v) in m.iter_mut().enumerate() { *v = f32::from_bits(word(b, 8 + 4 * i)?); }
+    if m.iter().any(|v| !v.is_finite()) || m[3].abs() > 1e-4 || m[7].abs() > 1e-4 || m[11].abs() > 1e-4 || (m[15] - 1.0).abs() > 1e-4 {
+        return Err("placement: not affine".into());
+    }
+    m[3] = 0.0; m[7] = 0.0; m[11] = 0.0; m[15] = 1.0;
+    let m = Mat4::from_cols_array(&m);
+    if m.determinant().abs() < 1e-8 { return Err("placement: singular".into()); }
+    Ok(m)
+}
+
+pub fn mesh_bounds(mesh: &StaticMesh, transform: Mat4) -> Aabb3 {
+    let (lo, hi) = mesh.positions.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(l, h), &p| (l.min(p), h.max(p)));
+    let mut b = Aabb3 { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) };
+    for i in 0..8 {
+        let c = Vec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z });
+        let p = transform.transform_point3(c);
+        b.min = b.min.min(p); b.max = b.max.max(p);
+    }
+    b
+}
+
+/// LODSelector descriptors (`{id, class LODDescriptor, graphic, f32 distance, f32, u8}` × 5 from payload 12).
+pub fn lod_descriptors(selector: &[u8]) -> Result<[(u32, f32); 5], String> {
+    let mut out = [(0, 0.0); 5];
+    for (k, d) in out.iter_mut().enumerate() {
+        let p = 12 + 21 * k;
+        if word(selector, p + 4)? != crc32("LODDescriptor") { return Err("LODSelector without LODDescriptors".into()); }
+        *d = (word(selector, p + 8)?, f32::from_bits(word(selector, p + 12)?));
+    }
+    Ok(out)
+}
+
+/// The visible mesh slot per distance band (RE/17 §3.2, archive observation 2026-10-09). Slot i covers
+/// [distance i−1, distance i). A null slot is filler (the data puts 1 m bands like 100/101/102 on them): it shows the
+/// next non-null slot, and past the last non-null slot that mesh stays until the last distance (**hypothesis**: the
+/// selection function itself was not traced).
+pub fn lod_bands(desc: &[(u32, f32); 5]) -> Vec<(f32, Option<usize>)> {
+    let last = desc.iter().rposition(|d| d.0 != 0);
+    let mut bands: Vec<(f32, Option<usize>)> = Vec::new();
+    for i in 0..5 {
+        let slot = (i..5).find(|&j| desc[j].0 != 0).or(last.filter(|&l| l < i));
+        let end = desc[i].1;
+        if !(end > bands.last().map_or(0.0, |b| b.0)) { continue; }
+        match bands.last_mut() {
+            Some(b) if b.1 == slot => b.0 = end,
+            _ => bands.push((end, slot)),
+        }
+    }
+    bands
+}
+
+fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject, materials: &mut HashMap<u32, Arc<MaterialData>>) -> Result<(), String> {
+    let r = data.archives.get(drawable)?;
+    // slot → mesh id
+    let (slots, bands): (Vec<u32>, Vec<(f32, Option<usize>)>) = if r.class_hash == crc32("LODSelector") {
+        let desc = lod_descriptors(&r.payload)?;
+        (desc.iter().map(|d| d.0).collect(), lod_bands(&desc))
+    } else if r.class_hash == crc32("Mesh") {
+        (vec![drawable], vec![(f32::INFINITY, Some(0))])
+    } else {
+        return Err("unsupported drawable".into());
+    };
+    // MeshInstanceData (mesh id at +5) → the following CompiledMeshInstance's colour blob.
+    let instances = markers(&b[v..], "MeshInstanceData").into_iter().map(|p| p + v).collect::<Vec<_>>();
+    let compiled = markers(&b[v..], "CompiledMeshInstance").into_iter().map(|p| p + v).collect::<Vec<_>>();
+    let mut colors: HashMap<u32, &[u8]> = HashMap::new();
+    for (k, &p) in instances.iter().enumerate() {
+        let next = instances.get(k + 1).copied().unwrap_or(b.len());
+        let Some(&c) = compiled.iter().find(|&&c| c > p && c < next) else { continue };
+        let bytes = word(b, c + 4)? as usize;
+        if let Some(blob) = b.get(c + 8..c + 8 + bytes) { colors.insert(word(b, p + 5)?, blob); }
+    }
+    let mut index_of_slot = HashMap::new();
+    for (slot, &id) in slots.iter().enumerate() {
+        if id == 0 { continue; }
+        let mesh = data.meshes.get(&data.archives, id)?;
+        let col = colors.get(&id).and_then(|blob| {
+            let n = mesh.positions.len();
+            (blob.len() == 16 + n * 4 && word(blob, 8).ok()? as usize == n * 4)
+                .then(|| Arc::new(blob[16..].chunks_exact(4).map(|c| [c[2], c[1], c[0], c[3]]).collect::<Vec<_>>()))
+        });
+        for s in &mesh.sections {
+            if !materials.contains_key(&s.material) {
+                let m = data.materials.material(&data.archives, s.material)?;
+                materials.insert(s.material, m);
+            }
+        }
+        index_of_slot.insert(slot, o.meshes.len());
+        o.meshes.push(LodMesh { id, mesh, colors: col });
+    }
+    o.lods = bands.into_iter().map(|(end, slot)| (end, slot.and_then(|s| index_of_slot.get(&s).copied()))).collect();
+    if let Some(first) = o.meshes.first() {
+        let bounds = mesh_bounds(&first.mesh, o.transform);
+        o.center = (bounds.min + bounds.max) * 0.5;
+        o.radius = (bounds.max - bounds.min).length() * 0.5;
+        for m in &o.meshes {
+            let bb = mesh_bounds(&m.mesh, o.transform);
+            o.bounds.min = o.bounds.min.min(bb.min); o.bounds.max = o.bounds.max.max(bb.max);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lod_bands_skip_filler_slots_and_keep_the_last_mesh() {
+        let m = |x| x;
+        // MM-M- 20/40/80/160/320: 0-20 slot0, 20-40 slot1, 40-160 slot3 (filler slot2 falls through), 160-320 slot3 kept
+        let d = [(m(1), 20.0), (2, 40.0), (0, 80.0), (4, 160.0), (0, 320.0)];
+        assert_eq!(lod_bands(&d), vec![(20.0, Some(0)), (40.0, Some(1)), (320.0, Some(3))]);
+        // M--M- 100/101/102/350/351
+        let d = [(1, 100.0), (0, 101.0), (0, 102.0), (4, 350.0), (0, 351.0)];
+        assert_eq!(lod_bands(&d), vec![(100.0, Some(0)), (351.0, Some(3))]);
+        // -M--- 9999/10000/...: an object shown only by its slot 1 mesh
+        let d = [(0, 9999.0), (1, 10000.0), (0, 10001.0), (0, 10002.0), (0, 10003.0)];
+        assert_eq!(lod_bands(&d), vec![(10003.0, Some(1))]);
+        // MMM-- 10/20/40/80/160
+        let d = [(1, 10.0), (2, 20.0), (3, 40.0), (0, 80.0), (0, 160.0)];
+        assert_eq!(lod_bands(&d), vec![(10.0, Some(0)), (20.0, Some(1)), (160.0, Some(2))]);
+    }
+}

@@ -878,6 +878,7 @@ fn shots(
             (hem, hem + right * 1.2 + fwd * 0.3 + Vec3::Y * 0.1)
         }
         "high" => (focus, focus - fwd * 2.2 - right * 1.6 + Vec3::Y * 2.2),
+        "overview" => (focus + fwd * 120.0 - Vec3::Y * 20.0, focus - fwd * 20.0 + Vec3::Y * 30.0),
         "front" => (focus, focus + fwd * 3.0 + Vec3::Y * 0.3),
         "fingers" | "fingers_side" => {
             let h = limbs.hands.map(|(l, r)| if l.y >= r.y { l } else { r }).unwrap_or(focus + Vec3::Y * 0.8);

@@ -3,10 +3,11 @@ use bevy::{ecs::system::RunSystemOnce, prelude::*, window::{CursorGrabMode, Curs
 use crate::player::{Player, SpawnPoint};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Map { #[default] Greybox, MasyafRoofs, MasyafVillage }
+pub enum Map { #[default] Greybox, MasyafRoofs, MasyafVillage, Damascus }
 impl Map {
     pub fn label(self) -> &'static str {
-        match self { Self::Greybox => "Greybox test level", Self::MasyafRoofs => "Masyaf roofs (experimental)", Self::MasyafVillage => "Masyaf village (experimental)" }
+        match self { Self::Greybox => "Greybox test level", Self::MasyafRoofs => "Masyaf roofs (experimental)", Self::MasyafVillage => "Masyaf village (experimental)",
+            Self::Damascus => "Damascus (whole city, streamed)" }
     }
 }
 
@@ -51,11 +52,11 @@ fn create_menu(mut commands: Commands) {
                 .with_children(|panel| {
                     panel.spawn((Text::new("Debug maps"), TextFont { font_size: FontSize::Px(26.0), ..default() }));
                     panel.spawn((MenuStatus, Text::new(""), TextFont { font_size: FontSize::Px(16.0), ..default() }));
-                    for (key, map) in [("1",Map::Greybox),("2",Map::MasyafRoofs),("3",Map::MasyafVillage)] {
+                    for (key, map) in [("1",Map::Greybox),("2",Map::MasyafRoofs),("3",Map::MasyafVillage),("4",Map::Damascus)] {
                         panel.spawn((Button, MapButton(map), Node { padding: UiRect::all(px(14)), ..default() }, BackgroundColor(Color::srgb(0.20,0.27,0.36))))
                             .with_children(|button| { button.spawn((Text::new(format!("{key}  {}",map.label())), TextFont { font_size: FontSize::Px(18.0), ..default() })); });
                     }
-                    panel.spawn((Text::new("Click a map or press 1 / 2 / 3.\nF2 or Esc: close. Switching resets your position.\nMasyaf requires your installed game files."), TextFont { font_size: FontSize::Px(15.0), ..default() }));
+                    panel.spawn((Text::new("Click a map or press 1 / 2 / 3 / 4.\nF2 or Esc: close. Switching resets your position.\nMasyaf requires your installed game files."), TextFont { font_size: FontSize::Px(15.0), ..default() }));
                 });
         });
 }
@@ -64,7 +65,8 @@ pub(crate) fn initialize(world: &mut World) {
     // PORT: optional startup-open switch for debug UI inspection.
     world.resource_mut::<MapMenu>().open = std::env::var_os("AC_DEBUG_MAP_MENU").is_some();
     // Environment selection remains supported for automated captures and existing workflows.
-    let initial = if std::env::var(crate::native_map::NATIVE_MAP_IMPORT).is_ok_and(|v|v=="masyaf-village") { Map::MasyafVillage }
+    let initial = if std::env::var(crate::native_map::NATIVE_MAP_IMPORT).is_ok_and(|v|v=="damascus") { Map::Damascus }
+        else if std::env::var(crate::native_map::NATIVE_MAP_IMPORT).is_ok_and(|v|v=="masyaf-village") { Map::MasyafVillage }
         else if crate::native_map::enabled() { Map::MasyafRoofs } else { Map::Greybox };
     if let Err(error) = switch(world, initial) {
         warn!("map import failed: {error}");
@@ -96,6 +98,7 @@ fn controls(keys: Res<ButtonInput<KeyCode>>, mut menu: ResMut<MapMenu>, mut time
     if keys.just_pressed(KeyCode::Digit1) { menu.pending = Some(Map::Greybox); }
     if keys.just_pressed(KeyCode::Digit2) { menu.pending = Some(Map::MasyafRoofs); }
     if keys.just_pressed(KeyCode::Digit3) { menu.pending = Some(Map::MasyafVillage); }
+    if keys.just_pressed(KeyCode::Digit4) { menu.pending = Some(Map::Damascus); }
     for (interaction, button) in &buttons {
         if *interaction == Interaction::Pressed { menu.pending = Some(button.0); }
     }
@@ -127,10 +130,16 @@ fn switch(world: &mut World, map: Map) -> Result<(), String> {
 
 fn switch_from(world: &mut World, map: Map, game: &std::path::Path) -> Result<(), String> {
     // Decode before removing the current scene: failures retain its render/collision/player state.
-    let imported = match map { Map::MasyafRoofs=>Some(crate::native_map::load(game)?),Map::MasyafVillage=>Some(crate::native_map::load_village(game)?),Map::Greybox=>None };
+    let bc = world.get_resource::<bevy::render::renderer::RenderDevice>()
+        .is_some_and(|d| d.features().contains(bevy::render::render_resource::WgpuFeatures::TEXTURE_COMPRESSION_BC));
+    let city = match map { Map::Damascus => Some(crate::city::prepare(game, &crate::city::DAMASCUS, bc, &crate::city::spawn_name())?), _ => None };
+    let imported = match map { Map::MasyafRoofs=>Some(crate::native_map::load(game)?),Map::MasyafVillage=>Some(crate::native_map::load_village(game)?),Map::Greybox|Map::Damascus=>None };
+    crate::city::leave(world);
     let entities: Vec<_> = world.query_filtered::<Entity,With<MapEntity>>().iter(world).collect();
     for entity in entities { world.despawn(entity); }
-    if let Some(imported) = imported {
+    if let Some(city) = city {
+        world.run_system_once_with(crate::city::spawn, city).map_err(|e| e.to_string())?;
+    } else if let Some(imported) = imported {
         world.run_system_once_with(crate::native_map::spawn, imported).map_err(|e| e.to_string())?;
     } else {
         world.run_system_once(crate::level::build_level).map_err(|e| e.to_string())?;

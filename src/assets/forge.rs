@@ -2,7 +2,7 @@
 //! Read-only: opens the user's own game files at runtime; nothing is copied into the project.
 
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read};
 use std::path::Path;
 
 const MAGIC: &[u8; 9] = b"scimitar\0";
@@ -91,10 +91,18 @@ impl Forge {
         Ok(forge)
     }
 
-    fn read_at(&mut self, off: u64, n: usize) -> io::Result<Vec<u8>> {
-        self.file.seek(SeekFrom::Start(off))?;
+    /// Positional read: no shared cursor, so one open archive serves several loader threads.
+    fn read_at(&self, off: u64, n: usize) -> io::Result<Vec<u8>> {
         let mut v = vec![0u8; n];
-        self.file.read_exact(&mut v)?;
+        let mut done = 0;
+        while done < n {
+            #[cfg(windows)]
+            let got = std::os::windows::fs::FileExt::seek_read(&self.file, &mut v[done..], off + done as u64)?;
+            #[cfg(unix)]
+            let got = std::os::unix::fs::FileExt::read_at(&self.file, &mut v[done..], off + done as u64)?;
+            if got == 0 { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "archive truncated")); }
+            done += got;
+        }
         Ok(v)
     }
 
@@ -105,6 +113,11 @@ impl Forge {
     /// Resource ids without inflating the resource container (RE/08 §4). Used to resolve
     /// shared map dependencies across stored files rather than guessing from resource names.
     pub fn resource_ids(&mut self, entry: &ForgeEntry) -> io::Result<Vec<u32>> {
+        self.resource_ids_shared(entry)
+    }
+
+    /// `resource_ids` without exclusive access (positional reads): several loader threads share one archive.
+    pub fn resource_ids_shared(&self, entry: &ForgeEntry) -> io::Result<Vec<u32>> {
         let start = entry.offset + FILEDATA_HEADER_SIZE;
         if rd_u64(&self.read_at(start, 8)?, 0) != COMPRESSED_MAGIC { return Ok(Vec::new()); }
         let (toc, _) = self.container(start)?;
@@ -115,7 +128,7 @@ impl Forge {
     }
 
     /// Decode one compressed container (RE/08 §3); returns (bytes, end offset).
-    fn container(&mut self, off: u64) -> io::Result<(Vec<u8>, u64)> {
+    fn container(&self, off: u64) -> io::Result<(Vec<u8>, u64)> {
         let h = self.read_at(off, 17)?;
         if rd_u64(&h, 0) != COMPRESSED_MAGIC {
             return Err(bad(format!("bad container magic at {off:#x}")));
@@ -152,6 +165,11 @@ impl Forge {
 
     /// All resources of a stored file (empty for uncompressed records such as GlobalMetaFile).
     pub fn resources(&mut self, entry: &ForgeEntry) -> io::Result<Vec<Resource>> {
+        self.resources_shared(entry)
+    }
+
+    /// `resources` without exclusive access (positional reads).
+    pub fn resources_shared(&self, entry: &ForgeEntry) -> io::Result<Vec<Resource>> {
         let start = entry.offset + FILEDATA_HEADER_SIZE;
         if rd_u64(&self.read_at(start, 8)?, 0) != COMPRESSED_MAGIC {
             return Ok(Vec::new());

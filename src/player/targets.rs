@@ -46,8 +46,13 @@ pub const TARGET_LADDER: u32 = 0x1000;
 
 /// PORT: static post candidates depend on map geometry, not the jumper. Build after all placements load.
 pub(crate) fn find_jump_pilotis(guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<Vec3> {
+    pilotis_for_edges(guidance.edges.iter(), guidance, collision)
+}
+
+/// The posts among some of the world's edges (a streamed map adds them per object as it loads).
+pub(crate) fn pilotis_for_edges<'a>(edges: impl Iterator<Item = &'a crate::guidance::GuidanceEdge>, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<Vec3> {
     let mut pilotis: Vec<Vec3> = Vec::new();
-    for e in &guidance.edges {
+    for e in edges {
         if e.subtype != GuidanceSubType::LedgeGrab { continue; }
         let mid = (e.p0 + e.p1) * 0.5;
         let into = -Vec3::new(e.n1.x, 0.0, e.n1.z);
