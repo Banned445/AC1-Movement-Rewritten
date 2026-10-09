@@ -163,9 +163,9 @@ pub struct CityState {
     pub tour: Option<Vec3>,
     /// A cell under the near box is still loading: the player is held at this position (0x55D810).
     pub hold: Option<Vec3>,
-    /// Draw the LOD cross-fade (`AC_LOD_FADE=1`). Off like the retail exe: its fade pass (0xABE770) only runs while
-    /// renderer +94 is set, which needs `byte_1A25846` — zero-initialised and never written (the `LODBlend` INI value,
-    /// GraphicsSettings +0x52, is loaded but never read).
+    /// Draw the LOD cross-fade (`AC_LOD_FADE=1`). Off like the retail game: its fade pass (0xABE770) only runs while
+    /// renderer +94 is set, which needs `g_LODBlendPassEnabled` (0x1A25846) — 0 in the running game (read live in
+    /// Damascus, 2026-10-09; the `LODBlend` INI value, GraphicsSettings +0x52, is loaded but never read).
     pub lod_fade: bool,
 }
 
