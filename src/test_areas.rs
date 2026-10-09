@@ -76,6 +76,8 @@ pub const AREAS: &[Area] = &[
     at("Swing bars", Vec3::new(60.0, 1.2, 85.0), NORTH),
     at("Ladder", Vec3::new(50.0, 0.0, 61.0), NORTH),
     at("Ladder side move onto a ledge (climb up, push left)", Vec3::new(-131.2, 0.0, -117.6), NORTH),
+    at("Free-standing ladder (climb, push sideways: swing round it)", Vec3::new(-125.0, 0.0, -121.9), NORTH),
+    at("Leaning ladder (grab it from underneath: it swings you on top)", Vec3::new(-137.0, 0.0, -122.1), NORTH),
     at("Ladder side jump onto a climb wall (climb up, push left)", Vec3::new(-100.0, 0.0, -11.6), NORTH),
     at("Ladder side jump into a hang (climb up, push left)", Vec3::new(144.4, 0.0, 8.8), NORTH),
 ];

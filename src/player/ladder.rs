@@ -46,7 +46,22 @@ pub const SIDE_JUMP: [[[[u32; 3]; 2]; 2]; 3] = [
      [[0x4912_2885, 0x4912_2886, 0x4912_2887], [0x4912_288D, 0x4912_288E, 0x4912_288F]]],
 ];
 
+/// MvtAnimState 6 "Revolve" [left, right], `xx_h_ladder_turn_{l,r}_a` then `…_b_tr_h_wait_{l,r}`: the swing around
+/// the ladder to its other side (`sub_E1D730` from event 5's post 0xE220C0; `HumanLadder__TryTurn` 0xE26440 on a
+/// leaning ladder's underside). Its clip steps 0.5 m aside and 1 m forward while turning 180°.
+pub const REVOLVE: [u32; 2] = [0x010A_24EE, 0x010A_24EF];
+
+/// The revolve's room (`sub_E24D90`: a box with nothing in it but characters): centre root + 0.85·forward + 1.2 m up
+/// ∓ 0.5 m to the side, half extents 0.6 / 0.55 / 0.65 (0xE262B0 / 0xE26440).
+pub fn revolve_room(root: Vec3, fwd: Vec3, right: bool, collision: &CollisionWorld) -> bool {
+    let f = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+    let r = super::right_of(f);
+    let c = root + f * 0.85 + Vec3::Y * 1.2 + r * if right { 0.5 } else { -0.5 };
+    collision.obb_free(c, [r, Vec3::Y, f], Vec3::new(0.6, 0.55, 0.65))
+}
+
 pub const DUMPED_ACTIONS: &[u32] = &[
+    REVOLVE[0], REVOLVE[1],
     TO_HANG_SIDE[0][0], TO_HANG_SIDE[0][1], TO_HANG_SIDE[1][0], TO_HANG_SIDE[1][1],
     SIDE_JUMP[0][0][0][0], SIDE_JUMP[0][0][0][1], SIDE_JUMP[0][0][0][2], SIDE_JUMP[0][0][1][0], SIDE_JUMP[0][0][1][1], SIDE_JUMP[0][0][1][2],
     SIDE_JUMP[0][1][0][0], SIDE_JUMP[0][1][0][1], SIDE_JUMP[0][1][0][2], SIDE_JUMP[0][1][1][0], SIDE_JUMP[0][1][1][1], SIDE_JUMP[0][1][1][2],
@@ -95,6 +110,9 @@ pub enum LadderPhase {
     ExitTop(usize),
     ExitGround,
     Jump,
+    /// The revolve (MvtAnimState 6, Main sub-state 7): item a, then b, then the far side (`HumanLadder__EndRevolve`
+    /// 0xE21EF0).
+    Revolve(usize),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -175,7 +193,13 @@ impl HumanLadderData {
     }
     /// The root on the ladder at `h`.
     pub fn root_at(&self, h: f32) -> Vec3 {
-        self.base + self.n * ATTACH_OUT + Vec3::Y * h
+        // along the ladder's line (a leaning ladder: PORT, the body stays upright)
+        let axis = (self.top - self.base).normalize_or(Vec3::Y);
+        self.base + self.n * ATTACH_OUT + axis * (h / axis.y.max(0.1))
+    }
+    /// `HumanLadder__TiltFromVertical` 0xE1EAC0: the ladder's angle from up.
+    pub fn tilt(&self) -> f32 {
+        (self.top - self.base).normalize_or(Vec3::Y).y.clamp(-1.0, 1.0).acos()
     }
     pub fn current(&self) -> Option<(ActionBlend, f32)> {
         let a = self.action?;
@@ -210,6 +234,15 @@ impl HumanLadderData {
         let h = self.height;
         let p = self.root_at(h);
         self.play(LadderPhase::Wait, blend(WAIT[self.high as usize][self.foot], 0, &[]), p, p, false);
+    }
+
+    /// `sub_E1D730` / `HumanLadder__EnterRevolve` 0xE219D0: the revolve's first item, its root motion in the facing frame
+    /// with a correction onto the far side.
+    fn start_revolve(&mut self, right: bool, from: Vec3) {
+        let a = blend(REVOLVE[right as usize], 0, &[]);
+        let far = self.base + (-self.n) * ATTACH_OUT + (self.root_at(self.height) - self.base - self.n * ATTACH_OUT);
+        self.fwd = -self.n;
+        self.play(LadderPhase::Revolve(0), a, from, far, a.is_some());
     }
 
     /// `HumanLadder__StateEntry_Enter` 0xE266D0.
@@ -526,6 +559,10 @@ pub fn update_ladder(
         } else {
             body.feet = p;
             body.heading = super::heading_of(l.heading);
+            if let (LadderPhase::Revolve(0), Some(a)) = (phase, l.action) {
+                // the clip's root yaw turns the body half round
+                body.heading = super::heading_of(l.fwd) + a.yaw(k);
+            }
         }
 
         // The interpreter's ladder state (`GoAssassinActionInterpreter__LadderState` 0xEEB570): above the 0.35 dead
@@ -575,6 +612,35 @@ pub fn update_ladder(
                 }
             }
             LadderPhase::Wait | LadderPhase::ClimbUp | LadderPhase::ClimbDown => {
+                // `HumanLadder__TryTurn` 0xE26440 (every frame of the climb state): on a ladder leaning 10° or more over
+                // the climber (its up axis against the facing), the revolve to the top side when there is room to the
+                // left (else the right), otherwise flag +908 0x40 → the release (0xE21E80)
+                let up = (l.top - l.base).normalize_or(Vec3::Y);
+                if l.tilt() >= 10f32.to_radians() && up.dot(fwd) < 0.0 && !(matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done) {
+                    let side = [false, true].into_iter().find(|&r| revolve_room(body.feet, fwd, r, &collision));
+                    match side {
+                        Some(right) => {
+                            l.start_revolve(right, body.feet);
+                            continue;
+                        }
+                        None => {
+                            let fall = blend(RELEASE[l.high as usize][l.foot], 0, &[]);
+                            let from = body.feet;
+                            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
+                            data.air.fall_action = fall;
+                            continue;
+                        }
+                    }
+                }
+                // the revolve (event 5, slots 8 / 9, guard 0xE262B0): the stick within 30° of the side (|dot(d, right)|
+                // > 0.866), in the wait (MvtAnimState ≤ 1), a ladder within 10° of vertical and room beside it
+                if phase == LadderPhase::Wait && stick && pad.dir.dot(super::right_of(fwd)).abs() > 0.866 && l.tilt() < 10f32.to_radians() {
+                    let right = pad.dir.dot(super::right_of(fwd)) > 0.0;
+                    if revolve_room(body.feet, fwd, right, &collision) {
+                        l.start_revolve(right, body.feet);
+                        continue;
+                    }
+                }
                 // QuickDrop (event 0, slots 6 / 7): the empty-hand button (interp +0x1129), on a ladder within 30° of
                 // vertical (`sub_E1EAC0`) → the release (MvtAnimState 15 / 16), its action as the fall's animation
                 if pad.hand_just_pressed() && (l.top - l.base).normalize_or(Vec3::Y).y > (30f32).to_radians().cos() {
@@ -691,6 +757,23 @@ pub fn update_ladder(
                     } else if phase != LadderPhase::Wait || done {
                         l.wait();
                     }
+                }
+            }
+            LadderPhase::Revolve(i) => {
+                if done {
+                    if i == 0 {
+                        if let Some(a) = l.action.and_then(|a| blend(a.id, 1, &[])) {
+                            let p = body.feet;
+                            l.heading = l.n;
+                            l.play(LadderPhase::Revolve(1), Some(a), p, p, false);
+                            continue;
+                        }
+                    }
+                    // `HumanLadder__EndRevolve` 0xE21EF0 → 0xE21B10: the far side, 0.5 m out from the ladder, facing it
+                    l.n = -l.n;
+                    l.fwd = -l.n;
+                    l.heading = -l.n;
+                    l.wait();
                 }
             }
             LadderPhase::ExitTop(i) => {

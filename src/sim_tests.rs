@@ -4007,3 +4007,42 @@ fn pushing_sideways_on_a_ladder_moves_onto_the_ledge_right_beside_it() {
     let l = &s.data().ledge;
     assert!((l.hand_l.y - 3.0).abs() < 0.05 && l.hand_r.x < -131.95, "hanging on the 3 m top: {:?} {:?}", l.hand_l, l.hand_r);
 }
+
+#[test]
+fn pushing_sideways_on_a_free_standing_ladder_swings_round_to_its_back() {
+    use crate::player::ladder::{LadderPhase, REVOLVE};
+    // event 5 (guard 0xE262B0): nothing behind the A2 yard's free-standing ladder, so the sideways stick in the wait
+    // swings round it (`xx_h_ladder_turn_r`, 0xE1D730) and the climb carries on from the far side (0xE21EF0)
+    let mut s = on_ladder(Vec3::new(-125.0, 0.0, -121.0), Vec3::new(-125.0, 5.0, -121.0), 1.5);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(0.5, |s| matches!(s.data().ladder.phase, Some(LadderPhase::Revolve(_)))), "no revolve");
+    assert_eq!(s.data().ladder.action.map(|a| a.id), Some(REVOLVE[1]));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled");
+    let (l, f) = (&s.data().ladder, s.body().feet);
+    assert!(l.n.dot(Vec3::Z) > 0.99, "climbing from the back: {:?}", l.n);
+    assert!((f.z + 120.5).abs() < 0.05 && (f.x + 125.0).abs() < 0.05, "0.5 m out on the far side: {f:?}");
+    assert!(s.body().forward().dot(Vec3::NEG_Z) > 0.99, "facing the ladder: {:?}", s.body().forward());
+    // climbing on from there reaches the top
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(6.0, |s| s.data().ladder.height > 2.4), "climbs from the back side");
+}
+
+#[test]
+fn a_ladder_leaning_over_the_climber_swings_him_onto_its_top_side() {
+    use crate::player::ladder::{LadderPhase, REVOLVE};
+    // `HumanLadder__TryTurn` 0xE26440: on the underside of a ladder leaning 18°, the climb state turns round to the
+    // top side at once (room to the left: `turn_l`), then the climb goes up onto the block
+    let mut s = on_ladder(Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 4.5, -122.5), 1.0);
+    let saw = std::cell::Cell::new(false);
+    assert!(s.run_until(2.0, |s| {
+        if s.data().ladder.action.is_some_and(|a| a.id == REVOLVE[0]) {
+            saw.set(true);
+        }
+        saw.get() && s.data().ladder.phase == Some(LadderPhase::Wait)
+    }), "no turn: {:?}", s.data().ladder.phase);
+    assert!(s.data().ladder.n.dot(Vec3::Z) > 0.99, "on the top side: {:?}", s.data().ladder.n);
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ground), "never reached the top: {:?} {:?}", s.data().ladder.phase, s.body().feet);
+    assert!((s.body().feet.y - 4.5).abs() < 0.1 && s.body().feet.z < -122.6, "on the block: {:?}", s.body().feet);
+}

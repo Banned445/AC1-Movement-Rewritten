@@ -1021,6 +1021,14 @@ pub const ACTIONS: &[(u32, &[&[&str]])] = &[
     (0x0292655b, &[
         &["xx_h_swing_cycle_front_050cm_to_air", "xx_h_swing_cycle_front_300cm_to_air", "xx_h_swing_cycle_front_550cm_to_air", "xx_h_swing_cycle_down_050cm_to_air", "xx_h_swing_cycle_down_300cm_to_air", "xx_h_swing_cycle_down_550cm_to_air", "xx_h_swing_cycle_up_100cm_to_air", "xx_h_swing_cycle_up_300cm_to_air"],
     ]),
+    (0x010a24ee, &[
+        &["xx_h_ladder_turn_l_a"],
+        &["xx_h_ladder_turn_l_b_tr_h_wait_l"],
+    ]),
+    (0x010a24ef, &[
+        &["xx_h_ladder_turn_r_a"],
+        &["xx_h_ladder_turn_r_b_tr_h_wait_r"],
+    ]),
     (0x56368e56, &[
         &["xx_h_ladder_wait_tr_hangwall_left"],
     ]),

@@ -94,6 +94,8 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     // at x -131.2 and a 3 m wall right beside it (x -136..-132): its top edge ends 0.8 m from the ladder
     (-130.0, -116.3, 4.0, 0.6, 6.0),
     (-134.0, -116.3, 4.0, 0.6, 3.0),
+    // the leaning ladder's block (x -139..-135, z -126..-122.6, top 4.5 m): the ladder leans on its +Z face
+    (-137.0, -124.3, 4.0, 3.4, 4.5),
     // a haystack (x -113.5..-110.5, z -126.5..-123.5) in a cart with a 1.2 m rim 0.3 m wide: the rim pairs into a
     // runtime beam, so the free run lands on it in NarrowObject and drops in from there (0xE51190)
     (-112.0, -123.35, 3.6, 0.3, 1.2),
@@ -163,6 +165,10 @@ pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
     (Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.0, 9.7), Vec3::NEG_Z),
     // A2 yard: beside the 3 m wall (the side move onto a ledge)
     (Vec3::new(-131.2, 0.0, -116.6), Vec3::new(-131.2, 6.0, -116.6), Vec3::NEG_Z),
+    // A2 yard: a free-standing ladder (nothing behind it: the revolve, event 5)
+    (Vec3::new(-125.0, 0.0, -121.0), Vec3::new(-125.0, 5.0, -121.0), Vec3::NEG_Z),
+    // A2 yard: a ladder leaning 18° on the block's +Z face, its front underneath (`HumanLadder__TryTurn` 0xE26440)
+    (Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 4.5, -122.5), Vec3::NEG_Z),
 ];
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
