@@ -1324,9 +1324,8 @@ pub fn update_climb(
                 }
             }
             let hold = from_grid.or_else(|| corner_from_candidates(&guidance, d, facing, dir).filter(|h| corner_clearance(&collision, body.feet, facing, h, side)));
-            // TrySideLedgeGrab 0xDF22C0 near (flag 4610), after the inside corner. PORT: ChooseMove tries it before the
-            // side candidates; the port takes the ground move first (the candidates sit level with the feet, the grab at
-            // the hands)
+            // TrySideLedgeGrab 0xDF22C0 near (flag 4610): after the inside corner and the side candidates (ChooseMove
+            // 0xDFE336 → 0xDFE348)
             if hold.is_none() {
                 if let Some(e) = side_ledge_grab(&guidance, &collision, d, body.feet, facing, dir, true) {
                     d.look = None;

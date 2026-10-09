@@ -8,6 +8,9 @@
 //!   when every set has AllActions and the flag. `AbilityStack__GetMaxSpeed` 0xEF02B0: the smaller MaxSpeed (0 when a
 //!   set lacks AllActions; 4 with no set).
 //! - **MaxSpeed in the interpreter** (0xEE65A0, RE/01 §6): 0 → speed 0; Jog in high profile → speed ≤ 0.3.
+//! - **PassOver** only gates the wall run's pass-over request (0xEE72DA sets interpreter +0x1128, passed to the
+//!   wall-run start IHumanGround vt116 0xDBBD40 → WallingData +0x20); that exit is dead in v1.02, so nothing in the
+//!   port reads it. Pass-over jump targets are not gated.
 //!
 //! PORT: the game's sets come from the player's progression and mission scripts (not ported). The port has one set,
 //! everything allowed by default; `AC_ABILITIES=<hex>` sets the flags and `AC_MAX_SPEED=<0..4>` the speed for tests.
