@@ -1017,6 +1017,27 @@ fn wall_run_steps_up_then_hangs_from_a_higher_edge() {
 }
 
 #[test]
+fn wall_run_at_a_3_m_edge_ends_in_a_wall_hang() {
+    // bug 1791478709: the free-hang probe B caught the wall's own 3 m top, so the grab and the pull-up played as a
+    // free hang 0.5 m off the wall. The game's probe B box only reaches overhanging edges (0xE37A07); a 3 m wall top
+    // is probe D's wall hang, as read live (root 0.5 m out, 1.1 m under the hands).
+    let mut s = Sim::new(Vec3::new(1.56, 0.0, 5.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.body().feet.z > 7.5));
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?} at {:?}", s.loco().current, s.body().feet);
+    s.pad(Vec3::Z, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge), "never hung: {:?}", s.loco().current);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "grab never ended");
+    let l = &s.data().ledge;
+    assert_eq!(l.hang_type, ledge::LedgeHangType::Wall);
+    assert!((l.hand_l.y - 3.0).abs() < 0.05 && l.hand_l.x > l.hand_r.x, "hands on the edge, left on the left: {:?} {:?}", l.hand_l, l.hand_r);
+    let f = s.body().feet;
+    assert!((f.y - 1.9).abs() < 0.05 && (l.hand_l.z - f.z - 0.5).abs() < 0.05, "wall-hang root: {f:?}");
+}
+
+#[test]
 fn wall_run_without_a_ledge_drops_back() {
     use crate::player::walling::WallingSubState;
     let mut s = wall_run_at(82.0);

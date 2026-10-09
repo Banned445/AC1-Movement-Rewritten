@@ -9,7 +9,7 @@ use bevy::prelude::*;
 
 use super::air::{FallOrigin, InAirEntry};
 use super::jump_blend::{self, ActionBlend};
-use super::ledge::{hang_root, hang_root_at, LedgeEntry, LedgeHangType, LedgeSubState};
+use super::ledge::{hang_root, LedgeEntry, LedgeHangType, LedgeSubState};
 use super::ledge_moves::{self, LedgeMove, MoveKind};
 use super::targets::JumpTarget;
 use super::{right_of, switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, TransitionSetup};
@@ -80,7 +80,7 @@ mod beam_warp_tests {
     fn ledge_hands_keep_left_and_right_whichever_way_the_edge_runs() {
         // facing +Z into a wall whose outward normal is -Z: the climber's right is -X
         for dir in [Vec3::X, Vec3::NEG_X] {
-            let c = LedgeCandidate { point: Vec3::new(0.0, 2.0, 0.0), normal: Vec3::NEG_Z, edge_dir: dir, height: 2.0, lateral: 0.0 };
+            let c = LedgeCandidate { point: Vec3::new(0.0, 2.0, 0.0), normal: Vec3::NEG_Z, edge_dir: dir, height: 2.0, dist: 0.0 };
             let (l, r) = hands(&c);
             assert!(l.x > r.x, "left hand on the climber's left for edge direction {dir}");
             assert!((l.distance(r) - 0.4).abs() < 1e-6);
@@ -247,14 +247,15 @@ struct LedgeCandidate {
     edge_dir: Vec3,
     /// Height above the root.
     height: f32,
-    /// Lateral offset from the probe origin.
-    lateral: f32,
+    /// Horizontal distance from the probe origin.
+    dist: f32,
 }
 
 /// `FindLedgeCandidates` 0xE36BD0 (reduced): LedgeGrab edges facing the character within 45°, whose closest
-/// point to the probe origin lies within ±`width` sideways, 0..`height` above it and within `range` ahead.
-/// Nearest first.
-fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: f32, height: f32, range: f32) -> Vec<LedgeCandidate> {
+/// point to the probe origin lies in the game's box: ±`width` sideways, 0..`height` above it and 0..`depth` ahead
+/// (arguments a6 / a7 / a8: the box centre is origin + a7/2·up + a8/2·forward). Nearest first. PORT: the fan of
+/// runtime edges of radius a9 (`sub_B28090` / `sub_B28260`, −75°…+135°: capsules, barrels) is not modelled.
+fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: f32, height: f32, depth: f32) -> Vec<LedgeCandidate> {
     let r = right_of(facing);
     let mut out: Vec<(f32, LedgeCandidate)> = Vec::new();
     for e in &g.edges {
@@ -266,10 +267,11 @@ fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: 
         let up = d.y;
         let ahead = d.dot(facing);
         let lat = d.dot(r);
-        if up < 0.0 || up > height || lat.abs() > width || !(-0.1..=range).contains(&ahead) {
+        if up < 0.0 || up > height || lat.abs() > width || !(0.0..=depth).contains(&ahead) {
             continue;
         }
-        out.push((ahead.abs() + up * 0.01, LedgeCandidate { point: q, normal: e.n1, edge_dir: (e.p1 - e.p0).normalize_or_zero(), height: q.y - root.y, lateral: lat }));
+        let dist = Vec2::new(d.x, d.z).length();
+        out.push((ahead.abs() + up * 0.01, LedgeCandidate { point: q, normal: e.n1, edge_dir: (e.p1 - e.p0).normalize_or_zero(), height: q.y - root.y, dist }));
     }
     out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     out.into_iter().map(|x| x.1).collect()
@@ -355,21 +357,25 @@ fn pullup_exit(id: u32, b: f32, root: Vec3, c: &LedgeCandidate) -> LedgeEntry {
 /// Probes after EntryB (UpdateWallingSubState 0xE37590, command 0): A = pull-up, B = free hang.
 fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &CollisionWorld) -> Option<LedgeEntry> {
     // A: FindLedge(pos, 0.3h, 1.05h+0.05, h, 0.8): 0.25h ≤ height ≤ h, room on top
-    for c in find_ledge(g, root, root, facing, 0.3 * H, 1.05 * H + 0.05, 0.8) {
+    for c in find_ledge(g, root, root, facing, 0.3 * H, 1.05 * H + 0.05, H) {
         if (0.25 * H..=H).contains(&c.height) && classify(&c, collision) == 1 {
             let b = ((c.height.max(0.3) - 0.3 * H) / (0.7 * H)).clamp(0.0, 1.0);
             return Some(pullup_exit(ENTRY_TO_KNEE, b, root, &c));
         }
     }
-    // B: FindLedge(pos + 1.5·up − 0.6·fwd, 0.3h, h+0.05, …, 1.2): free hang, 4-way blend
+    // B: FindLedge(pos + 1.5·up − 0.6·fwd, 0.3h, h+0.05, 0.25h+0.1, 1.2): an edge overhanging the run, 0.25–0.6 m
+    // behind the root (the box reaches 0.35 m forward from 0.6 m behind), not the wall's own top. Free hang, 4-way
+    // blend (0xE37A07 … 0xE37F06).
     let o = root + Vec3::Y * 1.5 - facing * 0.6;
-    if let Some(c) = find_ledge(g, o, root, facing, 0.3 * H, H + 0.05, 1.2).into_iter().find(|c| classify(c, collision) != 0) {
+    if let Some(c) = find_ledge(g, o, root, facing, 0.3 * H, H + 0.05, 0.25 * H + 0.1).into_iter().find(|c| classify(c, collision) != 0) {
         let hb = (c.height - 1.5).clamp(0.0, 1.0);
-        let lat = (1.0 - (c.lateral.abs() - 0.1) / 0.7).clamp(0.0, 1.0);
+        // the "max" weight: 1 − (flat distance from the probe origin − 0.1) / 0.7
+        let near = (1.0 - (c.dist - 0.1) / 0.7).clamp(0.0, 1.0);
         // clips: 250 min, 350 min, 250 max, 350 max (swing back)
-        let w = [(1.0 - hb) * lat, hb * lat, (1.0 - hb) * (1.0 - lat), hb * (1.0 - lat)];
+        let w = [(1.0 - hb) * (1.0 - near), hb * (1.0 - near), (1.0 - hb) * near, hb * near];
         let (hl, hr) = hands(&c);
-        let to = hang_root_at(hl, hr, c.normal, LedgeHangType::Free, collision);
+        // the root goes straight under the edge, 2.4 m down (0xE37F70); hang type Free (0xE3807F)
+        let to = hang_root(hl, hr, c.normal, LedgeHangType::Free);
         return Some(exit([blended(ENTRY_TO_HANGFREE, 0, &w), None, None, None], root, to, &c, (true, false, false)));
     }
     None
@@ -378,17 +384,23 @@ fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Collisio
 /// Probes after the Vertical step: C = free hang (2h ≤ height < 2.7h+0.1), D = pull-up (0.5h–h) or wall hang
 /// (h–2.7h+0.1).
 fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &CollisionWorld) -> Option<LedgeEntry> {
+    // C: FindLedge(pos − 0.6·fwd + up, 0.3h, 1.7h+0.1, 0.8h, 1.2), within 0.25h+0.1 flat of the probe origin
+    // (0xE38586): again an overhanging edge, not the wall's top.
     let oc = root - facing * 0.6 + Vec3::Y;
-    for c in find_ledge(g, oc, root, facing, 0.3 * H, 1.7 * H + 0.1, 1.2) {
-        if c.lateral.abs() < 0.25 * H + 0.1 && (2.0 * H..2.7 * H + 0.1).contains(&c.height) && classify(&c, collision) != 0 {
-            let hb = ((c.height - 2.0) / 0.7).clamp(0.0, 1.0);
+    for c in find_ledge(g, oc, root, facing, 0.3 * H, 1.7 * H + 0.1, 0.8 * H) {
+        if c.dist < 0.25 * H + 0.1 && (2.0 * H..2.7 * H + 0.1).contains(&c.height) && classify(&c, collision) != 0 {
+            // weights (0xE3870C … 0xE38855): height past 2 m × nearness ((0.7 − dist) / 0.7)
+            let hb = (c.height - 2.0).clamp(0.0, 1.0);
+            let near = ((0.8 - c.dist - 0.1) / 0.7).clamp(0.0, 1.0);
+            let w = [(1.0 - hb) * (1.0 - near), hb * (1.0 - near), (1.0 - hb) * near, hb * near];
             let (hl, hr) = hands(&c);
-            let to = hang_root_at(hl, hr, c.normal, LedgeHangType::Free, collision);
-            return Some(exit([blended(STEP1_TO_HANGFREE, 0, &[1.0 - hb, hb, 0.0, 0.0]), None, None, None], root, to, &c, (true, false, false)));
+            let to = hang_root(hl, hr, c.normal, LedgeHangType::Free);
+            return Some(exit([blended(STEP1_TO_HANGFREE, 0, &w), None, None, None], root, to, &c, (true, false, false)));
         }
     }
+    // D: FindLedge(pos − 0.6·fwd, 0.8h, 2.7h+0.1, 1.5h, 1.2) (0xE3863F)
     let od = root - facing * 0.6;
-    for c in find_ledge(g, od, root, facing, 0.8 * H, 2.7 * H + 0.1, 1.2) {
+    for c in find_ledge(g, od, root, facing, 0.8 * H, 2.7 * H + 0.1, 1.5 * H) {
         let class = classify(&c, collision);
         if class == 0 {
             continue;
