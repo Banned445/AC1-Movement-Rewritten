@@ -624,8 +624,10 @@ fn choose_clip(
     pad: Res<crate::input::PadInput>,
     collision: Res<crate::collision::CollisionWorld>,
     mut q: Query<(&Locomotion, &HumanDataBundle, &crate::player::Body, &mut AnimPlayer)>,
+    fly: Option<Res<crate::debug_fly::DebugFly>>,
 ) {
     use crate::player::air::AirMode;
+    let flying = fly.is_some_and(|f| f.active);
     use crate::player::ledge::{LedgeHangType, LedgeSubState};
     let dt = time.delta_secs();
     for (loco, data, body, mut p) in &mut q {
@@ -642,6 +644,8 @@ fn choose_clip(
             p.hold = None;
         }
         let req = match loco.current {
+            // the debug flight is the game's Debug context (3, 0xE46190): action request 7, Ghost mode
+            _ if flying => action(&lib, &[crate::debug_fly::GHOST_MODE], true, 1_900_000, Some(0.2), None),
             ActorContextId::Ground if g.crouch.is_some() => {
                 let c=g.crouch.unwrap();p.sim_phase=Some(c.phase());
                 sim_request(&mut p,&lib,&c.action,1_800_000+c.sequence as u64,c.fade)
