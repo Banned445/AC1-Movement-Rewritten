@@ -725,11 +725,13 @@ fn side_column_holds(g: &GuidanceWorld, d: &HumanClimbData, facing: Vec3, dir: u
 }
 
 /// `Human__ClimbBodyBoxesFree` 0xB2DF90 at a climb pose (S = F × U): a box at root + 0.5·U (half extents 0.375 / 0.25 /
-/// 0.5 along S / F / U) and one at root + 1.4·U (0.15 / 0.15 / 0.4) hold nothing.
-fn body_boxes_free(collision: &crate::collision::CollisionWorld, pose: &ClimbPose) -> bool {
+/// 0.5 along S / F / U) and one at root + 1.4·U (0.15 / 0.15 / 0.4) hold nothing. A sideways LONG move (`side` ±1)
+/// widens the first box to 0.575 and moves it 0.05·side against S.
+pub(crate) fn body_boxes_free(collision: &crate::collision::CollisionWorld, pose: &ClimbPose, side: i32) -> bool {
     let s = pose.forward.cross(pose.up).normalize_or_zero();
     let axes = [s, pose.forward, pose.up];
-    collision.obb_free(pose.root + pose.up * 0.5, axes, Vec3::new(0.375, 0.25, 0.5))
+    let (half_s, shift) = if side != 0 { (0.575, -0.05 * side as f32) } else { (0.375, 0.0) };
+    collision.obb_free(pose.root + pose.up * 0.5 + s * shift, axes, Vec3::new(half_s, 0.25, 0.5))
         && collision.obb_free(pose.root + pose.up * 1.4, axes, Vec3::new(0.15, 0.15, 0.4))
 }
 
@@ -758,7 +760,7 @@ fn lateral_path_free(collision: &crate::collision::CollisionWorld, from: Vec3, f
 fn corner_climb(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize, near: bool) -> Option<(Hold, Hold, ClimbPose, u32)> {
     let (f, h) = side_column_holds(g, d, facing, dir, near)?;
     let pose = climb_pose([h.pos, h.pos, f.pos, f.pos], [h.normal, h.normal, f.normal, f.normal], -f.normal);
-    if !body_boxes_free(collision, &pose) {
+    if !body_boxes_free(collision, &pose, 0) {
         return None;
     }
     if !near && !lateral_path_free(collision, root, facing, pose.root, -pose.normal()) {
@@ -969,7 +971,25 @@ fn overhang_hang(d: &HumanClimbData, sides: [Option<(Hold, Hold)>; 2], dir: usiz
     Some((hl, hr, n, OVERHANG_TO_HANG[left_lower as usize]))
 }
 
-/// IsGridMoveValid 0xDECD70: every moving side needs a foot hold and a hand hold two rows up.
+/// IsGridMoveValid 0xDECD70: every moving side needs a foot hold and a hand hold two rows up, and the body must fit at
+/// the climb pose of the new holds (ComputeRootFromMove 0xDEC6E0 → `Human__ClimbBodyBoxesFree` 0xB2DF90; a LONG move
+/// passes its side, −1 if a moving side goes left, +1 if right).
+fn try_move_clear(grid: &HoldGrid, d: &HumanClimbData, collision: &crate::collision::CollisionWorld, m: (usize, Side, i32, i32), long: bool) -> Option<(usize, [Option<(Hold, Hold)>; 2])> {
+    let (next, sides) = try_move(grid, d.pose, m)?;
+    let mut holds = [d.hand_l, d.hand_r, d.foot_l, d.foot_r];
+    let mut normals = d.hold_n;
+    for (i, s) in sides.iter().enumerate() {
+        if let Some((f, h)) = s {
+            (holds[i], normals[i]) = (h.pos, h.normal);
+            (holds[2 + i], normals[2 + i]) = (f.pos, f.normal);
+        }
+    }
+    let fallback = -Vec3::new(d.normal.x, 0.0, d.normal.z).normalize_or(Vec3::Z);
+    let side = if long { m.2.signum() } else { 0 };
+    body_boxes_free(collision, &climb_pose(holds, normals, fallback), side).then_some((next, sides))
+}
+
+/// The holds of a grid move (the first half of IsGridMoveValid 0xDECD70).
 fn try_move(grid: &HoldGrid, pose: usize, m: (usize, Side, i32, i32)) -> Option<(usize, [Option<(Hold, Hold)>; 2])> {
     let (next, side, dx, dy) = m;
     let (pl, pr) = POSES[pose];
@@ -1154,10 +1174,10 @@ pub fn update_climb(
         // ChooseMove 0xDFDE90: LONG first when the stick is pushed hard, then SHORT
         let mut chosen = None;
         if pad.magnitude > CLIMB_LONG_STICK {
-            chosen = lookup(&LONG, d.pose, dir).and_then(|m| try_move(&grid, d.pose, m).map(|r| (r, m, LONG_ACTIONS[d.pose][resolve_dir(&LONG, d.pose, dir)])));
+            chosen = lookup(&LONG, d.pose, dir).and_then(|m| try_move_clear(&grid, d, &collision, m, true).map(|r| (r, m, LONG_ACTIONS[d.pose][resolve_dir(&LONG, d.pose, dir)])));
         }
         if chosen.is_none() {
-            chosen = lookup(&SHORT, d.pose, dir).and_then(|m| try_move(&grid, d.pose, m).map(|r| (r, m, SHORT_ACTIONS[d.pose][resolve_dir(&SHORT, d.pose, dir)])));
+            chosen = lookup(&SHORT, d.pose, dir).and_then(|m| try_move_clear(&grid, d, &collision, m, false).map(|r| (r, m, SHORT_ACTIONS[d.pose][resolve_dir(&SHORT, d.pose, dir)])));
             // a valid SHORT move up onto holds that stick out: hang from them instead (TryTransitionToLedgeHang 0xDF4BA0,
             // ChooseMove step 4; 4613 + 2920 → the Ledge context, fill sub_DEEAC0)
             if let Some(((_, sides), _, _)) = chosen {

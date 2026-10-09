@@ -55,6 +55,11 @@ pub struct LimbState {
     travel: bool,
     /// Tag-driven: seconds the hold has differed from the contact without a release.
     wait: f32,
+    /// Tag-driven: released with no contact ahead in its clip (0xE56FC0 clears the travel flag, rec+2); the old
+    /// hold is forgotten and the next contact attaches at the new hold.
+    released: bool,
+    /// Tag-driven: the grab was predicted (contact under 0.2 s ahead); the limb holds the new hold until the tag.
+    predicted: bool,
 }
 
 /// What the playing clip's contact tag says about one limb this frame (LimbIK__UpdateContactsFromAnimTags
@@ -62,7 +67,8 @@ pub struct LimbState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tag {
     On,
-    Travel { s: f32 },
+    /// `until`: seconds left to the re-contact.
+    Travel { s: f32, until: f32 },
     Off,
 }
 
@@ -78,7 +84,7 @@ pub fn limb_tag(c: &crate::anim::ContactState, limb: usize) -> Option<Tag> {
         return Some(Tag::On);
     }
     match (c.off_since[b], c.next_on[b]) {
-        (Some(t0), Some(t1)) if t1 > t0 => Some(Tag::Travel { s: ((c.t - t0) / (t1 - t0)).clamp(0.0, 1.0) }),
+        (Some(t0), Some(t1)) if t1 > t0 => Some(Tag::Travel { s: ((c.t - t0) / (t1 - t0)).clamp(0.0, 1.0), until: t1 - c.t }),
         _ => Some(Tag::Off),
     }
 }
@@ -94,6 +100,26 @@ impl LimbState {
                 self.weight = (self.weight - dt * IK_WEIGHT_OUT_RATE).max(0.0);
                 self.dur = 0.0;
                 self.travel = false;
+                self.released = true;
+            }
+            Tag::Travel { until, .. } if self.released => {
+                // 0xE56FC0: a released limb stays released until its next contact is under 0.2 s away, then
+                // takes the new hold directly (the old contact becomes the new one; no travel from the old hold)
+                if until < IK_GRAB_PREDICT {
+                    self.weight = (self.weight + dt * IK_WEIGHT_IN_RATE).min(1.0);
+                    *self = LimbState { weight: self.weight, goal: p, from: p, to: p, anim_from: anim, has_goal: true, predicted: true, ..Default::default() };
+                } else {
+                    self.weight = (self.weight - dt * IK_WEIGHT_OUT_RATE).max(0.0);
+                }
+            }
+            Tag::Travel { .. } if self.predicted => {
+                self.weight = (self.weight + dt * IK_WEIGHT_IN_RATE).min(1.0);
+                self.goal = p;
+                self.to = p;
+            }
+            Tag::On if self.released || self.predicted => {
+                self.weight = (self.weight + dt * IK_WEIGHT_IN_RATE).min(1.0);
+                *self = LimbState { weight: self.weight, goal: p, from: p, to: p, anim_from: anim, has_goal: true, ..Default::default() };
             }
             Tag::On => {
                 self.weight = (self.weight + dt * IK_WEIGHT_IN_RATE).min(1.0);
@@ -118,7 +144,7 @@ impl LimbState {
                 }
                 self.to = self.goal;
             }
-            Tag::Travel { s } => {
+            Tag::Travel { s, .. } => {
                 if !self.travel {
                     // contact released with a re-contact ahead: travel from here to the new hold (a limb
                     // that never had a contact starts at the hold)
@@ -144,7 +170,7 @@ impl LimbState {
                 self.weight = (self.weight + dt * IK_WEIGHT_IN_RATE).min(1.0);
                 if !self.has_goal {
                     // new contact: no travel, the weight fade carries the limb in
-                    *self = LimbState { weight: self.weight, goal: p, from: p, to: p, anim_from: anim, t: 0.0, dur: 0.0, has_goal: true, travel: false, wait: 0.0 };
+                    *self = LimbState { weight: self.weight, goal: p, from: p, to: p, anim_from: anim, has_goal: true, ..Default::default() };
                 } else if (p - self.to).length() > IK_RETARGET_DIST {
                     // the limb moves to a new hold: travel from where it is now
                     self.from = self.goal;
@@ -1087,6 +1113,29 @@ mod tests {
         let (drop, lean) = head_clearance(&c, h, Vec3::NEG_Z);
         assert_eq!(drop, 0.0);
         assert!((lean - 0.1).abs() < 0.03, "{lean}");
+    }
+
+    #[test]
+    fn a_released_limb_takes_its_next_hold_directly_once_the_contact_is_near() {
+        // bug 1791501077: a foot released mid-jump came back travelling from the hold 2.2 m behind
+        let dt = 1.0 / 60.0;
+        let (old, new) = (Vec3::ZERO, Vec3::new(-2.2, 0.0, 0.0));
+        let mut l = LimbState::default();
+        for _ in 0..20 {
+            l.update_tagged(Some(old), old, Tag::On, dt);
+        }
+        for _ in 0..20 {
+            l.update_tagged(Some(new), new, Tag::Off, dt); // the jump's loop releases the foot
+        }
+        assert_eq!(l.weight, 0.0);
+        // the end clip: a contact 0.5 s ahead keeps the foot released, then under 0.2 s it takes the new hold
+        assert_eq!(l.update_tagged(Some(new), new + Vec3::Y, Tag::Travel { s: 0.2, until: 0.5 }, dt), None);
+        let g = l.update_tagged(Some(new), new + Vec3::Y, Tag::Travel { s: 0.8, until: 0.15 }, dt).unwrap();
+        assert!(g.distance(new) < 1e-6, "goal {g} should be the new hold, not a travel from {old}");
+        let g = l.update_tagged(Some(new), new + Vec3::Y * 0.5, Tag::Travel { s: 0.9, until: 0.1 }, dt).unwrap();
+        assert!(g.distance(new) < 1e-6, "{g}");
+        l.update_tagged(Some(new), new, Tag::On, dt);
+        assert!(l.goal.distance(new) < 1e-6 && !l.released && !l.predicted);
     }
 
     #[test]

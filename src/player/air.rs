@@ -189,11 +189,17 @@ pub struct HumanInAirData {
     pub drop: Option<(usize, usize, Option<Vec3>)>,
     /// First steep contact and rag-fall requirement (0xE038A0 / 0xE05200).
     pub slope_slide: super::ground_extras::SlopeSlide,
+    /// A run jump turns from the takeoff facing to its destination over the takeoff (set up on the first update).
+    turn_pending: bool,
+    /// (takeoff heading, destination heading) of that turn.
+    pub turn: Option<(f32, f32)>,
 }
 
 impl HumanInAirData {
     pub fn enter(&mut self, entry: InAirEntry) {
         self.seq = self.seq.wrapping_add(1);
+        self.turn_pending = false;
+        self.turn = None;
         self.apex_reached = false;
         self.fall_origin = FallOrigin::Ground;
         self.target_flags = 0;
@@ -327,6 +333,14 @@ impl HumanInAirData {
         self.flight = Some(flight);
         let end = add(takeoff.disp(1.0), flight.disp(1.0));
         let clip_end = from + to_world(end, fwd);
+        // 0xB20200 keeps the character's own matrix as the jump frame (InAirData +16 / +320) and stores a destination
+        // orientation (+256, flag +507) only for run jumps (kind 0 / 4) and the Leap of Faith; 0xE0ECDC slerps toward
+        // it. The frame is taken from the body on the first update (`begin_turn`).
+        self.turn_pending = kind == 0;
+        if std::env::var_os("AC_ANIM_LOG").is_some() {
+            info!("target jump: type {target_type:#x} kind {kind} dz {:.2} dist {:.2}: takeoff {takeoff_id:#010x} {t1:.2}s, flight {flight_id:#010x} {t2:.2}s, clip end {:.2} vs aim {:.2}",
+                aim.y - from.y, flat.length(), (clip_end - from).length(), (aim - from).length());
+        }
         AirMode::Jump { from, clip_end, aim, apex: 0.0, duration: (t1 + t2).max(1e-3), t: 0.0, then_fall_to, real: true, t_takeoff: t1, fwd }
     }
 }
@@ -341,7 +355,39 @@ impl HumanInAirData {
         self.flight = Some(flight);
         let d = flight.duration();
         let clip_end = from + to_world(flight.disp(1.0), fwd);
+        if std::env::var_os("AC_ANIM_LOG").is_some() {
+            info!("straight jump: flight {:#010x} b {:.2} {d:.2}s, clip end {:.2} vs aim {:.2}", j.flight, j.b, (clip_end - from).length(), (aim - from).length());
+        }
         AirMode::Jump { from, clip_end, aim, apex: 0.0, duration: d.max(0.2), t: 0.0, then_fall_to: None, real: true, t_takeoff: 0.0, fwd }
+    }
+}
+
+impl HumanInAirData {
+    /// The run jump's frame (0xB20200: the character's own matrix at takeoff): the clips' root motion plays in the
+    /// takeoff facing, the linear correction carries it onto the target, and the facing turns to the destination.
+    /// PORT: the destination orientation (InAirData +256, from 0xB1EC40) is taken as the direction to the target.
+    fn begin_turn(&mut self, heading: f32) {
+        if !std::mem::take(&mut self.turn_pending) {
+            return;
+        }
+        let AirMode::Jump { from, clip_end, fwd, .. } = &mut self.mode else { return };
+        let dest = super::heading_of(*fwd);
+        let start_fwd = Vec3::new(-heading.sin(), 0.0, -heading.cos());
+        let end = match (self.takeoff, self.flight) {
+            (Some(a), Some(b)) => add(a.disp(1.0), b.disp(1.0)),
+            _ => return,
+        };
+        *clip_end = *from + to_world(end, start_fwd);
+        *fwd = start_fwd;
+        self.turn = Some((heading, dest));
+    }
+
+    /// Facing during the jump (0xE0EF30): slerp(takeoff, destination, t / min(T₁, 0.4)), 1 once the takeoff item ends.
+    fn jump_heading(&self, t: f32, t_takeoff: f32, fwd: Vec3) -> f32 {
+        let Some((h0, h1)) = self.turn else { return super::heading_of(fwd) };
+        let s = if t_takeoff <= 0.0 || t >= t_takeoff { 1.0 } else { (t / t_takeoff.min(0.4)).min(1.0) };
+        let d = (h1 - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        h0 + d * s
     }
 }
 
@@ -442,6 +488,7 @@ pub fn update_air(
             loco.just_switched = false;
             // the controller keeps integrating the take-off velocity; the jump's path shifts with it so the
             // linear correction (0xE0DEF0) still ends on the target
+            data.air.begin_turn(body.heading);
             let before = body.feet;
             super::coast(&mut body, &collision, dt);
             let d = body.feet - before;
@@ -501,7 +548,7 @@ pub fn update_air(
                 let mv = (next - path(t)) + lag * (dt * JUMP_LAG_RECOVERY).min(1.0);
                 let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, mv, false, dt) };
                 body.velocity = path_vel;
-                body.heading = super::heading_of(fwd);
+                body.heading = air.jump_heading(t1, t_takeoff, fwd);
                 body.feet = r.position;
                 let blocked = (r.position - next).length() > JUMP_BLOCKED_LAG;
                 if air.free_target && r.landed && path_vel.y <= 0.0 {
@@ -808,6 +855,27 @@ pub fn update_air(
 #[cfg(test)]
 mod fall_tests {
     use super::*;
+    #[test]
+    fn a_run_jump_turns_to_its_target_over_the_takeoff() {
+        // bug 1791501015: the facing snapped 42° in one frame at takeoff. 0xE0EF30 slerps the jump frame from the
+        // takeoff facing to the destination over min(T₁, 0.4 s).
+        let mut air = HumanInAirData::default();
+        let start = 0.0f32; // facing −Z
+        let dir = Quat::from_rotation_y(-0.75) * Vec3::NEG_Z; // 43° to the right
+        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, speed_param: 0.5, foot_left: true });
+        air.begin_turn(start);
+        let AirMode::Jump { t_takeoff, fwd, from, clip_end, .. } = air.mode else { panic!("not a jump") };
+        assert!(t_takeoff > 0.1, "{t_takeoff}");
+        assert!(fwd.distance(Vec3::NEG_Z) < 1e-5, "the clips play in the takeoff frame: {fwd}");
+        let ahead = clip_end - from;
+        assert!(Vec3::new(ahead.x, 0.0, ahead.z).normalize().dot(Vec3::NEG_Z) > 0.99, "clip end ahead of the takeoff facing: {ahead}");
+        let h = |t: f32| air.jump_heading(t, t_takeoff, fwd);
+        let dest = super::super::heading_of(dir);
+        assert!((h(0.0) - start).abs() < 1e-5);
+        let mid = h(t_takeoff.min(0.4) * 0.5);
+        assert!((mid - (start + dest) * 0.5).abs() < 1e-4, "half way at half the turn: {mid} of {dest}");
+        assert!((h(t_takeoff) - dest).abs() < 1e-5 && (h(t_takeoff + 0.3) - dest).abs() < 1e-5);
+    }
     #[test]
     fn fall_entry_clears_previous_flight_and_keeps_all_native_origins() {
         for origin in [FallOrigin::Ground,FallOrigin::Climb,FallOrigin::HangWall,FallOrigin::HangFree] {

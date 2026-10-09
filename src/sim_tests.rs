@@ -412,27 +412,35 @@ fn climb_root_frame_follows_the_holds() {
 }
 
 #[test]
-fn climb_onto_holds_that_stick_out_becomes_a_free_hang() {
-    use crate::player::ledge_moves::MoveKind;
-    // wall K (face z -10.5) with the bay 0.9 m out above 3.3 m: climbing straight up, the hands reach the bay's
-    // bands while the feet stay on the wall; once the body leans out 30° more than the hands' line the climb hangs
-    // from the bay (TryTransitionToLedgeHang 0xDF4BA0)
+fn climbing_under_wall_k_bay_never_puts_the_body_inside_it() {
+    // bug 1791500965: wall K (face z -10.5) with the bay 0.9 m out above 3.3 m. Climbing straight up, the hands reached
+    // the bay's bands while a foot stayed on the wall, and the body ended 0.24 m inside the bay. The game checks the
+    // body at every grid move's new pose (IsGridMoveValid 0xDECD70 -> Human__ClimbBodyBoxesFree 0xB2DF90), so that
+    // move is refused; with the holds below run out the climb jumps up to the bay (TryBackEject 0xDF2F50).
+    let (collision, _) = crate::level::geometry();
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -11.4), FACE_PZ);
     walk_to_wall(&mut s, Vec3::Z, 2.0);
     s.pad(Vec3::Z, 1.0, true, false);
     s.press_hand(); // climbing from the ground: the empty-hand press (event 50, RE/02 4.7)
     assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
-    // a light push (≤ 0.5): SHORT moves only, one side at a time
+    // a light push (<= 0.5): SHORT moves only, one side at a time
     s.pad(Vec3::Z, 0.45, true, false);
-    assert!(s.run_until(15.0, |s| s.loco().current == ActorContextId::Ledge), "never hung: {:?} {:?} hands {:?}", s.data().climb.last_action, s.body().feet, s.data().climb.hand_l);
-    assert_eq!(s.data().climb.last_action, "overhang");
-    let mv = s.data().ledge.mv.expect("the overhang move");
-    assert_eq!(mv.kind, MoveKind::Arrival);
-    assert!(climb::OVERHANG_TO_HANG.contains(&mv.seq[0].expect("the action").id));
-    assert!(mv.hand_l.z < -11.4 && mv.hand_r.z < -11.4, "both hands on the bay: {:?} {:?}", mv.hand_l, mv.hand_r);
+    let worst = std::cell::Cell::new(None);
+    let left = s.run_until(15.0, |s| {
+        let d = &s.data().climb;
+        if s.loco().current == ActorContextId::Climb && d.moving.is_none() && !climb::body_boxes_free(&collision, &d.frame, 0) {
+            if worst.get().is_none() { worst.set(Some((d.last_action, d.frame.root))); }
+        }
+        s.loco().current == ActorContextId::Ledge
+    });
+    assert_eq!(worst.get(), None, "a climb pose with the body inside the geometry");
+    assert!(left, "never left wall K: {:?} {:?}", s.data().climb.last_action, s.body().feet);
+    assert!(["jump up", "overhang"].contains(&s.data().climb.last_action), "{}", s.data().climb.last_action);
     s.pad(Vec3::Z, 0.0, false, false);
-    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "move never ended");
-    assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Free);
+    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_none()), "move never ended");
+    let l = &s.data().ledge;
+    assert!(l.hand_l.z < -11.3 && l.hand_r.z < -11.3, "hands on the bay: {:?} {:?}", l.hand_l, l.hand_r);
+    assert_eq!(l.hang_type, ledge::LedgeHangType::Free);
 }
 
 /// Climb wall M from the ground at `x` and push up (light, SHORT moves) until both feet stand on the 2.4 m band.
@@ -1014,6 +1022,27 @@ fn wall_run_steps_up_then_hangs_from_a_higher_edge() {
     assert!(s.run_until(2.0, |s| s.data().ledge.mv.is_none()));
     let l = &s.data().ledge;
     assert!((l.hand_l.y - 3.8).abs() < 0.05, "hands on the 3.8 m edge: {:?}", l.hand_l);
+}
+
+#[test]
+fn wall_run_at_a_3_m_edge_ends_in_a_wall_hang() {
+    // bug 1791478709: the free-hang probe B caught the wall's own 3 m top, so the grab and the pull-up played as a
+    // free hang 0.5 m off the wall. The game's probe B box only reaches overhanging edges (0xE37A07); a 3 m wall top
+    // is probe D's wall hang, as read live (root 0.5 m out, 1.1 m under the hands).
+    let mut s = Sim::new(Vec3::new(1.56, 0.0, 5.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.body().feet.z > 7.5));
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?} at {:?}", s.loco().current, s.body().feet);
+    s.pad(Vec3::Z, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge), "never hung: {:?}", s.loco().current);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "grab never ended");
+    let l = &s.data().ledge;
+    assert_eq!(l.hang_type, ledge::LedgeHangType::Wall);
+    assert!((l.hand_l.y - 3.0).abs() < 0.05 && l.hand_l.x > l.hand_r.x, "hands on the edge, left on the left: {:?} {:?}", l.hand_l, l.hand_r);
+    let f = s.body().feet;
+    assert!((f.y - 1.9).abs() < 0.05 && (l.hand_l.z - f.z - 0.5).abs() < 0.05, "wall-hang root: {f:?}");
 }
 
 #[test]

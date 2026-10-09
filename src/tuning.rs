@@ -231,3 +231,6 @@ pub const IK_FOOT_UP: f32 = 0.0;
 pub const IK_FOOT_OUT: f32 = 0.17;
 /// PORT: a hold moved while the clip keeps that limb in contact and never releases it: settle after this long.
 pub const IK_CONTACT_WAIT: f32 = 0.3;
+/// A released limb takes its next contact once that contact is less than 0.2 s away in the playing clip
+/// (`LimbIK__UpdateContactsFromAnimTags` 0xE56FC0: `next − now < 0.2` predicts the grab).
+pub const IK_GRAB_PREDICT: f32 = 0.2;
