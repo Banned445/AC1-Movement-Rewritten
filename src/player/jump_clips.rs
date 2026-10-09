@@ -1021,6 +1021,123 @@ pub const ACTIONS: &[(u32, &[&[&str]])] = &[
     (0x0292655b, &[
         &["xx_h_swing_cycle_front_050cm_to_air", "xx_h_swing_cycle_front_300cm_to_air", "xx_h_swing_cycle_front_550cm_to_air", "xx_h_swing_cycle_down_050cm_to_air", "xx_h_swing_cycle_down_300cm_to_air", "xx_h_swing_cycle_down_550cm_to_air", "xx_h_swing_cycle_up_100cm_to_air", "xx_h_swing_cycle_up_300cm_to_air"],
     ]),
+    (0x56368e56, &[
+        &["xx_h_ladder_wait_tr_hangwall_left"],
+    ]),
+    (0x56368e57, &[
+        &["xx_h_ladder_wait_tr_hangwall_right"],
+    ]),
+    (0x56368e54, &[
+        &["xx_h_ladder_wait_tr_hangfree_left"],
+    ]),
+    (0x56368e55, &[
+        &["xx_h_ladder_wait_tr_hangfree_right"],
+    ]),
+    (0x4912284c, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_down_r_hand_2_a"],
+    ]),
+    (0x4912285f, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_left_2_b"],
+    ]),
+    (0x49122860, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_left_2_c"],
+    ]),
+    (0x49122864, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_right_2_a"],
+    ]),
+    (0x49122865, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_right_2_b"],
+    ]),
+    (0x49122866, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_right_2_c"],
+    ]),
+    (0x49122861, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_left_3_a"],
+    ]),
+    (0x49122862, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_left_3_b"],
+    ]),
+    (0x49122863, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_left_3_c"],
+    ]),
+    (0x49122867, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_right_3_a"],
+    ]),
+    (0x49122868, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_right_3_b"],
+    ]),
+    (0x49122869, &[
+        &["xx_h_climbing_climb1m_tr_climb1m_right_3_c"],
+    ]),
+    (0x49122876, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_left_2_a"],
+    ]),
+    (0x49122877, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_left_2_b"],
+    ]),
+    (0x49122878, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_left_2_c"],
+    ]),
+    (0x4912287c, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_right_2_a"],
+    ]),
+    (0x4912287d, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_right_2_b"],
+    ]),
+    (0x4912287e, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_right_2_c"],
+    ]),
+    (0x49122879, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_left_3_a"],
+    ]),
+    (0x4912287a, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_left_3_b"],
+    ]),
+    (0x4912287b, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_left_3_c"],
+    ]),
+    (0x4912287f, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_right_3_a"],
+    ]),
+    (0x49122880, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_right_3_b"],
+    ]),
+    (0x49122881, &[
+        &["xx_h_climbing_climb1m_tr_hangwall_right_3_c"],
+    ]),
+    (0x49122882, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_left_2_a"],
+    ]),
+    (0x49122883, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_left_2_b"],
+    ]),
+    (0x49122884, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_left_2_c"],
+    ]),
+    (0x4912288b, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_right_2_b"],
+    ]),
+    (0x4912288c, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_right_2_c"],
+    ]),
+    (0x49122885, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_left_3_a"],
+    ]),
+    (0x49122886, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_left_3_b"],
+    ]),
+    (0x49122887, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_left_3_c"],
+    ]),
+    (0x4912288d, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_right_3_a"],
+    ]),
+    (0x4912288e, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_right_3_b"],
+    ]),
+    (0x4912288f, &[
+        &["xx_h_climbing_climb1m_tr_hangfree_right_3_c"],
+    ]),
     (0x01068ff7, &[
         &["xx_l_ladder_wait_l"],
     ]),
@@ -2807,6 +2924,10 @@ pub const CLIPS: &[ClipRoot] = &[
     ClipRoot { name: "xx_h_ladder_wait_r", duration: 0.6667, disp: [[0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000]], yaw: [0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000] },
     ClipRoot { name: "xx_h_ladder_wait_r_tr_falling", duration: 0.7333, disp: [[0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0135, -0.1358, 0.0862], [0.0438, -0.4780, 0.2084], [0.0495, -0.9080, -0.0645], [0.0500, -1.3039, -0.7749], [0.0485, -1.5458, -1.7797], [0.0458, -1.6658, -3.0020], [0.0430, -1.6980, -4.3740]], yaw: [0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000] },
     ClipRoot { name: "xx_h_ladder_wait_r_tr_rebound_footr", duration: 0.1333, disp: [[0.0000, 0.0000, 0.0000], [0.0000, -0.0081, 0.0546], [0.0000, -0.0163, 0.1093], [0.0000, -0.0244, 0.1639], [0.0000, -0.0325, 0.2185], [0.0000, -0.0406, 0.2731], [0.0000, -0.0488, 0.3277], [0.0000, -0.0569, 0.3824], [0.0000, -0.0650, 0.4370]], yaw: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000] },
+    ClipRoot { name: "xx_h_ladder_wait_tr_hangfree_left", duration: 1.0000, disp: [[0.0000, 0.0000, 0.0000], [-0.1170, 0.1016, -0.0936], [-0.2341, 0.2031, -0.1872], [-0.3511, 0.3047, -0.2808], [-0.4681, 0.4063, -0.3744], [-0.5852, 0.5078, -0.4680], [-0.7022, 0.6094, -0.5616], [-0.7490, 0.6500, -0.5990], [-0.7490, 0.6500, -0.5990]], yaw: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000] },
+    ClipRoot { name: "xx_h_ladder_wait_tr_hangfree_right", duration: 1.0000, disp: [[0.0000, 0.0000, 0.0000], [0.0938, 0.0813, -0.0749], [0.1875, 0.1625, -0.1498], [0.2813, 0.2438, -0.2246], [0.3750, 0.3250, -0.2995], [0.4688, 0.4063, -0.3744], [0.5625, 0.4875, -0.4493], [0.6563, 0.5688, -0.5241], [0.7500, 0.6500, -0.5990]], yaw: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000] },
+    ClipRoot { name: "xx_h_ladder_wait_tr_hangwall_left", duration: 0.6000, disp: [[0.0000, 0.0000, 0.0000], [-0.0936, 0.0188, 0.0499], [-0.1873, 0.0375, 0.0998], [-0.2809, 0.0563, 0.1496], [-0.3745, 0.0750, 0.1995], [-0.4681, 0.0938, 0.2494], [-0.5617, 0.1125, 0.2993], [-0.6554, 0.1313, 0.3491], [-0.7490, 0.1500, 0.3990]], yaw: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000] },
+    ClipRoot { name: "xx_h_ladder_wait_tr_hangwall_right", duration: 0.6000, disp: [[0.0000, 0.0000, 0.0000], [0.0938, 0.0188, 0.0499], [0.1875, 0.0375, 0.0998], [0.2813, 0.0563, 0.1496], [0.3750, 0.0750, 0.1995], [0.4688, 0.0938, 0.2494], [0.5625, 0.1125, 0.2993], [0.6563, 0.1313, 0.3491], [0.7500, 0.1500, 0.3990]], yaw: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000] },
     ClipRoot { name: "xx_h_landing_damage_footl", duration: 0.4667, disp: [[0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000], [0.0000, 0.0000, 0.0000]], yaw: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000] },
     ClipRoot { name: "xx_h_landing_damage_footl_roll", duration: 0.6667, disp: [[0.0000, 0.0000, 0.0000], [0.0000, 0.0812, 0.0000], [0.0000, 0.4840, 0.0000], [0.0000, 0.8787, 0.0000], [0.0000, 1.2717, 0.0000], [0.0000, 1.6640, 0.0000], [0.0000, 2.0520, 0.0000], [0.0000, 2.4325, 0.0000], [0.0000, 2.7360, 0.0000]], yaw: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000] },
     ClipRoot { name: "xx_h_landing_damage_footl_tr_h_jog_footl", duration: 0.6000, disp: [[0.0000, 0.0000, 0.0000], [0.0000, 0.0248, 0.0000], [0.0000, 0.2475, 0.0000], [0.0000, 0.4695, 0.0000], [0.0000, 0.6900, 0.0000], [0.0000, 0.9074, 0.0000], [0.0000, 1.1223, 0.0000], [0.0000, 1.3349, 0.0000], [0.0000, 1.5470, 0.0000]], yaw: [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000] },

@@ -280,7 +280,7 @@ fn single(id: u32, item: usize) -> Option<ActionBlend> {
     jump_blend::action_items(id).filter(|i| i.len() > item).map(|_| ActionBlend::new(id, item, &[1.0]))
 }
 
-fn seq_durations(seq: &[Option<ActionBlend>; 4]) -> [f32; 4] {
+pub(crate) fn seq_durations(seq: &[Option<ActionBlend>; 4]) -> [f32; 4] {
     let mut d = [0.0; 4];
     for (i, a) in seq.iter().enumerate() {
         d[i] = a.map(|a| a.duration()).unwrap_or(0.0);

@@ -3947,3 +3947,63 @@ fn free_running_onto_a_narrow_rim_drops_into_the_haystack_from_the_beam() {
     assert!(on_rim.get(), "landed on the rim's beam first");
     assert_eq!(s.data().hay.kind, HayEntry::FreeStep);
 }
+
+fn on_ladder(base: Vec3, top: Vec3, h: f32) -> Sim {
+    use crate::player::ladder::{LadderEntry, ATTACH_OUT};
+    let n = Vec3::NEG_Z;
+    let from = base + Vec3::Y * h + n * ATTACH_OUT;
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToLadder(LadderEntry { base, top, n, from, facing: -n, from_ledge: true, height: Some(h), ..Default::default() }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(0.6);
+    assert_eq!(s.loco().current, ActorContextId::Ladder);
+    s
+}
+
+#[test]
+fn pushing_sideways_on_a_ladder_jumps_onto_the_climb_wall_beside_it() {
+    use crate::player::ladder::SIDE_JUMP;
+    // event 4 (0xE27610 → sub_E228E0): the ladder at x -100 and wall W (x -105.95..-102.05, bands every 0.6 m) 2 m to
+    // its right (facing +Z): the side jump onto its holds, the ladder's own table, then the Climb context
+    let mut s = on_ladder(Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), 2.0);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb), "no side jump: {:?}", s.loco().current);
+    let starts: Vec<u32> = SIDE_JUMP[0].iter().map(|f| f[1][0]).collect();
+    assert!(s.data().climb.move_action.is_some_and(|a| starts.contains(&a)), "the ladder's start (right): {:?}", s.data().climb.move_action.map(|a| format!("{a:#x}")));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().climb.reach.is_none() && s.data().climb.moving.is_none()), "never settled");
+    let c = &s.data().climb;
+    assert_eq!(s.loco().current, ActorContextId::Climb);
+    assert!(c.hand_l.x < -102.0 && c.hand_r.x < -102.0, "on wall W: {:?} {:?}", c.hand_l, c.hand_r);
+}
+
+#[test]
+fn pushing_sideways_on_a_ladder_jumps_into_a_hang_on_the_ledge_beside_it() {
+    use crate::player::ledge::LedgeHangType;
+    // event 4: the ladder at x 144.4 and the 2.6 m wall (x 140..143) 1.4 m to its right: no ledge within the side move's
+    // 0.8 m (sub_E1FC80), so the side jump (sub_E228E0) into a wall hang on its top edge
+    let mut s = on_ladder(Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.0, 9.7), 1.5);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ledge), "no side jump: {:?}", s.loco().current);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none() && s.data().ledge.queue.is_empty()), "never settled");
+    let l = &s.data().ledge;
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    assert!((l.hand_l.y - 2.6).abs() < 0.05 && l.hand_l.x < 143.05 && l.hand_r.x < 143.05, "hanging on the wall top: {:?} {:?}", l.hand_l, l.hand_r);
+    assert_eq!(l.hang_type, LedgeHangType::Wall);
+}
+
+#[test]
+fn pushing_sideways_on_a_ladder_moves_onto_the_ledge_right_beside_it() {
+    use crate::player::ladder::TO_HANG_SIDE;
+    // event 4's first search (sub_E1FC80): the A2 yard's ladder at x -131.2 and the 3 m wall's top edge ending 0.8 m to
+    // its right: `ladder_wait_tr_hangwall_right` while the root goes to the wall hang
+    let mut s = on_ladder(Vec3::new(-131.2, 0.0, -116.6), Vec3::new(-131.2, 6.0, -116.6), 1.5);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ledge), "no side move: {:?}", s.loco().current);
+    assert_eq!(s.data().ledge.mv.and_then(|m| m.seq[0]).map(|a| a.id), Some(TO_HANG_SIDE[0][1]));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "never settled");
+    let l = &s.data().ledge;
+    assert!((l.hand_l.y - 3.0).abs() < 0.05 && l.hand_r.x < -131.95, "hanging on the 3 m top: {:?} {:?}", l.hand_l, l.hand_r);
+}

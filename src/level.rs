@@ -90,6 +90,10 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     // thick along its -Z edge (top 5 m, a 5 m drop beyond): free run at it, vault, hang on the far side
     (-120.0, -115.5, 4.0, 5.0, 4.0),
     (-120.0, -118.15, 4.0, 0.3, 5.0),
+    // the ladder's side move onto a ledge (event 4, sub_E1FC80): a 6 m block (x -132..-128, face z -116.6) with a ladder
+    // at x -131.2 and a 3 m wall right beside it (x -136..-132): its top edge ends 0.8 m from the ladder
+    (-130.0, -116.3, 4.0, 0.6, 6.0),
+    (-134.0, -116.3, 4.0, 0.6, 3.0),
     // a haystack (x -113.5..-110.5, z -126.5..-123.5) in a cart with a 1.2 m rim 0.3 m wide: the rim pairs into a
     // runtime beam, so the free run lands on it in NarrowObject and drops in from there (0xE51190)
     (-112.0, -123.35, 3.6, 0.3, 1.2),
@@ -157,6 +161,8 @@ pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
     (Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), Vec3::NEG_Z),
     (Vec3::new(-129.4, 0.0, -10.5), Vec3::new(-129.4, 7.0, -10.5), Vec3::NEG_Z),
     (Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.0, 9.7), Vec3::NEG_Z),
+    // A2 yard: beside the 3 m wall (the side move onto a ledge)
+    (Vec3::new(-131.2, 0.0, -116.6), Vec3::new(-131.2, 6.0, -116.6), Vec3::NEG_Z),
 ];
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
