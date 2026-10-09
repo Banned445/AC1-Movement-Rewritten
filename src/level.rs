@@ -79,6 +79,13 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     //     before a climb wall (x -135.4..-131.4, face z -135.3, bands to 5.4 m: CLIMB_WALLS), beyond the side move's reach
     (-138.5, -135.0, 3.0, 0.6, 2.6),
     (-133.4, -135.0, 4.0, 0.6, 6.0),
+    // --- A2 test yard (x -140..-100, z -128..-112), RE/19: a raised bed around a 3 x 3 haystack at (-104, -120), its
+    //     1.2 m rim 1.1 m wide (too wide to pair into a runtime beam): the free run hops onto the rim and the free-step
+    //     arrival's support search drops it in (NarrowObject FreeStep, 0xE51190)
+    (-104.0, -117.95, 5.2, 1.1, 1.2),
+    (-104.0, -122.05, 5.2, 1.1, 1.2),
+    (-106.05, -120.0, 1.1, 3.0, 1.2),
+    (-101.95, -120.0, 1.1, 3.0, 1.2),
     // --- the climb's ledge grab (0xDF0980, RE/18 §7.3): a 7 m wall (x -130..-126, face z -135.3) whose bands start at
     //     3.0 m (CLIMB_WALLS): climbing down to the lowest band hangs from the one above it
     (-128.0, -135.0, 4.0, 0.6, 7.0),
@@ -157,7 +164,11 @@ pub const BEAMS: &[(Vec3, Vec3)] = &[
 
 /// Haystacks (centre x, centre z, size x, size z, height): not solid, jump targets of type 0x800. The first
 /// one sits 4.5 m off the high block's +X face (roof 9.5 m): the Leap of Faith test.
-pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[(37.5, 26.0, 2.2, 2.2, 1.5)];
+pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[
+    (37.5, 26.0, 2.2, 2.2, 1.5),
+    // A2 test yard: the haystack in a cart (its 1.2 m rim: WALLS)
+    (-104.0, -120.0, 3.0, 3.0, 1.5),
+];
 
 /// Kiosk frames (p0, p1 of the top bar, the side facing the roofs): guidance subtype Kiosk (8), not solid.
 pub const KIOSKS: &[(Vec3, Vec3, Vec3)] = &[(Vec3::new(118.5, 3.0, 25.0), Vec3::new(121.5, 3.0, 25.0), Vec3::NEG_Z)];

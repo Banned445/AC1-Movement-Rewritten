@@ -3677,3 +3677,22 @@ fn climbing_sideways_hangs_from_a_wall_top_at_the_hands() {
     assert!(l.normal.x < -0.99 && (l.hand_l.y - 3.6).abs() < 0.05, "on block Z's edge: {:?} {:?}", l.normal, l.hand_l);
     assert_eq!(l.mv.and_then(|m| m.seq[0]).map(|a| a.id), Some(CLIMB_TO_HANG[0][4]), "`_l_hangwall`");
 }
+
+#[test]
+fn free_running_onto_a_haystack_carts_rim_drops_into_the_haystack() {
+    use crate::player::hay::HayEntry;
+    // live 2026-10-09: the free run hops onto the cart's 1.2 m rim, then the support search of the free-step arrival
+    // (NarrowObject `CheckSupportAndFall` 0xE51190) finds the haystack and drops in as FreeStep (A2 test yard)
+    let mut s = Sim::new(Vec3::new(-104.0, 0.0, -126.0), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    let on_rim = std::cell::Cell::new(false);
+    let ok = s.run_until(5.0, |s| {
+        if s.loco().current == ActorContextId::Ground && s.body().feet.y > 1.1 {
+            on_rim.set(true);
+        }
+        s.loco().current == ActorContextId::HayStack
+    });
+    assert!(ok, "never got in: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(on_rim.get(), "landed on the rim first");
+    assert_eq!(s.data().hay.kind, HayEntry::FreeStep);
+}

@@ -98,7 +98,13 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
                     let target = JumpTarget { position: Vec3::new(landing.x, h, landing.z), ..base };
                     // PORT: a thin wall top is a pass-over (type 2). The query gives a railing type 1 | 2 like a
                     // roof; which of the two the game jumps at there is not established (LIVE:, RE/18 §9 item 2)
-                    if c.flags & 2 != 0 && c.sub == 4 {
+                    // PORT (live 2026-10-09, RE/18 §9): a haystack cart's rim is landed on, not vaulted, so no pass-over
+                    // when a haystack lies just beyond the edge
+                    let hay_beyond = guidance.haystacks.iter().any(|s| {
+                        let p = c.pos - c.wall * 0.8;
+                        p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3
+                    });
+                    if c.flags & 2 != 0 && c.sub == 4 && !hay_beyond {
                         if let Some((_, t)) = super::passover::far_edge(c.pos, -c.wall, guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS) {
                             let _ = t;
                             return Some(JumpTarget { position: c.pos + c.wall * 0.5, type_flags: 2, pass: Some((c.pos, c.wall)), ..base });

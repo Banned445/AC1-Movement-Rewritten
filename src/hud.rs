@@ -34,6 +34,7 @@ fn update_hud(
     model: Res<crate::model::ModelStatus>,
     map: Res<crate::map_menu::MapMenu>,
     fly: Option<Res<crate::debug_fly::DebugFly>>,
+    areas: Option<Res<crate::test_areas::TestAreas>>,
     q: Query<(&Locomotion, &Body, &HumanDataBundle), With<Player>>,
     mut hud: Query<(&mut Text, &mut Visibility), With<HudText>>,
 ) {
@@ -65,7 +66,7 @@ fn update_hud(
         .map(|l| format!("{:?}  fall {:.2} m  drop {:.2} m{}", l.kind, l.fall_height, l.total_drop, if l.roll { "  (roll)" } else { "" }))
         .unwrap_or_else(|| "-".into());
     text.0 = format!(
-        "AC1 movement port - {}   {}{}\n\
+        "AC1 movement port - {}   {}{}{}\n\
          context: {:?} ({})   previous: {:?}\n\
          {}\n\
          ground sub-state: {:?}   speed param {:.2} -> {:?}   turn atten {:.2}\n\
@@ -75,10 +76,11 @@ fn update_hud(
          WASD move | RMB high profile | Space legs (hold with RMB = sprint/free-run; into a wall = wall run; E at a wall = climb;\n\
          while hanging or climbing: E = let go, RMB+Space = jump off (stick steers); up at a top edge = pull up) | Alt slow\n\
          E empty hand (on a ladder: drop; RMB+Space = jump off; on a wall run: Space = push off)\n\
-         LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, Shift x3, Alt x10, Q strafe, F6 camera, E+F5 keep speed) | F9 save a bug report | F1 hide | F2 maps",
+         LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, Shift x3, Alt x10, Q strafe, F6 camera, E+F5 keep speed) | F4 test areas | F9 save a bug report | F1 hide | F2 maps",
         map.active.label(),
         model.0,
         if fly.is_some_and(|f| f.active) { "   [GHOST MODE - F5 to drop out]" } else { "" },
+        areas.and_then(|a| a.name()).map(|n| format!("   test area: {n} (F4 next, Shift+F4 back)")).unwrap_or_default(),
         loco.current,
         loco.current as u8,
         loco.previous,

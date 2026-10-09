@@ -1120,6 +1120,18 @@ pub fn update_ground(
         // The interpreter's last request (0xEE8E08, either profile): the stick past the dead zone and IHumanGround
         // vt1592 (event 122's guard 0xD8F0B0: touching a haystack, facing it within 100 degrees, the stick within 45
         // degrees into it) → vt1596 → HumanHayStack, entry Ground (0xD84F80).
+        // `HumanNarrowObject__CheckSupportAndFall` 0xE51190's haystack branch: the free-step arrival (a NarrowObject
+        // Movement stay in the game; PORT: its reception plays in Ground) past 0.6 of its action with a haystack found
+        // by the support search → HumanHayStack, entry FreeStep (0xE5146A). Live: the way into a rimmed haystack.
+        if let Some(os) = g.oneshot.filter(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id)) {
+            if os.t / os.duration.max(1e-4) > 0.6 {
+                if let Some(stack) = super::hay::find_support(body.feet, body.forward(), body.forward(), &guidance.haystacks, &collision) {
+                    let e = super::hay::HayStackEntry { stack, kind: super::hay::HayEntry::FreeStep, from: body.feet, speed: 0.0 };
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
+                    continue;
+                }
+            }
+        }
         if moving && !busy {
             if let Some(e) = super::hay::ground_entry(body.feet, body.forward(), pad.dir, &guidance.haystacks) {
                 switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));

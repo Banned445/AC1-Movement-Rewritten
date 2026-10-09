@@ -27,6 +27,7 @@ mod proxy;
 mod recorder;
 #[cfg(test)]
 mod sim_tests;
+mod test_areas;
 mod tuning;
 mod triangles;
 mod native_map;
@@ -87,6 +88,6 @@ fn main() {
             city::CityPlugin,
         ))
         // a tuple takes at most 15 plugins
-        .add_plugins(debug_fly::DebugFlyPlugin)
+        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin))
         .run();
 }
