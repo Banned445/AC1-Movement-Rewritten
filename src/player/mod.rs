@@ -8,6 +8,7 @@
 //!   and the new context skips its first update (the `justSwitched` byte);
 //! - every context's runtime data lives in one `HumanDataBundle` (HumanData+0x30 in the game).
 
+pub mod abilities;
 pub mod air;
 pub mod air_catches;
 pub mod anim_gate;
@@ -255,6 +256,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SpawnPoint(Vec3::new(0.0, 0.0, 4.0)))
+            .init_resource::<abilities::AbilitySet>()
             .add_systems(Startup, spawn_player)
             .add_systems(
                 Update,

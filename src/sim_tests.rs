@@ -3575,3 +3575,20 @@ fn falling_into_deep_water_drowns() {
     s.run(1.5);
     assert_eq!(s.data().dead.action.map(|a| (a.id, a.item)), Some((DROWN, 1)));
 }
+
+#[test]
+fn the_ability_stack_gates_the_jump() {
+    use crate::player::abilities::{Ability, AbilitySet};
+    // AssassinAbilitySet (0xEF0320): without the Jump flag the tap jump is never requested (0xEE817E checks
+    // `sub_D324C0`); with it, the same tap on open ground is the free jump
+    for allowed in [false, true] {
+        let mut s = Sim::new(Vec3::new(0.0, 0.0, 4.0), FACE_PZ);
+        let flags = if allowed { u64::MAX } else { !(1u64 << Ability::Jump as u32) };
+        s.app.world_mut().insert_resource(AbilitySet { flags, max_speed: 4, all_actions: true });
+        s.pad(Vec3::Z, 1.0, true, false);
+        s.run(0.4);
+        s.press_legs();
+        let jumped = s.run_until(0.6, |s| s.loco().current == ActorContextId::InAir);
+        assert_eq!(jumped, allowed);
+    }
+}

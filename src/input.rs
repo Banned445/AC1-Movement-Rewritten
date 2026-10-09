@@ -67,6 +67,7 @@ pub fn read_pad(
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&Gamepad>,
     rig: Res<CameraRig>,
+    abilities: Option<Res<crate::player::abilities::AbilitySet>>,
     mut pad: ResMut<PadInput>,
     menu: Option<Res<crate::map_menu::MapMenu>>,
 ) {
@@ -116,6 +117,8 @@ pub fn read_pad(
     pad.magnitude = mag;
     pad.speed01 = if mag <= STICK_DEADZONE { 0.0 } else { ((mag - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)).clamp(0.0, 1.0) };
     pad.high_profile = high;
+    // the ability stack's MaxSpeed (0xEE65A0: none → 0, Jog in high profile → 0.3)
+    pad.speed01 = crate::player::abilities::of(abilities.as_deref()).clamp_speed(pad.speed01, high);
     pad.legs_held = legs;
     pad.hand_held = hand;
     if legs_just {

@@ -14,7 +14,7 @@ use super::climb::{ClimbEntry, ClimbEntryType};
 
 use super::jump_blend::{self, ActionBlend};
 use super::move_blend::MoveBlend;
-use super::targets::{find_jump_target, JumpTarget};
+use super::targets::JumpTarget;
 use super::{
     heading_of, switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, SpawnPoint, TransitionSetup,
 };
@@ -508,8 +508,11 @@ pub fn update_ground(
     guidance: Res<GuidanceWorld>,
     spawn: Res<SpawnPoint>,
     mut rig: ResMut<CameraRig>,
+    abilities: Option<Res<super::abilities::AbilitySet>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>), With<Player>>,
 ) {
+    use super::abilities::Ability;
+    let ab = super::abilities::of(abilities.as_deref());
     let dt = time.delta_secs().min(1.0 / 20.0);
     for (mut loco, mut body, mut data, anim) in &mut q {
         let g = &mut data.ground;
@@ -903,7 +906,7 @@ pub fn update_ground(
         } else if let Some(mut ld) = g.look_down {
             ld.t += dt;
             g.look_down = Some(ld);
-        } else if let Some((p, n)) = look_down_edge(body.feet, body.forward(), &guidance, &collision) {
+        } else if let Some((p, n)) = ab.allows(Ability::LookDown).then(|| look_down_edge(body.feet, body.forward(), &guidance, &collision)).flatten() {
             let w = look_down_weights(body.feet, body.forward(), p, n);
             if let Some(a) = jump_blend::action_items(LOOK_DOWN[(g.blend.foot != 0) as usize]).map(|_| ActionBlend::new(LOOK_DOWN[(g.blend.foot != 0) as usize], 0, &w)) {
                 g.pose_seq = g.pose_seq.wrapping_add(1);
@@ -919,7 +922,7 @@ pub fn update_ground(
         // and within 60 degrees of the facing (`flt_1694AC8`), then the same guard (RE/02 4.7).
         let pressed = pad.jump_buffered() && pad.dir.dot(body.forward()) >= 45f32.to_radians().cos();
         let held = pad.legs_held && pad.magnitude > crate::tuning::STICK_DEADZONE && pad.dir.dot(body.forward()) >= 60f32.to_radians().cos();
-        if g.high_profile && moving && (pressed || held) {
+        if g.high_profile && moving && (pressed || held) && ab.allows(Ability::Walling) {
             if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
                 if pressed {
                     pad.consume_jump();
@@ -934,7 +937,7 @@ pub fn update_ground(
         // No press: high profile, the stick past the dead zone, the Jump ability, IHumanGround vt16 (CanHandleEvent
         // 45) → IHuman vt56 with kind 4 (Legs held) / 3, ladders left out, then the scorer (mode 1) → vt24. Its box
         // only reaches 0.45–1.3 m up and 0.5–2.0 m (1.3 m) ahead: the game's hop onto low obstacles (RE/18 §1.5).
-        if g.high_profile && moving && !busy {
+        if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
             if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
                 jump_log("free-run target jump", body.feet, Some(&target));
                 let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };
@@ -970,7 +973,7 @@ pub fn update_ground(
         // facing it; from the top, low profile + Legs at its top facing out over it.
         {
             let top_req = !g.high_profile && pad.jump_buffered();
-            if (moving || top_req) && !busy {
+            if (moving || top_req) && !busy && ab.allows(Ability::Ladder) {
                 if let Some((base, top, n, from_top)) = super::ladder::find_ladder(body.feet, body.forward(), 0.8, &guidance) {
                     if from_top == top_req {
                         if from_top {
@@ -988,7 +991,7 @@ pub fn update_ground(
         // Climbing from the ground is the empty-hand press (0xEE7255: the Climb ability, `Pad__JustPressed(3)` ->
         // IHumanGround vt840 = CanHandleEvent(50) -> vt844, event 50 -> the Climb context, fill 0xD83950; RE/02 4.7).
         let forward = body.forward();
-        if pad.hand_just_pressed() {
+        if pad.hand_just_pressed() && ab.allows(Ability::Climb) {
             // leading foot (Human__GetLeadingFoot 0xB18850): the playing locomotion item, footl = left ahead
             if let Some(entry) = climb_start_entry(body.feet, forward, g.blend.foot != 0, &guidance) {
                 pad.consume_hand();
@@ -1066,9 +1069,12 @@ pub fn update_ground(
         let want_jump = g.high_profile
             && moving
             && ((pad.jump_buffered() && !pad.legs_held) || edge_jump);
-        if want_jump && !busy {
+        if want_jump && !busy && ab.allows(Ability::Jump) {
             pad.consume_jump();
-            let found = find_jump_target(body.feet, if moving { pad.dir } else { forward }, &guidance, &collision);
+            // the candidates, then the Leap of Faith search under its ability (0xEE8239: `sub_D32760`, IHuman vt76)
+            let want = if moving { pad.dir } else { forward };
+            let found = super::targets::find_target(body.feet, want, want, &super::jump_candidates::Query::TAP, false, &guidance, &collision)
+                .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, &guidance)).flatten());
             jump_log("tap jump", body.feet, found.as_ref());
             let entry = match found {
                 // leading foot: the playing locomotion item (footl item = left ahead) (hypothesis)
@@ -1088,7 +1094,7 @@ pub fn update_ground(
                 // the facing, with beams; scorer mode 1 with the far-behind flag (a7 = 1). It sets +4399, which skips
                 // event 68 this frame.
                 let flat_fwd = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-                if r.dist < 0.01 && moving && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
+                if r.dist < 0.01 && moving && ab.allows(Ability::Jump) && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
                     if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision) {
                         jump_log("edge jump", body.feet, Some(&target));
                         let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };

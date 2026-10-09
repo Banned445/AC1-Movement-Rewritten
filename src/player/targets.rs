@@ -143,7 +143,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
 /// The Leap of Faith search (IHuman vt76, ability LeapOfFaith): a haystack's top in the 45-degree cone; a Leap of
 /// Faith when it lies 3 m or more below (bands -30 m / 7.5 m), else the haystack free-step bands (-3 m / 6 m)
 /// (0xB1EC40). PORT: vt76 itself is not traced (RE/04 §4.1.12).
-fn haystack_target(feet: Vec3, want_dir: Vec3, guidance: &GuidanceWorld) -> Option<JumpTarget> {
+pub fn haystack_target(feet: Vec3, want_dir: Vec3, guidance: &GuidanceWorld) -> Option<JumpTarget> {
     let want = Vec3::new(want_dir.x, 0.0, want_dir.z).normalize_or_zero();
     if want == Vec3::ZERO {
         return None;
