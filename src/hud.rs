@@ -75,10 +75,10 @@ fn update_hud(
          WASD move | RMB high profile | Space legs (hold with RMB = sprint/free-run; into a wall = wall run; E at a wall = climb;\n\
          while hanging or climbing: E = let go, RMB+Space = jump off (stick steers); up at a top edge = pull up) | Alt slow\n\
          E empty hand (on a ladder: drop; RMB+Space = jump off; on a wall run: Space = push off)\n\
-         LMB capture mouse | Esc release | G guidance edges | F5 fly (noclip; Space/Ctrl up/down, Shift x3, Alt x10) | F9 save a bug report | F1 hide | F2 maps",
+         LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, Shift x3, Alt x10, Q strafe, F6 camera, E+F5 keep speed) | F9 save a bug report | F1 hide | F2 maps",
         map.active.label(),
         model.0,
-        if fly.is_some_and(|f| f.active) { "   [FLY - F5 to land]" } else { "" },
+        if fly.is_some_and(|f| f.active) { "   [GHOST MODE - F5 to drop out]" } else { "" },
         loco.current,
         loco.current as u8,
         loco.previous,

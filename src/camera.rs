@@ -69,9 +69,12 @@ fn orbit(
     scroll: Res<AccumulatedMouseScroll>,
     gamepads: Query<&Gamepad>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
+    fly: Option<Res<crate::debug_fly::DebugFly>>,
     mut rig: ResMut<CameraRig>,
 ) {
     if menu.open { return; }
+    // Ghost mode: the right stick's Y is the height unless LB holds it (0xECDC50)
+    let pitch_free = fly.is_none_or(|f| !f.active || f.hold_height);
     let locked = cursor.single().map(|c| c.grab_mode != CursorGrabMode::None).unwrap_or(false);
     if locked {
         rig.yaw -= motion.delta.x * 0.003;
@@ -80,7 +83,9 @@ fn orbit(
     for gp in &gamepads {
         let s = gp.right_stick();
         rig.yaw -= s.x * 2.5 * time.delta_secs();
-        rig.pitch += s.y * 1.8 * time.delta_secs();
+        if pitch_free {
+            rig.pitch += s.y * 1.8 * time.delta_secs();
+        }
     }
     rig.pitch = rig.pitch.clamp(-1.3, 0.6);
     rig.distance = (rig.distance - scroll.delta.y * 0.5).clamp(2.0, 14.0);
@@ -121,10 +126,17 @@ fn follow(
     time: Res<Time>,
     rig: Res<CameraRig>,
     player: Query<&Transform, (With<Player>, Without<MainCamera>)>,
+    fly: Option<Res<crate::debug_fly::DebugFly>>,
     mut cam: Query<&mut Transform, With<MainCamera>>,
     mut lag: Local<FollowLag>,
 ) {
     let (Ok(p), Ok(mut c)) = (player.single(), cam.single_mut()) else { return };
+    // Ghost mode's debug camera (`DebugCameraToggleEvent`; PORT: it holds still and keeps Altaïr in view)
+    if fly.is_some_and(|f| f.active && f.free_camera) {
+        c.look_at(p.translation + Vec3::Y * 1.5, Vec3::Y);
+        lag.last_raw = None;
+        return;
+    }
     // PORT: tracker bone/rotated offset in Camera Switcher is not decoded (CameraBase__UpdateTarget 0x5DD2A0).
     let raw_focus = p.translation + Vec3::Y * 1.5;
     let dt = time.delta_secs();
