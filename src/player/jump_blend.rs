@@ -75,8 +75,6 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     super::hay::HAYSTACK_DIVE[0], super::hay::HAYSTACK_DIVE[1],
     // the step off an edge backwards (event 68, 0xD9D1F0): `xx_fall_ground_back_tr_fall`
     0x935C_E89E,
-    // drowning (HumanDead 0xE3F3B0): the plain and the face down / up variants
-    super::dead::DROWN, super::dead::DROWN_FRONT, super::dead::DROWN_BACK,
     // the climb's ledge grabs (TryLedgeGrab 0xDF0980): up, down, then left / right by row, [wall, free]
     super::climb::LEDGE_GRAB_UP[0], super::climb::LEDGE_GRAB_UP[1], super::climb::LEDGE_GRAB_DOWN[0], super::climb::LEDGE_GRAB_DOWN[1],
     super::climb::LEDGE_GRAB_SIDE[0][0][0], super::climb::LEDGE_GRAB_SIDE[0][0][1], super::climb::LEDGE_GRAB_SIDE[0][1][0],

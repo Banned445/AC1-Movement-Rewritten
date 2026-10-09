@@ -794,16 +794,6 @@ pub fn update_air(
         air.prev_y = body.feet.y;
         body.grounded = false;
 
-        // into deep water: InAir event 2 → Dead, drowning (0xE09C20 → 0xE00690). PORT trigger: the feet inside a
-        // deep-water volume (the game's sender, the damage system's drown, is not traced)
-        if let Some(y) = super::dead::in_deep_water(body.feet, &guidance.water) {
-            air.mode = AirMode::Idle;
-            let entry = super::dead::DeadEntry { drown: true, water_y: Some(y), from: body.feet, axis: body.forward() };
-            body.velocity = Vec3::ZERO;
-            switch_context(&mut loco, &mut data, TransitionSetup::ToDead(entry));
-            continue;
-        }
-
         if let Some(e) = ladder_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
