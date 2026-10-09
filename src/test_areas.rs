@@ -36,6 +36,7 @@ pub const AREAS: &[Area] = &[
     at("Pass-over railing", Vec3::new(40.0, 0.0, 8.4), SOUTH),
     at("Look-down and pull-down edge", Vec3::new(10.6, 3.5, 12.0), EAST),
     at("Falls and ledge stop (6 m block)", Vec3::new(-11.0, 6.0, 2.0), EAST),
+    at("Walk / run off an edge (2 m and 3.2 m blocks)", Vec3::new(0.0, 2.0, 24.0), SOUTH),
     // haystacks and kiosks
     at("Haystack (walk into it)", Vec3::new(37.5, 0.0, 21.5), NORTH),
     at("Haystack in a raised bed (free run onto the rim)", Vec3::new(-104.0, 0.0, -126.0), NORTH),

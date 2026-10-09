@@ -3787,3 +3787,30 @@ fn falling_in_front_of_a_knee_high_top_catches_it_and_stands_up() {
     assert!((f.y - 3.0).abs() < 0.05 && f.z > 9.0, "standing on the roof: {f:?}");
 }
 
+
+#[test]
+fn walking_and_running_off_an_edge_land_in_the_live_times() {
+    // live 2026-10-09 (RE/18 §1): event 68's free jump down (0xDA7A10) lands a 1.80 m drop in 0.44–0.49 s and a 3.16 m
+    // drop in 0.58–0.68 s, rising 0.01–0.05 m first. The port's low-profile walk-off is a little slower (0.52 s) and
+    // rises 0.12 m (PORT: the takeoff clip's root; which clip the game plays there is not recorded).
+    for (from, h, stick, high, (lo, hi)) in [
+        (Vec3::new(70.0, 1.8, 60.5), 1.8, 1.0, true, (0.42, 0.50)),
+        (Vec3::new(70.0, 1.8, 60.5), 1.8, 0.6, false, (0.42, 0.55)),
+        (Vec3::new(7.0, 3.2, 23.0), 3.2, 1.0, true, (0.56, 0.70)),
+    ] {
+        let mut s = Sim::new(from, 0.0);
+        s.pad(Vec3::NEG_Z, stick, high, false);
+        assert!(s.run_until(5.0, |s| s.loco().current == ActorContextId::InAir), "never left the edge ({h} m)");
+        let mut t = 0.0;
+        let mut top = f32::MIN;
+        while s.loco().current == ActorContextId::InAir && t < 3.0 {
+            s.run(1.0 / 60.0 + 1e-4);
+            t += 1.0 / 60.0;
+            top = top.max(s.body().feet.y);
+        }
+        assert_eq!(s.loco().current, ActorContextId::Ground, "{h} m: landed");
+        assert!(s.body().feet.y.abs() < 0.05, "{h} m: on the street {:?}", s.body().feet);
+        assert!(t > lo && t < hi, "{h} m (stick {stick}, high {high}): {t:.3} s in the air");
+        assert!(top - h < 0.15, "{h} m: rose {:.3} m", top - h);
+    }
+}
