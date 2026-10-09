@@ -1066,6 +1066,18 @@ pub fn update_narrow(
         let slot_done = matches!(n.state, BeamState::JumpOnPlace | BeamState::HopStart | BeamState::HopEnd);
         let done = if BEAM_COMPLETION && slot_done { n.t > dur } else { n.t >= dur };
 
+        // `HumanNarrowObject__CheckSupportAndFall` 0xE51190 (the arrival on the narrow support, NarrowObjectData+224
+        // ≤ 1): once the arrival action is past 0.6, a haystack found by the support search (IHuman vt80 0xB10A60 →
+        // `Human__FindHayStackSupport` 0xE17D20) → HumanHayStack, entry FreeStep (0xE5146A, +184 |= 0x10). A haystack
+        // with a rim narrow enough to be a beam is entered this way (live 2026-10-09).
+        if matches!(n.state, BeamState::Reception | BeamState::PilotisIn) && n.t / dur.max(1e-4) > 0.6 {
+            if let Some(stack) = super::hay::find_support(body.feet, facing, facing, &guidance.haystacks, &collision) {
+                let e = super::hay::HayStackEntry { stack, kind: super::hay::HayEntry::FreeStep, from: body.feet, speed: 0.0 };
+                switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
+                continue;
+            }
+        }
+
         // Event 17: walking into an obstacle with stick input searches a hand jump target before
         // pull-down / climb (0xEE9AF0 → 0xF7EF90 / 0xF7DB30 → 0xF70E50 → 0xB21DA0).
         // PORT: the existing standing hand probe and an oriented contact box replace the native

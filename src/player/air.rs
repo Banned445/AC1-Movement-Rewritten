@@ -47,6 +47,9 @@ pub struct Landing {
     pub action: Option<ActionBlend>,
 }
 
+/// PORT: the capsule's radius against a greybox haystack's side (the native contact is the controller's).
+const HAY_SIDE_R: f32 = 0.45;
+
 /// Drop sub-state (4) animations (`HumanInAir__EnterDropState` 0xE064C0, tables 0x1A2EAE0 / 0x1A2EB30 filled by
 /// 0xDFF680; HumanGround_Hurt block): the entry item by [drop type][side 0 front, 1 back], then the falling loop
 /// `hurt_fall_{front,back}`. Ground loss sends types 0..6 (`HumanGround__TransitionToInAirFall` 0xD8C380).
@@ -742,16 +745,33 @@ pub fn update_air(
                     body.velocity.y = 0.0;
                 }
                 if GAME_FALLS && narrow_on.is_none() {
-                    // 0xE05490 checks hay before ordinary landing. PORT: greybox AABB top crossing replaces
-                    // native controller contacts with type-3, subtype-8/9 entities; side entry is not reconstructed.
-                    hay_on = guidance.haystacks.iter().find(|stack| {
-                        let next = body.feet;
-                        let previous = next - body.velocity * dt;
+                    // 0xE05490 checks hay before ordinary landing: a controller contact with a haystack (type 3,
+                    // descriptor 8 / 9); InAir+340 = the contact normal's z ≤ 0.9, so through the top → Top, against a
+                    // side → SideJump (`EnterFromAir` 0xE42700, `xx_h_air_to_haystack`). The game takes it only while
+                    // InAir knows the haystack (+336, `sub_E03A90`: within 3.5 m in height), i.e. from a jump at a
+                    // haystack target that ends in a free fall (0xB1B8C0) or a let-go record (0xDD7810). PORT: the
+                    // greybox haystacks are not solid; their box stands in for the contact (the top crossed, or a side
+                    // entered by the capsule's 0.45 m), and every fall takes it (LIVE: a plain fall onto a haystack).
+                    let next = body.feet;
+                    let previous = next - body.velocity * dt;
+                    let top = guidance.haystacks.iter().find(|stack| {
                         body.velocity.y < 0.0 && previous.y >= stack.max.y && next.y <= stack.max.y
                             && next.x >= stack.min.x && next.x <= stack.max.x
                             && next.z >= stack.min.z && next.z <= stack.max.z
-                    // a hit through the top: contact normal more than 0.9 up → entry Top (0xE05490 / 0xE00E30)
-                    }).map(|stack| super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
+                    });
+                    let side = |p: Vec3, s: &crate::collision::Aabb3| {
+                        p.x >= s.min.x - HAY_SIDE_R && p.x <= s.max.x + HAY_SIDE_R && p.z >= s.min.z - HAY_SIDE_R && p.z <= s.max.z + HAY_SIDE_R
+                    };
+                    hay_on = top
+                        .map(|stack| (stack, super::hay::HayEntry::Top))
+                        .or_else(|| {
+                            guidance
+                                .haystacks
+                                .iter()
+                                .find(|s| side(next, s) && !side(previous, s) && next.y < s.max.y && next.y + 1.8 > s.min.y)
+                                .map(|stack| (stack, super::hay::HayEntry::SideJump))
+                        })
+                        .map(|(stack, kind)| super::hay::HayStackEntry { stack: *stack, kind, from: body.feet, speed: body.velocity.length() });
                 }
                 // InAir sub-state 3, the edge landing (0xE0D684): a flat contact with edges at the feet, under 9 m
                 let fall_h = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };

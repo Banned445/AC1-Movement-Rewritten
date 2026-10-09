@@ -3915,3 +3915,35 @@ fn a_static_jump_at_a_wall_top_hangs_from_it() {
     let l = &s.data().ledge;
     assert!((l.hand_l.y - 2.6).abs() < 0.05 && l.normal.dot(Vec3::NEG_Z) > 0.99, "hanging on the wall top: {:?} {:?}", l.hand_l, l.normal);
 }
+
+#[test]
+fn falling_against_a_haystacks_side_enters_it_from_the_air() {
+    use crate::player::hay::{HayEntry, HAYSTACK_FROM_AIR};
+    // 0xE05490: a contact normal at most 0.9 up → SideJump (`xx_h_air_to_haystack`, 0xE42700). The haystack at
+    // (37.5, 26), x 36.4..38.6, z 24.9..27.1, top 1.5 m: fall toward its -Z side from 1.2 m
+    let from = Vec3::new(37.5, 1.2, 23.9);
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::new(0.0, 0.0, 4.0), origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::HayStack), "no entry: {:?} {:?}", s.loco().current, s.body().feet);
+    assert_eq!(s.data().hay.kind, HayEntry::SideJump);
+    assert_eq!(s.data().hay.action.map(|a| a.id), Some(HAYSTACK_FROM_AIR));
+}
+
+#[test]
+fn free_running_onto_a_narrow_rim_drops_into_the_haystack_from_the_beam() {
+    use crate::player::hay::HayEntry;
+    // A2 yard: the cart's 0.3 m rim pairs into a runtime beam; the free run lands on it in NarrowObject and the
+    // arrival's support search (0xE51190) drops in as FreeStep
+    let mut s = Sim::new(Vec3::new(-112.0, 0.0, -119.5), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, true);
+    let on_rim = std::cell::Cell::new(false);
+    let ok = s.run_until(5.0, |s| {
+        if s.loco().current == ActorContextId::NarrowObject {
+            on_rim.set(true);
+        }
+        s.loco().current == ActorContextId::HayStack
+    });
+    assert!(ok, "never got in: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(on_rim.get(), "landed on the rim's beam first");
+    assert_eq!(s.data().hay.kind, HayEntry::FreeStep);
+}

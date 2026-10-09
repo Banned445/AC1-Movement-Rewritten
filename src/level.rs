@@ -90,6 +90,12 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     // thick along its -Z edge (top 5 m, a 5 m drop beyond): free run at it, vault, hang on the far side
     (-120.0, -115.5, 4.0, 5.0, 4.0),
     (-120.0, -118.15, 4.0, 0.3, 5.0),
+    // a haystack (x -113.5..-110.5, z -126.5..-123.5) in a cart with a 1.2 m rim 0.3 m wide: the rim pairs into a
+    // runtime beam, so the free run lands on it in NarrowObject and drops in from there (0xE51190)
+    (-112.0, -123.35, 3.6, 0.3, 1.2),
+    (-112.0, -126.65, 3.6, 0.3, 1.2),
+    (-113.65, -125.0, 0.3, 3.0, 1.2),
+    (-110.35, -125.0, 0.3, 3.0, 1.2),
     // --- the climb's ledge grab (0xDF0980, RE/18 §7.3): a 7 m wall (x -130..-126, face z -135.3) whose bands start at
     //     3.0 m (CLIMB_WALLS): climbing down to the lowest band hangs from the one above it
     (-128.0, -135.0, 4.0, 0.6, 7.0),
@@ -172,6 +178,8 @@ pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[
     (37.5, 26.0, 2.2, 2.2, 1.5),
     // A2 test yard: the haystack in a cart (its 1.2 m rim: WALLS)
     (-104.0, -120.0, 3.0, 3.0, 1.5),
+    // the narrow-rimmed cart
+    (-112.0, -125.0, 3.0, 3.0, 1.5),
 ];
 
 /// Kiosk frames (p0, p1 of the top bar, the side facing the roofs): guidance subtype Kiosk (8), not solid.

@@ -43,6 +43,8 @@ pub const AREAS: &[Area] = &[
     // haystacks and kiosks
     at("Haystack (walk into it)", Vec3::new(37.5, 0.0, 21.5), NORTH),
     at("Haystack in a raised bed (free run onto the rim)", Vec3::new(-104.0, 0.0, -126.0), NORTH),
+    at("Haystack in a narrow-rimmed cart (free run onto the beam rim)", Vec3::new(-112.0, 0.0, -119.5), SOUTH),
+    drop("Haystack side hit (fly at it with W, E+F5 to drop keeping the speed)", Vec3::new(37.5, 1.2, 22.5), NORTH),
     at("Leap of Faith (9.5 m block)", Vec3::new(30.5, 9.5, 26.0), EAST),
     at("Kiosk (market-stall bar)", Vec3::new(120.0, 4.5, 19.0), NORTH),
     // walls, ledges and climbing
