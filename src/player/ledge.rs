@@ -494,6 +494,17 @@ pub fn update_ledge(
                     continue;
                 }
             }
+            if done && mv.kind == (ledge_moves::MoveKind::PullDown { stage: 4 }) {
+                // ReleaseToInAir (0xDDFCF0 → 0xDDA100 → the let-go 0xDD7810, hang type 0: origin HangWall, the
+                // released hold 1.1 m above the root)
+                d.mv = None;
+                limbs.hands = None;
+                limbs.feet = None;
+                let hold = body.feet + Vec3::Y * 1.1;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::HangWall, speed_param: 0.0 }));
+                data.air.release_hold = Some(hold);
+                continue;
+            }
             if done && mv.end_stand {
                 // knee / waist arrivals end standing on top (Ledge SubState 4 → pull-up). Game: NarrowObject
                 // on the edge; PORT: Ground

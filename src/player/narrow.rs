@@ -818,8 +818,11 @@ fn try_pull_down(n: &HumanNarrowObjectData, stick: Option<Vec3>, camera: Vec3, g
         super::ledge_moves::PULLDOWN_BEAM_DESCENT[side],
         guidance,
         collision,
-    )?;
-    Some(super::ground::pulldown_ledge_entry(moves, normal, feet))
+    );
+    Some(match moves {
+        Ok(moves) => super::ground::pulldown_ledge_entry(moves, normal, feet),
+        Err(orient) => super::ground::pulldown_release_entry(orient, normal, feet),
+    })
 }
 
 /// Clip a segment to an oriented box (centre, unit axes, half extents); returns the parameter range kept.

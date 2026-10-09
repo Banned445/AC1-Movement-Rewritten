@@ -1555,8 +1555,19 @@ const PULLDOWN_HAND_WINDOW: f32 = 0.2;
 
 /// Pull-down from the ground at edge `p` / normal `n`: type Wait (from Movement) or EdgeStop (from the ledge stop).
 fn pulldown_entry(p: Vec3, n: Vec3, feet: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<super::ledge::LedgeEntry> {
-    let moves = super::ledge_moves::pulldown(p, n, feet, wait, guidance, collision)?;
-    Some(pulldown_ledge_entry(moves, n, feet))
+    Some(match super::ledge_moves::pulldown(p, n, feet, wait, guidance, collision) {
+        Ok(moves) => pulldown_ledge_entry(moves, n, feet),
+        Err(orient) => pulldown_release_entry(orient, n, feet),
+    })
+}
+
+/// The pull-down that finds no hands at the descent (PullDownSubState 4, ReleaseToInAir): the orientation alone.
+pub(crate) fn pulldown_release_entry(orient: super::ledge_moves::LedgeMove, n: Vec3, feet: Vec3) -> super::ledge::LedgeEntry {
+    let mut e = super::ledge::LedgeEntry::at((orient.hand_l + orient.hand_r) * 0.5, n, feet, super::ledge::LedgeSubState::PullDown);
+    e.hand_l = orient.hand_l;
+    e.hand_r = orient.hand_r;
+    e.entry_move = Some(orient);
+    e
 }
 
 /// The Ledge entry (SubState 11 PullDown, `PullDown_Enter` 0xDDE4D0) that plays the pull-down's three stages.

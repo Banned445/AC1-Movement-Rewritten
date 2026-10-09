@@ -3837,3 +3837,43 @@ fn walking_and_running_off_an_edge_land_in_the_live_times() {
     }
 }
 
+
+#[test]
+fn the_pull_down_reception_blends_by_the_walls_lean() {
+    use crate::collision::{Aabb3, CollisionWorld};
+    use crate::player::ledge_moves::pulldown_wall_weights;
+    // 0xDDF0AA: the line from the foot support up to the hands, from vertical. A plain wall: straight.
+    let mut c = CollisionWorld::default();
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
+    assert_eq!(pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c), [1.0, 0.0, 0.0]);
+    // the wall 0.3 m further in at the feet (the hands 0.3 m out, 1 m up: 16.7°): toward 30_out
+    let mut c = CollisionWorld::default();
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 2.5, -0.3) });
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 2.5, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
+    let w = pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c);
+    assert!((w[1] - 0.3f32.atan2(1.0) / 30f32.to_radians()).abs() < 0.02 && w[2] == 0.0, "{w:?}");
+    // the wall 0.4 m further out at the feet (a plinth): toward 45_in
+    let mut c = CollisionWorld::default();
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 2.5, 0.4) });
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 2.5, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
+    let w = pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c);
+    assert!((w[2] - 0.4f32.atan2(1.0) / 45f32.to_radians()).abs() < 0.02 && w[1] == 0.0, "{w:?}");
+}
+
+#[test]
+fn a_pull_down_with_no_hands_on_the_edge_releases_into_a_fall() {
+    use crate::player::ledge_moves::MoveKind;
+    // PullDownSubState 4 (0xDDFCF0 → 0xDDA100): no edge for the hands at the descent → the orientation, then the
+    // let-go into InAir (origin HangWall)
+    let (p, n) = (Vec3::new(11.0, 3.5, 12.0), Vec3::X);
+    let empty = crate::guidance::GuidanceWorld::default();
+    let (c, _) = crate::level::geometry();
+    let feet = Vec3::new(10.6, 3.5, 12.0);
+    let orient = crate::player::ledge_moves::pulldown(p, n, feet, true, &empty, &c).expect_err("no hands");
+    assert_eq!(orient.kind, MoveKind::PullDown { stage: 4 });
+    let mut s = Sim::new(feet, -std::f32::consts::FRAC_PI_2);
+    force(&mut s, crate::player::TransitionSetup::ToLedge(crate::player::ground::pulldown_release_entry(orient, n, feet)));
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::InAir), "never let go: {:?}", s.loco().current);
+    assert_eq!(s.data().air.fall_origin, air::FallOrigin::HangWall);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "fell to the street");
+}
