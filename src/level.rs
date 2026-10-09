@@ -71,6 +71,8 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     // platform C (x 98..102) and a beam from it into wall Y (x 109..112, 8 m): the wall run from a beam (RE/05 §2.10)
     (100.0, 70.0, 4.0, 4.0, 4.0),
     (110.5, 70.0, 3.0, 4.0, 8.0),
+    // --- kiosk (HumanKiosk, RE/18 §4): a 4.5 m roof (x 118..122, z 18..22) with a kiosk frame 3 m out (KIOSKS)
+    (120.0, 20.0, 4.0, 4.0, 4.5),
     // --- pilotis (RE/05 §2.8): 0.5 m posts 2.5 m apart between two 3 m platforms, along +X at z 80 ---
     (70.0, 80.0, 4.0, 4.0, 3.0),
     (74.5, 80.0, 0.5, 0.5, 3.0),
@@ -139,6 +141,9 @@ pub const BEAMS: &[(Vec3, Vec3)] = &[
 /// Haystacks (centre x, centre z, size x, size z, height): not solid, jump targets of type 0x800. The first
 /// one sits 4.5 m off the high block's +X face (roof 9.5 m): the Leap of Faith test.
 pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[(37.5, 26.0, 2.2, 2.2, 1.5)];
+
+/// Kiosk frames (p0, p1 of the top bar, the side facing the roofs): guidance subtype Kiosk (8), not solid.
+pub const KIOSKS: &[(Vec3, Vec3, Vec3)] = &[(Vec3::new(118.5, 3.0, 25.0), Vec3::new(121.5, 3.0, 25.0), Vec3::NEG_Z)];
 
 /// Floating slabs (centre x, top y, centre z, size x, size z, thickness): free-hang ledges.
 const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
@@ -268,6 +273,9 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
             guidance.edges.push(GuidanceEdge { p0: p0 + n * 0.1, p1: p1 + n * 0.1, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::LedgeGrab });
         }
     }
+    for &(p0, p1, n) in KIOSKS {
+        guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::Kiosk });
+    }
     for &(x, z, sx, sz, h) in HAYSTACKS {
         guidance.haystacks.push(Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) });
     }
@@ -369,6 +377,13 @@ pub(crate) fn build_level(
     let hay_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.85, 0.72, 0.30), perceptual_roughness: 1.0, ..default() });
     for &(x, z, sx, sz, h) in HAYSTACKS {
         commands.spawn((crate::map_menu::MapEntity,Mesh3d(meshes.add(Cuboid::new(sx, h, sz))), MeshMaterial3d(hay_mat.clone()), Transform::from_xyz(x, h * 0.5, z)));
+    }
+    // kiosk frames: the top bar only (PORT: the greybox draws no awning or posts; not solid)
+    let kiosk_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.55, 0.35, 0.2), perceptual_roughness: 0.9, ..default() });
+    for &(p0, p1, _) in KIOSKS {
+        let len = p0.distance(p1);
+        let rot = Quat::from_rotation_arc(Vec3::X, (p1 - p0).normalize_or(Vec3::X));
+        commands.spawn((crate::map_menu::MapEntity, Mesh3d(meshes.add(Cuboid::new(len, 0.08, 0.08))), MeshMaterial3d(kiosk_mat.clone()), Transform::from_translation((p0 + p1) * 0.5).with_rotation(rot)));
     }
     let beam_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.45, 0.32, 0.2), perceptual_roughness: 0.9, ..default() });
     for &(p0, p1) in BEAMS {

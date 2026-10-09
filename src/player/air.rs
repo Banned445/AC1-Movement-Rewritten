@@ -516,6 +516,7 @@ pub fn update_air(
         let mut on_target = false;
         let mut hang_on: Option<LedgeEntry> = None;
         let mut hay_on: Option<super::hay::HayStackEntry> = None;
+        let mut kiosk_on: Option<super::kiosk::KioskEntry> = None;
         let mut narrow_on: Option<TransitionSetup> = None;
         let mut pass_on: Option<super::passover::PassOverEntry> = None;
         let mut swing_on = false;
@@ -597,6 +598,16 @@ pub fn update_air(
                         }
                         ladder_on = Some(e);
                     }
+                    // kiosk target (0x400): 0xE07D00 sets InAir+225 bit 8, entry FreeStep and the side, then
+                    // `HumanInAir__RequestKiosk` 0xE015A0 → context 19 (RE/18 §4)
+                    if air.target_flags == 0x400 {
+                        if let Some(t) = air.target {
+                            if let Some(axis) = super::kiosk::kiosk_axis(t.position, &guidance) {
+                                let dir = Vec3::new(t.position.x - air.start.x, 0.0, t.position.z - air.start.z).normalize_or(fwd);
+                                kiosk_on = Some(super::kiosk::KioskEntry { from: body.feet, target: t.position, axis, dir });
+                            }
+                        }
+                    }
                     // pass-over target (type 2): 0xE07D00 case 2 → Ledge HandPassOver
                     if let Some((edge, normal)) = air.target.and_then(|t| t.pass) {
                         let mut fw = [0.0f32; 5];
@@ -622,7 +633,7 @@ pub fn update_air(
                         narrow_on = narrow_catch(body.feet, fwd, foot, &guidance, &collision);
                     }
                     match then_fall_to {
-                        _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() || ladder_on.is_some() => {}
+                        _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() || ladder_on.is_some() || kiosk_on.is_some() => {}
                         Some(p) if collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_none() => {
                             air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
                         }
@@ -808,6 +819,10 @@ pub fn update_air(
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, setup);
             if AIR_CATCHES { data.narrow.advance_catch_root(&mut body, dt); }
+        } else if let Some(e) = kiosk_on {
+            air.mode = AirMode::Idle;
+            body.velocity = Vec3::ZERO;
+            switch_context(&mut loco, &mut data, TransitionSetup::ToKiosk(e));
         } else if let Some(e) = hay_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;

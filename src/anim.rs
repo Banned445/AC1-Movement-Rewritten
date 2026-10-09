@@ -855,6 +855,12 @@ fn choose_clip(
                 p.sim_phase = Some(ph);
                 sim_request(&mut p, &lib, &b, 8_000_000 + data.walling.seq as u64 * 2 + (b.id == crate::player::walling::VERTICAL_END && b.item == 1) as u64, 0.08)
             }
+            // kiosk (0xE3E790 / 0xE3DD40): the table's action for the stage, at the sim's time
+            ActorContextId::Kiosk if data.kiosk.action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
+                let b = data.kiosk.action.unwrap();
+                p.sim_phase = Some((data.kiosk.t / b.duration().max(1e-4)).min(1.0));
+                sim_request(&mut p, &lib, &b, 5_500_000 + data.kiosk.seq as u64, 0.13)
+            }
             // haystack (0xE43140): entry action, then the wait, at the sim's time
             ActorContextId::HayStack if data.hay.action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
                 let b = data.hay.action.unwrap();

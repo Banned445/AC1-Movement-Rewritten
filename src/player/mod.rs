@@ -24,6 +24,7 @@ pub mod item_flags;
 pub mod jump_blend;
 pub mod jump_candidates;
 pub mod jump_clips;
+pub mod kiosk;
 pub mod ladder;
 pub mod ledge;
 pub mod ledge_moves;
@@ -53,6 +54,7 @@ pub enum ActorContextId {
     Climb = 10,
     Walling = 11,
     NarrowObject = 12,
+    Kiosk = 19,
     HayStack = 21,
 }
 
@@ -149,6 +151,7 @@ pub struct HumanDataBundle {
     pub walling: walling::HumanWallingData,
     pub narrow: narrow::HumanNarrowObjectData,
     pub ladder: ladder::HumanLadderData,
+    pub kiosk: kiosk::HumanKioskData,
 }
 
 /// Transition setup objects (`TransitionSetupDataToMovement` / `…ToInAir` …, RE/01 §4.2).
@@ -163,6 +166,7 @@ pub enum TransitionSetup {
     ToPilotis(narrow::PilotisEntry),
     ToPassOver(passover::PassOverEntry),
     ToLadder(ladder::LadderEntry),
+    ToKiosk(kiosk::KioskEntry),
 }
 
 /// Immediate context switch (0x55F7E0): exit old, apply setup to destination data, enter new.
@@ -210,6 +214,10 @@ pub fn switch_context(loco: &mut Locomotion, data: &mut HumanDataBundle, setup: 
             data.narrow.enter_pilotis(entry);
             ActorContextId::NarrowObject
         }
+        TransitionSetup::ToKiosk(entry) => {
+            data.kiosk.enter(entry);
+            ActorContextId::Kiosk
+        }
     };
     loco.just_switched = true;
 }
@@ -242,7 +250,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(Startup, spawn_player)
             .add_systems(
                 Update,
-                (social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
+                (social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
                     .chain()
                     .in_set(PlayerSet),
             );

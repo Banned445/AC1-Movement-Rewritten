@@ -133,7 +133,9 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             let entry = super::ladder::LadderEntry { base: bottom, top, n, from: pos, facing: -n, from_ledge: true, height: Some(h), action: Some(super::ladder::ARRIVE_TARGET), chain: true, ..Default::default() };
             Some(JumpTarget { position: pos, ladder: Some(entry), ..base })
         }
-        // horse (0x200) and kiosk (0x400) targets have no port context yet
+        // a kiosk's piece (0x400): its middle (0xE18970), handed to the Kiosk context on arrival (0xE07D00)
+        0x400 => Some(base),
+        // horse (0x200) targets have no port context
         _ => None,
     }
 }

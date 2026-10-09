@@ -87,7 +87,7 @@ impl CitySim {
             .init_resource::<CollisionWorld>().init_resource::<crate::guidance::GuidanceWorld>()
             .init_resource::<super::stream::City>()
             .add_systems(Update, (super::update_city, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,
-                crate::player::air::update_air, crate::player::ledge::update_ledge, crate::player::climb::update_climb, crate::player::hay::update_hay,
+                crate::player::air::update_air, crate::player::ledge::update_ledge, crate::player::climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk,
                 crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, super::hold_player).chain());
         let player = app.world_mut().spawn((crate::player::player_components(prepared.spawn, prepared.heading), Transform::default())).id();
         app.world_mut().run_system_once_with(super::spawn, prepared).unwrap();

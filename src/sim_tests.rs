@@ -36,7 +36,7 @@ impl Sim {
             .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
             .insert_resource(SpawnPoint(SPAWN))
             .init_resource::<CameraRig>()
-            .add_systems(Update, (crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
+            .add_systems(Update, (crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
         let (c, g) = level::geometry();
         app.insert_resource(c).insert_resource(g);
         let player = app.world_mut().spawn(player_components(feet, heading)).id();
@@ -3536,3 +3536,26 @@ fn walking_into_a_haystack_dives_in() {
     assert!((f.x - 37.5).abs() < 0.05 && (f.z - 26.0).abs() < 0.05, "inside the haystack: {f:?}");
 }
 
+
+#[test]
+fn a_jump_at_a_kiosk_swings_through_its_frame_and_drops() {
+    use crate::player::kiosk::{KioskSide, KIOSK_ACTIONS};
+    // the 4.5 m roof at (120, 20) and the kiosk frame 3 m out at 3 m (KIOSKS): the tap jump's query offers the
+    // kiosk piece (0x400, RE/18 §1.4), the arrival hands over to the Kiosk context (0xE07D00 → 0xE015A0); jumping
+    // across its bar is a front side: entry, one monkey-bar cycle, then InAir with the `_tr_fall` exit (0xE3E390)
+    let mut s = Sim::new(Vec3::new(120.0, 4.5, 19.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.run(0.6);
+    s.press_legs();
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.body().feet);
+    assert_eq!(s.data().air.target_flags, 0x400);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Kiosk), "never reached the kiosk: {:?} {:?}", s.loco().current, s.body().feet);
+    let side = s.data().kiosk.side;
+    assert!(matches!(side, KioskSide::FrontLeft | KioskSide::FrontRight), "{side:?}");
+    assert_eq!(s.data().kiosk.action.map(|a| a.id), Some(KIOSK_ACTIONS[0][side as usize]));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().kiosk.stage == 1), "no monkey bar");
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "never left the kiosk");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.body().feet);
+    assert!(s.body().feet.y.abs() < 0.05, "on the street: {:?}", s.body().feet);
+}
