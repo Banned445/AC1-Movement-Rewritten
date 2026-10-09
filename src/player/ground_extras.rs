@@ -125,6 +125,63 @@ impl SlopeSlide {
     }
 }
 
+/// The static request's hand-target evaluator (`sub_E165D0`, through IHuman vt64 0xB10990: max angle 120°): a hold
+/// is kept only when it gets a jump type and the way to it is clear. With the hold point `hold`, its outward
+/// normal `n` and `dz` its height above the feet:
+/// - the top: a ray from the hold + 0.5·n + 0.3 m up back toward the wall (1.75 m), less 0.5: < 0.03 → 64 (a wall
+///   right above the edge), < 0.3 → 16, < 1 → 8, else 2;
+/// - below: a ray down from the same point (2.9 m), less 0.3: < 0.5 → 2, < 2 → 4, else a ray from the hold + 0.5·n −
+///   1 m toward the wall (1.4 m), less 0.5: ≥ 0.7 → 16 (no wall for the feet), else 8; a hold 2.5 m or more up also
+///   needs 2.5 m of drop under the hold + 0.15·n (else rejected);
+/// - the type: dz < 0.5 → 1 and 0.5–2 → 4 (top not 64 / 16); 2–2.5 → 64 with a wall below (8, top not 64) or 8
+///   (16, top not 64 / 16), none over a floor (2 / 4); ≥ 2.5 → 128 (top not 64, no floor below);
+/// - the path: a ray from the feet + 0.75 m up to the hold + 0.2·n (types 1–8), or to the hold + 0.2·n − 1.1 m (the
+///   hang, 64 / 128), must be clear.
+/// Returns the type. PORT: the contact-object types (5 / 8, beams and kiosks) are not LedgeGrab edges here.
+pub fn static_target_type(feet: Vec3, forward: Vec3, hold: Vec3, n: Vec3, collision: &crate::collision::CollisionWorld) -> Option<u32> {
+    let n = n.with_y(0.0).normalize_or_zero();
+    let f = forward.with_y(0.0).normalize_or_zero();
+    if (-n).dot(f).clamp(-1.0, 1.0).acos() >= 120f32.to_radians() {
+        return None;
+    }
+    let layer = crate::layers::MAIN_CHARACTER;
+    let ray = |o: Vec3, d: Vec3, len: f32| collision.ray_distance(o, d, len, layer);
+    let dz = hold.y - feet.y;
+    let above = hold + n * 0.5 + Vec3::Y * 0.3;
+    let top = ray(above, -n, 1.75) - 0.5;
+    let wall_top = if top < 0.03 { 64 } else if top < 0.3 { 16 } else if top < 1.0 { 8 } else { 2 };
+    let below = ray(above, Vec3::NEG_Y, 2.9) - 0.3;
+    let wall_below = if below < 0.5 {
+        2
+    } else if below < 2.0 {
+        4
+    } else {
+        let feet_wall = ray(hold + n * 0.5 - Vec3::Y, -n, 1.4) - 0.5;
+        if dz >= 2.5 && ray(hold + n * 0.15 + Vec3::Y * 0.3, Vec3::NEG_Y, 2.9) - 0.3 < 2.5 {
+            return None;
+        }
+        if feet_wall >= 0.7 { 16 } else { 8 }
+    };
+    let ty = if dz < 0.5 {
+        (wall_top & 0x50 == 0).then_some(1)
+    } else if dz < 2.0 {
+        (wall_top & 0x50 == 0).then_some(4)
+    } else if dz < 2.5 {
+        match wall_below {
+            2 | 4 => None,
+            8 => (wall_top & 0x40 == 0).then_some(64),
+            _ => (wall_top & 0x50 == 0).then_some(8),
+        }
+    } else {
+        (wall_top & 0x40 == 0 && wall_below != 2 && wall_below != 4).then_some(128)
+    }?;
+    let from = feet + Vec3::Y * 0.75;
+    let to = if ty & 0x1070F != 0 { hold + n * 0.2 } else { hold + n * 0.2 - Vec3::Y * 1.1 };
+    let d = to - from;
+    let len = d.length();
+    (len < 1e-4 || ray(from, d / len, len) >= len - 1e-3).then_some(ty)
+}
+
 /// 0xE97720: prefer orientation by >30 degrees, otherwise prefer the higher report.
 pub fn choose_static_report(root: Vec3, forward: Vec3, reports: &[(Vec3, Vec3)]) -> Option<usize> {
     let mut best = None;
@@ -149,6 +206,35 @@ pub fn choose_static_report(root: Vec3, forward: Vec3, reports: &[(Vec3, Vec3)])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_static_evaluator_keeps_wall_tops_and_drops_holds_on_a_face() {
+        use crate::collision::{Aabb3, CollisionWorld};
+        let floor = Aabb3 { min: Vec3::new(-5.0, -1.0, -5.0), max: Vec3::new(5.0, 0.0, 5.0) };
+        let (feet, f) = (Vec3::new(0.0, 0.0, 0.6), Vec3::NEG_Z);
+        // a 2.6 m wall top with nothing above it, a wall below for the feet: the high hang (128)
+        let mut c = CollisionWorld::default();
+        c.boxes.extend([floor, Aabb3 { min: Vec3::new(-2.0, 0.0, -0.6), max: Vec3::new(2.0, 2.6, 0.0) }]);
+        assert_eq!(static_target_type(feet, f, Vec3::new(0.0, 2.6, 0.0), Vec3::Z, &c), Some(128));
+        // a 1.5 m top (room on it): 4; a 2.2 m top with a wall below: 64
+        let mut c = CollisionWorld::default();
+        c.boxes.extend([floor, Aabb3 { min: Vec3::new(-2.0, 0.0, -0.6), max: Vec3::new(2.0, 1.5, 0.0) }]);
+        assert_eq!(static_target_type(feet, f, Vec3::new(0.0, 1.5, 0.0), Vec3::Z, &c), Some(4));
+        let mut c = CollisionWorld::default();
+        c.boxes.extend([floor, Aabb3 { min: Vec3::new(-2.0, 0.0, -0.6), max: Vec3::new(2.0, 2.2, 0.0) }]);
+        assert_eq!(static_target_type(feet, f, Vec3::new(0.0, 2.2, 0.0), Vec3::Z, &c), Some(64));
+        // a hold on a tall face (the wall goes on above it): no type at 1.5 m nor at 2.6 m
+        let mut c = CollisionWorld::default();
+        c.boxes.extend([floor, Aabb3 { min: Vec3::new(-2.0, 0.0, -0.6), max: Vec3::new(2.0, 6.0, 0.0) }]);
+        assert_eq!(static_target_type(feet, f, Vec3::new(0.0, 1.5, 0.0), Vec3::Z, &c), None);
+        assert_eq!(static_target_type(feet, f, Vec3::new(0.0, 2.6, 0.0), Vec3::Z, &c), None);
+        // the 2.6 m top behind the character (beyond 120°): none; with a slab in the way of the hang: none
+        let mut c = CollisionWorld::default();
+        c.boxes.extend([floor, Aabb3 { min: Vec3::new(-2.0, 0.0, -0.6), max: Vec3::new(2.0, 2.6, 0.0) }]);
+        assert_eq!(static_target_type(feet, Vec3::Z, Vec3::new(0.0, 2.6, 0.0), Vec3::Z, &c), None);
+        c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 1.0, 0.25), max: Vec3::new(2.0, 1.2, 0.5) });
+        assert_eq!(static_target_type(feet, f, Vec3::new(0.0, 2.6, 0.0), Vec3::Z, &c), None);
+    }
     #[test]
     fn static_report_prefers_height_within_thirty_degrees_and_orientation_outside_it() {
         let root = Vec3::ZERO;

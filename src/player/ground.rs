@@ -1448,8 +1448,9 @@ fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bo
 }
 
 /// Stationary request's box is initialized by 0x1610920 / 0x1610970, consumed by 0xB10990.
-/// PORT: immutable LedgeGrab reports replace the complete 0xE165D0 chain/limb-config and clearance classifier.
-/// Rope/kiosk/pole reports and owner validity cannot be synthesized by this adapter.
+/// The holds in that box are kept by 0xE165D0's types and clearance rays (`ground_extras::static_target_type`),
+/// then 0xE97720 picks one. PORT: the box query stands in for the guidance chain walk (`GuidanceChain__FindGrabPoint`);
+/// rope/kiosk/pole reports and owner validity cannot be synthesized by this adapter.
 fn static_hand_target(feet:Vec3,forward:Vec3,guidance:&GuidanceWorld,collision:&CollisionWorld)->Option<JumpTarget> {
     let right=super::right_of(forward);
     let mut candidates=Vec::new();
@@ -1459,6 +1460,7 @@ fn static_hand_target(feet:Vec3,forward:Vec3,guidance:&GuidanceWorld,collision:&
             Vec3::new(0.5,1.0,1.35),feet,120f32.to_radians(),0.0,1<<1) else {continue;};
         let point=guidance.fit_hands(hit.point,hit.wall_normal);
         if !(GRAB_MIN_HEIGHT..=STRAIGHT_JUMP_MAX).contains(&(point.y-feet.y)) {continue;}
+        if super::ground_extras::static_target_type(feet,forward,point,hit.wall_normal,collision).is_none() {continue;}
         if let Some(target)=straight_target(feet,point,hit.wall_normal,collision,false) {
             candidates.push((point,hit.wall_normal,target));
         }
