@@ -287,6 +287,17 @@ fn probe_dump_jump_clips() {
     out += "/// (action id, items: clip names per item in slot order).\npub const ACTIONS: &[(u32, &[&[&str]])] = &[\n";
     let mut clips: Vec<String> = Vec::new();
     let mut ids: Vec<u32> = crate::player::jump_blend::DUMPED_ACTIONS.iter().chain(crate::player::ledge_moves::DUMPED_ACTIONS.iter()).chain(crate::player::walling::DUMPED_ACTIONS.iter()).chain(crate::player::narrow::DUMPED_ACTIONS.iter()).chain(crate::player::collide::DUMPED_ACTIONS.iter()).chain(crate::player::passover::DUMPED_ACTIONS.iter()).chain(crate::player::swing::DUMPED_ACTIONS.iter()).chain(crate::player::ladder::DUMPED_ACTIONS.iter()).chain(crate::player::climb::DUMPED_ACTIONS.iter()).chain(crate::player::ground::LOOK_DOWN.iter()).chain(crate::player::ground::PIVOT_ACTIONS.iter()).chain(crate::player::ground_tree::DUMPED_ACTIONS.iter()).chain(crate::player::ledge::DUMPED_ACTIONS.iter()).copied().collect();
+    // every action of the ledge's side / up jump table (0xDDD490 / 0xDD8CF0): the climb-hold and ladder rows (types 0
+    // and 3) were missing from the hand list, so those jumps found no clip and slid on a timer (bug-1791664645)
+    for row in crate::player::ledge_moves::LEDGE_JUMP_TABLE.iter() {
+        for (_, acts) in row.iter() {
+            for &id in acts.iter().filter(|&&id| id != 0) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
     // The authored transitions into the ground locomotion and the waits (item transitions whose destination is one of
     // them, `sub_5B98B0`): the simulation runs MoveBlend's transition path on their transition actions (RE/02 §4.6), so
     // those actions are dumped too (closure: a transition action can itself lead on).

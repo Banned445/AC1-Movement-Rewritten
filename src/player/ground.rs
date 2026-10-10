@@ -723,8 +723,13 @@ pub fn update_ground(
         // other requests.
         // The interpreter steers by the response-curved direction (+0x1270, RE/24 INPUT-6).
         let (mv_dir, mv_speed) = if GAME_GROUND_TREE { wall_slide(&body, pad.dir_move, pad.speed01) } else { (pad.dir, pad.speed01) };
-        // HG+1532: the signed angle from the current heading to the wanted one (Movement_PreUpdate 0xD97E30).
-        let stick_turn = if mv_speed > 0.0 { angle_diff(heading_of(mv_dir), body.heading) } else { 0.0 };
+        // The stick pushed straight into a wall (wall slide result 2): no speed, but the interpreter still hands the Ground
+        // the direction into the wall as DestHeading (0xEE6FB0: SetDestHeading whenever the stick magnitude +4672 > 0),
+        // so Idle can pivot round to face it (RE/24 GROUND-10, bug-1791664621). PORT: the stick inside the dead zone
+        // (DestSpeedRatio 0 without a wall) does not steer yet; that half of GROUND-10 waits for its live check.
+        let wall_stopped = GAME_GROUND_TREE && pad.speed01 > 0.0 && mv_speed <= 0.0;
+        // HG+1532: the signed angle from the current heading to the wanted one (Movement_PreUpdate 0xD97E30, no speed test).
+        let stick_turn = if mv_speed > 0.0 || wall_stopped { angle_diff(heading_of(mv_dir), body.heading) } else { 0.0 };
         // A transition into the locomotion (the Move state's transition path) keeps steering and the other requests
         // live. A released stick leaves it like any Move: `HumanGround__Move_CanRunStop` 0xD7EC90 (high profile, the
         // run stop allowed, and the playing action is the locomotion, the skid-turn exits legacy 96 / 97, or past 0.33 of its
@@ -871,14 +876,17 @@ pub fn update_ground(
         // from the current one, from standing (guard 0xD84B10) or from a low-profile walk (Move guard 0xD84F10: the
         // band flag HG+1500 clear: s ≤ 0.25, RE/24 GROUND-21). The turn action from the table at 0x1A2C120 by side, [from, to] profile and
         // leading foot, blending its 90 / 180 deg clips by (|a| - 90 deg) / 90 deg; the clip's root yaw turns the body.
-        if moving && !busy && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none() && off > std::f32::consts::FRAC_PI_2 && g.speed_param <= BAND_WALK {
+        // `Idle_CanPivot` needs no move request (only the anim gate, |HG+1532| > π/2 and HG+1485, which is never set:
+        // only cleared at 0xDB2CE7 / 0xDA7F6E), so the stick into a wall behind turns the character round.
+        let pivot_off = if GAME_GROUND_TREE { stick_turn.abs() } else { off };
+        if (moving || wall_stopped) && !busy && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none() && pivot_off > std::f32::consts::FRAC_PI_2 && g.speed_param <= BAND_WALK {
             let left = mv_dir.dot(super::right_of(body.forward())) < 0.0;
             // the player's EntityDescriptorType is Main (entity+168 & 7 == 1): `Pivot_Enter` 0xDA6150 then sets the
             // destination profile HG+1504 to the current one HG+1500, so the player only plays the low → low and
             // high → high turns
             let to_high = if GAME_GROUND_TREE { prev_high } else { g.high_profile };
             let id = PIVOT[(!left) as usize][prev_high as usize][to_high as usize][(g.blend.foot != 0) as usize];
-            let w = ((off - std::f32::consts::FRAC_PI_2) / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
+            let w = ((pivot_off - std::f32::consts::FRAC_PI_2) / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
             if jump_blend::action_items(id).is_some() {
                 g.play_oneshot(ActionBlend::new(id, 0, &[1.0 - w, w]));
                 g.tr = None;

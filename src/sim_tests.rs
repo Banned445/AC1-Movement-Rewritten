@@ -1886,6 +1886,19 @@ fn running_jump_at_a_railing_vaults_it() {
     assert!(s.body().feet.z < 3.85, "on the far side: {:?}", s.body().feet);
 }
 
+/// bug-1791664621: standing with the back against the 3 m wall (z 9) and the stick pushed toward it, the wall slide
+/// zeroes the speed (0xEDD7C0 result 2) but the direction into the wall still reaches DestHeading (0xEE6FB0), so Idle
+/// pivots round to face the wall (`Idle_CanPivot` 0xD84B10 has no move-request test).
+#[test]
+fn the_stick_into_a_wall_behind_turns_the_character_round() {
+    let mut s = Sim::new(Vec3::new(0.0, 0.0, 8.6), 0.0);
+    s.run(0.5);
+    assert!(s.body().forward().z < -0.9, "starts facing away from the wall: {:?}", s.body().forward());
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.body().forward().z > 0.9), "never turned to the wall: heading {} owner {:?}", s.body().heading, s.data().ground.owner);
+    assert!(s.body().feet.z > 8.4 && s.body().feet.z < 8.7, "stays at the wall: {:?}", s.body().feet);
+}
+
 // ---------------------------------------------------------------- swing bars (RE/03 §7.10)
 
 /// bug-1791661604: the far jump from the 3.5 m roof (x 5..11, z 9..15) at the 3.2 m block's -Z face (z 21.5) is a
@@ -3904,6 +3917,15 @@ fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_a_ladder() {
     assert!((f.x - 144.4).abs() < 0.1 && (f.z - 9.2).abs() < 0.1, "on the ladder: {f:?}");
 }
 
+/// Every ledge jump of 0xDDD490 / 0xDD8CF0 has its clips (bug-1791664645: the climb-hold and ladder rows, wall and free
+/// hang, were not dumped, so those jumps slid on a timer under the hang's wait).
+#[test]
+fn every_ledge_jump_action_has_its_clips() {
+    use crate::player::ledge_moves::LEDGE_JUMP_TABLE;
+    let missing: Vec<u32> = LEDGE_JUMP_TABLE.iter().flatten().flat_map(|(_, a)| *a).filter(|&id| id != 0 && crate::player::jump_blend::action_items(id).is_none()).collect();
+    assert!(missing.is_empty(), "no clips for {missing:#x?}");
+}
+
 #[test]
 fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
     use crate::player::ledge_moves::LEDGE_JUMP_TABLE;
@@ -3912,6 +3934,12 @@ fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
     // type 0: the start and loop in the Ledge context, the end item in the Climb context (RE/18 §7.2)
     let mut s = hang_at(Vec3::new(-137.8, 2.6, -135.3), Vec3::NEG_Z);
     s.pad(Vec3::X, 1.0, false, false);
+    // the jump plays its own start and loop clips (bug-1791664645: they were not in the clip table, so the root slid
+    // there on a timer under the hang's wait)
+    assert!(s.run_until(6.0, |s| s.data().ledge.last_action == "side jump to climb"), "no side jump: {}", s.data().ledge.last_action);
+    let mv = s.data().ledge.mv.expect("the side jump");
+    let starts: Vec<u32> = (0..2).flat_map(|f| [2, 3, 6, 7].map(|k| LEDGE_JUMP_TABLE[f][k].1[0])).collect();
+    assert!(mv.seq[0].is_some_and(|a| starts.contains(&a.id)) && mv.seq[1].is_some() && mv.follow_disp, "the jump's clips: {:?}", mv.seq);
     assert!(s.run_until(6.0, |s| s.loco().current == ActorContextId::Climb), "never reached the climb: {:?} ledge {}", s.loco().current, s.data().ledge.last_action);
     assert_eq!(s.data().ledge.last_action, "side jump to climb");
     s.pad(Vec3::X, 0.0, false, false);
