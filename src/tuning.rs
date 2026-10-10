@@ -123,9 +123,6 @@ pub const SHIMMY_MIN_STEP: f32 = 0.15;
 pub const HAND_SPACING: f32 = 0.4;
 /// Lost-ledge check radius = 0.25 + half the hand spacing. HasLostLedge 0xDD20D0
 pub const LOST_LEDGE_R: f32 = 0.25;
-/// Vertical hand-over-hand step to a ledge 0.6–1.2 m away (StartHandStep 0xDDE0C0).
-pub const VSTEP_MIN: f32 = 0.45;
-pub const VSTEP_MAX: f32 = 1.25;
 /// Pull-up: root ends 0.5 m inside the ledge (Pullup_Start 0xDDBE80).
 pub const PULLUP_IN: f32 = 0.5;
 /// Move durations = the game clips' lengths (RE/10): xx_h_hangwall_strafe_*_050cm_open 0.533 s /

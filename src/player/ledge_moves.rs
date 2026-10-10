@@ -376,6 +376,39 @@ pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang:
     })
 }
 
+/// `sub_DD8F70`'s three vertical searches (`GuidanceWorld::vertical_search`, 0.4 m wide, the ledge report of
+/// `sub_DDC620`: up −1.0 … +2.0 m, down −2.0 … 0 m around the higher hand), from the hands' midpoint at the lower hand
+/// (up) or the higher one (down):
+/// - `feet` (+688): up 0.3–0.9 m below, down 1.5–2.1 m below (the farthest along the step);
+/// - `hands` (+768): up 0.3–0.9 m above, down 0.3–0.9 m below;
+/// - `step` (+848, the hand step): up 0.1–0.8 m above, down 0.1–0.8 m below, the edge held cut out (capsule r 0.2 at
+///   the hands) and a ±30° wedge about the facing (up) or its opposite (down).
+///
+/// PORT: when the hands are within 0.1 m in height the game picks the height by the last vertical hand (+1844); the
+/// port keeps the lower / higher one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VerticalRows {
+    pub feet: Option<crate::guidance::GuidanceHit>,
+    pub hands: Option<crate::guidance::GuidanceHit>,
+    pub step: Option<crate::guidance::GuidanceHit>,
+}
+
+pub fn vertical_rows(hand_l: Vec3, hand_r: Vec3, n: Vec3, up: bool, guidance: &GuidanceWorld) -> VerticalRows {
+    use crate::guidance::Wedge;
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let mut mid = (hand_l + hand_r) * 0.5;
+    mid.y = if up { hand_l.y.min(hand_r.y) } else { hand_l.y.max(hand_r.y) };
+    let top = hand_l.y.max(hand_r.y);
+    let window = if up { (top - 1.0, top + 2.0) } else { (top - 2.0, top) };
+    let wedge = |cut_up: f32| Some(Wedge { angle: 0.523_598_8, cut_up });
+    let search = |dy: f32, lo: f32, hi: f32, w: Option<Wedge>| guidance.vertical_search(mid + Vec3::Y * dy, up, facing, lo, hi, 0.4, 0.0, w, false, window);
+    if up {
+        VerticalRows { feet: search(-0.9, 0.0, 0.6, None), hands: search(0.3, 0.0, 0.6, None), step: search(0.0, 0.1, 0.8, wedge(0.0)) }
+    } else {
+        VerticalRows { feet: search(-2.1, 0.0, 0.6, None), hands: search(-0.9, 0.0, 0.6, None), step: search(-0.8, 0.0, 0.7, wedge(0.8)) }
+    }
+}
+
 /// `HumanLedge__TryTurnCorner` 0xDD3BB0 on FindCornerEdges' same-height row (row 3). `right` = moving right.
 pub fn try_corner(
     inner: bool,

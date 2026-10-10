@@ -11,7 +11,7 @@
 //!   sweep; step = min(d âˆ’ 0.4, 1.0 âˆ’ spacing); blocked if d âˆ’ 0.15 < 0.7; min step 0.15; chain ends
 //!   handled implicitly (no edge further on â†’ no step).
 //! - Up/down: transition to Climb when wall holds exist (TryTransitionToClimb 0xDD46A0), else
-//!   hand-over-hand step to a ledge 0.6-1.2 m away, else (up, wall hang) the hop up into a free hang
+//!   hand step to an edge 0.1-0.8 m away (sub_DD8F70), else (up, wall hang) the swing back into a free hang
 //!   (TryWallJumpUp 0xDD62A0), else (up) "blocked up" -> pull-up if there is standing space (CanPullup 0xDE2270).
 //! - Left/right past the end of the edge (or blocked): inner corner, side jump, outer corner
 //!   (`ledge_moves`, RE/03 §7.6b).
@@ -324,14 +324,6 @@ fn start_move(d: &mut HumanLedgeData, mv: LedgeMove, what: &'static str) {
     d.last_action = what;
 }
 
-/// Both foot holds 1.2 m below the hands exist â†’ the wall is climbable (TryTransitionToClimb).
-fn climb_holds_below(guidance: &GuidanceWorld, hand_l: Vec3, hand_r: Vec3, n: Vec3) -> Option<(Vec3, Vec3)> {
-    let drop = CLIMB_ROW * CLIMB_HAND_ROWS as f32;
-    let fl = guidance.probe(hand_l - Vec3::Y * drop, CLIMB_PROBE_R, CLIMB_PROBE_VTOL * 0.5, Some(-n), 0.785)?;
-    let fr = guidance.probe(hand_r - Vec3::Y * drop, CLIMB_PROBE_R, CLIMB_PROBE_VTOL * 0.5, Some(-n), 0.785)?;
-    Some((fl.point, fr.point))
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn update_ledge(
     time: Res<Time>,
@@ -639,25 +631,24 @@ pub fn update_ledge(
                         continue;
                     }
                 }
-                // TryTransitionToClimb: wall holds for the feet (and, going up, a hold above the hands)
-                if let Some((fl, fr)) = climb_holds_below(&guidance, d.hand_l, d.hand_r, n) {
-                    let above = dir == LedgeDir::Down
-                        || guidance.probe(hand_mid(d) + Vec3::Y * CLIMB_ROW, CLIMB_PROBE_R, CLIMB_PROBE_VTOL * 0.5, Some(facing), 0.785).is_some();
-                    if above {
-                        let entry = ClimbEntry {
-                            entry_type: ClimbEntryType::FromLedge,
-                            hand_l: d.hand_l,
-                            hand_r: d.hand_r,
-                            foot_l: fl,
-                            foot_r: fr,
-                            normal: n,
-                            from_feet: body.feet,
-                            foot_right: false,
-                            action: Some(super::climb::LEDGE_TO_CLIMB[(dir == LedgeDir::Down) as usize][(d.hang_type != LedgeHangType::Wall) as usize]),
-                        };
-                        switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
-                        continue;
-                    }
+                // sub_DD8F70: the feet, hands and hand-step rows for this direction
+                let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, dir == LedgeDir::Up, &guidance);
+                // TryTransitionToClimb 0xDD46A0: both rows → the climb pose of those holds (both hands on the hands row,
+                // both feet on the feet row). PORT: its body boxes (0xB2DF90) are not tested.
+                if let (Some(feet_row), Some(hands_row)) = (rows.feet, rows.hands) {
+                    let entry = ClimbEntry {
+                        entry_type: ClimbEntryType::FromLedge,
+                        hand_l: hands_row.point,
+                        hand_r: hands_row.point,
+                        foot_l: feet_row.point,
+                        foot_r: feet_row.point,
+                        normal: hands_row.wall_normal,
+                        from_feet: body.feet,
+                        foot_right: false,
+                        action: Some(super::climb::LEDGE_TO_CLIMB[(dir == LedgeDir::Down) as usize][(d.hang_type != LedgeHangType::Wall) as usize]),
+                    };
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
+                    continue;
                 }
                 // TryFreeHangDropToClimb 0xDDF390 (free hang, down): drop onto holds below and ahead
                 if dir == LedgeDir::Down {
@@ -667,21 +658,15 @@ pub fn update_ledge(
                         continue;
                     }
                 }
-                // hand-over-hand step to a ledge 0.45â€“1.25 m above/below
-                let mid = hand_mid(d);
-                let mut target = None;
-                for k in [0.6f32, 0.9, 1.2] {
-                    if let Some(h) = guidance.probe(mid + Vec3::Y * k * sign, 0.3, 0.2, Some(facing), 0.785) {
-                        let dy = (h.point.y - mid.y) * sign;
-                        if (VSTEP_MIN..=VSTEP_MAX).contains(&dy) {
-                            target = Some(h);
-                            break;
-                        }
-                    }
-                }
-                if let Some(h) = target {
-                    let tl = Vec3::new(d.hand_l.x, h.point.y, d.hand_l.z);
-                    let tr = Vec3::new(d.hand_r.x, h.point.y, d.hand_r.z);
+                // StartHandStep 0xDDE0C0 (vertical): the hand step onto the step row's edge (0.1–0.8 m along the step)
+                // PORT: each hand keeps its lateral offset from the hands' midpoint on the new edge (the game moves one
+                // hand onto the hit, PickVerticalHandAndAnim 0xDCB3E0, and the other follows with its own search,
+                // ContinuePendingVerticalStep 0xDCF3C0); the target's hang body box is not tested.
+                if let Some(h) = rows.step {
+                    let mid = hand_mid(d);
+                    let along = |p: Vec3| right * (p - mid).dot(right);
+                    let tl = h.point + along(d.hand_l);
+                    let tr = h.point + along(d.hand_r);
                     // the destination needs the other hang type: the switch replaces the hand step (0xDE29E0 order:
                     // TrySwitchHangType before StartHandStep)
                     if let Some(nt) = needs_switch(d.hang_type, (tl + tr) * 0.5, n, &collision) {
