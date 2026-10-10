@@ -238,8 +238,15 @@ pub struct Profile {
     pub pitch: [f32; 3],
     pub dist: [f32; 2],
     pub e_default: f32,
-    /// +556 = 3: the lazy follow's 0.5 / 1.0 rad window (LowHigh); +556 = 0 follows whenever there is no input.
-    pub follow_window: Option<(f32, f32)>,
+    /// +556: how the yaw follows the target (0x692D90).
+    pub follow: FollowMode,
+    /// +272 z: the target's height above the feet.
+    pub target_height: f32,
+    /// +512 = 1 / 3: activation turns the yaw to the target heading plus +516 (FreeRoamingCamera__InitYaw 0x68F940);
+    /// otherwise it comes from the previous camera (0x6910C0).
+    pub init_yaw: Option<f32>,
+    /// +600: the camera activated after this one copies its yaw (0x69135A) instead of measuring this one's eye.
+    pub hands_yaw: bool,
     /// +576: the wait after manual input.
     pub input_hold: f32,
     /// +606 swing toward behind when blocked, +605 ease the distance back out, +444 the raised eye's minimum height.
@@ -250,19 +257,44 @@ pub struct Profile {
     pub lowhigh: bool,
 }
 
+/// FreeRoamingCameraSettings +556 (0x692D90's switch).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FollowMode {
+    /// 0: the yaw follows whenever there is no input.
+    Always,
+    /// 2: no automatic follow.
+    Off,
+    /// 3: the lazy follow inside its enter / exit window (rad).
+    Lazy(f32, f32),
+}
+
 pub const LOW_HIGH: Profile = Profile {
     priority: 10, blend_in: 1.0, target_lag_xy: 0.1, target_lag_z: 0.3, eye_lag: 0.125,
     pitch: [-0.698_132, 1.396_263, 1.45], dist: [3.5, 3.5], e_default: 0.535,
-    follow_window: Some((0.5, 1.0)), input_hold: 1.0, swing: true, ease_out: true, raise_min: 1.0, lowhigh: true,
+    follow: FollowMode::Lazy(0.5, 1.0), input_hold: 1.0, swing: true, ease_out: true, raise_min: 1.0, lowhigh: true,
+    target_height: 1.6, init_yaw: None, hands_yaw: false,
 };
 
 /// The Leap of Faith camera (FreeRoamingCameraSettings object 0xB97, priority 3500, activated by
 /// LeapOfFaithEventMonitor = ActorState 41, sent at the faith jump's start by the interpreter 0xEDAB20 and ended by
-/// InAir's cleanup / haystack entry): 3 m away, pitch fixed at 80° looking down, 0.05 s lags.
+/// InAir's cleanup / haystack entry): 3 m away, pitch fixed at 80° looking down, 0.05 s lags, starting behind the
+/// heading (+512 = 1).
 pub const LEAP_OF_FAITH: Profile = Profile {
     priority: 3500, blend_in: 1.0, target_lag_xy: 0.05, target_lag_z: 0.05, eye_lag: 0.05,
     pitch: [1.396_263, 1.396_263, 1.5], dist: [3.0, 3.0], e_default: 0.99,
-    follow_window: None, input_hold: 0.0, swing: false, ease_out: false, raise_min: 0.5, lowhigh: false,
+    follow: FollowMode::Always, input_hold: 0.0, swing: false, ease_out: false, raise_min: 0.5, lowhigh: false,
+    target_height: 1.65, init_yaw: Some(0.0), hands_yaw: false,
+};
+
+/// The StandOnLedge camera (FreeRoamingCameraSettings object 0x11FD, block 0x13CD; priority 18, blend-in 2 s),
+/// activated by StandOnLedgeEventMonitor = ActorState 62: sent with +16 = 0 by `HumanGround__LookDown_Enter`
+/// 0xD9FC80 and +16 = 1 when the look-down ends (0xD98CC0). Distance 3 → 1.8 m, pitch −8°..84°, e 0.865 (66° down,
+/// 2 m away), no lags, no follow, the yaw kept from the previous camera and handed on to the next.
+pub const STAND_ON_LEDGE: Profile = Profile {
+    priority: 18, blend_in: 2.0, target_lag_xy: 0.0, target_lag_z: 0.0, eye_lag: 0.0,
+    pitch: [-0.139_626, 1.466_077, 1.5], dist: [3.0, 1.8], e_default: 0.865,
+    follow: FollowMode::Off, input_hold: 0.0, swing: false, ease_out: false, raise_min: 0.5, lowhigh: false,
+    target_height: 1.7, init_yaw: None, hands_yaw: true,
 };
 
 /// PadR6VCameraControl (Camera Switcher 0x1A4B) and the mouse path of its update 0x5FAFC0.
@@ -488,6 +520,15 @@ pub struct CamInput {
     pub reset: bool,
 }
 
+/// What a newly active camera takes from the one before it (0x6910C0).
+#[derive(Clone, Copy, Debug)]
+pub enum Handover {
+    /// The previous camera's yaw (+600, or a first-person camera).
+    Yaw(f32),
+    /// The previous camera's eye.
+    Eye(Vec3),
+}
+
 /// The camera's output for this frame (port space).
 #[derive(Clone, Copy, Default, Debug)]
 pub struct CamView {
@@ -644,7 +685,7 @@ impl NativeCamera {
 
     /// `FreeRoamingCamera__Activate` 0x6910C0: snap the target, yaw behind the heading, e = +500, eye snapped.
     pub fn activate(&mut self, inp: &CamInput) {
-        self.target_raw = inp.root + Vec3::Y * S.target_height;
+        self.target_raw = inp.root + Vec3::Y * self.profile.target_height;
         self.target = self.target_raw;
         self.heading = game_heading(inp.forward);
         self.yaw = self.heading;
@@ -659,6 +700,20 @@ impl NativeCamera {
         self.look = Vec3::Y * (S.look_lo + (S.look_hi - S.look_lo) * self.e * self.e);
         self.active = true;
         self.last_root = Some(inp.root);
+    }
+
+    /// `FreeRoamingCamera__Activate` 0x6910C0 after another camera: e = +500 (InitElevation 0x68F8E0, +496 = 1 on
+    /// every block); the yaw from InitYaw (+512), else the previous camera's yaw when it hands it on (+600) or a
+    /// first-person camera, else the previous eye's azimuth round this camera's target (0x691297).
+    pub fn activate_after(&mut self, inp: &CamInput, prev: Handover) {
+        self.activate(inp);
+        self.yaw = match (self.profile.init_yaw, prev) {
+            (Some(off), _) => wrap(self.heading + off),
+            (None, Handover::Yaw(y)) => y,
+            (None, Handover::Eye(eye)) => angles_of(eye - self.target).0,
+        };
+        self.eye_raw = self.target + orbit_offset(self.yaw, self.pitch, self.dist);
+        self.eye = self.eye_raw;
     }
 
     fn move_heading(&self) -> f32 {
@@ -795,7 +850,7 @@ impl NativeCamera {
 
     /// `FreeRoamingCamera__UpdateTarget` 0x692430 (lag mode, +612 = 0).
     fn update_target(&mut self, inp: &CamInput, dt: f32) {
-        self.target_raw = inp.root + Vec3::Y * S.target_height;
+        self.target_raw = inp.root + Vec3::Y * self.profile.target_height;
         if self.target_raw.distance(self.target) > 5.0 {
             // PORT: a respawn / map switch snaps like an activation
             self.activate(inp);
@@ -914,15 +969,16 @@ impl NativeCamera {
         if !inp.mouse_mode && !self.climb {
             let (eye_az, _, _) = angles_of(self.eye_raw - self.target_raw);
             let off = wrap(eye_az - self.heading).abs();
-            match self.profile.follow_window {
-                Some((enter, exit)) => {
+            match self.profile.follow {
+                FollowMode::Lazy(enter, exit) => {
                     if !self.follow {
                         if enter >= off { self.follow = true; }
                     } else if off > exit {
                         self.follow = false;
                     }
                 }
-                None => self.follow = true,
+                FollowMode::Always => self.follow = true,
+                FollowMode::Off => self.follow = false,
             }
             let allowed = self.climb_follow_hold <= 0.0 && (!self.beam);
             if self.follow && allowed && !self.input_yaw && !self.input_e && !self.input_active && self.input_hold <= 0.0 {
@@ -1184,14 +1240,24 @@ impl SwitchBlend {
     }
 }
 
+/// The cameras the switcher picks from, by priority: Leap of Faith 3500, first person 26, StandOnLedge 18, LowHigh 10.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Shown {
+    #[default]
+    LowHigh,
+    StandOnLedge,
+    FirstPerson,
+    LeapOfFaith,
+}
+
 #[derive(Default)]
 struct FollowState {
     cam: NativeCamera,
-    /// The Leap of Faith camera and whether it is the one shown (priority 3500 over LowHigh's 10).
+    /// The Leap of Faith and StandOnLedge cameras.
     lof: NativeCamera,
-    lof_active: bool,
-    /// The first-person camera (priority 26).
+    ledge: NativeCamera,
     fp: FirstPerson,
+    shown: Shown,
     blend: Option<SwitchBlend>,
     mouse_mode: bool,
     /// The rig values this system wrote last frame, to see placements by other systems (scenarios, replays).
@@ -1278,43 +1344,47 @@ fn follow(
     };
     // the first-person activator (0xCD3360): Head toggles it while standing still
     let buttons = if menu.open { [false; 16] } else { pad.as_ref().map_or([false; 16], |p| p.buttons) };
-    let fp_was = st.fp.active;
     st.fp.activator(&FpInput { buttons, move_stick, root: p.translation, on_ground: matches!(ctx, Some(C::Ground)) });
-    // the switcher: the active camera with the highest priority; a newly active FreeRoaming camera takes the previous
-    // one's yaw and elevation (FreeRoamingCamera__Activate 0x6910C0 with the previous camera) and blends in
-    if st.fp.active != fp_was && !st.lof_active {
-        if st.fp.active {
-            let yaw = st.cam.yaw;
-            st.fp.activate(yaw);
-            st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: FIRST_PERSON.blend_in });
-        } else {
-            // back to LowHigh, which takes the first-person heading
-            st.cam.activate(&inp);
-            st.cam.yaw = st.fp.yaw;
-            st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: st.cam.profile.blend_in });
-        }
+    // ActorState 62 (StandOnLedge) while the look-down at an edge runs
+    let look_down = matches!(ctx, Some(C::Ground)) && data.is_some_and(|d| d.ground.look_down.is_some());
+    // the switcher: the active camera with the highest priority, activated after the one shown before (0x6910C0)
+    // and blended in over its blend-in time
+    let want = if leap { Shown::LeapOfFaith } else if st.fp.active { Shown::FirstPerson } else if look_down { Shown::StandOnLedge } else { Shown::LowHigh };
+    if want != st.shown {
+        let prev = match st.shown {
+            Shown::FirstPerson => Handover::Yaw(st.fp.yaw),
+            s => {
+                let c = match s { Shown::LeapOfFaith => &st.lof, Shown::StandOnLedge => &st.ledge, _ => &st.cam };
+                if c.profile.hands_yaw { Handover::Yaw(c.yaw) } else { Handover::Eye(c.eye) }
+            }
+        };
+        let blend_in = match want {
+            Shown::FirstPerson => {
+                let yaw = match prev { Handover::Yaw(y) => y, Handover::Eye(e) => angles_of(e - head_point(&rigs, &joints, p.translation)).0 };
+                st.fp.activate(yaw);
+                FIRST_PERSON.blend_in
+            }
+            w => {
+                let (cam, profile) = match w {
+                    Shown::LeapOfFaith => (&mut st.lof, &LEAP_OF_FAITH),
+                    Shown::StandOnLedge => (&mut st.ledge, &STAND_ON_LEDGE),
+                    _ => (&mut st.cam, &LOW_HIGH),
+                };
+                cam.profile = profile;
+                cam.activate_after(&inp, prev);
+                profile.blend_in
+            }
+        };
+        st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: blend_in });
+        st.shown = want;
     }
-    if leap != st.lof_active {
-        let (from, to) = if leap { (&st.cam, &mut st.lof) } else { (&st.lof, &mut st.cam) };
-        let (yaw, e) = (from.yaw, from.e);
-        to.profile = if leap { &LEAP_OF_FAITH } else { &LOW_HIGH };
-        to.activate(&inp);
-        to.yaw = yaw;
-        to.e = e;
-        st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: to.profile.blend_in });
-        st.lof_active = leap;
-    }
-    // the tracked head (last propagated pose; PORT: 1.6 m above the feet without a skeleton)
-    let head = rigs.single().ok()
-        .and_then(|r| r.bone_ids.iter().position(|&b| b == FP_HEAD_BONE).and_then(|i| joints.get(r.joints[i]).ok()))
-        .map_or(p.translation + Vec3::Y * S.target_height, |g| g.translation());
-    let first_person = st.fp.active && !st.lof_active;
-    let view = if st.lof_active {
-        st.lof.update(&inp, &*collision)
-    } else if first_person {
-        st.fp.update(&inp, head)
-    } else {
-        st.cam.update(&inp, &*collision)
+    let head = head_point(&rigs, &joints, p.translation);
+    let first_person = st.shown == Shown::FirstPerson;
+    let view = match st.shown {
+        Shown::LeapOfFaith => st.lof.update(&inp, &*collision),
+        Shown::StandOnLedge => st.ledge.update(&inp, &*collision),
+        Shown::FirstPerson => st.fp.update(&inp, head),
+        Shown::LowHigh => st.cam.update(&inp, &*collision),
     };
     // the active camera's field of view (+32)
     if let Projection::Perspective(pp) = &mut *projection {
@@ -1340,12 +1410,20 @@ fn follow(
     let r = c.rotation;
     c.translation += r * shake_pos;
     c.rotation *= shake_rot;
-    let shown = if st.lof_active { &st.lof } else { &st.cam };
+    let shown = match st.shown { Shown::LeapOfFaith => &st.lof, Shown::StandOnLedge => &st.ledge, _ => &st.cam };
     let (yaw, pitch) = if first_person { (st.fp.yaw, st.fp.pitch) } else { (shown.yaw, shown.pitch) };
     rig.yaw = wrap(PI - yaw);
     rig.pitch = -pitch;
     rig.distance = if first_person { 0.0 } else { shown.dist };
     st.written = Some((rig.yaw, rig.pitch, rig.distance));
+}
+
+/// The tracked head for the first-person camera: the head bone of the last propagated pose (PORT: 1.6 m above the
+/// feet without a skeleton).
+fn head_point(rigs: &Query<&crate::model::Rig, With<Player>>, joints: &Query<&GlobalTransform>, root: Vec3) -> Vec3 {
+    rigs.single().ok()
+        .and_then(|r| r.bone_ids.iter().position(|&b| b == FP_HEAD_BONE).and_then(|i| joints.get(r.joints[i]).ok()))
+        .map_or(root + Vec3::Y * S.target_height, |g| g.translation())
 }
 
 /// CameraSettings +24 = 0.45 (0x4C0B80): characters whose bounds meet a 0.45 m box round the eye are hidden when the eye
@@ -1698,6 +1776,34 @@ mod tests {
         inp.stick = Vec2::new(0.0, -1.0);
         for _ in 0..180 { fp.update(&inp, head); }
         assert!((fp.pitch - FIRST_PERSON.pitch[1]).abs() < 0.01, "{}", fp.pitch);
+    }
+
+    #[test]
+    fn activation_takes_the_previous_view_or_the_heading() {
+        let inp = input(1.0 / 60.0);
+        // LowHigh turned 1 rad off the heading
+        let mut low = NativeCamera { profile: &LOW_HIGH, ..default() };
+        low.activate(&inp);
+        low.yaw = 1.0;
+        low.eye = low.target + orbit_offset(low.yaw, low.pitch, low.dist);
+        // StandOnLedge measures the LowHigh eye round its own (higher) target: same azimuth, its own e
+        let mut ledge = NativeCamera { profile: &STAND_ON_LEDGE, ..default() };
+        ledge.activate_after(&inp, Handover::Eye(low.eye));
+        assert!((ledge.yaw - 1.0).abs() < 1e-4, "{}", ledge.yaw);
+        assert_eq!(ledge.e, 0.865);
+        let (d, pitch) = ledge.dist_pitch(ledge.e);
+        assert!((d - 1.962).abs() < 0.01 && (pitch.to_degrees() - 66.0).abs() < 0.5, "{d} {}", pitch.to_degrees());
+        assert!((ledge.target.y - 1.7).abs() < 1e-5);
+        // it hands its yaw on (+600); the Leap of Faith turns behind the heading instead (+512 = 1)
+        ledge.yaw = 2.0;
+        let prev = if ledge.profile.hands_yaw { Handover::Yaw(ledge.yaw) } else { Handover::Eye(ledge.eye) };
+        let mut back = NativeCamera { profile: &LOW_HIGH, ..default() };
+        back.activate_after(&inp, prev);
+        assert_eq!(back.yaw, 2.0);
+        assert_eq!(back.e, LOW_HIGH.e_default, "InitElevation resets e (+496 = 1)");
+        let mut lof = NativeCamera { profile: &LEAP_OF_FAITH, ..default() };
+        lof.activate_after(&inp, prev);
+        assert!((lof.yaw - game_heading(inp.forward)).abs() < 1e-5);
     }
 }
 
