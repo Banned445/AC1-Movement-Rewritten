@@ -650,44 +650,6 @@ pub fn update_ledge(
         match dir {
             LedgeDir::Up | LedgeDir::Down => {
                 let sign = if dir == LedgeDir::Up { 1.0 } else { -1.0 };
-                // the stick up within 45 degrees: the pull-up first when the ledge allows it (CanHandleEvent(0) =
-                // CanPullup 0xDE2270 -> event 0, sent from 0xEECC76, verified live); the other up moves are event 1
-                if dir == LedgeDir::Up {
-                    let mid = hand_mid(d);
-                    let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
-                    let standable = collision
-                        .ground_height(top + Vec3::Y * 0.05, 0.3)
-                        .filter(|h| (h - mid.y).abs() < 0.25)
-                        .is_some();
-                    if standable && collision.capsule_fits(Vec3::new(top.x, mid.y, top.z)) {
-                        // root: onto the top, 0.5 m in (Pullup_Start 0xDDBE80), along the pull-up clips' own
-                        // displacement (up, then in over the lip) plus a correction onto that point
-                        let top_feet = Vec3::new(top.x, mid.y, top.z);
-                        // HumanLedge__PullupNeedsOneHand 0xDD1120: from the hands' midpoint (higher hand) 0.15 m in, the
-                        // drop beyond the top 0.35 m to either side (Human__MeasureDropBeyondEdge 0xB19620: offset 0.35,
-                        // search 0.5 down); more than 0.2 m on a side → the one-hand pull-up. PORT: no solid within 0.2 m
-                        // below that point (point tests; the game sweeps a tilted capsule).
-                        let p = Vec3::new(mid.x, d.hand_l.y.max(d.hand_r.y), mid.z) - n * 0.15;
-                        let drops = |side: Vec3| {
-                            let q = p + side * 0.35;
-                            ![0.05f32, 0.1, 0.15, 0.2].iter().any(|dy| collision.point_inside(q - Vec3::Y * *dy))
-                        };
-                        let one_hand = drops(right) || drops(-right);
-                        // the wall-free hang (Free with a wall below, LedgeHangType 2) does not pull up: Pullup_Start
-                        // 0xDDBE80 switches it to the wall hang first (`hangwallfree_tr_hangwall`)
-                        if d.hang_type == LedgeHangType::Free && wall_below_hands(mid, n, &collision) {
-                            start_move(d, ledge_moves::wallfree_to_wall_move(body.feet, d.hand_l, d.hand_r, n), "wall-free to wall hang");
-                            continue;
-                        }
-                        let (mv, rest) = ledge_moves::pullup_move(d.hang_type, one_hand, body.feet, d.hand_l, d.hand_r, n, top_feet);
-                        start_move(d, mv, if one_hand { "pull-up (one hand)" } else { "pull-up" });
-                        d.queue = rest.into_iter().collect();
-                        d.sub_state = LedgeSubState::Pullup;
-                        limbs.suspended = !ledge_ik_runs(d.sub_state);
-                        limbs.hands = None;
-                        continue;
-                    }
-                }
                 // sub_DD8F70: the feet, hands and hand-step rows for this direction
                 let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, dir == LedgeDir::Up, &report);
                 // TryTransitionToClimb 0xDD46A0: both rows → the climb pose of those holds (both hands on the hands row,
@@ -763,8 +725,45 @@ pub fn update_ledge(
                         start_move(d, mv, "hop up");
                         continue;
                     }
-                    // nothing possible up (the pull-up was tried first)
+                    // the pull-up (event 0) only when nothing else is possible up: `HumanLedge__CanPullup` 0xDE2270 needs
+                    // +1862, which `Movement_ChooseAction` clears first (0xDE2A2C) and sets only when the climb transition,
+                    // the hang switch, the free-hang drop, the hand step, the jump up and the wall jump up all failed (0xDE2E12;
+                    // RE/24 LEDGE-2). PORT: the game sends it from the next frame's interpreter pass; the port pulls up at once.
                     d.blocked_up = true;
+                    let mid = hand_mid(d);
+                    let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
+                    let standable = collision
+                        .ground_height(top + Vec3::Y * 0.05, 0.3)
+                        .filter(|h| (h - mid.y).abs() < 0.25)
+                        .is_some();
+                    if standable && collision.capsule_fits(Vec3::new(top.x, mid.y, top.z)) {
+                        // root: onto the top, 0.5 m in (Pullup_Start 0xDDBE80), along the pull-up clips' own
+                        // displacement (up, then in over the lip) plus a correction onto that point
+                        let top_feet = Vec3::new(top.x, mid.y, top.z);
+                        // HumanLedge__PullupNeedsOneHand 0xDD1120: from the hands' midpoint (higher hand) 0.15 m in, the
+                        // drop beyond the top 0.35 m to either side (Human__MeasureDropBeyondEdge 0xB19620: offset 0.35,
+                        // search 0.5 down); more than 0.2 m on a side → the one-hand pull-up. PORT: no solid within 0.2 m
+                        // below that point (point tests; the game sweeps a tilted capsule).
+                        let p = Vec3::new(mid.x, d.hand_l.y.max(d.hand_r.y), mid.z) - n * 0.15;
+                        let drops = |side: Vec3| {
+                            let q = p + side * 0.35;
+                            ![0.05f32, 0.1, 0.15, 0.2].iter().any(|dy| collision.point_inside(q - Vec3::Y * *dy))
+                        };
+                        let one_hand = drops(right) || drops(-right);
+                        // the wall-free hang (Free with a wall below, LedgeHangType 2) does not pull up: Pullup_Start
+                        // 0xDDBE80 switches it to the wall hang first (`hangwallfree_tr_hangwall`)
+                        if d.hang_type == LedgeHangType::Free && wall_below_hands(mid, n, &collision) {
+                            start_move(d, ledge_moves::wallfree_to_wall_move(body.feet, d.hand_l, d.hand_r, n), "wall-free to wall hang");
+                            continue;
+                        }
+                        let (mv, rest) = ledge_moves::pullup_move(d.hang_type, one_hand, body.feet, d.hand_l, d.hand_r, n, top_feet);
+                        start_move(d, mv, if one_hand { "pull-up (one hand)" } else { "pull-up" });
+                        d.queue = rest.into_iter().collect();
+                        d.sub_state = LedgeSubState::Pullup;
+                        limbs.suspended = !ledge_ik_runs(d.sub_state);
+                        limbs.hands = None;
+                        continue;
+                    }
                     d.last_action = "blocked up";
                 } else {
                     d.last_action = "blocked down";
