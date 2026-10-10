@@ -599,7 +599,7 @@ pub fn update_ledge(
         }
         // ... and high profile with the Legs buffer jumps off (event 2): away from the wall, or along the stick
         if pad.high_profile && pad.jump_buffered() {
-            if let Some(jd) = super::targets::jump_off_wall_dir((pad.speed01 > 0.0).then_some(pad.dir), n) {
+            if let Some(jd) = super::targets::jump_off_wall_dir((pad.speed01 > 0.0).then_some(pad.dir_snap), n) {
                 pad.consume_jump();
                 limbs.hands = None;
                 limbs.feet = None;

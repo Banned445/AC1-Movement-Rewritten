@@ -709,9 +709,9 @@ pub fn update_ladder(
                     l.high = pad.high_profile;
                     let hi = l.high as usize;
                     let len = l.len();
-                    // low profile with the stick in the walk band: the climb plays at half rate (input value 0.5 from
-                    // `sub_ED7180`, `sub_E24540`). PORT: the interpreter's band table is not read; the ground's walk band.
-                    let rate = if !l.high && pad.speed01 <= crate::tuning::BAND_WALK { 0.5 } else { 1.0 };
+                    // low profile with the stick in band 1 (0.35–0.9): the climb plays at half rate (`StickSpeedValue`
+                    // 0xED7180 sends 0.5, `HumanLadder__ChooseClimbAnim` 0xE248F2 halves the rate at ≤ 0.5; RE/24 INPUT-9)
+                    let rate = if !l.high && pad.band <= 1 { 0.5 } else { 1.0 };
                     let top_free = top_exit_free(l.top, l.n, &collision);
                     // ReachedTop (`sub_E1D490`): the root within 1.63 m of the top (1.95 m in high profile when the top is
                     // blocked)

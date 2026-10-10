@@ -33,6 +33,11 @@ pub struct CrouchInput {
     pub anim_allows_exit: bool,
     pub blend_progress: Option<f32>,
     pub item_clock: Option<(f32, f32)>,
+    /// Legs held (the interpreter's slower rates) and k of the turn band (`UpdateHeading` 0xD95290).
+    pub legs: bool,
+    pub turn_k: f32,
+    /// HG+1780, the interpreter's quick reversal: the crouch walk pivots on it (0xDA6E90, RE/24 GROUND-9).
+    pub quick_turn: bool,
 }
 impl Crouch {
     pub fn enter(foot: usize, hide: bool, sequence: u32) -> Self {
@@ -89,8 +94,9 @@ impl Crouch {
         if matches!(self.mode, CrouchMode::Start | CrouchMode::Walk)
             && !super::anim_gate::anim_turns(&self.action)
         {
-            // PORT: shared Ground turn-rate adapter; the native angle-dependent RotateTowards is separate RE.
-            let step = crate::tuning::PLAYER_TURN_RATE * dt;
+            // `UpdateHeading` 0xD95290 for every Movement child, crouch included: the interpreter's rates and band
+            // (RE/24 GROUND-11)
+            let step = crate::tuning::player_turn_rate(pre_turn_gap.abs(), input.legs, input.turn_k) * dt;
             *heading += pre_turn_gap.clamp(-step, step);
         }
         match self.mode {
@@ -119,7 +125,7 @@ impl Crouch {
                 } else if (!input.request || input.high) && input.can_stand {
                     return None;
                 } else {
-                    if pre_turn_gap.abs() > 120f32.to_radians() {
+                    if input.quick_turn || pre_turn_gap.abs() > 120f32.to_radians() {
                         let d = super::ground::heading_delta(input.want_heading, *heading);
                         self.play(
                             CrouchMode::Pivot {
@@ -195,6 +201,9 @@ mod tests {
             anim_allows_exit: true,
             blend_progress: None,
             item_clock: None,
+            legs: false,
+            turn_k: 0.0,
+            quick_turn: false,
         }
     }
     #[test]
@@ -336,7 +345,8 @@ mod tests {
             ..input()
         };
         c.update(i, 0, &mut h, 0.15);
-        assert!((h - 2.042035).abs() < 0.00001);
+        // the walk turns 4.0 rad/s x 0.15 s first (k = 0: the max rate), then the pivot covers half the rest
+        assert!((h - 1.870796).abs() < 0.00001, "{h}");
         c.update(i, 0, &mut h, 0.15);
         assert_eq!(c.mode, CrouchMode::Wait);
         assert!((h - std::f32::consts::PI).abs() < 0.00001);

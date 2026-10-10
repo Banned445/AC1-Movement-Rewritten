@@ -118,6 +118,11 @@ pub struct HumanGroundData {
     pub owner: TreeState,
     /// HG+688 (0x2B0): the pivot's turn angle, read by the turn start's layouts 2 / 3.
     pub pivot_turn: f32,
+    /// HG+1780: the interpreter's quick-reversal flag (vt976, `player::interpreter`); the run stop turns into the skid
+    /// turn on it, the skid turn is not left for Move while it is set, and the crouch walk pivots on it (RE/24 INPUT-7).
+    pub quick_turn: bool,
+    /// Data+568: k of the turn band (`HumanGround__UpdateHeading` 0xD95290), reset on every Ground entry.
+    pub turn_k: f32,
     /// The foot column of Idle's wait (`HumanGround__PickLocomotionFoot` on the item Idle was entered from: 0 left
     /// ahead, 1 right ahead, 2 parallel), RE/02 §4.6.
     pub wait_foot: usize,
@@ -392,10 +397,12 @@ impl HumanGroundData {
                 let _ = LANDING_DAMAGE;
                 self.enter_wait(ended, high);
             }
-            // state 18 (0xDA8D70): the item ended with the stick more than 120 deg away → the skid turn (state 24,
-            // 0xD8B8E0, the turn of the exit foot); else Idle (0xDA7710) or Move through legacy 92 / 93 with s 0.5
-            // (0xD8B3F0: the left-foot stop hands over to item 1)
-            TreeState::RunStop if stick && turn.abs() > crate::tuning::RUN_TURN_ANGLE => {
+            // state 18 (0xDA8D70): the item ended with HG+1780 set or the stick more than 120 deg away (no stick test:
+            // HG+1532 is 0 only with the stick released) → the skid turn (state 24, 0xD8B8E0, the turn of the exit
+            // foot; RunStopToRunTurn 0xD9B933 clears HG+1780); else Idle (0xDA7710) or Move through legacy 92 / 93 with
+            // s 0.5 (0xD8B3F0: the left-foot stop hands over to item 1)
+            TreeState::RunStop if self.quick_turn || turn.abs() > crate::tuning::RUN_TURN_ANGLE => {
+                self.quick_turn = false;
                 let foot = pick_locomotion_foot(super::anim_gate::word(&ended), self.blend.foot).min(1);
                 if jump_blend::action_items(RUN_TURN[foot]).is_some() {
                     self.play_oneshot(ActionBlend::new(RUN_TURN[foot], 0, &[1.0]));
@@ -449,6 +456,7 @@ impl HumanGroundData {
     /// `TransitionSetupDataToMovement::Apply` (0xC80310), simplified.
     pub fn enter(&mut self, landing: Option<Landing>) {
         self.pending_landing = landing;
+        self.turn_k = PLAYER_TURN_BAND_K0;
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
         self.collide = None;
@@ -559,7 +567,8 @@ pub fn update_ground(
                 let moving=pad.magnitude>0.35;
                 let exit=super::anim_gate::allows_mode_exit(&crouch.action,moving,pad.high_profile);
                 let input=super::crouch::CrouchInput{request:g.crouch_requested,hide:g.crouch_hide_hint,
-                    high:pad.high_profile,moving,want_heading:if moving {heading_of(pad.dir)} else {body.heading},
+                    high:pad.high_profile,moving,want_heading:if moving && pad.dir_move!=Vec3::ZERO {heading_of(pad.dir_move)} else {body.heading},
+                    legs:pad.legs_held,turn_k:g.turn_k,quick_turn:g.quick_turn,
                     can_stand:super::ground_extras::can_stand(body.feet,&collision),anim_allows_exit:exit,
                     blend_progress,item_clock};
                 let wait_high=matches!(crouch.mode,super::crouch::CrouchMode::Wait) && !moving && pad.high_profile;
@@ -648,7 +657,8 @@ pub fn update_ground(
         // wall turns along it; pushed within 45 deg of straight into it, the wanted speed is 0 and the run stop allowed.
         // It changes what the interpreter hands the Ground (SetMoveDir / SetDestSpeedRatio); the raw stick keeps the
         // other requests.
-        let (mv_dir, mv_speed) = if GAME_GROUND_TREE { wall_slide(&body, pad.dir, pad.speed01) } else { (pad.dir, pad.speed01) };
+        // The interpreter steers by the response-curved direction (+0x1270, RE/24 INPUT-6).
+        let (mv_dir, mv_speed) = if GAME_GROUND_TREE { wall_slide(&body, pad.dir_move, pad.speed01) } else { (pad.dir, pad.speed01) };
         // HG+1532: the signed angle from the current heading to the wanted one (Movement_PreUpdate 0xD97E30).
         let stick_turn = if mv_speed > 0.0 { angle_diff(heading_of(mv_dir), body.heading) } else { 0.0 };
         // A transition into the locomotion (the Move state's transition path) keeps steering and the other requests
@@ -693,9 +703,10 @@ pub fn update_ground(
         if mv_speed > 0.0 && g.tr.is_some_and(|t| t.to_wait && super::anim_gate::allows_mode_exit(&t.action, true, pad.high_profile)) {
             g.tr = None;
         }
-        // The skid turn (state 24) is left for Move as soon as the stick asks to move within 120 deg again, or when it
-        // completes (`HumanGround__Guard_RunTurnToMove` 0xD85390); its locked item does not hold it.
-        if GAME_GROUND_TREE && g.owner == TreeState::RunTurn && mv_speed > 0.0 && stick_turn.abs() <= RUN_TURN_ANGLE {
+        // The skid turn (state 24) is left for Move as soon as the stick asks to move within 120 deg again with HG+1780
+        // clear, or when it completes (`HumanGround__Guard_RunTurnToMove` 0xD85390, 0xD853BE); its locked item does not
+        // hold it.
+        if GAME_GROUND_TREE && g.owner == TreeState::RunTurn && mv_speed > 0.0 && !g.quick_turn && stick_turn.abs() <= RUN_TURN_ANGLE {
             if let Some(os) = g.oneshot.take() {
                 g.owner = TreeState::Other;
                 g.run_turn_exit(os.blend, false, &mut body.heading);
@@ -708,9 +719,11 @@ pub fn update_ground(
         g.sprint = pad.high_profile && pad.legs_held; // sprint = high profile + legs (RE/01 §6.2)
         g.sub_state = if !GAME_GROUND_EXTRAS && g.sprint { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
 
-        // turn attenuation (interpreter 0xEE65A0): beyond 45° slow down; forced to 1 in low profile
+        // turn attenuation (interpreter 0xEE65A0): beyond 45° slow down; forced to 1 in low profile. The angle is +0x1264,
+        // the curved stick's (+0x1270) before the wall slide (0xEE69DA).
         let want_heading = if moving { heading_of(mv_dir) } else { body.heading };
-        let off = angle_diff(want_heading, body.heading).abs();
+        let off = if !GAME_GROUND_TREE { angle_diff(want_heading, body.heading).abs() }
+            else if moving && pad.dir_move != Vec3::ZERO { angle_diff(heading_of(pad.dir_move), body.heading).abs() } else { 0.0 };
         let atten_target = if !g.high_profile || off <= TURN_ATTEN_START {
             1.0
         } else {
@@ -755,7 +768,7 @@ pub fn update_ground(
         // 0xEE6783 / 0xEE67EE / 0xEE67FC): 1 with the stick released, and with the stick held more than 135 deg from the
         // facing (dot < -0.7071); 0 otherwise. Its guard (0xD7EC90) also needs the high profile (HG+1500). So
         // pulling the stick back at a run skids (run stop), and the Idle that follows pivots (state 25): the skid turn.
-        let reversed = pad.speed01 > 0.0 && pad.dir.dot(body.forward()) < -std::f32::consts::FRAC_1_SQRT_2;
+        let reversed = pad.speed01 > 0.0 && pad.dir_move.dot(body.forward()) < -std::f32::consts::FRAC_1_SQRT_2;
         // in front of the locomotion the guard also accepts the skid-turn exits (legacy 96 / 97) and any transition
         // past 0.33 s that is not locked (0xD7EC90)
         let tr_allows_stop = g.tr.is_none_or(|t| !t.to_wait && !super::anim_gate::locked(&t.action)
@@ -857,19 +870,21 @@ pub fn update_ground(
 
         // heading: rotate toward wanted at the player turn rate (0xD95290), unless the playing item turns the body
         // itself (0x10)
+        // k of the turn band grows every frame, before the clip-flag test (`HumanGround__UpdateHeading` 0xD95290)
+        g.turn_k = (g.turn_k + PLAYER_TURN_BAND_RATE * dt).min(1.0);
         if moving && !g.oneshot.is_some_and(|o| super::anim_gate::anim_turns(&o.blend)) && !g.tr.is_some_and(|t| super::anim_gate::anim_turns(&t.action)) {
             let mut d = angle_diff(want_heading, body.heading);
             // PORT: near 180 deg the shorter way flips sign with tiny stick changes, so the character turned back
-            // and forth (jitter when reversing). Keep the side a turn already started on (RotateTowards 0xD94F30's
-            // tie rule is not traced).
+            // and forth (jitter when reversing). Keep the side a turn already started on. (RotateTowards 0xD94F30 turns
+            // the shorter way unless HG+1776 forces a side; who sets HG+1776 for the player is not traced.)
             if d.abs() > 170f32.to_radians() && g.turn_sign != 0.0 && d.signum() != g.turn_sign {
                 d += g.turn_sign * std::f32::consts::TAU;
             }
             // the player's rates are set every frame by the interpreter (IHumanGround vt952 / vt956 → HG+1752 / +1756,
             // 0xEE6D3F–0xEE6D91): 1.5 / 4.0 rad/s, with Legs held 0.975 / 2.6 (0.375 / 3.0 in the vt1196 state, not
-            // reached by the port). The angle band HG+1760 / +1764 stays 0 for the player (ctor 0xDB2D5F; only NPC goals
-            // set it), so `RotateTowards` 0xD94F30 always turns at the max rate
-            let rate = if GAME_GROUND_TREE { if pad.legs_held { PLAYER_TURN_RATE_LEGS } else { PLAYER_TURN_RATE_GAME } } else { PLAYER_TURN_RATE };
+            // reached by the port); `RotateTowards` 0xD94F30 picks between them by the angle band 10° / 60° × k
+            // (RE/24 INPUT-5)
+            let rate = if GAME_GROUND_TREE { player_turn_rate(d.abs(), pad.legs_held, g.turn_k) } else { PLAYER_TURN_RATE };
             let step = rate * dt;
             let turn = d.clamp(-step, step);
             g.turn_sign = if d.abs() > 1e-3 { turn.signum() } else { 0.0 };
@@ -952,7 +967,7 @@ pub fn update_ground(
         // 45) → IHuman vt56 with kind 4 (Legs held) / 3, ladders left out, then the scorer (mode 1) → vt24. Its box
         // only reaches 0.45–1.3 m up and 0.5–2.0 m (1.3 m) ahead: the game's hop onto low obstacles (RE/18 §1.5).
         if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
-            if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
+            if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir_snap, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
                 jump_log("free-run target jump", body.feet, Some(&target));
                 let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
@@ -1092,7 +1107,7 @@ pub fn update_ground(
         if want_jump && !busy && ab.allows(Ability::Jump) {
             pad.consume_jump();
             // the candidates, then the Leap of Faith search under its ability (0xEE8239: `sub_D32760`, IHuman vt76)
-            let want = if moving { pad.dir } else { forward };
+            let want = if moving && pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { forward };
             let found = super::targets::find_target(body.feet, want, want, &super::jump_candidates::Query::TAP, false, &guidance, &collision)
                 .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, &guidance)).flatten());
             jump_log("tap jump", body.feet, found.as_ref());

@@ -50,11 +50,37 @@ pub const STICK_SPAN: f32 = 0.25;
 /// HumanGround__UpdateHeading 0xD95290 → RotateTowards 0xD94F30
 pub const PLAYER_TURN_RATE: f32 = std::f32::consts::TAU;
 /// The rates the player's interpreter writes every frame (GoAssassinActionInterpreter__ProcessGroundMovement
-/// 0xEE6D3F–0xEE6D91, IHumanGround vt952 / vt956 = HG+1752 / +1756): max 4.0 rad/s, 2.6 with Legs held. With the angle
-/// band left at 0 the max is always the rate (RE/02 §4.3). The 270 / 360 deg/s above is 0xD671C0's one-time default,
-/// overwritten every frame (GAME_GROUND_TREE comparison only).
+/// 0xEE6D3F–0xEE6D91, IHumanGround vt952 / vt956 = HG+1752 / +1756): min 1.5 / max 4.0 rad/s, with Legs held 0.975 /
+/// 2.6. The 270 / 360 deg/s above is 0xD671C0's one-time default, overwritten every frame (GAME_GROUND_TREE comparison
+/// only).
 pub const PLAYER_TURN_RATE_GAME: f32 = 4.0;
 pub const PLAYER_TURN_RATE_LEGS: f32 = 2.6;
+pub const PLAYER_TURN_RATE_MIN: f32 = 1.5;
+pub const PLAYER_TURN_RATE_MIN_LEGS: f32 = 0.975;
+/// The angle band `RotateTowards` 0xD94F30 scales the rate by (HG+1760 / +1764): below `lo` the min rate, above `hi`
+/// the max, linear between. The interpreter's Ground-state enter `sub_ED72E0` sets 10° / 60° (vt960 / vt964,
+/// 0.17453292 / 1.0471976) and never resets them; `UpdateHeading` 0xD95290 multiplies both by k (RE/24 INPUT-5).
+pub const PLAYER_TURN_BAND: (f32, f32) = (0.174_532_92, 1.047_197_6);
+/// k (Data+568) starts at the ToMovement setup's +24 and grows at its +28 per second up to 1 (`UpdateHeading`
+/// 0xD95290, `TransitionSetupDataToMovement::Apply` 0xC80310). PORT: 0 / 0.5 for every Ground entry, the values of the
+/// constructions checked (0xB0FCD0 spawn, 0xD7CC60, 0xE4D400 Narrow → Ground); the other ToMovement constructions
+/// (180 xrefs to vftable 0x16D9088) are not enumerated.
+pub const PLAYER_TURN_BAND_K0: f32 = 0.0;
+pub const PLAYER_TURN_BAND_RATE: f32 = 0.5;
+
+/// `HumanGround__RotateTowards` 0xD94F30: the turn rate for an angle (unsigned) to turn through, by the min / max rates
+/// and the band scaled by k.
+pub fn player_turn_rate(angle: f32, legs: bool, k: f32) -> f32 {
+    let (min, max) = if legs { (PLAYER_TURN_RATE_MIN_LEGS, PLAYER_TURN_RATE_LEGS) } else { (PLAYER_TURN_RATE_MIN, PLAYER_TURN_RATE_GAME) };
+    let (lo, hi) = (PLAYER_TURN_BAND.0 * k, PLAYER_TURN_BAND.1 * k);
+    if angle >= hi {
+        max
+    } else if angle >= lo {
+        (angle - lo) / (hi - lo) * (max - min) + min
+    } else {
+        min
+    }
+}
 
 /// Ground loss → InAir fall types by fall height 1 / 2 / 8 m and horizontal speed 2.5 m/s. 0xD8C380
 pub const FALL_TYPE_HEIGHTS: [f32; 3] = [1.0, 2.0, 8.0];

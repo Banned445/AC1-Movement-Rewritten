@@ -130,6 +130,31 @@ fn high_profile_runs_and_legs_sprints() {
 }
 
 #[test]
+fn a_flick_back_raises_the_quick_reversal_for_0_3_s() {
+    // ProcessGroundMovement 0xEE68C3: the stick entering a band more than 120° from the facing sets +0x112C → HG+1780
+    // for 0.3 s (RE/24 INPUT-7); a stick that only swings round within its band does not
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(1.5);
+    assert!(!s.ground().quick_turn);
+    s.pad(Vec3::Z, 1.0, true, false); // swung round without passing the centre: no band entry
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(!s.ground().quick_turn, "no band entry, no flag");
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.run(0.2);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(1.0);
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    s.pad(Vec3::Z, 1.0, true, false); // the flick: out of the centre straight into band 2, behind
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(s.ground().quick_turn, "the flick back sets HG+1780");
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.run(0.4);
+    assert!(!s.ground().quick_turn, "cleared once its 0.3 s ran out");
+}
+
+#[test]
 fn speed_param_rises_at_one_per_second() {
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
     s.pad(Vec3::NEG_Z, 1.0, true, true);

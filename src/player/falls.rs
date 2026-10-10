@@ -20,7 +20,7 @@ pub fn landing_damage(height: f32) -> (LandingType, u32) {
 /// GoAssassinActionInterpreter air update 0xEDBAF0 -> slot 12 / 0xE102B0, every frame.
 /// PORT: the movement-only pad has no ability-stack or input-capture ownership gates.
 pub fn speed_ratio(pad: &PadInput, facing: Vec3) -> f32 {
-    if pad.magnitude > 0.35 && pad.dir.dot(facing) < (std::f32::consts::PI / 3.0).cos() { return 0.0; }
+    if pad.magnitude > 0.35 && pad.dir_snap.dot(facing) < (std::f32::consts::PI / 3.0).cos() { return 0.0; }
     match (pad.high_profile, pad.magnitude > 0.5, pad.legs_held) {
         (false, false, _) => 0.09,
         (false, true, _) => 0.49,
@@ -172,13 +172,13 @@ mod tests {
     }
     #[test]
     fn player_air_speed_bands_and_angle_gate() {
-        let mut p = PadInput { dir: Vec3::NEG_Z, magnitude: 0.5, ..default() };
+        let mut p = PadInput { dir: Vec3::NEG_Z, dir_snap: Vec3::NEG_Z, magnitude: 0.5, ..default() };
         assert_eq!(speed_ratio(&p, Vec3::NEG_Z), 0.09);
         p.magnitude = 0.5f32.next_up(); assert_eq!(speed_ratio(&p, Vec3::NEG_Z), 0.49);
         p.high_profile = true; assert_eq!(speed_ratio(&p, Vec3::NEG_Z), 0.89);
         p.legs_held = true; assert_eq!(speed_ratio(&p, Vec3::NEG_Z), 1.0);
         p.magnitude = 0.5; assert_eq!(speed_ratio(&p, Vec3::NEG_Z), 0.19);
-        p.dir = Vec3::Z; assert_eq!(speed_ratio(&p, Vec3::NEG_Z), 0.0);
+        p.dir_snap = Vec3::Z; assert_eq!(speed_ratio(&p, Vec3::NEG_Z), 0.0);
         p.magnitude = 0.35; assert_eq!(speed_ratio(&p, Vec3::NEG_Z), 0.19);
     }
     #[test]

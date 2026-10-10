@@ -45,6 +45,16 @@ pub struct PadInput {
     pub stick_actor: Vec2,
     /// Interp +0x1129: the empty-hand buffer, kept by `player::interpreter` (RE/24 INPUT-2).
     pub hand_buffer: bool,
+    /// Interp +0x1250 (+0x400): the camera-relative direction snapped to straight ahead within 5° (`sub_55E7E0`); the
+    /// jump-target searches, the jump-offs and InAir read it (RE/24 INPUT-6). Zero below the dead zone.
+    pub dir_snap: Vec3,
+    /// Interp +0x1270 (+0x540): the camera-relative direction through the stick's response curve (5° → 1°, 10° → 5°,
+    /// 20° → 10°, 30° → 20°, 40° and beyond unchanged, `sub_55EDF0`); the ground steers by it (RE/24 INPUT-6).
+    pub dir_move: Vec3,
+    /// Interp +0x824 / +0x826: the stick's magnitude band this frame and the last (0: ≤ 0.35, 1: ≤ 0.9, 2: ≤ 1.0;
+    /// `sub_EE1710` → 0x717B70, `sub_55EAE0` 0x55ED93; RE/24 INPUT-12).
+    pub band: u8,
+    pub band_prev: u8,
 }
 
 impl PadInput {
