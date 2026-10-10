@@ -164,8 +164,8 @@ pub struct MoveTransition {
     /// The locomotion item the transition hands over to (ActionTransition +16): 0 footl, 1 footr.
     pub dest_item: usize,
     /// HG+1832 bit 0 (`HumanGround__PlayTurnStartMove` 0xD99710, a low-profile turn start with the high profile
-    /// wanted): the item plays at rate `2 − progress` (`sub_502A90` with `2 − sub_501DF0(0)`; **hypothesis**: vfunc +76
-    /// of the item node is its normalised time).
+    /// wanted): the item plays at rate `2 − progress` (`sub_502A90` with `2 − sub_501DF0(0)`, the item's normalised time:
+    /// its users pair 0.33 with 0.67 = 1 − 0.33, RE/24 GROUND-8).
     pub fast_start: bool,
     /// The item the transition was entered from (the animator looks its authored blends up there).
     pub from: Option<(u32, usize)>,

@@ -120,7 +120,8 @@ impl Default for MoveBlend {
 }
 
 impl MoveBlend {
-    /// Speed parameter step (0xDA1700–0xDA18A2, script-forced speed HG+0x6C8 not modelled).
+    /// Speed parameter step (0xDA1700–0xDA18A2). The script-forced speed HG+0x6C8 (HG+1736 / +1516 through
+    /// `HumanGround__SetDestSpeedRatio` vt30 `sub_D83640`) is script-only: not needed for the player (RE/24 GROUND-31).
     pub fn update_speed(&mut self, target: f32, dt: f32) {
         let target = target.min(1.0);
         let s = self.speed_param;
@@ -161,7 +162,7 @@ impl MoveBlend {
                 (SLOT_WALK, SLOT_JOG, (s - 0.25) * 4.0)
             }
         } else {
-            // also calls sub_DC3FA0(1 − f, f) (not traced)
+            // also calls sub_DC3FA0(1 − f, f): the upper-body walking fidget's weights (RE/24 GROUND-18, not ported)
             self.slowdown = 0.0;
             self.settle = 1.0;
             (SLOT_SLOWWALK, SLOT_WALK, s * 4.0)
