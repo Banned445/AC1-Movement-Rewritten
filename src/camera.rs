@@ -57,7 +57,7 @@ impl Plugin for CameraPlugin {
             .add_systems(Startup, spawn_camera)
             // after the player has moved this frame (otherwise the camera reads this frame's or last frame's position
             // depending on the scheduler: a one-frame judder)
-            .add_systems(Update, (grab_cursor, follow.after(crate::ik::IkSet)).chain().after(crate::player::PlayerSet));
+            .add_systems(Update, (grab_cursor, follow.after(crate::ik::IkSet), hide_near_camera).chain().after(crate::player::PlayerSet));
     }
 }
 
@@ -1157,6 +1157,46 @@ fn follow(
     rig.pitch = -shown.pitch;
     rig.distance = shown.dist;
     st.written = Some((rig.yaw, rig.pitch, rig.distance));
+}
+
+/// CameraSettings +24 = 0.45 (0x4C0B80): characters whose bounds meet a 0.45 m box round the eye are hidden when the eye
+/// is inside one of their body capsules (0x4BE440): pelvis–head 0.4 m, each leg's hip–knee and knee–foot 0.3 m, the
+/// forearms 0.2 m. The joints are read from the last propagated pose.
+fn hide_near_camera(
+    cam: Query<&Transform, With<MainCamera>>,
+    mut players: Query<(&crate::model::Rig, &mut Visibility), With<Player>>,
+    joints: Query<&GlobalTransform>,
+) {
+    const HEAD: u32 = 0x07C1_59A2;
+    const SEGMENTS: [(u32, u32, f32); 6] = [
+        (0x060D_F401, 0x5898_8870, 0.3), (0x863D_09FC, 0x9B14_362C, 0.3),
+        (0xB898_B609, 0xB675_F36C, 0.2), (0x63D8_9144, 0x75F9_4D30, 0.2), (0, 0x060D_F401, 0.3), (0, 0x863D_09FC, 0.3),
+    ];
+    let Ok(eye) = cam.single().map(|t| t.translation) else { return };
+    for (rig, mut vis) in &mut players {
+        let at = |id: u32| -> Option<Vec3> {
+            let i = if id == 0 { Some(0) } else { rig.bone_ids.iter().position(|&b| b == id) }?;
+            joints.get(rig.joints[i]).ok().map(|g| g.translation())
+        };
+        let points: Vec<Vec3> = rig.joints.iter().filter_map(|&j| joints.get(j).ok().map(|g| g.translation())).collect();
+        if points.is_empty() { continue; }
+        let (min, max) = points.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), &p| (a.min(p), b.max(p)));
+        let near_box = (eye - Vec3::splat(0.45)).cmple(max).all() && (eye + Vec3::splat(0.45)).cmpge(min).all();
+        let within = |a: Vec3, b: Vec3, r: f32| {
+            let ab = b - a;
+            let t = ((eye - a).dot(ab) / ab.length_squared().max(1e-8)).clamp(0.0, 1.0);
+            eye.distance(a + ab * t) <= r
+        };
+        let mut hide = false;
+        if near_box {
+            if let (Some(root), Some(head)) = (at(0), at(HEAD)) { hide |= within(root, head, 0.4); }
+            for (a, b, r) in SEGMENTS {
+                if let (Some(a), Some(b)) = (at(a), at(b)) { hide |= within(a, b, r); }
+            }
+        }
+        let want = if hide { Visibility::Hidden } else { Visibility::Inherited };
+        if *vis != want && !(*vis == Visibility::Visible && !hide) { *vis = want; }
+    }
 }
 
 /// The landing shake `FX_Camera_Shake_Assassins_Fall` (HumanFXPack_AlTair +88, FX 0x17C9A6D2; RE/21 §3), started by
