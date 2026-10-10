@@ -1759,6 +1759,39 @@ fn pushing_into_a_wall_in_high_profile_puts_the_hands_on_it() {
     assert_eq!(leans(Vec3::new(-3.0, 0.0, -4.0), Vec3::NEG_Z, false), None);
 }
 
+/// bug-1791667261: holding the stick into the wall and tapping sideways wiggles on it: W + D pushes away to the right
+/// (the slid stick runs along the wall), W alone goes back onto the wall (event 42 again, along the stick, during the
+/// push-away's unlocked transition), W + A pushes away to the left, and so on, without getting stuck.
+#[test]
+fn holding_into_the_wall_and_tapping_sideways_wiggles_on_it() {
+    use crate::player::collide::{LEAN_EXIT, CollidePhase};
+    let mut s = Sim::new(Vec3::new(7.46, 0.0, 26.9), 0.0);
+    let into = Vec3::NEG_Z;
+    s.pad(into, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.ground().collide.is_some_and(|c| c.phase != CollidePhase::Entry(0))), "no lean");
+    for (k, side) in [Vec3::X, Vec3::NEG_X, Vec3::X, Vec3::NEG_X].into_iter().enumerate() {
+        s.pad(into + side, 1.0, true, false);
+        assert!(s.run_until(1.0, |s| s.ground().collide.is_none()), "round {k}: never pushed away");
+        let exit = s.ground().oneshot.map(|o| o.blend.id);
+        assert!(exit.is_some_and(|id| LEAN_EXIT.contains(&id)), "round {k}: not a push-away: {exit:#x?}");
+        s.run(0.15);
+        s.pad(into, 1.0, true, false);
+        assert!(s.run_until(2.0, |s| s.ground().collide.is_some()), "round {k}: stuck off the wall at {:?} heading {} owner {:?} oneshot {:#x?}", s.body().feet, s.body().heading, s.ground().owner, s.ground().oneshot.map(|o| o.blend.id));
+        assert!(s.run_until(1.0, |s| s.body().forward().dot(into) > 0.95), "round {k}: not facing the wall");
+        assert!(s.body().feet.z > 26.7 && s.body().feet.z < 27.1, "round {k}: at the wall: {:?}", s.body().feet);
+    }
+    // the report's case: pushed away, then standing still along the wall; pushing into it puts the hands back on it
+    // (toward the middle of the 5 m wall, x 4.5..9.5)
+    let side = if s.body().feet.x > 7.0 { Vec3::NEG_X } else { Vec3::X };
+    s.pad(into + side, 1.0, true, false);
+    assert!(s.run_until(1.0, |s| s.ground().collide.is_none()));
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.run(2.0);
+    assert!(s.body().forward().dot(into).abs() < 0.5, "stands along the wall: {:?}", s.body().forward());
+    s.pad(into, 1.0, true, false);
+    assert!(s.run_until(1.0, |s| s.ground().collide.is_some()), "stuck standing along the wall: {:?}", s.body().feet);
+}
+
 /// bug-1791665811: snug against the 3.2 m block (back face z 26.5), high profile with the stick into it, Legs starts
 /// the wall run: the game's input test reads the stick, not the wanted speed the wall slide zeroed (0xEE7E73).
 #[test]

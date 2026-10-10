@@ -998,7 +998,7 @@ pub fn update_ground(
                     continue;
                 }
             }
-            let stick = (pad.speed01 > 0.0).then_some(pad.dir);
+            let stick = (pad.speed01 > 0.0).then(|| super::collide::lean_stick(pad.dir, c.normal));
             let (mut feet, mut heading) = (body.feet, body.heading);
             let out = super::collide::update(&mut c, dt, stick, pad.high_profile, &mut feet, &mut heading);
             body.feet = feet;
@@ -1374,12 +1374,21 @@ pub fn update_ground(
         // §4.5), so another poster (e.g. `HumanGround__PostEventTop` 0xDB5030) must send it. The stand-in: high profile,
         // the stick pushing into a wall at least 0.7 m high (the hand type; the foot type is not observed) within 45°
         // of the facing, on snapped ground (event 42's guard 0xB25230). The wall run and the jumps above go first.
-        if g.high_profile && pad.speed01 > 0.0 && (r.hit_wall || wall_stopped) && !busy && g.oneshot.is_none() && g.ledge_stop.is_none() && body.stick_residual.abs() <= 0.2 {
-            if let Some((contact, n, height)) = super::collide::obstacle_ahead(r.position, forward, &collision).filter(|&(_, n, h)| h >= 0.7 && pad.dir.dot(-n) > std::f32::consts::FRAC_1_SQRT_2) {
+        // Movement takes event 42 with only its contact guard (`Movement_CanHandleEvent` 0xDAF731 → 0xD838F0 →
+        // `Human__GetObstacleContact` 0xB25230: a controller contact within 45° of the event's direction, ≥ 0.5 m above the
+        // feet), no anim gate: it starts again during the push-away's transition into the walk (unlocked), not during the
+        // locked push-away itself. The direction is the stick, so standing along the wall and pushing into it turns the
+        // character to face it (the entry's 0.15 s warp).
+        let unlocked = g.oneshot.is_none_or(|o| !super::anim_gate::locked(&o.blend)) && g.tr.is_none_or(|t| !super::anim_gate::locked(&t.action));
+        if g.high_profile && pad.speed01 > 0.0 && (r.hit_wall || wall_stopped) && unlocked && g.ledge_stop.is_none() && body.stick_residual.abs() <= 0.2 {
+            if let Some((contact, n, height)) = super::collide::obstacle_ahead(r.position, pad.dir, &collision).filter(|&(_, n, h)| h >= 0.7 && pad.dir.dot(-n) > std::f32::consts::FRAC_1_SQRT_2) {
                 if let Some(c) = super::collide::enter(r.position, body.heading, contact, n, height, g.pose_seq) {
                     g.pose_seq = c.seq;
                     g.collide = Some(c);
                     g.tr = None;
+                    g.oneshot = None;
+                    g.oneshot_next = None;
+                    g.owner = TreeState::Other;
                     g.speed_param = 0.0;
                     g.blend.speed_param = 0.0;
                     body.feet = r.position;
