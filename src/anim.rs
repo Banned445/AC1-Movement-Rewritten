@@ -249,6 +249,10 @@ pub struct AnimPlayer {
     /// The running blend (`ActionBlend` of the transition or item seam): its type decides whether A (outgoing) and B
     /// (incoming) keep playing, its flags the weight curve, its modes where root motion and contacts come from.
     pub blend: ActBlend,
+    /// The running blend is a transition between two actions (slot 0's selected evaluator is then the transition's
+    /// ActionControllerEvaluator, 0x726F40 / 0x727560, so `AnimSlotInstance__GetSelectedAction` 0x723D10 returns no
+    /// action), not a seam between two items of one action.
+    pub action_switch: bool,
     /// A still playing while the blend runs (AROLLB* types): its items, item and phase.
     a_roll: Option<(Vec<ItemPlay>, usize, f32, bool)>,
     /// A's contact tags when the blend started (ACTBlendAcuatorMode FROMA).
@@ -905,7 +909,8 @@ fn choose_clip(
                     "grab" if loco.previous == ActorContextId::InAir && l.moving() && p.caught != Some(token) => {
                         p.caught = Some(token);
                         let hi = data.air.long_catch as usize;
-                        let mut r = action(&lib, &[if wall { ACT_CATCH_WALL[hi] } else { ACT_CATCH_FREE[hi] }], false, token, None, Some(if wall { "catch_wall" } else { "catch_free" }));
+                        let id = l.catch_action.unwrap_or(if wall { ACT_CATCH_WALL[hi] } else { ACT_CATCH_FREE[hi] });
+                        let mut r = action(&lib, &[id], false, token, None, Some(if wall { "catch_wall" } else { "catch_free" }));
                         // CheckAirCatch snaps the 3-way wall catch (straight / 30° out / 45° in) to the dominant angle
                         // class; the port's ledges are straight
                         if let Some(r) = r.as_mut().filter(|_| wall) {
@@ -1053,6 +1058,7 @@ fn choose_clip(
         let a_state = (std::mem::take(&mut p.items), p.item, p.phase, p.looping);
         let had = p.clip.take().is_some() && !p.last_pose.is_empty();
         start_blend(&mut p, blend, had, Some(a_state), &lib);
+        p.action_switch = true;
         // locomotion cycles all start on the left foot: keep the phase between gaits
         let cyclic = |n: &str| matches!(n, "walk" | "jog" | "run" | "sprint");
         let prev_cyclic = p.last_cyclic;
@@ -1073,6 +1079,17 @@ fn choose_clip(
         p.fit = req.fit;
         p.token = req.token;
         p.hold = req.hold.then_some(loco.current);
+    }
+}
+
+impl AnimPlayer {
+    /// The action slot 0 reports (`AnimSlotInstance__GetSelectedAction` 0x723D10): none while a transition between
+    /// two actions runs. (hypothesis): every action-to-action blend inserts the ActionControllerEvaluator.
+    pub fn selected_action(&self) -> Option<u32> {
+        if self.action_switch && self.prev.is_some() && self.fade < 1.0 {
+            return None;
+        }
+        self.items.get(self.item).map(|i| i.action)
     }
 }
 
@@ -1211,12 +1228,14 @@ pub fn apply_clip(
             let cur = p.items[p.item].clone();
             p.item = if p.item + 1 < p.items.len() { p.item + 1 } else { p.loop_from.min(p.items.len() - 1) };
             let nxt = &p.items[p.item];
-            let b = if nxt.action != cur.action && nxt.action != 0 {
+            let nxt_switch = nxt.action != cur.action && nxt.action != 0;
+            let b = if nxt_switch {
                 game_transition(&lib, Some(&cur), nxt.action).map(|t| t.blend_a).unwrap_or_default()
             } else {
                 nxt.blend
             };
             start_blend(&mut p, b, true, Some(a_state), &lib);
+            p.action_switch = nxt_switch;
             p.phase = 0.0;
         } else if p.looping {
             p.phase = next.fract();
@@ -1381,6 +1400,20 @@ fn load_library(mut lib: ResMut<AnimLibrary>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_action_is_none_through_an_action_transition_only() {
+        let mut p = AnimPlayer { items: vec![ItemPlay { action: 7, ..default() }], ..default() };
+        assert_eq!(p.selected_action(), Some(7));
+        p.prev = Some(Vec::new());
+        p.fade = 0.5;
+        // an item seam inside one action keeps the action evaluator selected
+        assert_eq!(p.selected_action(), Some(7));
+        p.action_switch = true;
+        assert_eq!(p.selected_action(), None);
+        p.fade = 1.0;
+        assert_eq!(p.selected_action(), Some(7));
+    }
 
     #[test]
     fn blend_weights_follow_the_ease_flags() {

@@ -79,6 +79,29 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     //     before a climb wall (x -135.4..-131.4, face z -135.3, bands to 5.4 m: CLIMB_WALLS), beyond the side move's reach
     (-138.5, -135.0, 3.0, 0.6, 2.6),
     (-133.4, -135.0, 4.0, 0.6, 6.0),
+    // --- A2 test yard (x -140..-100, z -128..-112), RE/19: a raised bed around a 3 x 3 haystack at (-104, -120), its
+    //     1.2 m rim 1.1 m wide (too wide to pair into a runtime beam): the free run hops onto the rim and the free-step
+    //     arrival's support search drops it in (NarrowObject FreeStep, 0xE51190)
+    (-104.0, -117.95, 5.2, 1.1, 1.2),
+    (-104.0, -122.05, 5.2, 1.1, 1.2),
+    (-106.05, -120.0, 1.1, 3.0, 1.2),
+    (-101.95, -120.0, 1.1, 3.0, 1.2),
+    // the pass-over pull-down (type 4, 0xDE0220): a 4 m roof (x -122..-118, z -118..-113) with a 1 m parapet 0.3 m
+    // thick along its -Z edge (top 5 m, a 5 m drop beyond): free run at it, vault, hang on the far side
+    (-120.0, -115.5, 4.0, 5.0, 4.0),
+    (-120.0, -118.15, 4.0, 0.3, 5.0),
+    // the ladder's side move onto a ledge (event 4, sub_E1FC80): a 6 m block (x -132..-128, face z -116.6) with a ladder
+    // at x -131.2 and a 3 m wall right beside it (x -136..-132): its top edge ends 0.8 m from the ladder
+    (-130.0, -116.3, 4.0, 0.6, 6.0),
+    (-134.0, -116.3, 4.0, 0.6, 3.0),
+    // the leaning ladder's block (x -139..-135, z -126..-122.6, top 4.5 m): the ladder leans on its +Z face
+    (-137.0, -124.3, 4.0, 3.4, 4.5),
+    // a haystack (x -113.5..-110.5, z -126.5..-123.5) in a cart with a 1.2 m rim 0.3 m wide: the rim pairs into a
+    // runtime beam, so the free run lands on it in NarrowObject and drops in from there (0xE51190)
+    (-112.0, -123.35, 3.6, 0.3, 1.2),
+    (-112.0, -126.65, 3.6, 0.3, 1.2),
+    (-113.65, -125.0, 0.3, 3.0, 1.2),
+    (-110.35, -125.0, 0.3, 3.0, 1.2),
     // --- the climb's ledge grab (0xDF0980, RE/18 §7.3): a 7 m wall (x -130..-126, face z -135.3) whose bands start at
     //     3.0 m (CLIMB_WALLS): climbing down to the lowest band hangs from the one above it
     (-128.0, -135.0, 4.0, 0.6, 7.0),
@@ -140,6 +163,12 @@ pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
     (Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), Vec3::NEG_Z),
     (Vec3::new(-129.4, 0.0, -10.5), Vec3::new(-129.4, 7.0, -10.5), Vec3::NEG_Z),
     (Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.0, 9.7), Vec3::NEG_Z),
+    // A2 yard: beside the 3 m wall (the side move onto a ledge)
+    (Vec3::new(-131.2, 0.0, -116.6), Vec3::new(-131.2, 6.0, -116.6), Vec3::NEG_Z),
+    // A2 yard: a free-standing ladder (nothing behind it: the revolve, event 5)
+    (Vec3::new(-125.0, 0.0, -121.0), Vec3::new(-125.0, 5.0, -121.0), Vec3::NEG_Z),
+    // A2 yard: a ladder leaning 18° on the block's +Z face, its front underneath (`HumanLadder__TryTurn` 0xE26440)
+    (Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 4.5, -122.5), Vec3::NEG_Z),
 ];
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
@@ -157,7 +186,13 @@ pub const BEAMS: &[(Vec3, Vec3)] = &[
 
 /// Haystacks (centre x, centre z, size x, size z, height): not solid, jump targets of type 0x800. The first
 /// one sits 4.5 m off the high block's +X face (roof 9.5 m): the Leap of Faith test.
-pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[(37.5, 26.0, 2.2, 2.2, 1.5)];
+pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[
+    (37.5, 26.0, 2.2, 2.2, 1.5),
+    // A2 test yard: the haystack in a cart (its 1.2 m rim: WALLS)
+    (-104.0, -120.0, 3.0, 3.0, 1.5),
+    // the narrow-rimmed cart
+    (-112.0, -125.0, 3.0, 3.0, 1.5),
+];
 
 /// Kiosk frames (p0, p1 of the top bar, the side facing the roofs): guidance subtype Kiosk (8), not solid.
 pub const KIOSKS: &[(Vec3, Vec3, Vec3)] = &[(Vec3::new(118.5, 3.0, 25.0), Vec3::new(121.5, 3.0, 25.0), Vec3::NEG_Z)];

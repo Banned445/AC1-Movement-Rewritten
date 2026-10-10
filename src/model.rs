@@ -2,7 +2,7 @@
 //! as skinned meshes driven by his movement skeleton and supplemental visual descendants.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
@@ -146,18 +146,14 @@ fn attach_altair(
         let mut img = Image::new_uninit(
             Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
             TextureDimension::D2,
-            if model.normal_textures.contains_key(id) { TextureFormat::Rgba8Unorm } else { TextureFormat::Rgba8UnormSrgb },
+            if t.srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm },
             RenderAssetUsages::RENDER_WORLD,
         );
         img.texture_descriptor.mip_level_count = t.mips.len() as u32;
         img.data = Some(t.mips.concat());
         if CHARACTER_VISUAL_FIXES {
-            // The outfit UVs tile beyond [0, 1]; clamp sampling smears the atlas border (RE/09 §6).
-            img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                address_mode_u: ImageAddressMode::Repeat,
-                address_mode_v: ImageAddressMode::Repeat,
-                ..ImageSamplerDescriptor::linear()
-            });
+            // the TextureMap's authored sampler: the outfit maps wrap (their UVs tile beyond [0, 1]) and filter linearly
+            img.sampler = ImageSampler::Descriptor(crate::assets::ac_formats::texture_sampler(t));
         }
         tex_handles.insert(*id, images.add(img));
     }
@@ -168,16 +164,17 @@ fn attach_altair(
         cull_mode: None,
         ..default()
     });
-    // Separate handles retain linear data sampling even when skin uses its diffuse map as a mask.
+    // Map slots (specular, ramp, multiply) sample each texture with its own GammaSettings: the head's specular mask is
+    // its sRGB diffuse map, so it is decoded as sRGB there too.
     let mut material_handles = std::collections::HashMap::new();
     for (id, t) in &model.material_textures {
+        let format = if t.srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
         let mut image = Image::new_uninit(Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
-            TextureDimension::D2, TextureFormat::Rgba8Unorm, RenderAssetUsages::RENDER_WORLD);
+            TextureDimension::D2, format, RenderAssetUsages::RENDER_WORLD);
         image.texture_descriptor.mip_level_count = t.mips.len() as u32;
         image.data = Some(t.mips.concat());
-        let ramp = model.parts.iter().flat_map(|p| &p.materials).any(|m| m.ramp == Some(*id));
-        let mode = if ramp { ImageAddressMode::ClampToEdge } else { ImageAddressMode::Repeat };
-        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor { address_mode_u: mode, address_mode_v: mode, ..ImageSamplerDescriptor::linear() });
+        // the authored sampler: the ramps clamp U and wrap V, the maps wrap
+        image.sampler = ImageSampler::Descriptor(crate::assets::ac_formats::texture_sampler(t));
         material_handles.insert(*id, images.add(image));
     }
     let mut cube_handles = std::collections::HashMap::new();

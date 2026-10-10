@@ -1,40 +1,62 @@
-//! Debug fly (noclip): F5 toggles a free flight that ignores collision, for moving around a map quickly.
+//! Ghost mode: the game's development flight, kept as a debug tool for the port's testers (RE/18 §2).
 //!
-//! It follows the game's own debug flight, the Human **Debug context** (ContextID_Debug = 3, `DebugContext`,
-//! RE/18 §2): entered by `GoDebugInputInterpreter` (pad buttons 14 + 15), it puts the capsule on collision layer
-//! 10 (NOTHING), plays action request 7 = 0x0006F88B "Ghost mode" (`Ghost_mode01` then the looping `Ghost_mode02`)
-//! and sets ActorState 38 (Debug) (enter 0xE46190); each frame the velocity is the input × 5 m/s, × 3 or × 10
-//! with the speed buttons (0xECDC50), with stick-to-ground and the step offset off, the body turned toward the
-//! horizontal motion (0xE46DF0).
-//! PORT: while it is on the player contexts do not run (`PlayerSet` is skipped); the body is moved directly.
-//! Leaving puts the feet on the floor straight below (the game's exit 0xE467B0 plays request 33
-//! `xx_h_jump_falling01` and falls in InAir with the flight's velocity); with no floor below, InAir falls.
+//! The Human **Debug context** (ContextID_Debug = 3, `DebugContext`) is still in v1.02 but unreachable: its input
+//! interpreter `GoDebugInputInterpreter` only exists when loaded data references it, and the retail game has none
+//! (checked live). The port turns it on with F5 or the game's own chord (L3 + R3).
 //!
-//! Keyboard: WASD = move along the camera's view (looking down + W descends), Space = up, Left Ctrl = down,
-//! Left Shift = × 3, Left Alt = × 10. Gamepad: left stick = move, A = up, LT = down, RT = × 3, RB = × 10.
+//! - **Enter** (0xE46190): the capsule goes to collision layer 10 (NOTHING: no collision), stick-to-ground and the
+//!   step offset off, action request 7 = 0x0006F88B "Ghost mode" (`Ghost_mode01`, then the looping `Ghost_mode02`),
+//!   ActorState 38 (Debug).
+//! - **Input** (`GoDebugInputInterpreter__FlyInput` 0xECDC50, pad indices from `PadXenon` 0x98CE60): the move is the
+//!   left stick on the ground plane (its direction × its magnitude), up / down the right stick's Y (zero while LB,
+//!   pad 11, is held), all × 5 m/s; × 3 with RT (12), × 10 with RB (13). X (1) held: IHumanDebug vt16 0xE45FF0 sets
+//!   DebugContextData +36, so the body keeps its facing (a strafe). R3 (15) pressed: `DebugCameraToggleEvent`.
+//! - **Update** (`DebugContext__Update` 0xE46DF0): velocity = the move × the multiplier; the body turns toward the
+//!   horizontal motion when its square exceeds 0.1 and +36 is clear; +36 is cleared every frame.
+//! - **Leave** (chord L3 + R3 0xECD1E0 → vt20 0xE473B0 / vt24 0xE473E0 → `DebugContext__Exit` 0xE467B0): request 33
+//!   `xx_h_jump_falling01`, the controller velocity zeroed, the character's layer back, then InAir. With B (3) pressed
+//!   in the same frame the InAir setup carries the flight's direction and speed (thrown out of the flight); without,
+//!   a fall from rest. A `ResurrectionEvent` follows (the port has no health: nothing to revive).
+//!
+//! PORT: the player contexts do not run while flying (`PlayerSet` is skipped); the body is moved here. The debug
+//! camera's own behaviour is not decoded: in the port it holds its position and keeps looking at Altaïr. While
+//! flying, the gamepad's right stick Y drives the height and not the camera pitch, unless LB is held.
+//!
+//! Keyboard (the pad slots through the user's bindings, RE/21 §1; KeyboardMouse2 shown): F5 = enter / leave (the empty
+//! hand, Left Shift, held while leaving: keep the flight's speed), the left stick (WASD) = move, Space / Left Ctrl or
+//! the right stick's Y (arrows) = up / down, high profile (RMB, RT) = × 3, Left Alt = × 10 (PORT: RB has no key), LB
+//! (Q) held = strafe (PORT: the game's X is the weapon hand, LMB, which captures the mouse in the port), F6 = debug
+//! camera.
+//! Gamepad: L3 + R3 = enter / leave (B with it: keep the speed), left stick = move, right stick Y = up / down, LB =
+//! hold the height, RT = × 3, RB = × 10, X held = strafe, R3 = debug camera.
 
 use bevy::input::gamepad::{Gamepad, GamepadButton};
 use bevy::prelude::*;
 
 use crate::camera::CameraRig;
-use crate::collision::CollisionWorld;
 use crate::input::PadInput;
 use crate::player::air::{FallOrigin, InAirEntry};
 use crate::player::{switch_context, Body, HumanDataBundle, LimbTargets, Locomotion, Player, PlayerSet, TransitionSetup};
 
-/// The Debug context's speed: the input × 5 m/s (`GoDebugInputInterpreter` 0xECDC50).
+/// The Debug context's speed: the input × 5 m/s (0xECDC50).
 const FLY_SPEED: f32 = 5.0;
-/// × 3 and × 10 with pad buttons 12 / 13 (0xECDC50).
+/// × 3 and × 10 with RT / RB (pad 12 / 13, 0xECDC50).
 const FLY_FAST: f32 = 3.0;
 const FLY_FASTER: f32 = 10.0;
+/// The body turns toward the motion when its horizontal square exceeds this (0xE46DF0).
+const TURN_MIN_SQ: f32 = 0.1;
 /// Action request 7 (HumanGround): `Ghost_mode01` (0.93 s), `Ghost_mode02` (2.27 s, looping).
 pub const GHOST_MODE: u32 = 0x0006_F88B;
-/// How far below the exit point a floor is looked for.
-const EXIT_FLOOR_REACH: f32 = 1000.0;
 
 #[derive(Resource, Default)]
 pub struct DebugFly {
     pub active: bool,
+    /// The flight's velocity this frame (carried out by a B / E exit).
+    pub velocity: Vec3,
+    /// The debug camera (`DebugCameraToggleEvent`): the camera holds still.
+    pub free_camera: bool,
+    /// The gamepad's LB: the right stick is the camera's, not the height's.
+    pub hold_height: bool,
 }
 
 pub struct DebugFlyPlugin;
@@ -64,54 +86,65 @@ fn ghost_autostart(time: Res<Time>, mut keys: ResMut<ButtonInput<KeyCode>>, mut 
     }
 }
 
+/// `ControlScheme__Chord2` 0xECD1E0: one button pressed this frame while the other is held.
+fn chord(gp: &Gamepad, a: GamepadButton, b: GamepadButton) -> bool {
+    (gp.just_pressed(a) && gp.pressed(b)) || (gp.just_pressed(b) && gp.pressed(a))
+}
+
 fn toggle_fly(
     keys: Res<ButtonInput<KeyCode>>,
-    collision: Res<CollisionWorld>,
+    gamepads: Query<&Gamepad>,
     mut fly: ResMut<DebugFly>,
     mut pad: ResMut<PadInput>,
     mut q: Query<(&mut Locomotion, &mut HumanDataBundle, &mut Body, &mut LimbTargets, Option<&mut crate::ik::LimbIk>), With<Player>>,
 ) {
-    if !keys.just_pressed(KeyCode::F5) {
+    let pad_chord = gamepads.iter().any(|gp| chord(gp, GamepadButton::LeftThumb, GamepadButton::RightThumb));
+    if !keys.just_pressed(KeyCode::F5) && !pad_chord {
+        // R3 / F6 alone while flying: the debug camera
+        let cam = keys.just_pressed(KeyCode::F6) || gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::RightThumb) && !gp.pressed(GamepadButton::LeftThumb));
+        if fly.active && cam {
+            fly.free_camera = !fly.free_camera;
+        }
         return;
     }
     let Ok((mut loco, mut data, mut body, mut limbs, ik)) = q.single_mut() else { return };
+    // the empty hand (E / B) with the toggle: leave with the flight's velocity (0xE467B0, vt24 argument 1)
+    let keep = pad.buttons[3] || gamepads.iter().any(|gp| gp.pressed(GamepadButton::East));
     fly.active = !fly.active;
-    body.velocity = Vec3::ZERO;
+    fly.free_camera = false;
     body.tilt = Quat::IDENTITY;
     body.stick_residual = 0.0;
     body.stick_normal_y = None;
     *limbs = LimbTargets::default();
     if fly.active {
+        // enter (0xE46190): from any context
+        body.velocity = Vec3::ZERO;
         body.grounded = false;
-        switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });
+        fly.velocity = Vec3::ZERO;
+        switch_context(&mut loco, &mut data, TransitionSetup::ToDebug);
         return;
     }
-    // the manifold, foot probes and pelvis drop belong to where the flight started
+    // leave (0xE467B0): the manifold, foot probes and pelvis drop belong to where the flight started
     body.proxy = default();
     if let Some(mut ik) = ik {
         *ik = default();
     }
-    // Space / A (up) also fed the jump buffer while flying
+    // Space / A (up) and E / B also fed the jump and hand buffers while flying
     pad.consume_jump();
     pad.consume_hand();
-    match collision.floor_height_below(body.feet, EXIT_FLOOR_REACH) {
-        Some(y) => {
-            body.feet.y = y;
-            body.grounded = true;
-            switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });
-        }
-        None => {
-            body.grounded = false;
-            let entry = InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Ground, speed_param: 0.0 };
-            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
-        }
-    }
+    let velocity = if keep { fly.velocity } else { Vec3::ZERO };
+    body.velocity = velocity;
+    body.grounded = false;
+    let entry = InAirEntry::Fall { from: body.feet, velocity, origin: FallOrigin::Ground, speed_param: 0.0 };
+    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
 }
 
 fn fly(
     time: Res<Time>,
-    fly: Res<DebugFly>,
+    mut fly: ResMut<DebugFly>,
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
+    bindings: Option<Res<crate::bindings::Bindings>>,
     gamepads: Query<&Gamepad>,
     rig: Res<CameraRig>,
     mut q: Query<(&mut Body, &mut Transform), With<Player>>,
@@ -120,33 +153,48 @@ fn fly(
         return;
     }
     let Ok((mut body, mut tr)) = q.single_mut() else { return };
+    use crate::bindings::Slot;
     let key = |k: KeyCode| keys.pressed(k) as i32 as f32;
-    let mut stick = Vec2::new(key(KeyCode::KeyD) - key(KeyCode::KeyA), key(KeyCode::KeyW) - key(KeyCode::KeyS));
-    let mut lift = key(KeyCode::Space) - key(KeyCode::ControlLeft);
-    let mut scale = if keys.pressed(KeyCode::AltLeft) { FLY_FASTER } else if keys.pressed(KeyCode::ShiftLeft) { FLY_FAST } else { 1.0 };
+    let default_bindings = crate::bindings::Bindings::default();
+    let b = bindings.as_deref().unwrap_or(&default_bindings);
+    let no_mouse = ButtonInput::<MouseButton>::default();
+    let m = mouse.as_deref().unwrap_or(&no_mouse);
+    let held = |s: Slot| b.pressed(s, &keys, m) as i32 as f32;
+    let mut stick = Vec2::new(held(Slot::LeftStickRight) - held(Slot::LeftStickLeft), held(Slot::LeftStickUp) - held(Slot::LeftStickDown));
+    let mut lift = (key(KeyCode::Space) - key(KeyCode::ControlLeft) + held(Slot::RightStickUp) - held(Slot::RightStickDown)).clamp(-1.0, 1.0);
+    let mut scale = if keys.pressed(KeyCode::AltLeft) { FLY_FASTER } else if held(Slot::HighProfile) > 0.0 { FLY_FAST } else { 1.0 };
+    let mut strafe = held(Slot::LeftShoulder) > 0.0;
+    let mut hold = false;
     for gp in &gamepads {
         let s = gp.left_stick();
         if s.length() > stick.length() {
             stick = s;
         }
-        lift += gp.pressed(GamepadButton::South) as i32 as f32 - gp.pressed(GamepadButton::LeftTrigger2) as i32 as f32;
+        // LB (pad 11) held: no height change; else the right stick's Y
+        if gp.pressed(GamepadButton::LeftTrigger) {
+            hold = true;
+        } else if gp.right_stick().y.abs() > lift.abs() {
+            lift = gp.right_stick().y;
+        }
         if gp.pressed(GamepadButton::RightTrigger) {
             scale = FLY_FASTER;
         } else if gp.pressed(GamepadButton::RightTrigger2) {
             scale = scale.max(FLY_FAST);
         }
+        strafe |= gp.pressed(GamepadButton::West);
     }
+    fly.hold_height = hold;
+    // the stick's direction × its magnitude on the ground plane, relative to the camera's heading
     let stick = stick.clamp_length_max(1.0);
-    // the camera sits at focus + rot * Z, looking back at the focus
-    let view = -(Quat::from_euler(EulerRot::YXZ, rig.yaw, rig.pitch, 0.0) * Vec3::Z);
     let flat = Vec3::new(-rig.yaw.sin(), 0.0, -rig.yaw.cos());
     let right = crate::player::right_of(flat);
-    let wish = view * stick.y + right * stick.x + Vec3::Y * lift.clamp(-1.0, 1.0);
-    let v = wish.clamp_length_max(1.0) * FLY_SPEED * scale;
+    let wish = flat * stick.y + right * stick.x + Vec3::Y * lift.clamp(-1.0, 1.0);
+    let v = wish * FLY_SPEED * scale;
     body.feet += v * time.delta_secs();
-    // the body turns toward the horizontal motion (0xE46DF0: when its square exceeds 0.1)
+    fly.velocity = v;
+    // the body turns toward the horizontal motion unless X / Q is held (0xE46DF0, DebugContextData +36)
     let h = Vec3::new(v.x, 0.0, v.z);
-    if h.length_squared() > 0.1 {
+    if !strafe && h.length_squared() > TURN_MIN_SQ {
         body.heading = crate::player::heading_of(h.normalize());
     }
     body.velocity = Vec3::ZERO;
@@ -159,6 +207,7 @@ fn fly(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collision::CollisionWorld;
     use crate::player::ActorContextId;
     use bevy::time::TimeUpdateStrategy;
     use std::time::Duration;
@@ -171,7 +220,8 @@ mod tests {
         app.add_plugins(bevy::time::TimePlugin)
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(100)))
             .insert_resource(ButtonInput::<KeyCode>::default())
-            .insert_resource(crate::camera::CameraRig { pitch: 0.0, ..default() })
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .insert_resource(crate::camera::CameraRig { pitch: -0.8, ..default() })
             .insert_resource(crate::map_menu::neutral_pad())
             .insert_resource(crate::map_menu::MapMenu::default())
             .init_resource::<ContextRuns>()
@@ -185,7 +235,15 @@ mod tests {
         app
     }
 
+    fn step_rmb(app: &mut App, keys: &[KeyCode]) {
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+        step(app, keys);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().release_all();
+    }
+
     fn step(app: &mut App, keys: &[KeyCode]) {
+        // the empty hand (pad 3) as `read_pad` would set it from the bindings
+        app.world_mut().resource_mut::<PadInput>().buttons[3] = keys.contains(&KeyCode::ShiftLeft);
         let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
         input.release_all();
         input.clear();
@@ -203,41 +261,70 @@ mod tests {
     }
 
     #[test]
-    fn f5_flies_through_the_world_without_the_contexts_and_lands_on_the_floor_below() {
+    fn ghost_mode_flies_on_the_ground_plane_through_the_world_and_falls_out() {
         let mut app = app();
         let runs = app.world().resource::<ContextRuns>().0;
         step(&mut app, &[KeyCode::F5]);
         assert!(app.world().resource::<DebugFly>().active);
+        assert_eq!(player(&mut app).0.current, ActorContextId::Debug);
         assert_eq!(app.world().resource::<ContextRuns>().0, runs, "PlayerSet is skipped while flying");
-        // up 10 frames (1 s), then forward (camera yaw PI looks along +Z) into the solid box: noclip
+        // up 10 frames (1 s)
         for _ in 0..10 {
             step(&mut app, &[KeyCode::Space]);
         }
         let y = player(&mut app).1.feet.y;
         assert!((y - (2.0 + FLY_SPEED)).abs() < 1e-3, "{y}");
+        // forward with the camera pitched down: the move stays on the ground plane (0xECDC50), through the solid box
         for _ in 0..10 {
-            step(&mut app, &[KeyCode::KeyW, KeyCode::ControlLeft]);
+            step(&mut app, &[KeyCode::KeyW]);
         }
         let feet = player(&mut app).1.feet;
-        assert!(feet.z > 3.0 && feet.y < y, "{feet}");
+        assert!((feet.y - y).abs() < 1e-4 && (feet.z - FLY_SPEED).abs() < 1e-3, "{feet}");
+        // leaving falls from rest into InAir (0xE467B0), not onto the floor
         step(&mut app, &[KeyCode::F5]);
         assert!(!app.world().resource::<DebugFly>().active);
         let (loco, body) = player(&mut app);
-        assert_eq!(loco.current, ActorContextId::Ground);
-        assert!(body.grounded && (body.feet.y - 2.0).abs() < 1e-4, "{}", body.feet);
+        assert_eq!(loco.current, ActorContextId::InAir);
+        assert!(!body.grounded && body.velocity.length() < 1e-6, "{:?}", body.velocity);
         assert!(app.world().resource::<PadInput>().legs_pressed_ago.is_infinite(), "flying up must not leave a buffered jump");
         step(&mut app, &[]);
         assert!(app.world().resource::<ContextRuns>().0 > runs);
     }
 
     #[test]
-    fn leaving_the_flight_with_no_floor_below_falls() {
+    fn leaving_with_the_empty_hand_keeps_the_flights_velocity() {
         let mut app = app();
         step(&mut app, &[KeyCode::F5]);
-        app.world_mut().resource_mut::<CollisionWorld>().boxes.clear();
-        step(&mut app, &[KeyCode::F5]);
+        // × 3 with high profile (RMB, RT), then the empty hand (Left Shift, B) with the toggle
+        step_rmb(&mut app, &[KeyCode::KeyW]);
+        step_rmb(&mut app, &[KeyCode::KeyW, KeyCode::ShiftLeft, KeyCode::F5]);
         let (loco, body) = player(&mut app);
         assert_eq!(loco.current, ActorContextId::InAir);
-        assert!(!body.grounded);
+        assert!((body.velocity.z - FLY_SPEED * FLY_FAST).abs() < 1e-3, "thrown out at the flight's speed: {:?}", body.velocity);
+    }
+
+    #[test]
+    fn strafing_keeps_the_facing() {
+        let mut app = app();
+        step(&mut app, &[KeyCode::F5]);
+        let h0 = player(&mut app).1.heading;
+        for _ in 0..5 {
+            step(&mut app, &[KeyCode::KeyD, KeyCode::KeyQ]);
+        }
+        assert!((player(&mut app).1.heading - h0).abs() < 1e-6, "Q held: no turn");
+        step(&mut app, &[KeyCode::KeyD]);
+        assert!((player(&mut app).1.heading - h0).abs() > 0.5, "without Q the body turns toward the motion");
+    }
+
+    #[test]
+    fn f6_toggles_the_debug_camera_while_flying() {
+        let mut app = app();
+        step(&mut app, &[KeyCode::F6]);
+        assert!(!app.world().resource::<DebugFly>().free_camera, "only in Ghost mode");
+        step(&mut app, &[KeyCode::F5]);
+        step(&mut app, &[KeyCode::F6]);
+        assert!(app.world().resource::<DebugFly>().free_camera);
+        step(&mut app, &[KeyCode::F5]);
+        assert!(!app.world().resource::<DebugFly>().free_camera, "leaving resets it");
     }
 }

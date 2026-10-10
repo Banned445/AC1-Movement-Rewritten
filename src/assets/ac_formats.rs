@@ -117,8 +117,9 @@ pub fn parse_mesh(d: &[u8]) -> Option<AcMesh> {
     for i in 0..nv {
         let o = v0 + i * stride;
         let q = [i16_at(d, o), i16_at(d, o + 2), i16_at(d, o + 4)];
-        // PORT: static weapon scale is fitted to authored tag/sheath extents (RE/09 §8).
-        let scale = if stride == 24 { 1.0 / 32768.0 } else { POS_SCALE };
+        // stride 24 is the packed-position vertex of the GEN shaders: xyz · |w| · 3.81481368e-6 (RE/14 §2); Altaïr's
+        // weapons author w = ±8, i.e. 1/32768
+        let scale = if stride == 24 { (i16_at(d, o + 6) as f32).abs() * 3.814_813_7e-6 } else { POS_SCALE };
         m.positions.push([q[0] as f32 * scale, q[1] as f32 * scale, q[2] as f32 * scale]);
         let n = &d[o + 8..o + 11];
         let nv3 = [n[0] as f32 / 127.5 - 1.0, n[1] as f32 / 127.5 - 1.0, n[2] as f32 / 127.5 - 1.0];
@@ -244,6 +245,34 @@ pub struct AcTexture {
     pub width: u32,
     pub height: u32,
     pub mips: Vec<Vec<u8>>,
+    /// TextureMap +28 `GammaSettings` (TextureMap serializer 0xA64260): Gamma_sRGB (1) for the outfit's diffuse
+    /// maps, Gamma_Linear (0) for normal and specular maps. The texture is sampled with that decode whatever slot uses it.
+    pub srgb: bool,
+    /// TextureMap +36 / +40 `AddressMode` U / V (0 Wrap, 1 Mirror, 2 Clamp, 3 Border, 4 MirrorOnce) and +48 / +52 / +56
+    /// mag / min / mip `FilterType` (0 Point, 1 Linear, 2 None).
+    pub address: [u32; 2],
+    pub filter: [u32; 3],
+}
+
+/// The sampler a TextureMap authors (its AddressMode and FilterType fields).
+pub fn texture_sampler(t: &AcTexture) -> bevy::image::ImageSamplerDescriptor {
+    use bevy::image::{ImageAddressMode as A, ImageFilterMode as F};
+    let address = |m: u32| match m { 1 => A::MirrorRepeat, 2 => A::ClampToEdge, 3 => A::ClampToBorder, _ => A::Repeat };
+    let filter = |m: u32| if m == 0 { F::Nearest } else { F::Linear };
+    bevy::image::ImageSamplerDescriptor {
+        address_mode_u: address(t.address[0]),
+        address_mode_v: address(t.address[1]),
+        mag_filter: filter(t.filter[0]),
+        min_filter: filter(t.filter[1]),
+        mipmap_filter: filter(t.filter[2]),
+        ..bevy::image::ImageSamplerDescriptor::linear()
+    }
+}
+
+/// The sampler fields of a TextureMap payload (shared by TextureGradient).
+pub fn texture_sampler_fields(d: &[u8]) -> ([u32; 2], [u32; 3]) {
+    let w = |o| u32_at(d, o).unwrap_or(0);
+    ([w(36), w(40)], [w(48).min(2), w(52).min(2), w(56).min(2)])
 }
 
 fn chain_size(w: u32, h: u32, block_bytes: u32, mips: u32) -> u32 {
@@ -279,7 +308,8 @@ pub fn parse_texture(d: &[u8]) -> Option<AcTexture> {
                 mw = (mw / 2).max(1);
                 mh = (mh / 2).max(1);
             }
-            return Some(AcTexture { width: w, height: h, mips: out });
+            let (address, filter) = texture_sampler_fields(d);
+            return Some(AcTexture { width: w, height: h, mips: out, srgb: u32_at(d, 28) == Some(1), address, filter });
         }
     }
     None

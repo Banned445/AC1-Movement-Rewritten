@@ -784,7 +784,7 @@ pub fn pull_down_edge(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
 }
 
 /// 0xB2E4F0: upright torso clearance followed by a box tilted 30° for the descent.
-fn pull_down_clear(feet: Vec3, edge: Vec3, outward: Vec3, collision: &CollisionWorld) -> bool {
+pub(crate) fn pull_down_clear(feet: Vec3, edge: Vec3, outward: Vec3, collision: &CollisionWorld) -> bool {
     let right = super::right_of(outward);
     let upright = (edge + outward * 0.25).with_y(feet.y + 1.075);
     if !collision.obb_free(upright, [right, Vec3::Y, outward], Vec3::new(0.3, 0.725, 0.75)) { return false; }
@@ -818,8 +818,11 @@ fn try_pull_down(n: &HumanNarrowObjectData, stick: Option<Vec3>, camera: Vec3, g
         super::ledge_moves::PULLDOWN_BEAM_DESCENT[side],
         guidance,
         collision,
-    )?;
-    Some(super::ground::pulldown_ledge_entry(moves, normal, feet))
+    );
+    Some(match moves {
+        Ok(moves) => super::ground::pulldown_ledge_entry(moves, normal, feet),
+        Err(orient) => super::ground::pulldown_release_entry(orient, normal, feet),
+    })
 }
 
 /// Clip a segment to an oriented box (centre, unit axes, half extents); returns the parameter range kept.
@@ -1062,6 +1065,18 @@ pub fn update_narrow(
         // PORT: these single-item, one-shot actions have no queued evaluator in the movement simulation.
         let slot_done = matches!(n.state, BeamState::JumpOnPlace | BeamState::HopStart | BeamState::HopEnd);
         let done = if BEAM_COMPLETION && slot_done { n.t > dur } else { n.t >= dur };
+
+        // `HumanNarrowObject__CheckSupportAndFall` 0xE51190 (the arrival on the narrow support, NarrowObjectData+224
+        // ≤ 1): once the arrival action is past 0.6, a haystack found by the support search (IHuman vt80 0xB10A60 →
+        // `Human__FindHayStackSupport` 0xE17D20) → HumanHayStack, entry FreeStep (0xE5146A, +184 |= 0x10). A haystack
+        // with a rim narrow enough to be a beam is entered this way (live 2026-10-09).
+        if matches!(n.state, BeamState::Reception | BeamState::PilotisIn) && n.t / dur.max(1e-4) > 0.6 {
+            if let Some(stack) = super::hay::find_support(body.feet, facing, facing, &guidance.haystacks, &collision) {
+                let e = super::hay::HayStackEntry { stack, kind: super::hay::HayEntry::FreeStep, from: body.feet, speed: 0.0 };
+                switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
+                continue;
+            }
+        }
 
         // Event 17: walking into an obstacle with stick input searches a hand jump target before
         // pull-down / climb (0xEE9AF0 → 0xF7EF90 / 0xF7DB30 → 0xF70E50 → 0xB21DA0).

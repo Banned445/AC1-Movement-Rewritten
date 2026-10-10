@@ -178,8 +178,13 @@ fn append_part(map: &mut ImportedMap, resources: &mut Resources, p: NativePlacem
         let layer = (word(&entity.payload, inert + 29)? & 0x3f) as u8;
         let rigid = rigid_transform(&entity.payload, inert + 57)?;
         let convert = |v: Vec3| { let v = (p.transform * rigid).transform_point3(v); Vec3::new(v.x, v.z, -v.y) };
-        for indices in shape.indices.chunks_exact(3) {
-            if let Some(t) = Triangle::new([convert(shape.vertices[indices[0] as usize]), convert(shape.vertices[indices[1] as usize]), convert(shape.vertices[indices[2] as usize])], layer) { map.collision.triangles.push(t); }
+        let mut sound = std::collections::HashMap::new();
+        for (k, indices) in shape.indices.chunks_exact(3).enumerate() {
+            let id = shape.materials.get(k).copied().unwrap_or(0);
+            let material = *sound.entry(id).or_insert_with(|| {
+                (id != 0).then(|| resources.get(id).ok()).flatten().and_then(|r| crate::assets::static_mesh::collision_material_sound(r.class_hash, &r.payload))
+            });
+            if let Some(t) = Triangle::new([convert(shape.vertices[indices[0] as usize]), convert(shape.vertices[indices[1] as usize]), convert(shape.vertices[indices[2] as usize])], layer) { map.collision.triangles.push(t.with_material(material)); }
         }
     }
     for (active, mut edge) in p.world_edges() {

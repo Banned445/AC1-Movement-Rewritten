@@ -427,8 +427,10 @@ pub fn update_walling(
     mut pad: ResMut<PadInput>,
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
+    camera: Option<ResMut<crate::camera::CameraEvents>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
 ) {
+    let mut camera = camera;
     let dt = time.delta_secs().min(1.0 / 20.0);
     for (mut loco, mut body, mut data) in &mut q {
         if loco.current != ActorContextId::Walling {
@@ -480,6 +482,10 @@ pub fn update_walling(
             pad.consume_jump();
             let from = body.feet;
             let (dir, target) = rebound_jump(from, normal, push, &guidance, &collision);
+            if let Some(c) = camera.as_mut() {
+                // ActorState 67 (CameraReset)
+                c.reset = true;
+            }
             body.heading = super::heading_of(dir);
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
             continue;

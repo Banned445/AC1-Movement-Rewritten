@@ -141,7 +141,7 @@ impl CollisionWorld {
         let parked = Vec3::splat(PARKED);
         for &s in slots {
             self.triangles[s as usize] = crate::triangles::Triangle { vertices: [parked; 3], bounds: Aabb3 { min: parked, max: parked },
-                normal: Vec3::Y, layer: crate::layers::NOTHING };
+                normal: Vec3::Y, layer: crate::layers::NOTHING, material: crate::triangles::NO_MATERIAL };
         }
     }
 
@@ -266,6 +266,20 @@ impl CollisionWorld {
             }
         }
         best
+    }
+
+    /// The sound material of the nearest triangle straight below `p` within `max` (boxes have none): the footstep
+    /// events' switch 0.
+    /// PORT (hypothesis): the game asks its own ground contact for the material; a ray down stands in.
+    pub fn material_below(&self, p: Vec3, max: f32) -> Option<u16> {
+        let end = p - Vec3::Y * max;
+        let mut best: Option<(f32, u16)> = None;
+        for t in self.triangles_in_bounds(end, p) {
+            if let Some(d) = t.ray(p, -Vec3::Y, best.map_or(max, |b| b.0)) {
+                best = Some((d, t.material));
+            }
+        }
+        best.map(|b| b.1).filter(|&m| m != crate::triangles::NO_MATERIAL)
     }
 
     /// PORT: camera obstruction ray against imported static faces; native NavigationCamera remains open.

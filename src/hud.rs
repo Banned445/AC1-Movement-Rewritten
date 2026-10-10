@@ -34,6 +34,8 @@ fn update_hud(
     model: Res<crate::model::ModelStatus>,
     map: Res<crate::map_menu::MapMenu>,
     fly: Option<Res<crate::debug_fly::DebugFly>>,
+    areas: Option<Res<crate::test_areas::TestAreas>>,
+    bindings: Option<Res<crate::bindings::Bindings>>,
     q: Query<(&Locomotion, &Body, &HumanDataBundle), With<Player>>,
     mut hud: Query<(&mut Text, &mut Visibility), With<HudText>>,
 ) {
@@ -64,21 +66,30 @@ fn update_hud(
         .last_landing
         .map(|l| format!("{:?}  fall {:.2} m  drop {:.2} m{}", l.kind, l.fall_height, l.total_drop, if l.roll { "  (roll)" } else { "" }))
         .unwrap_or_else(|| "-".into());
+    use crate::bindings::Slot;
+    let default_bindings = crate::bindings::Bindings::default();
+    let b = bindings.as_deref().unwrap_or(&default_bindings);
+    let (hp, legs, hand, head) = (b.label(Slot::HighProfile), b.label(Slot::Legs), b.label(Slot::EmptyHand), b.label(Slot::Head));
+    let help = format!(
+        "bindings: {} | {}{}{}{} move | {hp} high profile | {legs} legs (hold with {hp} = sprint/free-run; into a wall = wall run; {hand} at a wall = climb;\n\
+         while hanging or climbing: {hand} = let go, {hp}+{legs} = jump off (stick steers); up at a top edge = pull up) | {head} head | Alt slow (port)\n\
+         {hand} empty hand (at a roof edge: pull down to a hang; on a ladder: drop; {hp}+{legs} = jump off; on a wall run: {legs} = push off)\n\
+         LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, {hp} x3, Alt x10, {} strafe, F6 camera, {hand}+F5 keep speed) | F4 test areas | F9 save a bug report | F1 hide | F2 maps",
+        b.profile, b.label(Slot::LeftStickUp), b.label(Slot::LeftStickLeft), b.label(Slot::LeftStickDown), b.label(Slot::LeftStickRight), b.label(Slot::LeftShoulder)
+    );
     text.0 = format!(
-        "AC1 movement port - {}   {}{}\n\
+        "AC1 movement port - {}   {}{}{}\n\
          context: {:?} ({})   previous: {:?}\n\
          {}\n\
          ground sub-state: {:?}   speed param {:.2} -> {:?}   turn atten {:.2}\n\
          profile: {}   legs: {}   stick {:.2} (speed01 {:.2})\n\
          air: {}   height {:.2} m\n\
          last landing: {}\n\n\
-         WASD move | RMB high profile | Space legs (hold with RMB = sprint/free-run; into a wall = wall run; E at a wall = climb;\n\
-         while hanging or climbing: E = let go, RMB+Space = jump off (stick steers); up at a top edge = pull up) | Alt slow\n\
-         E empty hand (on a ladder: drop; RMB+Space = jump off; on a wall run: Space = push off)\n\
-         LMB capture mouse | Esc release | G guidance edges | F5 fly (noclip; Space/Ctrl up/down, Shift x3, Alt x10) | F9 save a bug report | F1 hide | F2 maps",
+         {}",
         map.active.label(),
         model.0,
-        if fly.is_some_and(|f| f.active) { "   [FLY - F5 to land]" } else { "" },
+        if fly.is_some_and(|f| f.active) { "   [GHOST MODE - F5 to drop out]" } else { "" },
+        areas.and_then(|a| a.name()).map(|n| format!("   test area: {n} (F4 next, Shift+F4 back)")).unwrap_or_default(),
         loco.current,
         loco.current as u8,
         loco.previous,
@@ -93,6 +104,7 @@ fn update_hud(
         pad.speed01,
         air_mode,
         body.feet.y,
-        landing
+        landing,
+        help
     );
 }

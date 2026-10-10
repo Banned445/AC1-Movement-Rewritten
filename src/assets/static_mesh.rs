@@ -91,6 +91,19 @@ pub(crate) fn index_buffer(blob: &[u8], vb: usize, ib: usize, count: usize) -> R
 pub struct CollisionMesh {
     pub vertices: Vec<Vec3>,
     pub indices: Vec<u16>,
+    /// Per triangle: the CollisionMaterial id (0 = none). MeshShape: its per-triangle u8 index into its material
+    /// references (0x647480); BoxShape: the shape's one reference (0x6D1F00).
+    pub materials: Vec<u32>,
+}
+
+/// CRC32("CollisionMaterial"); +8 u32 is the surface's sound material (the footstep events' switch 0 and the
+/// ContactTable groups: Dirt 0, Sand 2, Pebbles 3, Stone_Clean 4, ... Concrete_Polished 22, Metal_Grill 24,
+/// Default 4001).
+pub const CLASS_COLLISION_MATERIAL: u32 = 0x74F7_311D;
+
+/// The sound material of a CollisionMaterial resource.
+pub fn collision_material_sound(class: u32, payload: &[u8]) -> Option<u16> {
+    (class == CLASS_COLLISION_MATERIAL).then(|| word(payload, 8).ok()).flatten().and_then(|m| u16::try_from(m).ok())
 }
 
 /// Static shape variants used by village props. BoxShape reader 0x6D1F00 supplies half extents
@@ -103,7 +116,8 @@ pub fn parse_static_shape(d: &[u8]) -> Result<CollisionMesh,String> {
     for (i,v) in matrix.iter_mut().enumerate() { *v = float(d,24+i*4)?; }
     let matrix = Mat4::from_cols_array(&matrix);
     let vertices = (0..8).map(|i| matrix.transform_point3(Vec3::new(if i&1==0 {-half.x} else {half.x},if i&2==0 {-half.y} else {half.y},if i&4==0 {-half.z} else {half.z}))).collect();
-    Ok(CollisionMesh { vertices, indices: vec![0,2,3,0,3,1,4,5,7,4,7,6,0,1,5,0,5,4,2,6,7,2,7,3,0,4,6,0,6,2,1,3,7,1,7,5] })
+    let material = word(d, 88).unwrap_or(0);
+    Ok(CollisionMesh { vertices, indices: vec![0,2,3,0,3,1,4,5,7,4,7,6,0,1,5,0,5,4,2,6,7,2,7,3,0,4,6,0,6,2,1,3,7,1,7,5], materials: vec![material; 12] })
 }
 
 /// MeshShape__Read 0x647480; 0x6468B0 binds its u16 array as triangle lists, stride 6.
@@ -124,7 +138,19 @@ pub fn parse_collision_mesh(d: &[u8]) -> Result<CollisionMesh, String> {
     if count % 3 != 0 || count > d.len().saturating_sub(p + 4) / 2 { return Err("invalid collision triangle count".into()); }
     let indices: Vec<u16> = d[p + 4..p + 4 + count * 2].chunks_exact(2).map(|p| u16::from_le_bytes(p.try_into().unwrap())).collect();
     if indices.iter().any(|&i| i as usize >= vertices.len()) { return Err("collision index outside vertex buffer".into()); }
-    Ok(CollisionMesh { vertices, indices })
+    // then u32 n + n per-triangle material indices (u8), u32 n + n CollisionMaterial references (count & 0x3FFF)
+    let mut p = p + 4 + count * 2;
+    let per_tri = word(d, p).ok().map(|n| n as usize).filter(|&n| n == count / 3);
+    let materials = per_tri
+        .and_then(|n| {
+            let idx = d.get(p + 4..p + 4 + n)?;
+            p += 4 + n;
+            let refs = (word(d, p).ok()? & 0x3FFF) as usize;
+            let refs: Vec<u32> = (0..refs).map(|k| word(d, p + 4 + 4 * k)).collect::<Result<_, _>>().ok()?;
+            Some(idx.iter().map(|&i| refs.get(i as usize).copied().unwrap_or(0)).collect())
+        })
+        .unwrap_or_else(|| vec![0; count / 3]);
+    Ok(CollisionMesh { vertices, indices, materials })
 }
 
 #[cfg(test)]
@@ -142,6 +168,8 @@ mod tests {
         let max = shape.vertices.iter().fold(Vec3::splat(f32::NEG_INFINITY),|a,&p|a.max(p));
         assert!(min.abs_diff_eq(Vec3::new(2.5,3.0,3.0),1e-5));
         assert!(max.abs_diff_eq(Vec3::new(3.5,5.0,7.0),1e-5));
+        data[88..92].copy_from_slice(&0x0F44_A009u32.to_le_bytes());
+        assert!(parse_static_shape(&data).unwrap().materials.iter().all(|&m| m == 0x0F44_A009), "the box's CollisionMaterial (0x6D1F00)");
         data[24..28].copy_from_slice(&f32::NAN.to_le_bytes());
         assert!(parse_static_shape(&data).is_err());
     }
@@ -165,6 +193,13 @@ mod tests {
         let shape = parse_collision_mesh(&r.payload).unwrap();
         assert_eq!(shape.vertices.len(), 623);
         assert_eq!(shape.indices.len(), 3768);
+        // every triangle names a CollisionMaterial (0x647480: per-triangle u8 index + references)
+        assert_eq!(shape.materials.len(), 3768 / 3);
+        let sounds: std::collections::HashSet<Option<u16>> = shape.materials.iter()
+            .map(|id| resources.iter().find(|r| r.id == *id).and_then(|r| collision_material_sound(r.class_hash, &r.payload)))
+            .collect();
+        // (some references point at materials stored in other cells; the loaders resolve those across the archive)
+        assert!(sounds.contains(&Some(2)), "Sand: {sounds:?}");
         let mut corrupt = r.payload.clone();
         corrupt[12..16].copy_from_slice(&f32::NAN.to_le_bytes());
         assert!(parse_collision_mesh(&corrupt).is_err());

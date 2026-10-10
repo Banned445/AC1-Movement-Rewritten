@@ -62,7 +62,9 @@ fn barrel(d: &[u8]) -> Result<(CollisionMesh, usize), String> {
         for k in 1..ring.len() - 1 { indices.extend([ring[0], ring[k], ring[k + 1]]); }
     }
     if indices.is_empty() { return Err("BarrelShape has no faces".into()); }
-    Ok((CollisionMesh { vertices: vertices.iter().map(|&p| m.transform_point3(p)).collect(), indices }, end))
+    // PORT: the hull's CollisionMaterial reference is not read (no material)
+    let materials = vec![0; indices.len() / 3];
+    Ok((CollisionMesh { vertices: vertices.iter().map(|&p| m.transform_point3(p)).collect(), indices, materials }, end))
 }
 
 /// PORT: Havok collides with the exact capsule; the port's triangle world gets a 12-sided capsule hull.
@@ -94,13 +96,15 @@ fn capsule(d: &[u8]) -> Result<(CollisionMesh, usize), String> {
         }
         indices.extend([1 + 3 * SIDES as u16 + k, 1 + 3 * SIDES as u16 + n, top]);
     }
-    Ok((CollisionMesh { vertices, indices }, 48))
+    // PORT: the capsule's CollisionMaterial reference is not read (no material)
+    let materials = vec![0; indices.len() / 3];
+    Ok((CollisionMesh { vertices, indices, materials }, 48))
 }
 
 fn list(d: &[u8]) -> Result<(CollisionMesh, usize), String> {
     let n = word(d, 8)? as usize;
     if n > 256 { return Err("invalid ListShape count".into()); }
-    let mut out = CollisionMesh { vertices: Vec::new(), indices: Vec::new() };
+    let mut out = CollisionMesh { vertices: Vec::new(), indices: Vec::new(), materials: Vec::new() };
     let mut p = 12;
     for _ in 0..n {
         if d.get(p) != Some(&0) { return Err("ListShape child is not inline".into()); }
@@ -110,6 +114,7 @@ fn list(d: &[u8]) -> Result<(CollisionMesh, usize), String> {
         let base = out.vertices.len() as u16;
         out.vertices.extend(mesh.vertices);
         out.indices.extend(mesh.indices.iter().map(|i| i + base));
+        out.materials.extend(mesh.materials);
         p += 1 + used;
     }
     Ok((out, p + 4))

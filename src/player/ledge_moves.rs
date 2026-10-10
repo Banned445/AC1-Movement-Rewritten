@@ -280,7 +280,7 @@ fn single(id: u32, item: usize) -> Option<ActionBlend> {
     jump_blend::action_items(id).filter(|i| i.len() > item).map(|_| ActionBlend::new(id, item, &[1.0]))
 }
 
-fn seq_durations(seq: &[Option<ActionBlend>; 4]) -> [f32; 4] {
+pub(crate) fn seq_durations(seq: &[Option<ActionBlend>; 4]) -> [f32; 4] {
     let mut d = [0.0; 4];
     for (i, a) in seq.iter().enumerate() {
         d[i] = a.map(|a| a.duration()).unwrap_or(0.0);
@@ -1055,6 +1055,48 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
     (base, stand)
 }
 
+/// The knee catch from a fall (`CheckAirCatch` type 0, RE/19 §2.4): the catch action plays while the root is
+/// interpolated onto the edge (sub_711130 over the action), then the stand-up onto the top as the climb-out's
+/// (`ACT_KNEE_TO_FREESTEP`, PORT: Ground). Returns the catch move and the step onto the top.
+pub fn knee_catch_moves(action: u32, from: Vec3, edge: Vec3, n: Vec3) -> (LedgeMove, LedgeMove) {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let seq = [single(action, 0), None, None, None];
+    let durations = seq_durations(&seq);
+    let durations = if durations.iter().sum::<f32>() > 0.0 { durations } else { [0.2, 0.0, 0.0, 0.0] };
+    let r = right_of(facing);
+    let (hand_l, hand_r) = (edge - r * HAND_SPACING * 0.5, edge + r * HAND_SPACING * 0.5);
+    let knee = edge + facing * 0.1;
+    let base = LedgeMove {
+        kind: MoveKind::Pullup,
+        seq,
+        durations,
+        t: 0.0,
+        from,
+        to: knee,
+        facing_from: facing,
+        facing_to: facing,
+        follow_disp: false,
+        lead: 0.0,
+        end_free: false,
+        end_wall: false,
+        end_stand: false,
+        hand_l,
+        hand_r,
+        normal: n,
+    };
+    let step = [single(ACT_KNEE_TO_FREESTEP[0], 0), None, None, None];
+    let d = seq_durations(&step);
+    let stand = LedgeMove {
+        seq: step,
+        durations: if d[0] > 0.0 { d } else { [0.4, 0.0, 0.0, 0.0] },
+        from: knee,
+        to: edge - n * PULLUP_IN,
+        end_stand: true,
+        ..base
+    };
+    (base, stand)
+}
+
 // ---------------------------------------------------------------- jumps into a hang
 
 /// Pull-up chain pieces: hangwaist → hangknee (`xx_h_hangwaist_tr_hangknee_footl`), hangknee → wait.
@@ -1456,22 +1498,82 @@ pub const PULLDOWN_BEAM_DESCENT: [u32; 4] = [0x516D_5CF9, 0x516D_5D01, 0x516D_5D
 /// `p` = the edge point, `n` = the edge's outward normal (the character faces along it, guard 0xD9D6C0),
 /// `wait` = type 1 (from Movement) instead of 0 (from the ledge stop).
 /// 1. Orientation: the type's orientation action, root → p + 0.5·n, facing −n.
-/// 2. Descent: hands found on the edge at p ± 0.25·side (else the game releases into InAir), the descent
-///    action, root → p + 1.0·n − 0.8 m.
-/// 3. Reception: foot support (`sub_B16130`) → wall reception (angle blend, straight here) to the wall-hang
+/// 2. Descent: hands found on the edge at p ± 0.25·side, the descent action, root → p + 1.0·n − 0.8 m. No hands:
+///    PullDownSubState 4, ReleaseToInAir (`StatePullDown_Update` 0xDDFCF0 → 0xDDA100, the hang let-go 0xDD7810):
+///    `Err` holds the orientation alone, which falls when it ends.
+/// 3. Reception: foot support (`sub_B16130`) → wall reception (angle blend `pulldown_wall_weights`) to the wall-hang
 ///    root, else the free reception to the free-hang root.
-pub fn pulldown(p: Vec3, n: Vec3, from: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<[LedgeMove; 3]> {
+pub fn pulldown(p: Vec3, n: Vec3, from: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
     pulldown_with(p, n, from, PULLDOWN_ORIENT[wait as usize], PULLDOWN_DESCENT, guidance, collision)
 }
 
+/// The pull-down reception's angle blend (`HumanLedge__PullDown_Update` 0xDDF0AA): the signed angle of the line from
+/// the foot support up to the hands, from vertical (positive with the hands further out than the wall at the feet);
+/// a ≥ 0 → straight / `30_out` by a / 30°, a < 0 → straight / `45_in` by −a / 45° (both clamped to 1). Weights
+/// [straight, 30_out, 45_in]. PORT: the foot support is the wall 1 m below the hands (the hang-type probe's height).
+pub fn pulldown_wall_weights(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> [f32; 3] {
+    let out = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let origin = mid - Vec3::Y + out * 0.5;
+    let Some((d, _)) = collision.ray_hit(origin, -out, 1.2, 0) else {
+        return [1.0, 0.0, 0.0];
+    };
+    let wall = origin - out * d;
+    let a = (mid - wall).dot(out).atan2(mid.y - wall.y);
+    if a >= 0.0 {
+        let w = (a / 30f32.to_radians()).min(1.0);
+        [1.0 - w, w, 0.0]
+    } else {
+        let w = (-a / 45f32.to_radians()).min(1.0);
+        [1.0 - w, 0.0, w]
+    }
+}
+
 /// The pull-down with the type's orientation and descent actions (table 0x1A2C3F0).
-pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<[LedgeMove; 3]> {
+pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
+    pulldown_blend(p, n, from, single(orient_id, 0), single(descent_id, 0), 0.0, guidance, collision)
+}
+
+/// The pass-over pull-down (type 4, `HumanLedge__PassOverToPullDown` 0xDE0220): from the wall top's far edge after
+/// the vault with hand `hand` (0 left: the orientation `0x09A0B647`, else `0x09A0B649`; the descent `…48` / `…4A`),
+/// both blended [1 − w, w] by the thickness, and the orientation and descent roots pulled back 0.3·(1 − w) along
+/// the normal (0xDDE7FA / 0xDDED9E).
+pub fn pulldown_passover(p: Vec3, n: Vec3, from: Vec3, hand: usize, w: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
+    use super::passover::{PULLDOWN_DESCENT as D, PULLDOWN_ORIENT as O};
+    let blend = |id: u32| jump_blend::action_items(id).map(|_| ActionBlend::new(id, 0, &[1.0 - w, w]));
+    pulldown_blend(p, n, from, blend(O[hand.min(1)]), blend(D[hand.min(1)]), 0.3 * (1.0 - w), guidance, collision)
+}
+
+/// The pull-down's three stages with the orientation and descent actions given; `inset` pulls both roots back
+/// toward the wall.
+pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<ActionBlend>, descent_action: Option<ActionBlend>, inset: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
     let n = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let facing_out = n;
     let facing_in = -n;
     let r = right_of(facing_in);
-    let hl = guidance.on_edge(p - r * 0.25, n, 0.3)?.point;
-    let hr = guidance.on_edge(p + r * 0.25, n, 0.3)?.point;
+    let hands = guidance.on_edge(p - r * 0.25, n, 0.3).zip(guidance.on_edge(p + r * 0.25, n, 0.3));
+    let Some((hl, hr)) = hands.map(|(a, b)| (a.point, b.point)) else {
+        // ReleaseToInAir: the orientation plays, then the let-go
+        let seq = [orient_action, None, None, None];
+        let durations = seq_durations(&seq);
+        return Err(LedgeMove {
+            kind: MoveKind::PullDown { stage: 4 },
+            seq,
+            durations: if durations.iter().sum::<f32>() > 0.0 { durations } else { [GRAB_TIME, 0.0, 0.0, 0.0] },
+            t: 0.0,
+            from,
+            to: p + n * (0.5 - inset),
+            facing_from: facing_out,
+            facing_to: facing_in,
+            follow_disp: false,
+            lead: 0.0,
+            end_free: false,
+            end_wall: false,
+            end_stand: false,
+            hand_l: p - r * 0.25,
+            hand_r: p + r * 0.25,
+            normal: n,
+        });
+    };
     let mid = (hl + hr) * 0.5;
     let mk = |kind: u8, seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, ff: Vec3, ft: Vec3, end_wall: bool, end_free: bool| {
         let durations = seq_durations(&seq);
@@ -1496,16 +1598,16 @@ pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u
         }
     };
     let item = |id: u32, i: usize, w: &[f32]| jump_blend::action_items(id).filter(|it| it.len() > i).map(|_| ActionBlend::new(id, i, w));
-    let p1 = Vec3::new(mid.x, mid.y, mid.z) + n * 0.5;
-    let orient = mk(1, [single(orient_id, 0), None, None, None], from, p1, facing_out, facing_in, false, false);
-    let p2 = mid + n * 1.0 - Vec3::Y * 0.8;
-    let descent = mk(2, [single(descent_id, 0), None, None, None], p1, p2, facing_in, facing_in, false, false);
+    let p1 = Vec3::new(mid.x, mid.y, mid.z) + n * (0.5 - inset);
+    let orient = mk(1, [orient_action, None, None, None], from, p1, facing_out, facing_in, false, false);
+    let p2 = mid + n * (1.0 - inset) - Vec3::Y * 0.8;
+    let descent = mk(2, [descent_action, None, None, None], p1, p2, facing_in, facing_in, false, false);
     let wall = hang_type_at(mid, n, collision) == LedgeHangType::Wall;
-    let straight = [1.0, 0.0, 0.0];
+    let w = pulldown_wall_weights(mid, n, collision);
     let reception = if wall {
         mk(
             3,
-            [item(PULLDOWN_WALL[0], 0, &straight), item(PULLDOWN_WALL[1], 0, &straight), item(PULLDOWN_WALL[1], 1, &straight), None],
+            [item(PULLDOWN_WALL[0], 0, &w), item(PULLDOWN_WALL[1], 0, &w), item(PULLDOWN_WALL[1], 1, &w), None],
             p2,
             hang_root(hl, hr, n, LedgeHangType::Wall),
             facing_in,
@@ -1525,5 +1627,5 @@ pub fn pulldown_with(p: Vec3, n: Vec3, from: Vec3, orient_id: u32, descent_id: u
             true,
         )
     };
-    Some([orient, descent, reception])
+    Ok([orient, descent, reception])
 }

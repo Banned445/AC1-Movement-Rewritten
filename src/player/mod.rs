@@ -46,6 +46,8 @@ use crate::tuning::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ActorContextId {
+    /// Ghost mode, the development flight (`DebugContext`, RE/18 §2; `debug_fly.rs`).
+    Debug = 3,
     Ground = 4,
     Ladder = 5,
     Pole = 6,
@@ -168,6 +170,8 @@ pub enum TransitionSetup {
     ToPassOver(passover::PassOverEntry),
     ToLadder(ladder::LadderEntry),
     ToKiosk(kiosk::KioskEntry),
+    /// Ghost mode (0xE46190): `debug_fly` moves the body while the player contexts are skipped.
+    ToDebug,
 }
 
 /// Immediate context switch (0x55F7E0): exit old, apply setup to destination data, enter new.
@@ -215,6 +219,7 @@ pub fn switch_context(loco: &mut Locomotion, data: &mut HumanDataBundle, setup: 
             data.narrow.enter_pilotis(entry);
             ActorContextId::NarrowObject
         }
+        TransitionSetup::ToDebug => ActorContextId::Debug,
         TransitionSetup::ToKiosk(entry) => {
             data.kiosk.enter(entry);
             ActorContextId::Kiosk

@@ -50,7 +50,7 @@ environment variable. Without the game, the level still runs with a capsule in p
 | F1 | Toggle help |
 | F2 | Debug map menu |
 | F3 | City streaming counters (Damascus) |
-| F5 | Debug fly / noclip, the game's own debug flight (Debug context, "Ghost mode" animation): WASD along the view, Space / Ctrl up / down, 5 m/s, Shift × 3, Alt × 10. F5 again lands on the floor below |
+| F5 | **Ghost mode**, the game's unused development flight (the Debug context, "Ghost mode" animation). WASD on the ground plane, Space / Ctrl up / down, 5 m/s, Shift × 3, Alt × 10, Q held = strafe, F6 = debug camera (holds still). F5 again drops out into a fall; hold E with it to keep the flight's speed. Gamepad: L3 + R3 (B with it to keep the speed), left stick, right stick Y up / down (LB holds the height), RT × 3, RB × 10, X strafe, R3 camera |
 | F9 | Save a bug report |
 
 ## Maps

@@ -8,6 +8,7 @@ pub mod ac_formats;
 pub mod altair;
 pub mod character_material;
 pub mod anims;
+pub mod dare;
 pub mod forge;
 pub mod world;
 pub mod static_mesh;

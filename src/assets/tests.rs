@@ -103,7 +103,17 @@ fn altair_atlas_and_normal_maps_from_install() {
         for id in part.normal_maps.iter().flatten() {
             let tex = &m.normal_textures[id];
             assert_eq!(tex.mips[0].len(), (tex.width * tex.height * 4) as usize);
+            assert!(!tex.srgb, "normal maps author Gamma_Linear");
         }
+    }
+    // TextureMap +28 GammaSettings: every outfit diffuse map is Gamma_sRGB
+    assert!(m.textures.values().all(|t| t.srgb), "diffuse maps author Gamma_sRGB");
+    // the authored samplers: the outfit maps wrap with linear filtering; the ramps clamp U and wrap V
+    assert!(m.textures.values().all(|t| t.address == [0, 0] && t.filter == [1, 1, 1]));
+    let ramps: Vec<_> = m.parts.iter().flat_map(|p| &p.materials).filter_map(|mat| mat.ramp).collect();
+    assert!(!ramps.is_empty());
+    for id in ramps {
+        assert_eq!(m.material_textures[&id].address, [2, 0], "ramp {id:#x}");
     }
 }
 

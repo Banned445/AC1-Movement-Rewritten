@@ -95,6 +95,8 @@ pub struct HumanGroundData {
     pub collide: Option<super::collide::Collide>,
     /// Look-down at an edge (sub-state 9, event 119, `HumanGround__LookDown_Enter` 0xD9FC80).
     pub look_down: Option<LookDown>,
+    /// The interpreter's edge-halt latch (+4176) and how long it has held (timer +4144, 0xEE7C5E–0xEE7C8E).
+    pub edge_halt_t: f32,
     pub pose_seq: u32,
     /// Facing applied when the next one-shot starts (the lean exits end turned, `collide`).
     pub face_next: Option<f32>,
@@ -808,10 +810,14 @@ pub fn update_ground(
         // 0.16 m with a drop of more than 2 m and its normal within 70 deg of the facing (and of the stick) zeroes the
         // wanted speed: the walk halts at the edge without a clip (drops of 2–5 m; deeper ones get the ledge stop),
         // and with no move request Idle does not start again.
-        let edge_halt = !g.high_profile
-            && moving
-            && edge_report_drop(body.feet, body.forward(), EDGE_HALT_REACH, EDGE_HALT_COS, 2.0, &guidance, &collision)
-                .is_some_and(|(_, n, d)| (d <= LEDGE_STOP_DROP || g.ledge_stop_lock.is_some()) && pad.dir.dot(Vec3::new(n.x, 0.0, n.z).normalize_or_zero()) > EDGE_HALT_COS);
+        let halt_edge = (!g.high_profile && moving)
+            .then(|| edge_report_drop(body.feet, body.forward(), EDGE_HALT_REACH, EDGE_HALT_COS, 2.0, &guidance, &collision))
+            .flatten()
+            .filter(|&(_, n, d)| (d <= LEDGE_STOP_DROP || g.ledge_stop_lock.is_some()) && pad.dir.dot(Vec3::new(n.x, 0.0, n.z).normalize_or_zero()) > EDGE_HALT_COS);
+        let edge_halt = halt_edge.is_some();
+        // the halt also latches +4176 (0xEE7C85) and starts its timer +4144 when it rises; any frame without it clears
+        // the latch (0xEE7C8E)
+        g.edge_halt_t = if edge_halt { g.edge_halt_t + dt } else { 0.0 };
         // start from standing (Idle → Move, 0xD84AC0 → `HumanGround__PlayStartMove` 0xD98990)
         if moving && !busy && !edge_halt && g.oneshot.is_none() && g.tr.is_none() && g.speed_param <= 0.0 && g.collide.is_none() && g.ledge_stop.is_none() && g.ledge_stop_lock.is_none() {
             g.play_start_move();
@@ -900,13 +906,21 @@ pub fn update_ground(
         }
 
         // ---------------------------------------------------------------- look-down at an edge (event 119)
-        // PORT trigger: standing still (the event's sender and its guard's mode value, 0xD7E590, are not traced)
-        if moving || busy || g.speed_param > 0.0 {
+        // Sender (interpreter 0xEE87DE–0xEE8844): the edge-halt latch (+4176: low profile, the stick past the dead zone
+        // and within 70° of a front edge's normal, the edge within 0.16 m, its drop over 2 m) with its drop (+4128)
+        // over 2 m, held for more than 0.25 s (+4144, flt_1682378), the LookDown ability, then IHumanGround vt1540
+        // (0xDB6AD0, CanHandleEvent(119): the Idle wait sub-state 0xDA7250, guard 0xD7E590) and vt1544 (0xDBEF90).
+        // The look-down is Idle's sub-state 149: the player's interpreter sends no end event (120 comes only from the
+        // NPC AI, 0xEBAF80 → 0xEB9BD0), so it lasts until the walk starts again (the stick turned off the edge) or
+        // another action takes over. Releasing the stick keeps it.
+        // (the halt zeroes the wanted speed at the input, +4176; the port zeroes it after MoveBlend, so the parameter
+        // read here is not yet 0 while halted)
+        if busy || (!edge_halt && (moving || g.speed_param > 0.0)) {
             g.look_down = None;
         } else if let Some(mut ld) = g.look_down {
             ld.t += dt;
             g.look_down = Some(ld);
-        } else if let Some((p, n)) = ab.allows(Ability::LookDown).then(|| look_down_edge(body.feet, body.forward(), &guidance, &collision)).flatten() {
+        } else if let Some((p, n)) = halt_edge.filter(|&(_, _, d)| d > 2.0 && g.edge_halt_t > LOOK_DOWN_HOLD && ab.allows(Ability::LookDown)).map(|(p, n, _)| (p, n)) {
             let w = look_down_weights(body.feet, body.forward(), p, n);
             if let Some(a) = jump_blend::action_items(LOOK_DOWN[(g.blend.foot != 0) as usize]).map(|_| ActionBlend::new(LOOK_DOWN[(g.blend.foot != 0) as usize], 0, &w)) {
                 g.pose_seq = g.pose_seq.wrapping_add(1);
@@ -1001,11 +1015,15 @@ pub fn update_ground(
         }
         // ---------------------------------------------------------------- ledge stop (event 69 / sub-state 38)
         if let Some(ls) = g.ledge_stop {
-            // pull-down EdgeStop (LedgeStop_HandleEvent 0xDA4D90, event 70): only while the start action plays
-            // (guard 0xD9D580). PORT trigger as for Wait: Legs.
-            if !ls.ending && pad.jump_buffered() {
+            // pull-down EdgeStop (LedgeStop_HandleEvent 0xDA4D90, event 70). Sender (0xEE8977–0xEE89AF): in the ledge
+            // stop (vt752 `HumanGround__IsInLedgeStop` 0xD8A990) the stick past 0.35 and within 70° of the edge's
+            // normal, with the Climb ability. The guard (0xD9D580) takes it only on the frame the start action
+            // (0x06E8BD7F) is done and still the playing item: still pushing into the edge then hangs from it,
+            // having let go the end action steps back.
+            let start_done = g.oneshot.is_some_and(|o| o.blend.id == super::ledge_moves::LEDGE_STOP_START && o.t + dt >= o.duration);
+            let toward = pad.magnitude > crate::tuning::STICK_DEADZONE && pad.dir.dot(Vec3::new(ls.normal.x, 0.0, ls.normal.z).normalize_or_zero()) > EDGE_HALT_COS;
+            if !ls.ending && start_done && toward && ab.allows(Ability::Climb) {
                 if let Some(entry) = pulldown_entry(ls.point, ls.normal, body.feet, false, &guidance, &collision) {
-                    pad.consume_jump();
                     g.ledge_stop = None;
                     g.oneshot = None;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
@@ -1042,11 +1060,13 @@ pub fn update_ground(
         }
 
         // ---------------------------------------------------------------- pull-down (event 70)
-        // The game's decision layer sends event 70 (not traced); guard 0xD9D6C0: facing along the edge's outward
-        // normal, a drop of more than 2 m, body space. PORT trigger: Legs in low profile at an edge.
-        if !g.high_profile && pad.jump_buffered() && !busy {
+        // Sender (interpreter 0xEE8934–0xEE8A6D, after the step off, event 68): the edge report, the Climb ability,
+        // vt764 (0xDB63D0, CanHandleEvent(70): guard 0xD9D6C0, facing along the edge's outward normal, a drop of more
+        // than 2 m, body space) and, out of the ledge stop, the empty hand pressed within the last 0.2 s
+        // (`sub_ED4A20(3, 0.2)`, dword_170861C). Either profile.
+        if pad.hand_pressed_ago <= PULLDOWN_HAND_WINDOW && !busy && ab.allows(Ability::Climb) {
             if let Some(entry) = try_pulldown(body.feet, body.forward(), &guidance, &collision) {
-                pad.consume_jump();
+                pad.consume_hand();
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
                 continue;
             }
@@ -1120,6 +1140,18 @@ pub fn update_ground(
         // The interpreter's last request (0xEE8E08, either profile): the stick past the dead zone and IHumanGround
         // vt1592 (event 122's guard 0xD8F0B0: touching a haystack, facing it within 100 degrees, the stick within 45
         // degrees into it) → vt1596 → HumanHayStack, entry Ground (0xD84F80).
+        // `HumanNarrowObject__CheckSupportAndFall` 0xE51190's haystack branch: the free-step arrival (a NarrowObject
+        // Movement stay in the game; PORT: its reception plays in Ground) past 0.6 of its action with a haystack found
+        // by the support search → HumanHayStack, entry FreeStep (0xE5146A). Live: the way into a rimmed haystack.
+        if let Some(os) = g.oneshot.filter(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id)) {
+            if os.t / os.duration.max(1e-4) > 0.6 {
+                if let Some(stack) = super::hay::find_support(body.feet, body.forward(), body.forward(), &guidance.haystacks, &collision) {
+                    let e = super::hay::HayStackEntry { stack, kind: super::hay::HayEntry::FreeStep, from: body.feet, speed: 0.0 };
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
+                    continue;
+                }
+            }
+        }
         if moving && !busy {
             if let Some(e) = super::hay::ground_entry(body.feet, body.forward(), pad.dir, &guidance.haystacks) {
                 switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
@@ -1416,8 +1448,9 @@ fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bo
 }
 
 /// Stationary request's box is initialized by 0x1610920 / 0x1610970, consumed by 0xB10990.
-/// PORT: immutable LedgeGrab reports replace the complete 0xE165D0 chain/limb-config and clearance classifier.
-/// Rope/kiosk/pole reports and owner validity cannot be synthesized by this adapter.
+/// The holds in that box are kept by 0xE165D0's types and clearance rays (`ground_extras::static_target_type`),
+/// then 0xE97720 picks one. PORT: the box query stands in for the guidance chain walk (`GuidanceChain__FindGrabPoint`);
+/// rope/kiosk/pole reports and owner validity cannot be synthesized by this adapter.
 fn static_hand_target(feet:Vec3,forward:Vec3,guidance:&GuidanceWorld,collision:&CollisionWorld)->Option<JumpTarget> {
     let right=super::right_of(forward);
     let mut candidates=Vec::new();
@@ -1427,6 +1460,7 @@ fn static_hand_target(feet:Vec3,forward:Vec3,guidance:&GuidanceWorld,collision:&
             Vec3::new(0.5,1.0,1.35),feet,120f32.to_radians(),0.0,1<<1) else {continue;};
         let point=guidance.fit_hands(hit.point,hit.wall_normal);
         if !(GRAB_MIN_HEIGHT..=STRAIGHT_JUMP_MAX).contains(&(point.y-feet.y)) {continue;}
+        if super::ground_extras::static_target_type(feet,forward,point,hit.wall_normal,collision).is_none() {continue;}
         if let Some(target)=straight_target(feet,point,hit.wall_normal,collision,false) {
             candidates.push((point,hit.wall_normal,target));
         }
@@ -1487,7 +1521,8 @@ fn edge_report_drop(feet: Vec3, forward: Vec3, reach: f32, min_cos: f32, min_dro
 /// The step off an edge (event 68's action 0xD9D1F0, the parameter = 1.0 in high profile): facing more than 120 degrees
 /// from the edge normal plays `xx_fall_ground_back_tr_fall` 0x935CE89E (InAirData+520 = 0.4 s); otherwise a free jump
 /// at pos + (1 + 2·a·HG+1512)·dir − 3 m (HG+0x5E8 = the speed parameter), the direction the facing turned to within
-/// 60 degrees of the normal (`sub_B27180` kind 0).
+/// 60 degrees of the normal (`sub_B27180` kind 0). Live (RE/18 §9): every walk-off and high-profile run-off fires it;
+/// 1.80 m takes 0.44–0.49 s and 3.16 m 0.58–0.68 s, rising only 0.01–0.05 m first.
 fn step_off_entry(feet: Vec3, facing: Vec3, r: &super::jump_candidates::EdgeReport, high: bool, speed_param: f32, foot_left: bool) -> Option<InAirEntry> {
     let angle = signed_angle_y(r.normal, facing);
     if angle.abs() >= 120f32.to_radians() {
@@ -1515,23 +1550,26 @@ fn signed_angle_y(from: Vec3, to: Vec3) -> f32 {
 /// `xx_fall_ground_back_tr_fall` (0xD9D1F0, backing off an edge).
 const STEP_OFF_BACK: u32 = 0x935C_E89E;
 
-/// An edge to look down at while standing: a LedgeGrab edge within 0.6 m of the feet, not behind the character
-/// (|angle| ≤ 90°), with more than 2 m of drop beyond it (the ledge stop's report rules).
-fn look_down_edge(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
-    let hit = guidance.probe(feet, 0.6, 0.2, None, std::f32::consts::PI)?;
-    let n = hit.wall_normal;
-    let nf = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    if nf.dot(forward) < -0.05 {
-        return None;
-    }
-    let below = collision.ground_height(hit.point + n * 0.6 - Vec3::Y * 0.05, 50.0).unwrap_or(hit.point.y - 100.0);
-    (hit.point.y - below > 2.0).then_some((hit.point, n))
-}
+/// The look-down's latch time (interpreter 0xEE8803, flt_1682378).
+const LOOK_DOWN_HOLD: f32 = 0.25;
+/// The pull-down's empty-hand window (interpreter 0xEE8A33, dword_170861C).
+const PULLDOWN_HAND_WINDOW: f32 = 0.2;
 
 /// Pull-down from the ground at edge `p` / normal `n`: type Wait (from Movement) or EdgeStop (from the ledge stop).
 fn pulldown_entry(p: Vec3, n: Vec3, feet: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<super::ledge::LedgeEntry> {
-    let moves = super::ledge_moves::pulldown(p, n, feet, wait, guidance, collision)?;
-    Some(pulldown_ledge_entry(moves, n, feet))
+    Some(match super::ledge_moves::pulldown(p, n, feet, wait, guidance, collision) {
+        Ok(moves) => pulldown_ledge_entry(moves, n, feet),
+        Err(orient) => pulldown_release_entry(orient, n, feet),
+    })
+}
+
+/// The pull-down that finds no hands at the descent (PullDownSubState 4, ReleaseToInAir): the orientation alone.
+pub(crate) fn pulldown_release_entry(orient: super::ledge_moves::LedgeMove, n: Vec3, feet: Vec3) -> super::ledge::LedgeEntry {
+    let mut e = super::ledge::LedgeEntry::at((orient.hand_l + orient.hand_r) * 0.5, n, feet, super::ledge::LedgeSubState::PullDown);
+    e.hand_l = orient.hand_l;
+    e.hand_r = orient.hand_r;
+    e.entry_move = Some(orient);
+    e
 }
 
 /// The Ledge entry (SubState 11 PullDown, `PullDown_Enter` 0xDDE4D0) that plays the pull-down's three stages.

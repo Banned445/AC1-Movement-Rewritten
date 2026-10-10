@@ -836,7 +836,8 @@ fn pull_down_from_a_roof_edge_into_a_wall_hang() {
     // roof A: x 5..11, h 3.5; stand near its +X edge facing +X (over the drop)
     let mut s = Sim::new(Vec3::new(10.6, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
     s.run(0.2);
-    s.press_legs();
+    // the empty hand at the edge (interpreter 0xEE8A33: pressed within 0.2 s)
+    s.press_hand();
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
     let mv = s.data().ledge.mv.expect("orientation");
     assert_eq!(mv.kind, MoveKind::PullDown { stage: 1 });
@@ -862,6 +863,8 @@ fn walking_into_a_roof_edge_stops_then_steps_back() {
     s.pad(Vec3::X, 1.0, false, false);
     assert!(s.run_until(3.0, |s| s.ground().ledge_stop.is_some()), "never stopped: {:?}", s.body().feet);
     assert_eq!(s.ground().oneshot.map(|o| o.blend.id), Some(LEDGE_STOP_START));
+    // the stick let go during the start action: no pull-down, the end action steps back
+    s.pad(Vec3::X, 0.0, false, false);
     assert!(s.run_until(1.0, |s| s.ground().ledge_stop.is_some_and(|l| l.ending)));
     assert_eq!(s.ground().oneshot.map(|o| o.blend.id), Some(LEDGE_STOP_END));
     let at_end = s.body().feet;
@@ -870,15 +873,10 @@ fn walking_into_a_roof_edge_stops_then_steps_back() {
     // the end action steps back (~0.5 m), still on the roof, no fall
     assert!(s.body().feet.x < at_end.x - 0.3, "stepped back: {:?}", s.body().feet);
     assert_eq!(s.loco().current, ActorContextId::Ground);
-    // still pushing into the edge: no new stop until the stick lets go (PORT lock)
-    s.run(1.0);
-    assert!(s.ground().ledge_stop.is_none());
-    assert_eq!(s.loco().current, ActorContextId::Ground, "held at the edge, no fall");
-    assert!(s.body().feet.x < edge - 0.03, "held behind the edge: {:?}", s.body().feet);
-    s.pad(Vec3::X, 0.0, false, false);
-    s.run(0.1);
+    // walking in again stops again; holding on into the edge then hangs from it
     s.pad(Vec3::X, 1.0, false, false);
-    assert!(s.run_until(1.0, |s| s.ground().ledge_stop.is_some()), "stops again after letting go");
+    assert!(s.run_until(2.0, |s| s.ground().ledge_stop.is_some()), "stops again");
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ledge), "held into the edge: the pull-down");
 }
 
 #[test]
@@ -887,8 +885,8 @@ fn pull_down_from_the_ledge_stop_uses_the_edge_stop_orientation() {
     let mut s = Sim::new(Vec3::new(-11.0, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, false, false);
     assert!(s.run_until(3.0, |s| s.ground().ledge_stop.is_some()));
-    s.press_legs();
-    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
+    // still pushing into the edge when the start action is done (0xEE8977 / guard 0xD9D580): the pull-down
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
     let mv = s.data().ledge.mv.expect("orientation");
     assert_eq!(mv.kind, MoveKind::PullDown { stage: 1 });
     assert_eq!(mv.seq[0].map(|a| a.id), Some(PULLDOWN_ORIENT[0]));
@@ -1685,16 +1683,40 @@ fn obstacle_collision_with_a_knee_high_obstacle_is_the_foot_collide() {
 }
 
 #[test]
-fn standing_at_a_roof_edge_looks_down_toward_it() {
-    // roof A (x -3..3, top 3), standing 0.3 m from its +X edge facing -Z: the edge is on the right
-    let mut s = Sim::new(Vec3::new(2.7, 3.0, 12.0), 0.0);
-    s.run(0.3);
-    let ld = s.ground().look_down.expect("look-down");
+fn walking_into_a_roof_edge_halts_then_looks_down() {
+    // roof A (x -3..3, top 3: a 3 m drop, under the ledge stop's 5 m): walking into its +X edge in low profile halts
+    // at it (0xEE7C31); held there for more than 0.25 s the interpreter sends event 119 (0xEE87DE–0xEE8844)
+    let mut s = Sim::new(Vec3::new(-1.0, 3.0, 12.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(5.0, |s| s.ground().edge_halt_t > 0.0), "never halted: {:?}", s.body().feet);
+    s.run(0.15);
+    assert!(s.ground().look_down.is_none(), "not before 0.25 s");
+    assert!(s.run_until(0.3, |s| s.ground().look_down.is_some()), "no look-down");
+    let ld = s.ground().look_down.unwrap();
     let w = ld.action.weights();
-    assert!(w[2] > 0.95 && w[1] == 0.0, "right look-down: {w:?}");
+    assert!(w[0] > 0.9, "front look-down: {w:?}");
+    assert!(s.body().feet.x < 3.0 && s.loco().current == ActorContextId::Ground, "on the roof: {:?}", s.body().feet);
+    // letting go keeps it (the player sends no end event); turning the stick off the edge walks away
+    s.pad(Vec3::X, 0.0, false, false);
+    s.run(0.5);
+    assert!(s.ground().look_down.is_some(), "kept after letting go");
     s.pad(Vec3::NEG_X, 1.0, false, false);
-    s.run(0.1);
-    assert!(s.ground().look_down.is_none(), "the stick ends it");
+    assert!(s.run_until(0.5, |s| s.ground().look_down.is_none()), "walking away ends it");
+}
+
+#[test]
+fn the_empty_hand_does_not_pull_down_away_from_an_edge_and_legs_never_does() {
+    // the Wait pull-down's sender is the empty hand (0xEE8A33); Legs at the edge is not a pull-down (the old stand-in)
+    let mut s = Sim::new(Vec3::new(10.6, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
+    s.run(0.2);
+    s.press_legs();
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ground, "Legs: no pull-down");
+    let mut s = Sim::new(Vec3::new(8.0, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
+    s.run(0.2);
+    s.press_hand();
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ground, "no edge in reach: no pull-down");
 }
 
 // ---------------------------------------------------------------- pass-over (RE/04 §4.1.13)
@@ -3676,4 +3698,351 @@ fn climbing_sideways_hangs_from_a_wall_top_at_the_hands() {
     let l = &s.data().ledge;
     assert!(l.normal.x < -0.99 && (l.hand_l.y - 3.6).abs() < 0.05, "on block Z's edge: {:?} {:?}", l.normal, l.hand_l);
     assert_eq!(l.mv.and_then(|m| m.seq[0]).map(|a| a.id), Some(CLIMB_TO_HANG[0][4]), "`_l_hangwall`");
+}
+
+#[test]
+fn free_running_onto_a_haystack_carts_rim_drops_into_the_haystack() {
+    use crate::player::hay::HayEntry;
+    // live 2026-10-09: the free run hops onto the cart's 1.2 m rim, then the support search of the free-step arrival
+    // (NarrowObject `CheckSupportAndFall` 0xE51190) finds the haystack and drops in as FreeStep (A2 test yard)
+    let mut s = Sim::new(Vec3::new(-104.0, 0.0, -126.0), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    let on_rim = std::cell::Cell::new(false);
+    let ok = s.run_until(5.0, |s| {
+        if s.loco().current == ActorContextId::Ground && s.body().feet.y > 1.1 {
+            on_rim.set(true);
+        }
+        s.loco().current == ActorContextId::HayStack
+    });
+    assert!(ok, "never got in: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(on_rim.get(), "landed on the rim first");
+    assert_eq!(s.data().hay.kind, HayEntry::FreeStep);
+}
+
+#[test]
+fn falling_past_climb_holds_with_the_hand_held_catches_into_the_climb() {
+    use crate::player::air_catches::CLIMB_CATCH;
+    // CheckAirCatch 0xE0BB70 → FindLedgeCatch 0xE0A990 (hands at the feet + 1.4 m) with holds for the feet 1.2 m below
+    // (sub_E0A810) → the climb catch, type 1: the Climb context (the tower face z 27, bands every 0.6 m)
+    let from = Vec3::new(-20.0, 6.0, 26.45);
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "no climb catch: {:?} {:?}", s.loco().current, s.body().feet);
+    let c = &s.data().climb;
+    assert!((c.hand_l.y - c.foot_l.y - 1.2).abs() < 0.05, "hands 1.2 m above the feet: {:?} {:?}", c.hand_l, c.foot_l);
+    assert!(c.move_action.is_some_and(|a| CLIMB_CATCH.contains(&a)), "the climb catch plays: {:?}", c.move_action);
+}
+
+#[test]
+fn a_long_fall_beside_a_free_hang_edge_catches_one_handed_to_the_side() {
+    use crate::player::air_catches::FREE_CATCH_SIDE;
+    // sub_DFFE30 (fall of 3 m or more): one hold at the feet + 1.95 m, ahead along the reach; the balcony slab's south
+    // edge (z 35.4, 2.9 m, no wall below) lies 90° to the side of the facing → the side free-hang catch, one hand
+    // facing +X, the stick toward the slab (+Z): the manual grab's box lies along the stick, 0.5 m ahead
+    let from = Vec3::new(1.0, 5.2, 34.9);
+    let mut s = Sim::new(from, -std::f32::consts::FRAC_PI_2);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::Z, 0.6, false, false);
+    s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ledge), "no catch: {:?} {:?}", s.loco().current, s.body().feet);
+    s.run(0.05);
+    let l = &s.data().ledge;
+    assert!(l.catch_action.is_some_and(|a| FREE_CATCH_SIDE.contains(&a)), "a side catch: {:?}", l.catch_action.map(|a| format!("{a:#x}")));
+    assert!(l.catch_one_hand.is_some());
+    assert_eq!(l.hang_type, crate::player::ledge::LedgeHangType::Free);
+}
+
+#[test]
+fn landing_on_a_roofs_lip_steps_off_the_edge() {
+    use crate::player::air_catches::STEP_OFF;
+    // InAir sub-state 3 (0xE0D684): a flat landing with the feet within 0.15 m of the roof edge (roof x 38..44, z
+    // 9..15, 3 m) → the step-off action, then the fall to the street
+    // facing the drop (-Z): `step_off_back` (its root steps 0.48 m forward), then the fall to the street
+    let from = Vec3::new(41.0, 5.0, 9.1);
+    let mut s = Sim::new(from, 0.0);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.5, |s| s.data().air.edge_landed), "no edge landing: {:?} {:?}", s.loco().current, s.body().feet);
+    assert_eq!(s.data().air.flight.map(|a| a.id), Some(STEP_OFF[1]), "step_off_back");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "never reached the street: {:?}", s.body().feet);
+    // facing into the roof (+Z): `step_off_front` steps 0.48 m backward off the lip; falling in front of the face with
+    // its top at the feet, the knee catch (type 0) takes the edge again and stands up
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.5, |s| s.data().air.edge_landed), "no edge landing facing the roof");
+    assert_eq!(s.data().air.flight.map(|a| a.id), Some(STEP_OFF[0]), "step_off_front");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood again");
+    assert!((s.body().feet.y - 3.0).abs() < 0.05, "back on the roof: {:?}", s.body().feet);
+}
+
+
+#[test]
+fn edge_landing_finds_the_roof_edge_at_the_feet() {
+    use crate::player::air_catches::{edge_landing, STEP_OFF};
+    let (collision, guidance) = crate::level::geometry();
+    // the roof x 38..44, z 9..15, 3 m: feet 0.1 m inside its south edge (normal -Z), facing +Z (away from the drop)
+    let got = edge_landing(Vec3::new(41.0, 3.0, 9.1), Vec3::Z, &guidance, &collision);
+    assert!(got.is_some(), "no edge at the feet");
+    let (id, face) = got.unwrap();
+    assert_eq!(id, STEP_OFF[0], "facing away from the drop: step_off_front");
+    assert!(face.z > 0.9, "keeps facing away from the drop: {face:?}");
+    // well inside the roof: nothing
+    assert!(edge_landing(Vec3::new(41.0, 3.0, 12.0), Vec3::Z, &guidance, &collision).is_none());
+}
+
+#[test]
+fn falling_in_front_of_a_knee_high_top_catches_it_and_stands_up() {
+    use crate::player::air_catches::KNEE_CATCH;
+    // CheckAirCatch type 0 (sub_E04630 / sub_B2E240): falling just in front of the 3 m roof's south face (x 38..44, z
+    // 9..15) with its top at the feet → the knee catch, then the stand-up onto the roof
+    let from = Vec3::new(41.0, 4.0, 8.62);
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ledge), "no knee catch: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.data().ledge.mv.and_then(|m| m.seq[0]).is_some_and(|a| KNEE_CATCH.contains(&a.id)), "the knee catch plays");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood up: {:?}", s.loco().current);
+    let f = s.body().feet;
+    assert!((f.y - 3.0).abs() < 0.05 && f.z > 9.0, "standing on the roof: {f:?}");
+}
+
+
+#[test]
+fn walking_and_running_off_an_edge_land_in_the_live_times() {
+    // live 2026-10-09 (RE/18 §1): event 68's free jump down (0xDA7A10) lands a 1.80 m drop in 0.44–0.49 s and a 3.16 m
+    // drop in 0.58–0.68 s, rising 0.01–0.05 m first. The port's low-profile walk-off is a little slower (0.52 s) and
+    // rises 0.12 m (PORT: the takeoff clip's root; which clip the game plays there is not recorded).
+    for (from, h, stick, high, (lo, hi)) in [
+        (Vec3::new(70.0, 1.8, 60.5), 1.8, 1.0, true, (0.42, 0.50)),
+        (Vec3::new(70.0, 1.8, 60.5), 1.8, 0.6, false, (0.42, 0.55)),
+        (Vec3::new(7.0, 3.2, 23.0), 3.2, 1.0, true, (0.56, 0.70)),
+    ] {
+        let mut s = Sim::new(from, 0.0);
+        s.pad(Vec3::NEG_Z, stick, high, false);
+        assert!(s.run_until(5.0, |s| s.loco().current == ActorContextId::InAir), "never left the edge ({h} m)");
+        let mut t = 0.0;
+        let mut top = f32::MIN;
+        while s.loco().current == ActorContextId::InAir && t < 3.0 {
+            s.run(1.0 / 60.0 + 1e-4);
+            t += 1.0 / 60.0;
+            top = top.max(s.body().feet.y);
+        }
+        assert_eq!(s.loco().current, ActorContextId::Ground, "{h} m: landed");
+        assert!(s.body().feet.y.abs() < 0.05, "{h} m: on the street {:?}", s.body().feet);
+        assert!(t > lo && t < hi, "{h} m (stick {stick}, high {high}): {t:.3} s in the air");
+        assert!(top - h < 0.15, "{h} m: rose {:.3} m", top - h);
+    }
+}
+
+
+#[test]
+fn the_pull_down_reception_blends_by_the_walls_lean() {
+    use crate::collision::{Aabb3, CollisionWorld};
+    use crate::player::ledge_moves::pulldown_wall_weights;
+    // 0xDDF0AA: the line from the foot support up to the hands, from vertical. A plain wall: straight.
+    let mut c = CollisionWorld::default();
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
+    assert_eq!(pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c), [1.0, 0.0, 0.0]);
+    // the wall 0.3 m further in at the feet (the hands 0.3 m out, 1 m up: 16.7°): toward 30_out
+    let mut c = CollisionWorld::default();
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 2.5, -0.3) });
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 2.5, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
+    let w = pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c);
+    assert!((w[1] - 0.3f32.atan2(1.0) / 30f32.to_radians()).abs() < 0.02 && w[2] == 0.0, "{w:?}");
+    // the wall 0.4 m further out at the feet (a plinth): toward 45_in
+    let mut c = CollisionWorld::default();
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 2.5, 0.4) });
+    c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 2.5, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
+    let w = pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c);
+    assert!((w[2] - 0.4f32.atan2(1.0) / 45f32.to_radians()).abs() < 0.02 && w[1] == 0.0, "{w:?}");
+}
+
+#[test]
+fn a_pull_down_with_no_hands_on_the_edge_releases_into_a_fall() {
+    use crate::player::ledge_moves::MoveKind;
+    // PullDownSubState 4 (0xDDFCF0 → 0xDDA100): no edge for the hands at the descent → the orientation, then the
+    // let-go into InAir (origin HangWall)
+    let (p, n) = (Vec3::new(11.0, 3.5, 12.0), Vec3::X);
+    let empty = crate::guidance::GuidanceWorld::default();
+    let (c, _) = crate::level::geometry();
+    let feet = Vec3::new(10.6, 3.5, 12.0);
+    let orient = crate::player::ledge_moves::pulldown(p, n, feet, true, &empty, &c).expect_err("no hands");
+    assert_eq!(orient.kind, MoveKind::PullDown { stage: 4 });
+    let mut s = Sim::new(feet, -std::f32::consts::FRAC_PI_2);
+    force(&mut s, crate::player::TransitionSetup::ToLedge(crate::player::ground::pulldown_release_entry(orient, n, feet)));
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::InAir), "never let go: {:?}", s.loco().current);
+    assert_eq!(s.data().air.fall_origin, air::FallOrigin::HangWall);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "fell to the street");
+}
+
+#[test]
+fn vaulting_a_roofs_parapet_pulls_down_to_hang_on_the_far_side() {
+    use crate::player::ledge_moves::MoveKind;
+    use crate::player::passover::{PassOverPhase, PULLDOWN_ORIENT};
+    // A2 yard: a 4 m roof with a 1 m parapet (z -118.3..-118.0, top 5 m) over a 5 m drop. The vault finds the far
+    // edge, room at it and 3 m or more beyond (0xDD2BD0) → pull-down type 4 (0xDE0220), hanging on the far side
+    let mut s = Sim::new(Vec3::new(-120.0, 4.0, -113.4), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(0.4);
+    s.press_legs();
+    assert!(s.run_until(0.6, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.body().feet);
+    assert_eq!(s.data().air.target.map(|t| t.type_flags), Some(2), "pass-over target");
+    assert!(s.run_until(2.0, |s| s.data().ledge.pass_over.is_some_and(|p| p.phase == PassOverPhase::Vault)), "no vault: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::PullDown { stage: 1 })), "no pull-down: {:?} {:?}", s.loco().current, s.body().feet);
+    let m = s.data().ledge.mv.unwrap();
+    assert!(m.seq[0].is_some_and(|a| PULLDOWN_ORIENT.contains(&a.id)), "the pass-over orientation");
+    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_none() && s.data().ledge.queue.is_empty()), "never settled");
+    let l = &s.data().ledge;
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    assert!(l.normal.dot(Vec3::NEG_Z) > 0.99 && (l.hand_l.y - 5.0).abs() < 0.05, "hanging on the parapet's far face: {:?} {:?}", l.normal, l.hand_l);
+    assert!(s.body().feet.z < -118.3, "on the far side: {:?}", s.body().feet);
+}
+
+#[test]
+fn a_static_jump_at_a_wall_top_hangs_from_it() {
+    // the jump-up wall (x 8..16, face z 41.7, top 2.6 m): standing at it in high profile, the static request finds
+    // the top through 0xE165D0 (type 128: no wall above, a wall below) and jumps up into a wall hang
+    let mut s = Sim::new(Vec3::new(12.0, 0.0, 41.1), FACE_PZ);
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    s.press_legs();
+    s.run(0.4);
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ledge), "no hang: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.run_until(2.0, |s| s.data().ledge.mv.is_none()), "never settled");
+    let l = &s.data().ledge;
+    assert!((l.hand_l.y - 2.6).abs() < 0.05 && l.normal.dot(Vec3::NEG_Z) > 0.99, "hanging on the wall top: {:?} {:?}", l.hand_l, l.normal);
+}
+
+#[test]
+fn falling_against_a_haystacks_side_enters_it_from_the_air() {
+    use crate::player::hay::{HayEntry, HAYSTACK_FROM_AIR};
+    // 0xE05490: a contact normal at most 0.9 up → SideJump (`xx_h_air_to_haystack`, 0xE42700). The haystack at
+    // (37.5, 26), x 36.4..38.6, z 24.9..27.1, top 1.5 m: fall toward its -Z side from 1.2 m
+    let from = Vec3::new(37.5, 1.2, 23.9);
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::new(0.0, 0.0, 4.0), origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::HayStack), "no entry: {:?} {:?}", s.loco().current, s.body().feet);
+    assert_eq!(s.data().hay.kind, HayEntry::SideJump);
+    assert_eq!(s.data().hay.action.map(|a| a.id), Some(HAYSTACK_FROM_AIR));
+}
+
+#[test]
+fn free_running_onto_a_narrow_rim_drops_into_the_haystack_from_the_beam() {
+    use crate::player::hay::HayEntry;
+    // A2 yard: the cart's 0.3 m rim pairs into a runtime beam; the free run lands on it in NarrowObject and the
+    // arrival's support search (0xE51190) drops in as FreeStep
+    let mut s = Sim::new(Vec3::new(-112.0, 0.0, -119.5), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, true);
+    let on_rim = std::cell::Cell::new(false);
+    let ok = s.run_until(5.0, |s| {
+        if s.loco().current == ActorContextId::NarrowObject {
+            on_rim.set(true);
+        }
+        s.loco().current == ActorContextId::HayStack
+    });
+    assert!(ok, "never got in: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(on_rim.get(), "landed on the rim's beam first");
+    assert_eq!(s.data().hay.kind, HayEntry::FreeStep);
+}
+
+fn on_ladder(base: Vec3, top: Vec3, h: f32) -> Sim {
+    use crate::player::ladder::{LadderEntry, ATTACH_OUT};
+    let n = Vec3::NEG_Z;
+    let from = base + Vec3::Y * h + n * ATTACH_OUT;
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToLadder(LadderEntry { base, top, n, from, facing: -n, from_ledge: true, height: Some(h), ..Default::default() }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(0.6);
+    assert_eq!(s.loco().current, ActorContextId::Ladder);
+    s
+}
+
+#[test]
+fn pushing_sideways_on_a_ladder_jumps_onto_the_climb_wall_beside_it() {
+    use crate::player::ladder::SIDE_JUMP;
+    // event 4 (0xE27610 → sub_E228E0): the ladder at x -100 and wall W (x -105.95..-102.05, bands every 0.6 m) 2 m to
+    // its right (facing +Z): the side jump onto its holds, the ladder's own table, then the Climb context
+    let mut s = on_ladder(Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), 2.0);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb), "no side jump: {:?}", s.loco().current);
+    let starts: Vec<u32> = SIDE_JUMP[0].iter().map(|f| f[1][0]).collect();
+    assert!(s.data().climb.move_action.is_some_and(|a| starts.contains(&a)), "the ladder's start (right): {:?}", s.data().climb.move_action.map(|a| format!("{a:#x}")));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().climb.reach.is_none() && s.data().climb.moving.is_none()), "never settled");
+    let c = &s.data().climb;
+    assert_eq!(s.loco().current, ActorContextId::Climb);
+    assert!(c.hand_l.x < -102.0 && c.hand_r.x < -102.0, "on wall W: {:?} {:?}", c.hand_l, c.hand_r);
+}
+
+#[test]
+fn pushing_sideways_on_a_ladder_jumps_into_a_hang_on_the_ledge_beside_it() {
+    use crate::player::ledge::LedgeHangType;
+    // event 4: the ladder at x 144.4 and the 2.6 m wall (x 140..143) 1.4 m to its right: no ledge within the side move's
+    // 0.8 m (sub_E1FC80), so the side jump (sub_E228E0) into a wall hang on its top edge
+    let mut s = on_ladder(Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.0, 9.7), 1.5);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ledge), "no side jump: {:?}", s.loco().current);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none() && s.data().ledge.queue.is_empty()), "never settled");
+    let l = &s.data().ledge;
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    assert!((l.hand_l.y - 2.6).abs() < 0.05 && l.hand_l.x < 143.05 && l.hand_r.x < 143.05, "hanging on the wall top: {:?} {:?}", l.hand_l, l.hand_r);
+    assert_eq!(l.hang_type, LedgeHangType::Wall);
+}
+
+#[test]
+fn pushing_sideways_on_a_ladder_moves_onto_the_ledge_right_beside_it() {
+    use crate::player::ladder::TO_HANG_SIDE;
+    // event 4's first search (sub_E1FC80): the A2 yard's ladder at x -131.2 and the 3 m wall's top edge ending 0.8 m to
+    // its right: `ladder_wait_tr_hangwall_right` while the root goes to the wall hang
+    let mut s = on_ladder(Vec3::new(-131.2, 0.0, -116.6), Vec3::new(-131.2, 6.0, -116.6), 1.5);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ledge), "no side move: {:?}", s.loco().current);
+    assert_eq!(s.data().ledge.mv.and_then(|m| m.seq[0]).map(|a| a.id), Some(TO_HANG_SIDE[0][1]));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "never settled");
+    let l = &s.data().ledge;
+    assert!((l.hand_l.y - 3.0).abs() < 0.05 && l.hand_r.x < -131.95, "hanging on the 3 m top: {:?} {:?}", l.hand_l, l.hand_r);
+}
+
+#[test]
+fn pushing_sideways_on_a_free_standing_ladder_swings_round_to_its_back() {
+    use crate::player::ladder::{LadderPhase, REVOLVE};
+    // event 5 (guard 0xE262B0): nothing behind the A2 yard's free-standing ladder, so the sideways stick in the wait
+    // swings round it (`xx_h_ladder_turn_r`, 0xE1D730) and the climb carries on from the far side (0xE21EF0)
+    let mut s = on_ladder(Vec3::new(-125.0, 0.0, -121.0), Vec3::new(-125.0, 5.0, -121.0), 1.5);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(0.5, |s| matches!(s.data().ladder.phase, Some(LadderPhase::Revolve(_)))), "no revolve");
+    assert_eq!(s.data().ladder.action.map(|a| a.id), Some(REVOLVE[1]));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled");
+    let (l, f) = (&s.data().ladder, s.body().feet);
+    assert!(l.n.dot(Vec3::Z) > 0.99, "climbing from the back: {:?}", l.n);
+    assert!((f.z + 120.5).abs() < 0.05 && (f.x + 125.0).abs() < 0.05, "0.5 m out on the far side: {f:?}");
+    assert!(s.body().forward().dot(Vec3::NEG_Z) > 0.99, "facing the ladder: {:?}", s.body().forward());
+    // climbing on from there reaches the top
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(6.0, |s| s.data().ladder.height > 2.4), "climbs from the back side");
+}
+
+#[test]
+fn a_ladder_leaning_over_the_climber_swings_him_onto_its_top_side() {
+    use crate::player::ladder::{LadderPhase, REVOLVE};
+    // `HumanLadder__TryTurn` 0xE26440: on the underside of a ladder leaning 18°, the climb state turns round to the
+    // top side at once (room to the left: `turn_l`), then the climb goes up onto the block
+    let mut s = on_ladder(Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 4.5, -122.5), 1.0);
+    let saw = std::cell::Cell::new(false);
+    assert!(s.run_until(2.0, |s| {
+        if s.data().ladder.action.is_some_and(|a| a.id == REVOLVE[0]) {
+            saw.set(true);
+        }
+        saw.get() && s.data().ladder.phase == Some(LadderPhase::Wait)
+    }), "no turn: {:?}", s.data().ladder.phase);
+    assert!(s.data().ladder.n.dot(Vec3::Z) > 0.99, "on the top side: {:?}", s.data().ladder.n);
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ground), "never reached the top: {:?} {:?}", s.data().ladder.phase, s.body().feet);
+    assert!((s.body().feet.y - 4.5).abs() < 0.1 && s.body().feet.z < -122.6, "on the block: {:?}", s.body().feet);
 }

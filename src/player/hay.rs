@@ -11,7 +11,11 @@
 //!   - **Ground** (2, 0xE42420) / **FreeStep** (1, 0xE42190): one of `0x244CD280` / `0x244CFACB`
 //!     (`xx_h_freestep_footr_to_haystack_01/02`, picked by the game's LCG bit), the root interpolated to the
 //!     haystack over the action's length; Ground turns to face the haystack, FreeStep keeps the facing. Ground is
-//!     the Ground context's event 122 (IHumanGround vt1592 / vt1596, guard 0xD8F0B0).
+//!     the Ground context's event 122 (IHumanGround vt1592 / vt1596, guard 0xD8F0B0). FreeStep comes from
+//!     NarrowObject (`CheckSupportAndFall` 0xE51190: a haystack found by the support search while standing on a
+//!     narrow object, once the action is past 0.6). Live (RE/18 §9): walking into a rimmed haystack hops onto its
+//!     rim and drops in as FreeStep; the Leap of Faith lands as Top. PORT: the greybox haystack has no rim, so the
+//!     port enters it by the Ground rule; the rim route is not ported.
 //! - Wait (`ChooseWait` 0xE416B0 → `PlayWaitHigh` 0xE408C0): `0x23A9666D` `xx_h_haystack_wait`.
 //! - Hop out: event 3 in the wait (`Wait_HandleEvent` 0xE43BD0), guard `Guard_HopOut` 0xE434E0: the ray along
 //!   the wanted direction leaves the haystack's footprint; the exit point (+0.5 m along it, 1.25 m up) must
@@ -110,6 +114,55 @@ impl HumanHayStackData {
             }
         }
     }
+}
+
+/// The haystack search that `HumanNarrowObject__CheckSupportAndFall` 0xE51190 runs while the free-step arrival plays
+/// (IHuman vt80 `IHuman__FindHayStackSupport` 0xB10A60 → `Human__FindHayStackSupport` 0xE17D20 → `Human__sub_E15AA0`
+/// with 3.0 / 3.0 / 2.5 / 2.5 / 0 / 0 / 1.5 m, 80° / 80°, 0.66; RE/19 §1.2). A haystack (or hiding place) qualifies when
+/// its top, the entity origin + 1.6 m, is
+/// - above the feet by more than 0 and less than 1.5 m (the blend b = (1.5 − dz) / 1.5 scales the limits, all equal
+///   here);
+/// - within ±3 m sideways and ±2.5 m along `dir` in the frame of `dir`;
+/// - in front of `facing` (the flat directions to it and the facing at least 90° apart is a reject);
+/// - within 80° of `dir` seen from 1.5 m behind the feet;
+/// - reachable: a clear ray from 0.4 m above the feet to 0.66 of the way to the top (0.4 m up), then from there to
+///   0.25 m above the top (`sub_E1C470`).
+/// The first one that qualifies is taken (the game walks its entity list in order).
+pub fn find_support(feet: Vec3, dir: Vec3, facing: Vec3, stacks: &[Aabb3], collision: &CollisionWorld) -> Option<Aabb3> {
+    const TOP: f32 = 1.6;
+    let d = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+    let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
+    if d == Vec3::ZERO {
+        return None;
+    }
+    let right = super::right_of(d);
+    let clear = |a: Vec3, b: Vec3| {
+        let v = b - a;
+        let len = v.length();
+        len < 1e-4 || collision.ray_distance(a, v / len, len, crate::layers::MAIN_CHARACTER) >= len - 1e-4
+    };
+    stacks.iter().copied().find(|s| {
+        let top = Vec3::new((s.min.x + s.max.x) * 0.5, s.min.y + TOP, (s.min.z + s.max.z) * 0.5);
+        let dz = top.y - feet.y;
+        if !(dz > 0.0 && dz < 1.5) {
+            return false;
+        }
+        let rel = top - feet;
+        if right.dot(rel).abs() >= 3.0 || d.dot(rel).abs() >= 2.5 {
+            return false;
+        }
+        let flat = Vec3::new(rel.x, 0.0, rel.z).normalize_or_zero();
+        if flat.dot(f) < 0.0 {
+            return false;
+        }
+        let from_behind = Vec3::new(top.x - (feet.x - d.x * 1.5), 0.0, top.z - (feet.z - d.z * 1.5)).normalize_or_zero();
+        if from_behind == Vec3::ZERO || from_behind.dot(d).clamp(-1.0, 1.0).acos() >= 80f32.to_radians() {
+            return false;
+        }
+        let a = feet + Vec3::Y * 0.4;
+        let mid = feet + (top - feet) * 0.66 + Vec3::Y * 0.4;
+        clear(a, mid) && clear(mid, top + Vec3::Y * 0.25)
+    })
 }
 
 /// Ground event 122's guard (0xD8F0B0): a controller contact with a haystack (entity descriptor 8; 9 = hiding place),

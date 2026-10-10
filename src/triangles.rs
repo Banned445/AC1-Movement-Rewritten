@@ -9,14 +9,23 @@ pub struct Triangle {
     pub bounds: Aabb3,
     pub normal: Vec3,
     pub layer: u8,
+    /// The surface's sound material (CollisionMaterial +8), `NO_MATERIAL` when unknown.
+    pub material: u16,
 }
+
+pub const NO_MATERIAL: u16 = u16::MAX;
 
 impl Triangle {
     pub fn new(vertices: [Vec3; 3], layer: u8) -> Option<Self> {
         let [a, b, c] = vertices;
         let n = (b - a).cross(c - a);
         if !a.is_finite() || !b.is_finite() || !c.is_finite() || n.length_squared() < 1e-14 { return None; }
-        Some(Self { vertices, normal: n.normalize(), bounds: Aabb3 { min: a.min(b).min(c), max: a.max(b).max(c) }, layer })
+        Some(Self { vertices, normal: n.normalize(), bounds: Aabb3 { min: a.min(b).min(c), max: a.max(b).max(c) }, layer, material: NO_MATERIAL })
+    }
+
+    pub fn with_material(mut self, material: Option<u16>) -> Self {
+        self.material = material.unwrap_or(NO_MATERIAL);
+        self
     }
 
     pub fn overlaps(&self, min: Vec3, max: Vec3) -> bool {

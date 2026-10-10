@@ -692,7 +692,8 @@ pub fn update_cloth(time: Res<Time>, wind: Res<crate::wind::WindField>, transfor
         let mut settings = cloth.settings.clone();
         if CLOTH_NATIVE_TIMING {
             cloth.state.sample_entity_motion(player.translation(), player.rotation(), time.delta_secs());
-            let action = animations.get(cloth.player).ok().and_then(|a| a.items.get(a.item)).map(|a| a.action);
+            // 0x5B55B0: the action from 0x723D10; none (a transition between actions) leaves the strength at 1
+            let action = animations.get(cloth.player).ok().and_then(|a| a.selected_action());
             settings.action_strength = action.and_then(|id| settings.action_settings.iter().find(|(key, _)| *key == id)).map_or(1.0, |(_, strength)| *strength);
         }
         let capsules: Option<Vec<_>> = settings.colliders.iter().zip(&cloth.collider_joints).map(|(c, &joint)| {

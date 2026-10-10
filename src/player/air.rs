@@ -47,6 +47,9 @@ pub struct Landing {
     pub action: Option<ActionBlend>,
 }
 
+/// PORT: the capsule's radius against a greybox haystack's side (the native contact is the controller's).
+const HAY_SIDE_R: f32 = 0.45;
+
 /// Drop sub-state (4) animations (`HumanInAir__EnterDropState` 0xE064C0, tables 0x1A2EAE0 / 0x1A2EB30 filled by
 /// 0xDFF680; HumanGround_Hurt block): the entry item by [drop type][side 0 front, 1 back], then the falling loop
 /// `hurt_fall_{front,back}`. Ground loss sends types 0..6 (`HumanGround__TransitionToInAirFall` 0xD8C380).
@@ -161,6 +164,10 @@ pub struct HumanInAirData {
     pub time_in_air: f32,
     /// Last catch (fall height ≥ 3 m selects the long catch animations in the game, 0xE0BB70).
     pub long_catch: bool,
+    /// InAirData +0x190: the hold let go of (a ledge or climb release); catches must be 0.5 m below it (0xE0A990).
+    pub release_hold: Option<Vec3>,
+    /// The edge landing (InAir +225 bit 2) has played in this air stay.
+    pub edge_landed: bool,
     pub mode: AirMode,
     /// JumpApexPosition (+0xD0): where descent started — the fall-height reference.
     pub apex_y: f32,
@@ -191,6 +198,8 @@ pub struct HumanInAirData {
     pub drop: Option<(usize, usize, Option<Vec3>)>,
     /// First steep contact and rag-fall requirement (0xE038A0 / 0xE05200).
     pub slope_slide: super::ground_extras::SlopeSlide,
+    /// `HumanInAir__AntiStuckNudge` 0xE0B1E0.
+    pub anti_stuck: super::falls::AntiStuck,
     /// A run jump turns from the takeoff facing to its destination over the takeoff (set up on the first update).
     turn_pending: bool,
     /// (takeoff heading, destination heading) of that turn.
@@ -212,7 +221,10 @@ impl HumanInAirData {
         self.free_target = false;
         self.drop = None;
         self.slope_slide = default();
+        self.anti_stuck.reset(self.seq.wrapping_mul(2_654_435_761));
         self.entry_velocity = None;
+        self.release_hold = None;
+        self.edge_landed = false;
         match entry {
             InAirEntry::JumpToTarget { from, target, speed_param, foot_left } => {
                 self.speed_ratio = speed_param;
@@ -524,6 +536,9 @@ pub fn update_air(
         let mut pass_on: Option<super::passover::PassOverEntry> = None;
         let mut swing_on = false;
         let mut ladder_on: Option<super::ladder::LadderEntry> = None;
+        let mut climb_on: Option<super::climb::ClimbEntry> = None;
+        let mut catch_hang: Option<(u32, bool, Option<bool>)> = None;
+        let mut step_off: Option<(u32, Vec3)> = None;
         let foot = (!air.foot_left) as usize;
         match air.mode {
             AirMode::Jump { from, clip_end, aim, apex, duration, t, then_fall_to, real, t_takeoff, fwd } => {
@@ -702,11 +717,13 @@ pub fn update_air(
                 if !AIR_CATCHES && body.velocity.y <= 0.0 && air.apex_y - body.feet.y < 9.0 && air.time_in_air > 0.1 {
                     narrow_on = narrow_catch(body.feet + body.velocity * dt, body.forward(), foot, &guidance, &collision);
                 }
+                let before = body.feet;
+                air.anti_stuck.tick(dt);
                 let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, b.velocity * dt, false, dt) };
                 body.feet = r.position;
-                // PORT: static proxy contacts have no character bodies. The 0.3 m / Data+528
-                // rejection gate (0xE038A0) is inactive until native AntiStuckNudge (0xE0B1C0)
-                // arms it; that recovery path is not yet ported.
+                // PORT: static proxy contacts have no character bodies. While the anti-stuck nudge's gate runs,
+                // contacts within 0.3 m below the start do not count (0xE038A0, Data+528)
+                let gated = air.anti_stuck.ignores_contacts(air.start_y, body.feet.y);
                 let contact = if GAME_GROUND_EXTRAS {
                     super::ground_extras::ground_contact(body.proxy.manifold.iter().map(|c| c.normal.y))
                 } else { super::ground_extras::GroundContact::None };
@@ -728,20 +745,53 @@ pub fn update_air(
                     body.velocity.y = 0.0;
                 }
                 if GAME_FALLS && narrow_on.is_none() {
-                    // 0xE05490 checks hay before ordinary landing. PORT: greybox AABB top crossing replaces
-                    // native controller contacts with type-3, subtype-8/9 entities; side entry is not reconstructed.
-                    hay_on = guidance.haystacks.iter().find(|stack| {
-                        let next = body.feet;
-                        let previous = next - body.velocity * dt;
+                    // 0xE05490 checks hay before ordinary landing: a controller contact with a haystack (type 3,
+                    // descriptor 8 / 9); InAir+340 = the contact normal's z ≤ 0.9, so through the top → Top, against a
+                    // side → SideJump (`EnterFromAir` 0xE42700, `xx_h_air_to_haystack`). The game takes it only while
+                    // InAir knows the haystack (+336, `sub_E03A90`: within 3.5 m in height), i.e. from a jump at a
+                    // haystack target that ends in a free fall (0xB1B8C0) or a let-go record (0xDD7810). PORT: the
+                    // greybox haystacks are not solid; their box stands in for the contact (the top crossed, or a side
+                    // entered by the capsule's 0.45 m), and every fall takes it (LIVE: a plain fall onto a haystack).
+                    let next = body.feet;
+                    let previous = next - body.velocity * dt;
+                    let top = guidance.haystacks.iter().find(|stack| {
                         body.velocity.y < 0.0 && previous.y >= stack.max.y && next.y <= stack.max.y
                             && next.x >= stack.min.x && next.x <= stack.max.x
                             && next.z >= stack.min.z && next.z <= stack.max.z
-                    // a hit through the top: contact normal more than 0.9 up → entry Top (0xE05490 / 0xE00E30)
-                    }).map(|stack| super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
+                    });
+                    let side = |p: Vec3, s: &crate::collision::Aabb3| {
+                        p.x >= s.min.x - HAY_SIDE_R && p.x <= s.max.x + HAY_SIDE_R && p.z >= s.min.z - HAY_SIDE_R && p.z <= s.max.z + HAY_SIDE_R
+                    };
+                    hay_on = top
+                        .map(|stack| (stack, super::hay::HayEntry::Top))
+                        .or_else(|| {
+                            guidance
+                                .haystacks
+                                .iter()
+                                .find(|s| side(next, s) && !side(previous, s) && next.y < s.max.y && next.y + 1.8 > s.min.y)
+                                .map(|stack| (stack, super::hay::HayEntry::SideJump))
+                        })
+                        .map(|(stack, kind)| super::hay::HayStackEntry { stack: *stack, kind, from: body.feet, speed: body.velocity.length() });
                 }
-                if narrow_on.is_some() || hay_on.is_some() {
-                } else if r.landed && body.velocity.y <= 0.0 {
+                // InAir sub-state 3, the edge landing (0xE0D684): a flat contact with edges at the feet, under 9 m
+                let fall_h = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
+                if AIR_CATCHES && narrow_on.is_none() && hay_on.is_none() && r.landed && body.velocity.y <= 0.0 && !air.edge_landed
+                    // PORT: the proxy's contact list is empty on the landing frame; a landing that is not a steep
+                    // contact is the flat contact (GetGroundContactType = 1)
+                    && fall_h < 9.0 && contact != super::ground_extras::GroundContact::Steep
+                {
+                    step_off = super::air_catches::edge_landing(body.feet, body.forward(), &guidance, &collision);
+                }
+                if narrow_on.is_some() || hay_on.is_some() || step_off.is_some() {
+                } else if r.landed && body.velocity.y <= 0.0 && !gated {
                     landed_at = Some(body.feet.y);
+                } else if let Some(v) = (dt > 0.0).then(|| (body.feet - before) / dt).and_then(|moved| {
+                    // `HumanInAir__AntiStuckNudge` 0xE0B1E0: after every landing check failed, a body held still (or
+                    // sliding sideways on a contact) for 0.5 s is pushed out
+                    let has_contacts = !body.proxy.manifold.is_empty();
+                    air.anti_stuck.update(dt, moved, air.target.is_some(), has_contacts, body.feet, body.forward(), |p| collision.capsule_fits(p))
+                }) {
+                    body.velocity = v;
                 } else if !AIR_CATCHES && grasp && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
                     // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
                     // in reach
@@ -769,17 +819,33 @@ pub fn update_air(
                     e.facing = body.forward();
                     e.catch_speed = body.velocity.length();
                     ladder_on = Some(e);
-                } else if manual {
-                    // PORT: the pre-existing generic ledge adapter is outside this catch-geometry pass.
-                    if let Some(h) = find_air_catch(body.feet, reach, &guidance) {
-                        air.long_catch = fall_height >= 3.0;
-                        hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception) });
+                } else if let Some(found) = super::air_catches::ledge_search(body.feet, reach, body.forward(), fall_height, manual, air.release_hold, &guidance, &collision) {
+                    // CheckAirCatch 0xE0BB70: the ledge, climb and free-hang catches (RE/19 §2)
+                    air.long_catch = fall_height >= 3.0;
+                    match found {
+                        super::air_catches::CatchFound::Climb(e) => climb_on = Some(e),
+                        super::air_catches::CatchFound::Hang { mid, normal, wall, action, one_hand } => {
+                            let sub = if wall { LedgeSubState::HangWallReception } else { LedgeSubState::HangFreeReception };
+                            hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(mid, normal, body.feet, sub) });
+                            catch_hang = Some((action, wall, one_hand));
+                        }
                     }
                 }
             }
-            if ladder_on.is_none() && hang_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
+            if ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
                 let ahead = super::air_catches::target_ahead(body.feet, air.target, &collision);
                 if !ahead { narrow_on = narrow_catch(body.feet, body.forward(), foot, &guidance, &collision); }
+                // the knee catch (type 0, 0xE0D58B): an edge at the feet with a drop in front of it and room on top
+                if narrow_on.is_none() && !ahead && body.velocity.y <= 0.0 {
+                    if let Some((edge, n)) = super::air_catches::knee_catch(body.feet, body.forward(), &guidance, &collision) {
+                        let action = super::air_catches::KNEE_CATCH[(fall_height >= 3.0) as usize];
+                        let (knee, stand) = super::ledge_moves::knee_catch_moves(action, body.feet, edge, n);
+                        let mut e = LedgeEntry::at(edge, n, body.feet, LedgeSubState::Pullup);
+                        e.entry_move = Some(knee);
+                        e.entry_rest = [Some(stand), None];
+                        hang_on = Some(e);
+                    }
+                }
             }
         }
 
@@ -794,7 +860,25 @@ pub fn update_air(
         air.prev_y = body.feet.y;
         body.grounded = false;
 
-        if let Some(e) = ladder_on {
+        if let Some(e) = climb_on {
+            // the climb catch (type 1): the catch action plays as the climb's entry while the root goes to the holds'
+            // pose. PORT: the game enters the Ledge context (SubState 13, catch type 1) first.
+            air.mode = AirMode::Idle;
+            body.velocity = Vec3::ZERO;
+            switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
+        } else if let Some((action, facing)) = step_off {
+            // the edge landing: the step-off action, then the fall (request 33), facing the chosen way
+            body.heading = super::heading_of(facing);
+            body.velocity.y = 0.0;
+            let blend = super::ledge_moves::single_item(action, 0);
+            let fall = super::ledge_moves::single_item(action, 1);
+            if let Some(a) = blend {
+                let release = air.release_hold;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::OnPlace { from: body.feet, fwd: facing, action: a, fall }));
+                data.air.edge_landed = true;
+                data.air.release_hold = release;
+            }
+        } else if let Some(e) = ladder_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
@@ -804,6 +888,11 @@ pub fn update_air(
             body.velocity = Vec3::ZERO;
             let flight = air.flight;
             switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
+            if let Some((action, wall, one_hand)) = catch_hang {
+                data.ledge.catch_action = Some(action);
+                data.ledge.catch_free = !wall;
+                data.ledge.catch_one_hand = one_hand;
+            }
             if swing_on {
                 let n = entry.normal;
                 let root = super::ledge::hang_root_at(entry.hand_l, entry.hand_r, n, super::ledge::LedgeHangType::Free, &collision);

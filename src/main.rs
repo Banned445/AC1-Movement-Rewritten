@@ -13,6 +13,7 @@ mod debug_fly;
 mod guidance;
 mod hud;
 mod ik;
+mod bindings;
 mod input;
 mod layers;
 mod level;
@@ -27,12 +28,14 @@ mod proxy;
 mod recorder;
 #[cfg(test)]
 mod sim_tests;
+mod test_areas;
 mod tuning;
 mod triangles;
 mod native_map;
 mod city;
 mod map_menu;
 mod wind;
+mod sound;
 
 use bevy::prelude::*;
 
@@ -69,6 +72,7 @@ fn main() {
             ..default()
         }))
         .init_resource::<collision::CollisionWorld>()
+        .add_plugins(bindings::BindingsPlugin)
         .add_plugins((
             level::LevelPlugin,
             map_menu::MapMenuPlugin,
@@ -87,6 +91,6 @@ fn main() {
             city::CityPlugin,
         ))
         // a tuple takes at most 15 plugins
-        .add_plugins(debug_fly::DebugFlyPlugin)
+        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin, sound::SoundPlugin))
         .run();
 }

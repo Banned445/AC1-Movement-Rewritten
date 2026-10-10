@@ -70,6 +70,39 @@ impl NoiseTables {
     }
 }
 
+/// The 2D gradient-noise tables (Noise__InitPermutation 0x973850 and the 2D/3D gradients of sub_973AD0, seed 84:
+/// three draws per entry, the third giving the 2D gradient's angle).
+pub struct Noise2Tables { perm: [u8; 256], grad: [Vec2; 256] }
+
+impl Noise2Tables {
+    pub fn new() -> Self {
+        let perm = NoiseTables::new().perm;
+        let mut rng = Subtractive::new(84);
+        let grad = std::array::from_fn(|_| {
+            let _z = rng.next();
+            let _a = rng.next();
+            let t = (rng.next() as f64 * 6.283185482025146) as f32;
+            Vec2::new((t as f64).cos() as f32, (t as f64).sin() as f32)
+        });
+        Self { perm, grad }
+    }
+
+    /// Noise__Perlin2D 0x971BE0 (smoothstep weights, coordinates offset by 4096).
+    pub fn noise(&self, x: f32, y: f32) -> f32 {
+        let (x, y) = (x + 4096.0, y + 4096.0);
+        let (ix, iy) = (x as i32, y as i32);
+        let (fx, fy) = (x - ix as f32, y - iy as f32);
+        let p = |i: i32| self.perm[(i & 255) as usize] as i32;
+        let (a, b) = (p(ix), p(ix + 1));
+        let g = |h: i32, dx: f32, dy: f32| { let g = self.grad[p(h) as usize]; g.x * dx + g.y * dy };
+        let sx = (3.0 - fx * 2.0) * fx * fx;
+        let sy = (3.0 - (fy + fy)) * fy * fy;
+        let lo = g(a + iy, fx, fy) + (g(b + iy, fx - 1.0, fy) - g(a + iy, fx, fy)) * sx;
+        let hi = g(a + iy + 1, fx, fy - 1.0) + (g(b + iy + 1, fx - 1.0, fy - 1.0) - g(a + iy + 1, fx, fy - 1.0)) * sx;
+        lo + (hi - lo) * sy
+    }
+}
+
 /// One serialized Wind (Wind__Read 0x5C7F20) placed by its owner entity.
 #[derive(Clone, Debug)]
 pub struct WindSource {

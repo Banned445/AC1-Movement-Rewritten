@@ -703,7 +703,7 @@ pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWo
 
 /// `Human__MeasureDropBeyondEdge` 0xB19620 (max, step out). PORT: one ray down from just past the edge; the exe
 /// sweeps angled rays and follows stepped drops with nested edge reports.
-fn measure_drop(p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld) -> f32 {
+pub(crate) fn measure_drop(p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld) -> f32 {
     let o = p + n * (step + 0.05) + Vec3::Y * 0.05;
     collision.ray_distance(o, -Vec3::Y, max + 0.05, RAY_LAYER) - 0.05
 }
