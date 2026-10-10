@@ -279,8 +279,8 @@ impl GuidanceWorld {
     /// forward × up, forward, up); each candidate edge (the ledge report: no Ladder edges, none steeper than 40°, no
     /// Surface unless `surface`) is cut to the box |x| ≤ width/2, |y| ≤ 0.5, z in [lo, hi] (and to `z_window`, the
     /// report box's heights in world space). With a `wedge`, the capsule's part is cut out first (GuidanceZoneCapsule
-    /// vslot 10 mode 2), then the piece is cut to the two vertical half-spaces through start + lo (up) / hi (down) whose
-    /// normals are the facing (up) or its opposite (down) turned ±(90° − angle) about the vertical. The wall (the lower
+    /// vslot 10 mode 2), then the piece is cut to the two half-spaces through start + lo (up) / hi (down) whose normals
+    /// are the step direction (±z) turned ±(90° − angle) about the forward axis: a V in the wall plane. The wall (the lower
     /// face normal, flattened) must face within 60° (dot < −0.5). On each piece the point nearest the line through
     /// start + x_ref·right along right; the piece farthest along the step wins (|z − (lo − 0.1)| up, |z − (hi + 0.1)|
     /// down), ties within 1 cm going to the point nearest x_ref.
@@ -339,14 +339,15 @@ impl GuidanceWorld {
                 let (mut la, mut lb) = (la + centre, lb + centre);
                 if let Some(w) = wedge {
                     let apex = Vec3::new(0.0, 0.0, if up { lo } else { hi });
-                    // the facing in the local frame (right, forward, up): +y going up, −y going down
-                    let f = if up { Vec3::Y } else { Vec3::NEG_Y };
+                    // the step direction (±z of the local frame right, forward, up) turned ±(90° − a15) about the
+                    // forward axis (`sub_55E390`(a8, a9, …) at 0x116FA59–0x116FAC2): the wedge lies in the wall plane,
+                    // |x| ≤ tan(a15)·|z| from the apex (RE/24 LEDGE-13)
+                    let f = if up { 1.0f32 } else { -1.0 };
                     let turn = std::f32::consts::FRAC_PI_2 - w.angle;
                     let mut ok = true;
                     for s in [1.0f32, -1.0] {
-                        // the facing turned about the vertical in the (x, y) plane of the local frame
                         let (sn, cs) = (turn * s).sin_cos();
-                        let n = Vec3::new(f.x * cs - f.y * sn, f.x * sn + f.y * cs, 0.0);
+                        let n = Vec3::new(f * sn, 0.0, f * cs);
                         match clip_half_space(la, lb, apex, n) {
                             Some((p, q)) => (la, lb) = (p, q),
                             None => {
@@ -850,5 +851,16 @@ mod tests {
         assert!((h.point.y - 2.7).abs() < 1e-4, "the farthest up within 0.1–0.8 m: {:?}", h.point);
         let h = g.vertical_search(Vec3::new(0.0, 2.0, 0.0), true, Vec3::Z, 0.1, 0.5, 0.4, 0.0, wedge, false, (0.0, 5.0)).unwrap();
         assert!((h.point.y - 2.4).abs() < 1e-4, "{:?}", h.point);
+    }
+
+    #[test]
+    fn the_vertical_wedge_lies_in_the_wall_plane() {
+        // RE/24 LEDGE-13: the wedge is |x| ≤ tan 30°·z from the apex in the wall plane; an edge 0.1 m in front of the hands'
+        // plane (sticking out above them) is kept, where the old horizontal wedge dropped everything in front of it
+        let g = GuidanceWorld { edges: vec![ledge(Vec3::new(-1.0, 2.5, -0.1), Vec3::new(1.0, 2.5, -0.1))], ..Default::default() };
+        let wedge = Some(Wedge { angle: 0.523_598_8, cut_up: 0.0 });
+        let h = g.vertical_search(Vec3::new(0.0, 2.0, 0.0), true, Vec3::Z, 0.1, 0.8, 0.4, 0.0, wedge, false, (0.0, 5.0));
+        let h = h.expect("the edge in front of the hands' plane");
+        assert!((h.point.y - 2.5).abs() < 1e-4 && h.point.x.abs() < 1e-4, "{:?}", h.point);
     }
 }
