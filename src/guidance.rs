@@ -161,6 +161,8 @@ impl GuidanceWorld {
             };
             let score = q.distance_squared(reference);
             if best.as_ref().is_none_or(|b| score < b.0) {
+                // a ladder hit snaps to the nearest 0.5 m rung (`sub_116DEA0` at 0x1170EAB), after the score
+                let q = if e.subtype == GuidanceSubType::Ladder { snap_to_rung(e, q) } else { q };
                 best = Some((score, GuidanceHit { point: q, edge: i, wall_normal: wall, dir: (e.p1 - e.p0).normalize_or_zero() }));
             }
         }
@@ -376,6 +378,19 @@ impl GuidanceWorld {
         }
         best.map(|b| b.2)
     }
+}
+
+/// `sub_116DEA0` (from `Guidance__ProbeBoxNearest` 0x1170A70 for Ladder hits): the point's distance from the ladder
+/// entity's origin rounded to the nearest 0.5 m (a remainder of 0.25 or more rounds up), along origin → top (RE/24
+/// GUIDE-1). PORT: the origin is the edge's lower end (the entity's origin when it stands at the ladder's base; the
+/// placement origin is not kept per edge).
+pub fn snap_to_rung(e: &GuidanceEdge, p: Vec3) -> Vec3 {
+    let (o, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
+    let axis = (top - o).normalize_or_zero();
+    let d = (p - o).length();
+    let k = (d / 0.5).floor();
+    let k = if d - k * 0.5 >= 0.25 { k + 1.0 } else { k };
+    o + axis * (k * 0.5)
 }
 
 /// The parts of segment a→b farther than `r` from segment c→d (none, one or two pieces): the cut of a capsule zone
@@ -910,6 +925,15 @@ mod tests {
         assert!((xs[0].1 - 1.7).abs() < 1e-4 && (xs[1].0 - 2.3).abs() < 1e-4, "{xs:?}");
         // the carve-only report (the ladder's side jump) keeps the steep edge
         assert_eq!(g.ledge_report(Vec3::new(2.0, 2.0, 0.0), 10.0, false).edges.len(), 4);
+    }
+
+    #[test]
+    fn ladder_hits_snap_to_the_nearest_rung() {
+        // sub_116DEA0 (RE/24 GUIDE-1): 1.3 m up → 1.5 m (the port used to floor the raw 1.3 to 1.0); 1.2 m → 1.0 m
+        let ladder = GuidanceEdge { p0: Vec3::new(0.0, 0.0, 0.0), p1: Vec3::new(0.0, 4.0, 0.0), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::Ladder };
+        assert!((snap_to_rung(&ladder, Vec3::new(0.0, 1.3, 0.0)).y - 1.5).abs() < 1e-6);
+        assert!((snap_to_rung(&ladder, Vec3::new(0.0, 1.2, 0.0)).y - 1.0).abs() < 1e-6);
+        assert!((snap_to_rung(&ladder, Vec3::new(0.0, 1.25, 0.0)).y - 1.5).abs() < 1e-6, "0.25 rounds up");
     }
 
     #[test]

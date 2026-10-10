@@ -302,6 +302,7 @@ impl HumanLadderData {
 /// `HumanInAir__FindLadderCatch` 0xE04100: the catch height is the hit's height on the ladder rounded down to 0.5 m; it
 /// must be at least 0.45 m and below the ladder's height − 1.95 m.
 pub fn catch_height(h: f32, len: f32) -> Option<f32> {
+    // the probe has already snapped the hit to a rung (GUIDE-1); the game truncates that value with no epsilon
     let h = if crate::tuning::AIR_CATCHES { (h * 2.0).trunc() * 0.5 } else { (h * 2.0 + 1e-3).floor() * 0.5 };
     (h >= 0.45 && h < len - 1.95).then_some(h)
 }
