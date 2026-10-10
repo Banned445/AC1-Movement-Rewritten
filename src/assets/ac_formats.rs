@@ -245,6 +245,9 @@ pub struct AcTexture {
     pub width: u32,
     pub height: u32,
     pub mips: Vec<Vec<u8>>,
+    /// TextureMap +28 `GammaSettings` (TextureMap serializer 0xA64260): Gamma_sRGB (1) for the outfit's diffuse
+    /// maps, Gamma_Linear (0) for normal and specular maps. The texture is sampled with that decode whatever slot uses it.
+    pub srgb: bool,
 }
 
 fn chain_size(w: u32, h: u32, block_bytes: u32, mips: u32) -> u32 {
@@ -280,7 +283,7 @@ pub fn parse_texture(d: &[u8]) -> Option<AcTexture> {
                 mw = (mw / 2).max(1);
                 mh = (mh / 2).max(1);
             }
-            return Some(AcTexture { width: w, height: h, mips: out });
+            return Some(AcTexture { width: w, height: h, mips: out, srgb: u32_at(d, 28) == Some(1) });
         }
     }
     None

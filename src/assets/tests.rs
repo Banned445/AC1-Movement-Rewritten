@@ -103,8 +103,11 @@ fn altair_atlas_and_normal_maps_from_install() {
         for id in part.normal_maps.iter().flatten() {
             let tex = &m.normal_textures[id];
             assert_eq!(tex.mips[0].len(), (tex.width * tex.height * 4) as usize);
+            assert!(!tex.srgb, "normal maps author Gamma_Linear");
         }
     }
+    // TextureMap +28 GammaSettings: every outfit diffuse map is Gamma_sRGB
+    assert!(m.textures.values().all(|t| t.srgb), "diffuse maps author Gamma_sRGB");
 }
 
 #[test]

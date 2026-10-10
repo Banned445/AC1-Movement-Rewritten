@@ -21,7 +21,7 @@ pub fn parse_gradient(p: &[u8]) -> Option<AcTexture> {
     if word(79)? as usize != bytes { return None; }
     let mut rgba = p.get(83..83 + bytes)?.to_vec();
     for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
-    Some(AcTexture { width: w, height: h, mips: vec![rgba] })
+    Some(AcTexture { width: w, height: h, mips: vec![rgba], srgb: false })
 }
 
 /// Eye reflection map: six BC3 face chains (archive layout, RE/09 §9).

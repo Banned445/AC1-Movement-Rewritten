@@ -146,7 +146,7 @@ fn attach_altair(
         let mut img = Image::new_uninit(
             Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
             TextureDimension::D2,
-            if model.normal_textures.contains_key(id) { TextureFormat::Rgba8Unorm } else { TextureFormat::Rgba8UnormSrgb },
+            if t.srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm },
             RenderAssetUsages::RENDER_WORLD,
         );
         img.texture_descriptor.mip_level_count = t.mips.len() as u32;
@@ -168,11 +168,13 @@ fn attach_altair(
         cull_mode: None,
         ..default()
     });
-    // Separate handles retain linear data sampling even when skin uses its diffuse map as a mask.
+    // Map slots (specular, ramp, multiply) sample each texture with its own GammaSettings: the head's specular mask is
+    // its sRGB diffuse map, so it is decoded as sRGB there too.
     let mut material_handles = std::collections::HashMap::new();
     for (id, t) in &model.material_textures {
+        let format = if t.srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
         let mut image = Image::new_uninit(Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
-            TextureDimension::D2, TextureFormat::Rgba8Unorm, RenderAssetUsages::RENDER_WORLD);
+            TextureDimension::D2, format, RenderAssetUsages::RENDER_WORLD);
         image.texture_descriptor.mip_level_count = t.mips.len() as u32;
         image.data = Some(t.mips.concat());
         let ramp = model.parts.iter().flat_map(|p| &p.materials).any(|m| m.ramp == Some(*id));
