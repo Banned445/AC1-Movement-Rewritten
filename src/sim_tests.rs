@@ -3835,6 +3835,18 @@ fn the_ability_stack_gates_the_jump() {
 }
 
 #[test]
+fn a_landing_starts_at_speed_0_and_hands_the_profile_speed_to_move() {
+    // Movement_EnterBody 0xD92C40: landings (modes 9 / 10) enter at s = 0; LandingToMove_Layout6 0xD990A0 then sets the
+    // profile's speed (RE/24 GROUND-5)
+    let mut s = Sim::new(Vec3::new(-30.0, 2.5, -30.0), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground && s.ground().owner == crate::player::ground::TreeState::Landing), "no landing");
+    assert_eq!(s.ground().speed_param, 0.0);
+    assert!(s.run_until(2.0, |s| s.ground().owner != crate::player::ground::TreeState::Landing), "the landing never ended");
+    assert!(s.ground().speed_param >= 0.5, "Move at the high profile's speed: {}", s.ground().speed_param);
+}
+
+#[test]
 fn sprint_needs_the_sprint_max_speed() {
     use crate::player::abilities::AbilitySet;
     // vt144 Sprint = MaxSpeed 4 and Legs (0xEE709F, RE/24 GROUND-22): with MaxSpeed Run the high-profile run never sprints

@@ -509,23 +509,18 @@ impl HumanGroundData {
             Some(_) => TreeState::Landing,
             None => TreeState::Other,
         };
+        // `Movement_EnterBody` 0xD92C40 sets the speed parameter HG+1512 for every entry mode: 0 for the plain entries
+        // and the landings (modes 0/1/2/7/9/10/11/13), 0.25 for 3, 0.5 for 4/5/12 (RE/24 GROUND-5). The landing sets
+        // the profile's speed when it hands over to Move (`LandingToMove_Layout6` 0xD990A0). PORT: every port entry
+        // into the ground is one of the 0 modes (the 0.25 / 0.5 exits are not routed through entry modes).
+        self.speed_param = 0.0;
+        self.blend.speed_param = 0.0;
         if landing.is_none() {
-            // PORT: entries without a landing (pull-up, beam / ladder / pass-over exits …) start standing. The game's
-            // OnEnterInit 0xDA7D20 leaves HG+0x5E8 alone, but those contexts drive the parameter themselves; the port's
-            // stale value from before the climb made the run stop slide on after the move (off roof edges).
-            // LIVE: read HG+0x5E8 right after a pull-up.
-            self.speed_param = 0.0;
-            self.blend.speed_param = 0.0;
             self.oneshot = None;
         }
         if let Some(l) = landing {
             self.landing_seq = self.landing_seq.wrapping_add(1);
             self.oneshot = l.action.map(|b| GroundOneShot { blend: b, t: 0.0, duration: b.duration(), applied: [0.0; 3], h0: None });
-            // The speed parameter HG+0x5E8 is not reset by OnEnterInit 0xDA7D20, so the landing's exit
-            // into locomotion continues at the retained ground speed. No native heavy-damage speed reset.
-            if !GAME_FALLS && l.kind == LandingType::HeavyDamage {
-                self.speed_param = 0.0;
-            }
             self.last_landing = Some(l);
         }
     }
