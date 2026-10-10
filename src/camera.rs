@@ -225,6 +225,46 @@ pub const S: Settings = Settings {
 /// plus the normal times that radius (+268 → 0x4D8DC0), i.e. the sphere's centre at contact.
 pub const SPHERE: f32 = 0.2;
 
+/// The parts of a FreeRoamingCameraSettings block that differ between the player's cameras (Camera Switcher: the
+/// LowHighProfile block at 0x1BE6, the Leap of Faith FreeRoaming block at 0xD67; layout 0x5A5DB0).
+#[derive(Debug)]
+pub struct Profile {
+    /// CameraSettings +8 priority (the switcher shows the active camera with the highest) and +12 blend-in time (s).
+    pub priority: i32,
+    pub blend_in: f32,
+    pub target_lag_xy: f32,
+    pub target_lag_z: f32,
+    pub eye_lag: f32,
+    pub pitch: [f32; 3],
+    pub dist: [f32; 2],
+    pub e_default: f32,
+    /// +556 = 3: the lazy follow's 0.5 / 1.0 rad window (LowHigh); +556 = 0 follows whenever there is no input.
+    pub follow_window: Option<(f32, f32)>,
+    /// +576: the wait after manual input.
+    pub input_hold: f32,
+    /// +606 swing toward behind when blocked, +605 ease the distance back out, +444 the raised eye's minimum height.
+    pub swing: bool,
+    pub ease_out: bool,
+    pub raise_min: f32,
+    /// The LowHighProfile layer (climb mode, long fall, recentres, its settings tail).
+    pub lowhigh: bool,
+}
+
+pub const LOW_HIGH: Profile = Profile {
+    priority: 10, blend_in: 1.0, target_lag_xy: 0.1, target_lag_z: 0.3, eye_lag: 0.125,
+    pitch: [-0.698_132, 1.396_263, 1.45], dist: [3.5, 3.5], e_default: 0.535,
+    follow_window: Some((0.5, 1.0)), input_hold: 1.0, swing: true, ease_out: true, raise_min: 1.0, lowhigh: true,
+};
+
+/// The Leap of Faith camera (FreeRoamingCameraSettings object 0xB97, priority 3500, activated by
+/// LeapOfFaithEventMonitor = ActorState 41, sent at the faith jump's start by the interpreter 0xEDAB20 and ended by
+/// InAir's cleanup / haystack entry): 3 m away, pitch fixed at 80° looking down, 0.05 s lags.
+pub const LEAP_OF_FAITH: Profile = Profile {
+    priority: 3500, blend_in: 1.0, target_lag_xy: 0.05, target_lag_z: 0.05, eye_lag: 0.05,
+    pitch: [1.396_263, 1.396_263, 1.5], dist: [3.0, 3.0], e_default: 0.99,
+    follow_window: None, input_hold: 0.0, swing: false, ease_out: false, raise_min: 0.5, lowhigh: false,
+};
+
 /// PadR6VCameraControl (Camera Switcher 0x1A4B) and the mouse path of its update 0x5FAFC0.
 pub struct R6v {
     /// +108: per-axis dead zone of the stick value (0x5F9C00).
@@ -408,6 +448,7 @@ pub struct CamView {
 #[derive(Clone, Debug)]
 pub struct NativeCamera {
     pub active: bool,
+    pub profile: &'static Profile,
     /// Smoothed / raw follow point (this+192 / +208).
     pub target: Vec3,
     pub target_raw: Vec3,
@@ -477,6 +518,7 @@ impl Default for NativeCamera {
     fn default() -> Self {
         Self {
             active: false,
+            profile: &LOW_HIGH,
             target: Vec3::ZERO,
             target_raw: Vec3::ZERO,
             eye_raw: Vec3::ZERO,
@@ -540,7 +582,8 @@ impl NativeCamera {
     pub fn dist_pitch(&self, e: f32) -> (f32, f32) {
         let e = e.clamp(0.0, 1.0);
         let d = (self.dist_pair[1] - self.dist_pair[0]) * e + self.dist_pair[0];
-        let p = S.pitch_lo + (S.pitch_hi - S.pitch_lo) * e.powf(S.pitch_exp);
+        let [lo, hi, exp] = self.profile.pitch;
+        let p = lo + (hi - lo) * e.powf(exp);
         (d, p)
     }
 
@@ -555,8 +598,8 @@ impl NativeCamera {
         self.target = self.target_raw;
         self.heading = game_heading(inp.forward);
         self.yaw = self.heading;
-        self.e = S.e_default;
-        self.dist_pair = if inp.climbing { S.dist_climb } else { S.dist_ground };
+        self.e = self.profile.e_default;
+        self.dist_pair = if inp.climbing && self.profile.lowhigh { S.dist_climb } else { self.profile.dist };
         let (d, p) = self.dist_pitch(self.e);
         self.dist = d;
         self.pitch = p;
@@ -616,7 +659,7 @@ impl NativeCamera {
         }
         self.events(inp, world);
         // 0xC5E040: the distance pair lags (T 0.3) toward the mode's values
-        let want = if self.climb { S.dist_climb } else { S.dist_ground };
+        let want = if self.climb { S.dist_climb } else { self.profile.dist };
         for i in 0..2 {
             self.dist_pair[i] = lag(self.dist_pair[i], want[i], 0.3, dt);
         }
@@ -653,7 +696,7 @@ impl NativeCamera {
         self.eye = if inp.mouse_mode {
             self.eye_raw
         } else {
-            (self.eye * S.eye_lag + self.eye_raw * dt) / (S.eye_lag + dt)
+            (self.eye * self.profile.eye_lag + self.eye_raw * dt) / (self.profile.eye_lag + dt)
         };
         // +296 = 0x690C30: the look offset (rotated by π − heading, which leaves the vertical one unchanged)
         let look = Vec3::Y * (S.look_lo + (S.look_hi - S.look_lo) * self.e * self.e);
@@ -673,6 +716,9 @@ impl NativeCamera {
 
     /// PresentationEvent / FallEvent handlers (0xC5E820 / 0xC5E980) from this frame's state.
     fn events(&mut self, inp: &CamInput, world: &dyn CamWorld) {
+        if !self.profile.lowhigh {
+            return;
+        }
         if inp.climbing && !self.climb {
             self.climb = true;
             self.recentre_e = false;
@@ -705,9 +751,10 @@ impl NativeCamera {
             self.activate(inp);
             return;
         }
-        self.target.x = lag(self.target.x, self.target_raw.x, S.target_lag_xy, dt);
-        self.target.z = lag(self.target.z, self.target_raw.z, S.target_lag_xy, dt);
-        self.target.y = lag(self.target.y, self.target_raw.y, S.target_lag_z, dt);
+        let pr = self.profile;
+        self.target.x = lag(self.target.x, self.target_raw.x, pr.target_lag_xy, dt);
+        self.target.z = lag(self.target.z, self.target_raw.z, pr.target_lag_xy, dt);
+        self.target.y = lag(self.target.y, self.target_raw.y, pr.target_lag_z, dt);
     }
 
     /// 0xC5EE20 (+308): climbing, the wall-above probe; reaching the top of the wall recentres e → 0.6 and the yaw.
@@ -800,7 +847,7 @@ impl NativeCamera {
         self.input_yaw = self.yaw != yaw0;
         self.input_e = self.e != e0;
         if self.input_yaw || self.input_e {
-            self.input_hold = S.input_hold;
+            self.input_hold = self.profile.input_hold;
         }
     }
 
@@ -862,10 +909,15 @@ impl NativeCamera {
         if !inp.mouse_mode && !self.climb {
             let (eye_az, _, _) = angles_of(self.eye_raw - self.target_raw);
             let off = wrap(eye_az - self.heading).abs();
-            if !self.follow {
-                if S.follow_enter >= off { self.follow = true; }
-            } else if off > S.follow_exit {
-                self.follow = false;
+            match self.profile.follow_window {
+                Some((enter, exit)) => {
+                    if !self.follow {
+                        if enter >= off { self.follow = true; }
+                    } else if off > exit {
+                        self.follow = false;
+                    }
+                }
+                None => self.follow = true,
             }
             let allowed = self.climb_follow_hold <= 0.0 && (!self.beam);
             if self.follow && allowed && !self.input_yaw && !self.input_e && !self.input_active && self.input_hold <= 0.0 {
@@ -904,7 +956,7 @@ impl NativeCamera {
         self.blocked = if hit { self.blocked_fraction(eye) } else { 0.0 };
         let mut rebuild = false;
         // +606: swing toward behind when blocked ≥ 0.7 while moving and not following
-        if self.blocked >= S.swing_blocked && !self.follow && speed > 0.0 {
+        if self.profile.swing && self.blocked >= S.swing_blocked && !self.follow && speed > 0.0 {
             self.yaw = self.prev_yaw;
             smooth_cd_angle(&mut self.yaw, self.heading, &mut self.swing_vel, S.swing_omega, dt);
             rebuild = true;
@@ -928,7 +980,7 @@ impl NativeCamera {
         // +284: blocked past 0.77 (climbing 0.75) keeps the eye at least 1 m above the target, then re-probes (+352)
         let raise = if self.climb { self.blocked >= S.climb_raise } else { self.blocked >= S.blocked_hold + 0.02 };
         if raise {
-            eye.y = eye.y.max(self.target.y + S.raise_min);
+            eye.y = eye.y.max(self.target.y + self.profile.raise_min);
             let from = if self.climb || self.beam {
                 let back = heading_frame(inp.forward, Vec3::new(0.0, S.climb_probe_back[0], S.climb_probe_back[1]));
                 let base = self.target + back + Vec3::Y * S.climb_probe_down;
@@ -941,7 +993,7 @@ impl NativeCamera {
             }
         }
         let (az, pt, d) = angles_of(eye - self.target);
-        if self.blocked <= prev_blocked {
+        if self.blocked <= prev_blocked && self.profile.ease_out {
             // opening up (+605): the distance eases back out with ω 7.5
             smooth_cd(&mut self.coll_dist, d, &mut self.coll_vel, S.ease_out_omega, dt);
             eye = self.target + orbit_offset(az, pt, self.coll_dist);
@@ -962,9 +1014,31 @@ impl NativeCamera {
 // Bevy glue
 // ---------------------------------------------------------------------------------------------------------------
 
+/// The camera switcher's blend into a newly active camera (BlendCamera update 0x71A350): the eye goes from where the
+/// view was toward the new camera's eye by w = curve(t / blend-in) (0x719A30). (hypothesis): the cosine curve
+/// (type 1); BlendCameraSettings' curve type is not decoded. The view direction is turned with the same weight.
+#[derive(Clone, Copy)]
+struct SwitchBlend {
+    from_eye: Vec3,
+    from_rot: Quat,
+    t: f32,
+    duration: f32,
+}
+
+impl SwitchBlend {
+    fn weight(&self) -> f32 {
+        let p = (self.t / self.duration.max(1e-4)).clamp(0.0, 1.0);
+        1.0 - ((p * PI).cos() + 1.0) * 0.5
+    }
+}
+
 #[derive(Default)]
 struct FollowState {
     cam: NativeCamera,
+    /// The Leap of Faith camera and whether it is the one shown (priority 3500 over LowHigh's 10).
+    lof: NativeCamera,
+    lof_active: bool,
+    blend: Option<SwitchBlend>,
     mouse_mode: bool,
     /// The rig values this system wrote last frame, to see placements by other systems (scenarios, replays).
     /// PORT: a placement's distance is ignored (the camera's e sets it).
@@ -1025,6 +1099,9 @@ fn follow(
     // the climb lead reads the pad's movement stick (0xC5E370 → sub_587B90(0))
     let move_stick = pad.as_ref().map_or(Vec2::ZERO, |p| p.stick);
     let ctx = loco.map(|l| l.current);
+    // ActorState 41 LeapOfFaith: the faith jump at a haystack 3 m or more below (0xEDAB20) until InAir ends
+    let leap = matches!(ctx, Some(C::InAir)) && data.is_some_and(|d| d.air.target.as_ref().is_some_and(|t|
+        t.type_flags == crate::player::jump_blend::TARGET_HAYSTACK && t.position.y - d.air.start.y <= -crate::player::jump_blend::FAITH_MIN_DROP));
     let fall_drop = match (ctx, data) {
         (Some(C::InAir), Some(d)) if d.air.apex_reached => Some((d.air.apex_y - body.map_or(p.translation.y, |b| b.feet.y)).max(0.0)),
         (Some(C::InAir), Some(_)) => Some(0.0),
@@ -1043,7 +1120,19 @@ fn follow(
         fall_drop,
         reset: std::mem::take(&mut events.reset),
     };
-    let view = st.cam.update(&inp, &*collision);
+    // the switcher: the active camera with the highest priority; a newly active FreeRoaming camera takes the previous
+    // one's yaw and elevation (FreeRoamingCamera__Activate 0x6910C0 with the previous camera) and blends in
+    if leap != st.lof_active {
+        let (from, to) = if leap { (&st.cam, &mut st.lof) } else { (&st.lof, &mut st.cam) };
+        let (yaw, e) = (from.yaw, from.e);
+        to.profile = if leap { &LEAP_OF_FAITH } else { &LOW_HIGH };
+        to.activate(&inp);
+        to.yaw = yaw;
+        to.e = e;
+        st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: to.profile.blend_in });
+        st.lof_active = leap;
+    }
+    let view = if st.lof_active { st.lof.update(&inp, &*collision) } else { st.cam.update(&inp, &*collision) };
     // the landing camera shake (FX_Camera_Shake_Assassins_Fall)
     if rig.shake > 0.0 {
         st.shake.start(rig.shake);
@@ -1053,12 +1142,20 @@ fn follow(
     c.translation = view.eye;
     // the view (0x694080): yaw and pitch of the look-at point (+128) seen from the smoothed eye
     c.look_at(view.look_at, Vec3::Y);
+    if let Some(b) = st.blend.as_mut() {
+        b.t += time.delta_secs();
+        let w = b.weight();
+        c.translation = b.from_eye.lerp(view.eye, w);
+        c.rotation = b.from_rot.slerp(c.rotation, w);
+        if b.t >= b.duration { st.blend = None; }
+    }
     let r = c.rotation;
     c.translation += r * shake_pos;
     c.rotation *= shake_rot;
-    rig.yaw = wrap(PI - st.cam.yaw);
-    rig.pitch = -st.cam.pitch;
-    rig.distance = st.cam.dist;
+    let shown = if st.lof_active { &st.lof } else { &st.cam };
+    rig.yaw = wrap(PI - shown.yaw);
+    rig.pitch = -shown.pitch;
+    rig.distance = shown.dist;
     st.written = Some((rig.yaw, rig.pitch, rig.distance));
 }
 
@@ -1260,6 +1357,21 @@ mod tests {
         inp.fall_drop = None;
         for _ in 0..240 { cam.update(&inp, &Open); }
         assert!(cam.offset.length() < 0.01);
+    }
+
+    #[test]
+    fn camera_leap_of_faith_profile_looks_down_from_three_metres() {
+        let mut cam = NativeCamera { profile: &LEAP_OF_FAITH, ..default() };
+        cam.activate(&input(1.0 / 60.0));
+        for e in [0.0, 0.5, 0.99] {
+            let (d, p) = cam.dist_pitch(e);
+            assert!((d - 3.0).abs() < 1e-6 && (p - 1.396_263).abs() < 1e-5);
+        }
+        let v = cam.update(&input(1.0 / 60.0), &Open);
+        assert!(v.eye.y - cam.target.y > 2.9, "80 degrees above the target: {:?}", v.eye - cam.target);
+        // the switch blend's cosine weight
+        let b = SwitchBlend { from_eye: Vec3::ZERO, from_rot: Quat::IDENTITY, t: 0.5, duration: 1.0 };
+        assert!((b.weight() - 0.5).abs() < 1e-6);
     }
 
     #[test]
