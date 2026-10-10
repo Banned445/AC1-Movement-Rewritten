@@ -227,6 +227,26 @@ fn hand_mid(d: &HumanLedgeData) -> Vec3 {
     (d.hand_l + d.hand_r) * 0.5
 }
 
+/// The ray part of `sub_11718B0` (a wall support for a foot): from `centre` + `up`·z, `half_depth` m out from the wall,
+/// a ray of 2·`half_depth` toward it. PORT: the game takes only bodies flagged as foot surfaces (0x10000000; none for
+/// those `sub_E1C1F0` rejects) and falls back to Surface guidance edges facing within 45° (sliced every `step`); the
+/// port's static collision counts as support everywhere and the fallback is not searched.
+pub fn support_ray(centre: Vec3, n: Vec3, half_depth: f32, z: f32, collision: &CollisionWorld) -> bool {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let start = centre + Vec3::Y * z - facing * half_depth;
+    collision.sphere_free_distance(start, facing, 0.01, 2.0 * half_depth) < 2.0 * half_depth - 1e-3
+}
+
+/// `sub_B16130`: the wall-hang feet supports under a hold point `hand` (the free-hang drop 0xDDF390, the corners
+/// 0xDD3BB0, the climb's ledge grab 0xDF0980): two `sub_11718B0` searches 1.0 m below it and 0.125 m into the wall, one
+/// 0.2 m to the left raised 0.1 m and one under the point lowered 0.1 m (box half extents 0.25 / 0.625 / 0.15); either
+/// is enough (the other foot then shares it).
+pub fn feet_supports(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let c = hand - Vec3::Y + facing * 0.125;
+    support_ray(c - right_of(facing) * 0.2, n, 0.625, 0.1, collision) || support_ray(c, n, 0.625, -0.1, collision)
+}
+
 /// Foot supports for a hang at `mid` (`sub_DE0A60` from TrySwitchHangType 0xDE1060): two rays of 1.2 m toward
 /// the wall, starting 1 m below the hands, 0.5 m back from the wall and 0.1 m to either side (collision layer
 /// 43). Returns (left foot hits, right foot hits).

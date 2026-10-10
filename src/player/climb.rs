@@ -1397,8 +1397,8 @@ pub fn update_climb(
             let hn = h.normal;
             let hf = -Vec3::new(hn.x, 0.0, hn.z).normalize_or(facing);
             let e0 = LedgeEntry::at(guidance.fit_hands(h.pos, hn), hn, body.feet, LedgeSubState::TransitionInFromClimb);
-            // PORT: the feet supports (sub_B16130) are the collision foot rays (`hang_type_at`)
-            let hang = super::ledge::hang_type_at((e0.hand_l + e0.hand_r) * 0.5, hn, &collision);
+            // the feet supports (sub_B16130)
+            let hang = if super::ledge::feet_supports((e0.hand_l + e0.hand_r) * 0.5, hn, &collision) { super::ledge::LedgeHangType::Wall } else { super::ledge::LedgeHangType::Free };
             let wall = hang == super::ledge::LedgeHangType::Wall;
             let root = super::ledge::hang_root_at(e0.hand_l, e0.hand_r, hn, hang, &collision);
             // PORT: the game's test that keeps a climber near the ground from hanging is not identified; the port wants

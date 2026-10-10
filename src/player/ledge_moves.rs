@@ -424,7 +424,7 @@ pub fn try_corner(
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let hit = corner_rows(inner, right, hand_l, hand_r, n, guidance)[3]?;
     let nn = hit.wall_normal;
-    let new_hang = hang_type_at(hit.point, nn, collision);
+    let new_hang = if super::ledge::feet_supports(hit.point, nn, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
     // a wall hang needs foot holds on the new wall (sub_B16130)
     if hang == LedgeHangType::Wall && new_hang != LedgeHangType::Wall {
         return None;
@@ -549,7 +549,8 @@ pub fn try_side_jump(
             };
             return Some((mv, Some(climb)));
         }
-        let new_hang = hang_type_at(c, nn, collision);
+        // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
+        let new_hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
         let to = hang_root_at(hl, hr, nn, new_hang, collision);
         if !collision.capsule_fits(to + Vec3::Y * 0.05) {
             continue;
@@ -646,7 +647,8 @@ pub fn try_climb_reach(
     let r = right_of(-nn);
     let c = hit.point + side * HAND_SPACING * 0.5;
     let (hl, hr) = (c - r * HAND_SPACING * 0.5, c + r * HAND_SPACING * 0.5);
-    let hang = hang_type_at(c, nn, collision);
+    // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
+    let hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
     let to = hang_root_at(hl, hr, nn, hang, collision);
     let ty = if hang == LedgeHangType::Wall { 1 } else { 2 };
     // clearance: a capsule pulled back from the target and out from the wall, swept to the target root
@@ -931,8 +933,8 @@ pub fn try_free_hang_drop(
         };
         (FREE_DROP_TO_CLIMB, to, upper.point, upper.point, lower.point.y, Some(e))
     } else {
-        let (fl, fr) = super::ledge::feet_on_wall(upper.point, nn, collision);
-        if !(fl && fr) {
+        // wall supports for the feet (sub_B16130 under the hold)
+        if !super::ledge::feet_supports(upper.point, nn, collision) {
             return None;
         }
         let r = right_of(new_facing);
@@ -1701,7 +1703,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
     let orient = mk(1, [orient_action, None, None, None], from, p1, facing_out, facing_in, false, false);
     let p2 = mid + n * (1.0 - inset) - Vec3::Y * 0.8;
     let descent = mk(2, [descent_action, None, None, None], p1, p2, facing_in, facing_in, false, false);
-    let wall = hang_type_at(mid, n, collision) == LedgeHangType::Wall;
+    let wall = super::ledge::feet_supports(mid, n, collision);
     let w = pulldown_wall_weights(mid, n, collision);
     let reception = if wall {
         mk(
