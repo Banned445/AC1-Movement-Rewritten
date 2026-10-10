@@ -3780,9 +3780,18 @@ fn a_running_jump_without_a_target_matches_the_live_game() {
 
 #[test]
 fn legs_in_high_profile_jumps_straight_off_a_ledge_and_low_profile_legs_does_nothing() {
+    use crate::player::ledge::LedgeSubState;
+    use crate::player::ledge_moves::{MoveKind, REBOUND};
     // GoAssassinActionInterpreter__LedgeState 0xEEC89F (event 2): high profile + the Legs buffer; with the stick in the
     // dead zone the jump goes straight away from the wall. Without high profile Legs does nothing (verified live).
+    // Event 2's guard refuses a free hang (0xDCCE10): the balcony slab's free hang stays (RE/24 LEDGE-16).
     let mut s = hang_on_balcony();
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.press_legs();
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "a free hang jumped off");
+    // wall C (2.6 m, face z 49.7): a wall hang
+    let mut s = hang_at(Vec3::new(20.0, 2.6, 49.7), Vec3::NEG_Z);
     s.pad(Vec3::ZERO, 0.0, false, false);
     s.press_legs();
     s.run(0.5);
@@ -3791,7 +3800,12 @@ fn legs_in_high_profile_jumps_straight_off_a_ledge_and_low_profile_legs_does_not
     let start = s.body().feet;
     s.pad(Vec3::ZERO, 0.0, true, false);
     s.press_legs();
-    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "high profile + Legs did not jump");
+    // the rebound turn plays in the Ledge context first (0xDD2CA0, SubState 5), straight back = `_footr`
+    assert!(s.run_until(0.2, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::Rebound)), "no rebound");
+    assert_eq!(s.data().ledge.sub_state, LedgeSubState::ReboundTransition);
+    assert_eq!(s.data().ledge.mv.unwrap().seq[0].map(|a| a.id), Some(REBOUND[1]));
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::InAir), "high profile + Legs did not jump");
+    assert!(s.body().forward().dot(Vec3::new(n.x, 0.0, n.z).normalize()) > 0.9, "facing away from the wall");
     s.run(0.3);
     let moved = (s.body().feet - start).with_y(0.0);
     assert!(moved.normalize_or_zero().dot(Vec3::new(n.x, 0.0, n.z).normalize()) > 0.9, "not away from the wall: {moved:?} n {n:?}");

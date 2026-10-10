@@ -47,6 +47,44 @@ pub const LEDGE_JUMP_TABLE: [[(u8, [u32; 3]); 32]; 2] = [
     ],
 ];
 
+/// The jump off's rebound turn (0xDD2CA0): [`xx_h_hangwall_tr_rebound_footl` (the jump to the character's right),
+/// `…_footr` (to the left)].
+pub const REBOUND: [u32; 2] = [0x011F_FC1A, 0x011F_FC1B];
+
+/// `sub_DD2CA0` 0xDD2CA0, event 2's action on a wall hang (the jump off, RE/24 LEDGE-16): the rebound by the side of the
+/// jump direction `jd` (the signed angle from it to straight back ≥ 0, i.e. to the character's left → `_footr`), the
+/// root interpolated linearly over the action (`sub_711130` without an action) from the hang root to itself, lowered
+/// by 0.3·min(|angle|, 45°)/45° for a jump to the right.
+pub fn rebound_move(from: Vec3, n: Vec3, jd: Vec3, hand_l: Vec3, hand_r: Vec3) -> LedgeMove {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let away = -facing;
+    // angle ≥ 0 (the left, and straight back) → `_footr`
+    let left = jd.dot(right_of(facing)) <= 1e-6;
+    let a = away.angle_between(Vec3::new(jd.x, 0.0, jd.z).normalize_or(away));
+    let id = REBOUND[left as usize];
+    let seq = [single(id, 0), None, None, None];
+    let durations = seq_durations(&seq);
+    let drop = if left { 0.0 } else { 0.3 * a.min(std::f32::consts::FRAC_PI_4) / std::f32::consts::FRAC_PI_4 };
+    LedgeMove {
+        kind: MoveKind::Rebound,
+        seq,
+        durations: if durations.iter().sum::<f32>() > 0.0 { durations } else { [0.3, 0.0, 0.0, 0.0] },
+        t: 0.0,
+        from,
+        to: from - Vec3::Y * drop,
+        facing_from: facing,
+        facing_to: facing,
+        follow_disp: false,
+        lead: 0.0,
+        end_free: false,
+        end_wall: true,
+        end_stand: false,
+        hand_l,
+        hand_r,
+        normal: n,
+    }
+}
+
 /// Corner actions (0xDD3BB0: 510126209 + k). Free hang: `hangfree_corner_{left,right}_090_{in,out}`; wall
 /// hang: the two-item strafe open + close actions with the hand targets on the new edge.
 /// [free, wall] × [left in, left out, right in, right out].
@@ -60,7 +98,7 @@ pub const HOP_UP: u32 = 0x4CD6_8F4F;
 pub const HOP_UP_B: u32 = 0x4CD6_8F50;
 
 pub const DUMPED_ACTIONS: &[u32] = &[
-    RECEPTION_WALL_OTHER,
+    RECEPTION_WALL_OTHER, REBOUND[0], REBOUND[1],
     0x491228AE, 0x491228AF, 0x491228B0, 0x491228B1, 0x491228B2, 0x491228B3,
     0x491228C6, 0x491228C7, 0x491228C8, 0x491228C9, 0x491228CA, 0x491228CB,
     0x491228CC, 0x491228CD, 0x491228CE, 0x491228CF, 0x491228D0, 0x491228D1,
@@ -153,6 +191,8 @@ pub enum MoveKind {
     Pullup,
     /// Ground → hang over an edge (0xDDE4D0 / 0xDDE980): orientation, descent, reception.
     PullDown { stage: u8 },
+    /// The jump off a wall hang: the rebound turn before the jump (event 2 → 0xDD2CA0, SubState 5, state 10).
+    Rebound,
 }
 
 /// A running ledge move.

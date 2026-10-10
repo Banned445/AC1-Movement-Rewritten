@@ -169,6 +169,8 @@ pub struct HumanLedgeData {
     /// A vertical step's second hand still to move (+1848, `ContinuePendingVerticalStep` 0xDCF3C0): (that hand's index,
     /// the pending direction is up, +1852). The hands stay split until the stick asks for it (RE/24 LEDGE-4).
     pub pending_vstep: Option<(usize, bool)>,
+    /// The jump off's stored target (event 2 → 0xDD2CA0 copies it to LedgeData+64), jumped at when the rebound ends.
+    pub jump_off: Option<super::air::InAirEntry>,
     moves: Vec<RootInterp>,
     after: Option<After>,
     /// Running corner turn / ledge jump / hop up (`ledge_moves`).
@@ -205,6 +207,7 @@ impl HumanLedgeData {
         self.alt_flag = false; // EnterCommon 0xDE26D0 clears +0x85
         self.blocked_up = false;
         self.pending_vstep = None;
+        self.jump_off = None;
         self.moves.clear();
         self.mv = None;
         self.hang_set = false;
@@ -531,6 +534,19 @@ pub fn update_ledge(
                 data.air.release_hold = Some(hold);
                 continue;
             }
+            if done && mv.kind == ledge_moves::MoveKind::Rebound {
+                // `sub_DD0A40` 0xDD0A40: the rebound done → face away from the wall and jump (`sub_B27180` kind 2, the
+                // playing item's leading foot), presentation event 67. PORT: the jump uses the port's kind-0 takeoff until
+                // jump kind 2 (`xx_h_rebound_*_to_air`, RE/24 AIR-5) is ported.
+                d.mv = None;
+                limbs.hands = None;
+                limbs.feet = None;
+                body.heading = super::heading_of(mv.normal);
+                if let Some(entry) = d.jump_off.take() {
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry.starting_at(body.feet)));
+                }
+                continue;
+            }
             if done && mv.end_stand {
                 // knee / waist arrivals end standing on top (Ledge SubState 4 → pull-up). Game: NarrowObject
                 // on the edge; PORT: Ground
@@ -629,14 +645,15 @@ pub fn update_ledge(
             data.air.release_hold = Some(hold);
             continue;
         }
-        // ... and high profile with the Legs buffer jumps off (event 2): away from the wall, or along the stick
-        if pad.high_profile && pad.jump_buffered() {
+        // ... and high profile with the Legs buffer jumps off (event 2): away from the wall, or along the stick. Event 2's
+        // guard (0xDCCE10) refuses a free hang; its action (0xDD2CA0) plays the rebound turn in the Ledge context (SubState
+        // 5, state 10) with the target stored, and the jump starts when it ends (0xDD0A40, RE/24 LEDGE-16)
+        if pad.high_profile && pad.jump_buffered() && d.hang_type == LedgeHangType::Wall {
             if let Some(jd) = super::targets::jump_off_wall_dir((pad.speed01 > 0.0).then_some(pad.dir_snap), n) {
                 pad.consume_jump();
-                limbs.hands = None;
-                limbs.feet = None;
-                let entry = super::targets::jump_off_wall_entry(body.feet, jd, &guidance, &collision);
-                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+                d.jump_off = Some(super::targets::jump_off_wall_entry(body.feet, jd, &guidance, &collision));
+                start_move(d, ledge_moves::rebound_move(body.feet, n, jd, d.hand_l, d.hand_r), "rebound");
+                d.sub_state = LedgeSubState::ReboundTransition;
                 continue;
             }
         }

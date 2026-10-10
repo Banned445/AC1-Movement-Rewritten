@@ -126,6 +126,20 @@ pub enum InAirEntry {
     Fall { from: Vec3, velocity: Vec3, origin: FallOrigin, speed_param: f32 },
 }
 
+impl InAirEntry {
+    /// The same entry from another start point (a target stored before a rebound, 0xDD2CA0).
+    pub fn starting_at(self, p: Vec3) -> Self {
+        match self {
+            InAirEntry::JumpToTarget { target, speed_param, foot_left, .. } => InAirEntry::JumpToTarget { from: p, target, speed_param, foot_left },
+            InAirEntry::FreeJump { dir, ahead, speed_param, foot_left, .. } => InAirEntry::FreeJump { from: p, dir, ahead, speed_param, foot_left },
+            InAirEntry::FreeStepJump { target, foot_left, .. } => InAirEntry::FreeStepJump { from: p, target, foot_left },
+            InAirEntry::OnPlace { fwd, action, fall, .. } => InAirEntry::OnPlace { from: p, fwd, action, fall },
+            InAirEntry::SwingJump { target, .. } => InAirEntry::SwingJump { from: p, target },
+            InAirEntry::Fall { velocity, origin, speed_param, .. } => InAirEntry::Fall { from: p, velocity, origin, speed_param },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum AirMode {
     #[default]
