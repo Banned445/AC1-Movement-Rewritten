@@ -22,8 +22,11 @@
 //! camera's own behaviour is not decoded: in the port it holds its position and keeps looking at Altaïr. While
 //! flying, the gamepad's right stick Y drives the height and not the camera pitch, unless LB is held.
 //!
-//! Keyboard: F5 = enter / leave (hold E while leaving: keep the flight's speed), WASD = move, Space / Left Ctrl = up /
-//! down, Left Shift = × 3, Left Alt = × 10, Q held = strafe, F6 = debug camera.
+//! Keyboard (the pad slots through the user's bindings, RE/21 §1; KeyboardMouse2 shown): F5 = enter / leave (the empty
+//! hand, Left Shift, held while leaving: keep the flight's speed), the left stick (WASD) = move, Space / Left Ctrl or
+//! the right stick's Y (arrows) = up / down, high profile (RMB, RT) = × 3, Left Alt = × 10 (PORT: RB has no key), LB
+//! (Q) held = strafe (PORT: the game's X is the weapon hand, LMB, which captures the mouse in the port), F6 = debug
+//! camera.
 //! Gamepad: L3 + R3 = enter / leave (B with it: keep the speed), left stick = move, right stick Y = up / down, LB =
 //! hold the height, RT = × 3, RB = × 10, X held = strafe, R3 = debug camera.
 
@@ -106,7 +109,7 @@ fn toggle_fly(
     }
     let Ok((mut loco, mut data, mut body, mut limbs, ik)) = q.single_mut() else { return };
     // the empty hand (E / B) with the toggle: leave with the flight's velocity (0xE467B0, vt24 argument 1)
-    let keep = keys.pressed(KeyCode::KeyE) || gamepads.iter().any(|gp| gp.pressed(GamepadButton::East));
+    let keep = pad.buttons[3] || gamepads.iter().any(|gp| gp.pressed(GamepadButton::East));
     fly.active = !fly.active;
     fly.free_camera = false;
     body.tilt = Quat::IDENTITY;
@@ -140,6 +143,8 @@ fn fly(
     time: Res<Time>,
     mut fly: ResMut<DebugFly>,
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
+    bindings: Option<Res<crate::bindings::Bindings>>,
     gamepads: Query<&Gamepad>,
     rig: Res<CameraRig>,
     mut q: Query<(&mut Body, &mut Transform), With<Player>>,
@@ -148,11 +153,17 @@ fn fly(
         return;
     }
     let Ok((mut body, mut tr)) = q.single_mut() else { return };
+    use crate::bindings::Slot;
     let key = |k: KeyCode| keys.pressed(k) as i32 as f32;
-    let mut stick = Vec2::new(key(KeyCode::KeyD) - key(KeyCode::KeyA), key(KeyCode::KeyW) - key(KeyCode::KeyS));
-    let mut lift = key(KeyCode::Space) - key(KeyCode::ControlLeft);
-    let mut scale = if keys.pressed(KeyCode::AltLeft) { FLY_FASTER } else if keys.pressed(KeyCode::ShiftLeft) { FLY_FAST } else { 1.0 };
-    let mut strafe = keys.pressed(KeyCode::KeyQ);
+    let default_bindings = crate::bindings::Bindings::default();
+    let b = bindings.as_deref().unwrap_or(&default_bindings);
+    let no_mouse = ButtonInput::<MouseButton>::default();
+    let m = mouse.as_deref().unwrap_or(&no_mouse);
+    let held = |s: Slot| b.pressed(s, &keys, m) as i32 as f32;
+    let mut stick = Vec2::new(held(Slot::LeftStickRight) - held(Slot::LeftStickLeft), held(Slot::LeftStickUp) - held(Slot::LeftStickDown));
+    let mut lift = (key(KeyCode::Space) - key(KeyCode::ControlLeft) + held(Slot::RightStickUp) - held(Slot::RightStickDown)).clamp(-1.0, 1.0);
+    let mut scale = if keys.pressed(KeyCode::AltLeft) { FLY_FASTER } else if held(Slot::HighProfile) > 0.0 { FLY_FAST } else { 1.0 };
+    let mut strafe = held(Slot::LeftShoulder) > 0.0;
     let mut hold = false;
     for gp in &gamepads {
         let s = gp.left_stick();
@@ -209,6 +220,7 @@ mod tests {
         app.add_plugins(bevy::time::TimePlugin)
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(100)))
             .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
             .insert_resource(crate::camera::CameraRig { pitch: -0.8, ..default() })
             .insert_resource(crate::map_menu::neutral_pad())
             .insert_resource(crate::map_menu::MapMenu::default())
@@ -223,7 +235,15 @@ mod tests {
         app
     }
 
+    fn step_rmb(app: &mut App, keys: &[KeyCode]) {
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+        step(app, keys);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().release_all();
+    }
+
     fn step(app: &mut App, keys: &[KeyCode]) {
+        // the empty hand (pad 3) as `read_pad` would set it from the bindings
+        app.world_mut().resource_mut::<PadInput>().buttons[3] = keys.contains(&KeyCode::ShiftLeft);
         let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
         input.release_all();
         input.clear();
@@ -275,8 +295,9 @@ mod tests {
     fn leaving_with_the_empty_hand_keeps_the_flights_velocity() {
         let mut app = app();
         step(&mut app, &[KeyCode::F5]);
-        step(&mut app, &[KeyCode::KeyW, KeyCode::ShiftLeft]);
-        step(&mut app, &[KeyCode::KeyW, KeyCode::ShiftLeft, KeyCode::KeyE, KeyCode::F5]);
+        // × 3 with high profile (RMB, RT), then the empty hand (Left Shift, B) with the toggle
+        step_rmb(&mut app, &[KeyCode::KeyW]);
+        step_rmb(&mut app, &[KeyCode::KeyW, KeyCode::ShiftLeft, KeyCode::F5]);
         let (loco, body) = player(&mut app);
         assert_eq!(loco.current, ActorContextId::InAir);
         assert!((body.velocity.z - FLY_SPEED * FLY_FAST).abs() < 1e-3, "thrown out at the flight's speed: {:?}", body.velocity);

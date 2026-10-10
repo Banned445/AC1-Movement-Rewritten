@@ -117,6 +117,11 @@ impl InputFrame {
         pad.legs_pressed_ago = self.legs_pressed_ago;
         pad.hand_pressed_ago = self.hand_pressed_ago;
         pad.hand_held = self.hand_held;
+        // the pad buttons the recording carries (A legs, B empty hand, RT high profile)
+        pad.buttons = [false; 16];
+        pad.buttons[0] = self.legs_held;
+        pad.buttons[3] = self.hand_held;
+        pad.buttons[12] = self.high_profile;
     }
 }
 

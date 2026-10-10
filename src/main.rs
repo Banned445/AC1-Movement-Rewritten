@@ -13,6 +13,7 @@ mod debug_fly;
 mod guidance;
 mod hud;
 mod ik;
+mod bindings;
 mod input;
 mod layers;
 mod level;
@@ -70,6 +71,7 @@ fn main() {
             ..default()
         }))
         .init_resource::<collision::CollisionWorld>()
+        .add_plugins(bindings::BindingsPlugin)
         .add_plugins((
             level::LevelPlugin,
             map_menu::MapMenuPlugin,
