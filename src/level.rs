@@ -319,6 +319,14 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
         let min = Vec3::new(x - sx * 0.5, top - t, z - sz * 0.5);
         let max = Vec3::new(x + sx * 0.5, top, z + sz * 0.5);
         collision.boxes.push(Aabb3 { min, max });
+        if sz <= 0.25 && t <= 0.25 {
+            // a swing bar: like Damascus's bars, a pair of horizontal Pole edges (subtype 4) along it, 0.1 m either side
+            // of its axis with opposite normals and no end edges (probe_damascus_guidance_subtypes, RE/24 LEDGE-17)
+            for (zz, n) in [(z - 0.05, Vec3::NEG_Z), (z + 0.05, Vec3::Z)] {
+                guidance.edges.push(GuidanceEdge { p0: Vec3::new(min.x, top, zz), p1: Vec3::new(max.x, top, zz), n0: Vec3::Y, n1: n, subtype: GuidanceSubType::Pole });
+            }
+            continue;
+        }
         add_roof_edges(&mut guidance, min, max);
     }
     for &(p0, p1, n) in LADDERS {

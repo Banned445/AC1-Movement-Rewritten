@@ -52,6 +52,9 @@ pub struct Swing {
     pub target: Option<JumpTarget>,
     pub seq: u32,
     impact_w: f32,
+    /// Both hands hold Pole edges (contact kind 3, +1792 / +1796; RE/24 LEDGE-17): only then does the landing go on into
+    /// the cycle and can the swing be started or jumped from.
+    pub on_pole: bool,
 }
 
 impl Swing {
@@ -81,7 +84,14 @@ pub fn enter(from: Vec3, root: Vec3, fwd: Vec3, hands_mid: Vec3, flight: Option<
         }
     }
     let action = ActionBlend::new(SWING_LANDING, 0, &w);
-    Some(Swing { phase: SwingPhase::Landing, action, t: 0.0, from, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), impact_w: 0.0 })
+    Some(Swing { phase: SwingPhase::Landing, action, t: 0.0, from, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), impact_w: 0.0, on_pole: false })
+}
+
+/// Event 5 (`HumanLedge` guard 0xDD3750, action 0xDD2940 → SwingReception, Human+2704 = 3): start swinging from a still
+/// free hang on a pole: the cycle from its first item at the hang root.
+pub fn start(root: Vec3, fwd: Vec3, hands_mid: Vec3, seq: u32) -> Option<Swing> {
+    let action = single(SWING_CYCLE, 0, &[])?;
+    Some(Swing { phase: SwingPhase::Cycle(0), action, t: 0.0, from: root, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), impact_w: 0.0, on_pole: true })
 }
 
 fn single(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -118,11 +128,14 @@ pub enum SwingOut {
     Jump(JumpTarget),
 }
 
-/// `HumanLedge__StateSwingReception_Update` 0xDD24F0 with its events (0xDD2890). `find_target` = the jump target
-/// ahead of the bar (the game's +1792 / +1796 == 3 checks; PORT: `targets::find_jump_target` along the facing).
-pub fn update(s: &mut Swing, dt: f32, stick: bool, jump_pressed: bool, feet: &mut Vec3, collision: &CollisionWorld, find_target: impl Fn(Vec3, Vec3) -> Option<JumpTarget>) -> SwingOut {
+/// `HumanLedge__StateSwingReception_Update` 0xDD24F0 with its events (0xDD2890). The interpreter's ledge state
+/// (0xEECCF9–0xEED11F, RE/24 LEDGE-17 / CENSUS-3) drives it with held buttons: `held` = high profile and Legs held
+/// (+4397; its negation +4398 sends the stop, event 6), `jump_pressed` = held, Legs pressed and the stick past the dead
+/// zone within 75° of the facing (event 7). `find_target` = the jump target along the facing (the guidance search;
+/// PORT: the Leap of Faith and the free jump that follow it are not modelled).
+pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut Vec3, collision: &CollisionWorld, find_target: impl Fn(Vec3, Vec3) -> Option<JumpTarget>) -> SwingOut {
     s.t += dt;
-    if jump_pressed {
+    if jump_pressed && s.on_pole {
         s.jump_req = true;
     }
     let dur = s.action.duration();
@@ -133,15 +146,17 @@ pub fn update(s: &mut Swing, dt: f32, stick: bool, jump_pressed: bool, feet: &mu
             if !done {
                 return SwingOut::Stay;
             }
-            // with a jump target ahead the landing goes on into the swing cycle; without, it settles (0xDCD300 -> 0xDD0140)
-            s.target = find_target(s.root, s.fwd);
-            if s.target.is_some() {
+            // 0xDD24F0: legs blocked → the legs impact for any bar (`SwingLandingToImpactLegs` 0xDCFE90 runs first); on a
+            // pole (both hands, `SwingLandingToSettle` 0xDCD300) the landing goes on into the cycle; on a ledge-type free
+            // hang it settles (`PlaySwingImpact` 0xDD0140)
+            let (impact_id, impact_f) = impact(s, collision);
+            if impact_id != IMPACT_LEGS && s.on_pole {
                 if let Some(a) = single(SWING_CYCLE, 0, &[]) {
                     s.phase = SwingPhase::Cycle(0);
                     s.action = a;
                 }
             } else {
-                let (id, f) = impact(s, collision);
+                let (id, f) = (impact_id, impact_f);
                 s.impact_w = f;
                 let w = if id == IMPACT_LEGS { legs_weights(f) } else { vec![1.0] };
                 if let Some(a) = single(id, 0, &w) {
@@ -157,8 +172,8 @@ pub fn update(s: &mut Swing, dt: f32, stick: bool, jump_pressed: bool, feet: &mu
         }
         SwingPhase::Cycle(i) => {
             *feet = s.root;
-            // event 6 (guard 0xDCCF40: not on the up items 0 / 2): PORT trigger = the stick released
-            if !stick && (i == 1 || i == 3) {
+            // event 6 (+4398: high profile or Legs released; guard 0xDCCF40: not on the up items 0 / 2)
+            if !held && (i == 1 || i == 3) {
                 let id = SWING_STOP[(i == 3) as usize];
                 if let Some(a) = single(id, 0, &[]) {
                     s.phase = SwingPhase::Settle(id, 0);

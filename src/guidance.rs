@@ -174,7 +174,7 @@ impl GuidanceWorld {
         self.edges
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.subtype == GuidanceSubType::LedgeGrab && e.n1.dot(n) > 0.9)
+            .filter(|(_, e)| matches!(e.subtype, GuidanceSubType::LedgeGrab | GuidanceSubType::Pole) && e.n1.dot(n) > 0.9)
             .map(|(i, e)| (i, e, e.closest_point(p)))
             .filter(|(_, _, q)| (*q - p).length() <= tol)
             .min_by(|a, b| (a.2 - p).length().total_cmp(&(b.2 - p).length()))

@@ -118,8 +118,9 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
         }
         2 => Some(JumpTarget { position: c.pos + c.wall * 0.5, pass: Some((c.pos, c.wall)), ..base }),
         TARGET_LEDGE | TARGET_LEDGE_FREE => {
-            // hang targets need an edge (poles, type 32, are cut content in v1.02: RE/05 §3.5)
-            if c.ty == 32 {
+            // a Pole edge (type 32: the horizontal swing bars, subtype 4) is a free-hang target (the scorer's pole case
+            // 0xE96BF0 → 0x80, the swing flight); the cut content of RE/05 §3.5 is the vertical pole climb, not the bars
+            if c.ty == 32 && ty != TARGET_LEDGE_FREE {
                 return None;
             }
             let e = &guidance.edges[c.edge?];

@@ -245,6 +245,11 @@ fn hand_mid(d: &HumanLedgeData) -> Vec3 {
     (d.hand_l + d.hand_r) * 0.5
 }
 
+/// Both hands hold Pole edges (the swing bars; contact kinds +1792 / +1796 == 3, `SyncLimbContacts` 0xDD0390).
+pub fn hands_on_pole(d: &HumanLedgeData, n: Vec3, guidance: &GuidanceWorld) -> bool {
+    [d.hand_l, d.hand_r].iter().all(|h| guidance.on_edge(*h, n, 0.15).is_some_and(|hit| guidance.edges[hit.edge].subtype == crate::guidance::GuidanceSubType::Pole))
+}
+
 /// The ray part of `sub_11718B0` (a wall support for a foot): from `centre` + `up`·z, `half_depth` m out from the wall,
 /// a ray of 2·`half_depth` toward it, on layer 43 (`sub_11718B0`). A hit on a body owned by a component (flag
 /// 0x10000000, the same tag `ContactManager__GroundMaterial` 0x55A580 tests) is a support, which is all the port's
@@ -403,12 +408,15 @@ pub fn update_ledge(
             body.velocity = Vec3::ZERO;
             body.heading = heading_of(s.fwd);
             let mut feet = body.feet;
-            let jump = pad.high_profile && pad.jump_buffered();
+            // the interpreter's ledge state (0xEECCF9–0xEED11F): +4397 = high profile and Legs held; the jump (event 7) with
+            // the stick past the dead zone within 75° of the facing (1.3089969) and Legs pressed (RE/24 LEDGE-17)
+            let held = pad.high_profile && pad.legs_held;
+            let toward = pad.speed01 > 0.0 && pad.dir_snap.dot(s.fwd) > 1.308_997f32.cos();
+            let jump = held && toward && pad.jump_buffered();
             if jump {
                 pad.consume_jump();
             }
-            let stick = pad.speed01 > 0.0;
-            let out = super::swing::update(&mut s, dt, stick, jump, &mut feet, &collision, |p, f| super::targets::find_jump_target(p, f, &guidance, &collision));
+            let out = super::swing::update(&mut s, dt, held, jump, &mut feet, &collision, |p, f| super::targets::find_jump_target(p, f, &guidance, &collision));
             body.feet = feet;
             match out {
                 super::swing::SwingOut::Stay => data.ledge.swing = Some(s),
@@ -660,6 +668,19 @@ pub fn update_ledge(
                 start_move(d, ledge_moves::rebound_move(body.feet, n, jd, d.hand_l, d.hand_r), "rebound");
                 d.sub_state = LedgeSubState::ReboundTransition;
                 continue;
+            }
+        }
+        // event 5 (+4397 = high profile and Legs held, CanHandleEvent(5) = guard 0xDD3750): a still free hang with both hands
+        // on Pole edges, no pending step, and the box 0.5 m ahead / 1.0 m up (half extents 0.3 / 0.5 / 1.0) free → start
+        // swinging (0xDD2940, RE/24 LEDGE-17 / CENSUS-3)
+        if pad.high_profile && pad.legs_held && d.hang_type == LedgeHangType::Free && d.pending_vstep.is_none() && hands_on_pole(d, n, &guidance) {
+            let centre = body.feet + facing * 0.5 + Vec3::Y * 1.0;
+            if collision.obb_free(centre, [right_of(facing), facing, Vec3::Y], Vec3::new(0.3, 0.5, 1.0)) {
+                if let Some(s) = super::swing::start(body.feet, facing, hand_mid(d), d.swing.map(|s| s.seq).unwrap_or(0)) {
+                    d.swing = Some(s);
+                    d.last_action = "swing";
+                    continue;
+                }
             }
         }
         let Some(dir) = dir else {

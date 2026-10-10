@@ -1984,6 +1984,29 @@ fn a_vertical_hand_step_waits_for_the_stick_for_the_second_hand() {
 
 // ---------------------------------------------------------------- swing bars (RE/03 §7.10)
 
+/// The swing's held-button rules (RE/24 LEDGE-17 / CENSUS-3, the interpreter 0xEECCF9–0xEED11F): on a bar (a Pole edge),
+/// releasing high profile + Legs stops the swing (event 6) into the free hang; holding them again from the still hang
+/// starts it (event 5, 0xDD3750 → 0xDD2940).
+#[test]
+fn the_swing_stops_and_starts_with_high_profile_and_legs_held() {
+    use crate::player::swing::SwingPhase;
+    let mut s = Sim::new(Vec3::new(60.0, 1.2, 85.0), std::f32::consts::PI);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.run(0.35);
+    s.press_legs();
+    assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some()), "never swung");
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle");
+    // release: the stop on a down item, then the free hang
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(4.0, |s| s.data().ledge.swing.is_none() && s.loco().current == ActorContextId::Ledge), "never stopped: {:?}", s.data().ledge.swing.map(|w| w.phase));
+    s.run(0.5);
+    assert!(s.data().ledge.swing.is_none(), "stays still with the buttons released");
+    // hold them again: swinging starts from the hang
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    assert!(s.run_until(1.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "event 5 never started the swing");
+}
+
 /// bug-1791661604: the far jump from the 3.5 m roof (x 5..11, z 9..15) at the 3.2 m block's -Z face (z 21.5) is a
 /// free-hang jump (0x80: the edge lies in the third zone, which clears 0x40, 0xE1A81F), but the block is solid below
 /// the edge, so the arrival finds foot holds (`sub_B15C30`) and plays the wall reception, not the swing (0xE093FC).
@@ -2016,7 +2039,10 @@ fn swing_from_bar_to_bar() {
     assert_eq!(s.data().air.target.unwrap().type_flags, crate::player::targets::TARGET_LEDGE_FREE);
     assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some()), "never swung: {:?} {:?}", s.loco().current, s.body().feet);
     assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_LANDING);
-    // a bar ahead → the swing cycle
+    // both hands on a pole (the bars are Pole edges) → the swing cycle; high profile and Legs held keep it going and
+    // jump with the stick toward the facing (RE/24 LEDGE-17)
+    assert!(s.data().ledge.swing.unwrap().on_pole, "the bar is a pole");
+    s.pad(Vec3::Z, 1.0, true, true);
     assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle: {:?}", s.data().ledge.swing.map(|w| w.phase));
     assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_CYCLE);
     for z in [93.5f32, 97.0] {
@@ -2727,6 +2753,7 @@ fn the_hands_let_go_of_the_bar_on_a_swing_jump() {
     s.press_legs();
     assert!(s.run_until(4.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, crate::player::swing::SwingPhase::Cycle(_)))));
     assert!(s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap().hands.is_some(), "hands on the bar while swinging");
+    s.pad(Vec3::Z, 1.0, true, true);
     s.press_legs();
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no swing jump");
     s.run(1.0 / 60.0 + 1e-4);

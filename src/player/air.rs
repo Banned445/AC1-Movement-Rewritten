@@ -936,6 +936,10 @@ pub fn update_air(
                 let fwd = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
                 let seq = data.ledge.swing.map(|s| s.seq).unwrap_or(0);
                 data.ledge.swing = super::swing::enter(body.feet, root, fwd, (entry.hand_l + entry.hand_r) * 0.5, flight, seq);
+                let on_pole = [entry.hand_l, entry.hand_r].iter().all(|h| guidance.on_edge(*h, n, 0.15).is_some_and(|hit| guidance.edges[hit.edge].subtype == crate::guidance::GuidanceSubType::Pole));
+                if let Some(s) = data.ledge.swing.as_mut() {
+                    s.on_pole = on_pole;
+                }
                 data.ledge.hang_type = super::ledge::LedgeHangType::Free;
                 data.ledge.hang_set = true;
             }
