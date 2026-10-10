@@ -196,46 +196,70 @@ impl HumanWallingData {
 
 // ---------------------------------------------------------------- the wall ahead (0xE18390)
 
-/// Outward normal of the axis-aligned greybox face at `p` (the game takes the collision hit's normal).
-fn face_normal(p: Vec3, toward: Vec3, collision: &CollisionWorld) -> Vec3 {
-    let mut best = -toward;
-    let mut score = f32::MIN;
-    for n in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
-        if collision.point_inside(p - n * 0.03) && !collision.point_inside(p + n * 0.03) {
-            let s = n.dot(-toward);
-            if s > score {
-                score = s;
-                best = n;
-            }
+/// The walling probes' collision layer (14, `Human__RayClear` / `Human__RayDistance` in 0xE149E0 / 0xE14590).
+const WALL_RAY_LAYER: u8 = crate::layers::RAYCAST_NO_CHARACTERS;
+
+/// `Human__WallingWidthCheck` 0xE149E0 (RE/24 WALL-1): from the hit + 0.001·n, a ray 0.5 m along n turned −45° and then
+/// +45° about up. Both clear → accept the hit. A ray that hits found something jutting out beside the contact (an inner
+/// corner, a pilaster): `sub_E14790` steps away from it (hypothesis: the side of n × ±up away from it; toward it the ray
+/// would start inside it): from that hit a ray 0.3 m along the wall (away from
+/// that side) must be clear, then from there a ray back along −n, as long as the distance to the original wall plane +
+/// 0.25 m, must hit; that hit becomes the contact. A failed step rejects the wall. Narrow walls, posts and a wall's outer end are accepted.
+fn width_check(hit: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
+    let start = hit + n * 0.001;
+    for a in [-std::f32::consts::FRAC_PI_4, std::f32::consts::FRAC_PI_4] {
+        let dir = Quat::from_rotation_y(a) * n;
+        let Some((d, _)) = collision.ray_hit(start, dir, 0.5, WALL_RAY_LAYER) else { continue };
+        let jut = start + dir * d;
+        let along = -(dir - n * dir.dot(n)).normalize_or_zero();
+        if collision.ray_hit(jut, along, 0.3, WALL_RAY_LAYER).is_some() {
+            return None;
         }
+        let from = jut + along * 0.3;
+        let back = (from - hit).dot(n) + 0.25;
+        let (d2, _) = collision.ray_hit(from, -n, back, WALL_RAY_LAYER)?;
+        return Some(from - n * d2);
     }
-    best
+    Some(hit)
 }
 
-/// `HumanWalling` entry test (event 49 guard 0xDA2B10 → 0xE18390): a ray from 1.3·h above the feet along the
-/// facing, 1.5·h long; the wall must face back within 45° and extend about 0.5 m to both sides (0xE149E0); its
-/// slope (0xE14590 / 0xE14FB0) must be within 45°. Returns the warp target (hit + 0.5·h out, feet + h)
-/// and the outward normal.
+/// `Human__WallingSlopeDir` 0xE14590 + `Human__WallingSlopeLimit` 0xE14FB0 (RE/24 WALL-3): a ray from the hit + 0.75·n +
+/// 1.0 up back along −n, 1.5 m. Clear → the wall's normal is n. Hit → the line from the hit up to that hit, turned 90°
+/// about n × up, is the wall's tilted outward normal. Its signed angle from n about n × up (positive: tilted up, the wall
+/// leaning back): |a| ≥ 45° rejects the wall; it is clamped to −10°…+20°. Returns the slope normal.
+fn slope_normal(hit: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
+    let from = hit + n * 0.75 + Vec3::Y;
+    let Some((d, _)) = collision.ray_hit(from, -n, 1.5, WALL_RAY_LAYER) else { return Some(n) };
+    let up_line = (from - n * d - hit).normalize_or_zero();
+    let k = n.cross(Vec3::Y).normalize_or_zero();
+    let mut s = Quat::from_axis_angle(k, -std::f32::consts::FRAC_PI_2) * up_line;
+    if s.dot(n) < 0.0 {
+        s = -s;
+    }
+    let a = n.cross(s).dot(k).atan2(n.dot(s));
+    if a.abs() >= std::f32::consts::FRAC_PI_4 {
+        return None;
+    }
+    let a = a.clamp(-10f32.to_radians(), 20f32.to_radians());
+    Some(Quat::from_axis_angle(k, a) * n)
+}
+
+/// `HumanWalling` entry test (event 49 guard 0xDA2B10 → 0xE18390): a ray from 1.3·h above the feet along the facing,
+/// 1.5·h long, on the walling layer; the hit's own normal flattened (0xE184EA, RE/24 WALL-2) must face back within 45°;
+/// the width check (`width_check`) may move the contact or reject; the slope (`slope_normal`) may reject. Returns the warp
+/// target (contact + 0.5·h along the slope normal, 0.3·h down: feet + h on a vertical wall) and the flat outward normal.
+/// PORT: the run's facing frame stays upright (the game pitches it with the slope normal and lerps back in VerticalEnd).
 pub fn wall_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
     let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let o = feet + Vec3::Y * (1.3 * H);
-    let d = collision.sphere_free_distance(o, f, 0.01, 1.5 * H);
-    if d >= 1.5 * H - 1e-3 {
+    let (d, normal) = collision.ray_hit(o, f, 1.5 * H, WALL_RAY_LAYER)?;
+    let n = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
+    if n == Vec3::ZERO || n.dot(-f) < 45f32.to_radians().cos() {
         return None;
     }
-    let hit = o + f * d;
-    let n = face_normal(hit, f, collision);
-    if n.dot(-f) < 45f32.to_radians().cos() {
-        return None;
-    }
-    let side = right_of(-n);
-    let solid = |p: Vec3| collision.point_inside(p - n * 0.05);
-    if !(solid(hit + side * 0.5) && solid(hit - side * 0.5)) {
-        return None;
-    }
-    // 0xE14590 probes 1 m higher only to measure the wall's slope (a vertical greybox wall: 0°); it does not
-    // reject a wall that ends lower.
-    let contact = Vec3::new(hit.x, feet.y + H, hit.z) + n * (0.5 * H);
+    let hit = width_check(o + f * d, n, collision)?;
+    let slope = slope_normal(hit, n, collision)?;
+    let contact = hit + slope * (0.5 * H) - Vec3::Y * (0.3 * H);
     Some((contact, n))
 }
 
@@ -551,4 +575,79 @@ fn rebound_jump(from: Vec3, normal: Vec3, push: Vec3, guidance: &GuidanceWorld, 
         ladder: None,
     });
     (dir, target)
+}
+
+#[cfg(test)]
+mod wall_entry_tests {
+    use super::*;
+    use crate::collision::Aabb3;
+    use crate::triangles::Triangle;
+
+    /// A quad a–b–c–d as two triangles on the walling layer, outward normal (b − a) × (d − a).
+    fn quad(c: &mut CollisionWorld, a: Vec3, b: Vec3, cc: Vec3, d: Vec3) {
+        for t in [[a, b, cc], [a, cc, d]] {
+            c.triangles.push(Triangle::new(t, crate::layers::STATIC).unwrap());
+        }
+    }
+
+    /// RE/24 WALL-1: the width check never needs the wall to reach 0.5 m to both sides: a 0.3 m post and the last 0.2 m
+    /// of a wall run up; a pilaster jutting out beside the contact moves it past the pilaster.
+    #[test]
+    fn narrow_walls_and_wall_ends_are_run_up_and_a_pilaster_is_stepped_past() {
+        let feet = Vec3::new(0.0, 0.0, 1.0);
+        let mut post = CollisionWorld::default();
+        post.boxes.push(Aabb3 { min: Vec3::new(-0.15, 0.0, -0.3), max: Vec3::new(0.15, 4.0, 0.0) });
+        let (contact, n) = wall_ahead(feet, Vec3::NEG_Z, &post).expect("a 0.3 m post runs up");
+        assert!(n.dot(Vec3::Z) > 0.999 && (contact - Vec3::new(0.0, 1.0, 0.5)).length() < 1e-3, "{contact:?} {n:?}");
+        let mut end = CollisionWorld::default();
+        end.boxes.push(Aabb3 { min: Vec3::new(-0.2, 0.0, -1.0), max: Vec3::new(5.0, 4.0, 0.0) });
+        assert!(wall_ahead(feet, Vec3::NEG_Z, &end).is_some(), "the last 0.2 m of a wall runs up");
+        // a pilaster 0.25 m to the right (x 0.25..0.45), jutting 0.5 m out: the right 45° ray meets it, the contact steps
+        // 0.3 m away from it along the wall
+        let mut pil = CollisionWorld::default();
+        pil.boxes.push(Aabb3 { min: Vec3::new(-5.0, 0.0, -1.0), max: Vec3::new(5.0, 4.0, 0.0) });
+        pil.boxes.push(Aabb3 { min: Vec3::new(0.25, 0.0, 0.0), max: Vec3::new(0.45, 4.0, 0.5) });
+        let (contact, _) = wall_ahead(feet, Vec3::NEG_Z, &pil).expect("stepped away from the pilaster");
+        assert!(contact.x < -0.01 && (contact.z - 0.5).abs() < 1e-3, "the contact moved away from the pilaster: {contact:?}");
+    }
+
+    /// RE/24 WALL-2: the hit's own normal, not the nearest axis: a wall at 45° keeps its 45° normal.
+    #[test]
+    fn an_oblique_wall_keeps_its_own_normal() {
+        let mut c = CollisionWorld::default();
+        let (u, v) = (Vec3::new(1.0, 0.0, -1.0).normalize(), Vec3::Y);
+        let o = Vec3::new(0.0, 0.0, 0.0);
+        quad(&mut c, o - u * 3.0, o + u * 3.0, o + u * 3.0 + v * 4.0, o - u * 3.0 + v * 4.0);
+        let out = Vec3::new(-1.0, 0.0, -1.0).normalize();
+        let n_quad = c.triangles[0].normal;
+        let (a, b, cc, d) = if n_quad.dot(out) > 0.0 { (o - u * 3.0, o + u * 3.0, o + u * 3.0 + v * 4.0, o - u * 3.0 + v * 4.0) } else { (o + u * 3.0, o - u * 3.0, o - u * 3.0 + v * 4.0, o + u * 3.0 + v * 4.0) };
+        c.triangles.clear();
+        quad(&mut c, a, b, cc, d);
+        let feet = out * 0.8;
+        let (_, n) = wall_ahead(feet, -out, &c).expect("an oblique wall");
+        assert!(n.dot(out) > 0.999, "not snapped to an axis: {n:?}");
+    }
+
+    /// RE/24 WALL-3: a wall leaning back 15° moves the contact along its tilted normal; one leaning 50° is refused.
+    #[test]
+    fn the_wall_slope_moves_the_contact_and_too_steep_a_lean_refuses() {
+        let lean = |deg: f32| {
+            let mut c = CollisionWorld::default();
+            let t = deg.to_radians();
+            // the face rises from z 0 at the floor, leaning back toward −z
+            let top = Vec3::new(0.0, 4.0 * t.cos(), -4.0 * t.sin());
+            let (a, b) = (Vec3::new(-3.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0));
+            quad(&mut c, a, b, b + top, a + top);
+            if c.triangles[0].normal.z < 0.0 {
+                c.triangles.clear();
+                quad(&mut c, b, a, a + top, b + top);
+            }
+            c
+        };
+        let feet = Vec3::new(0.0, 0.0, 0.8);
+        let (vert, _) = wall_ahead(feet, Vec3::NEG_Z, &lean(0.0)).expect("vertical");
+        let (leaning, _) = wall_ahead(feet, Vec3::NEG_Z, &lean(15.0)).expect("15 degrees back");
+        assert!(leaning.y > vert.y + 0.05, "the contact follows the tilted normal: {leaning:?} vs {vert:?}");
+        assert!(wall_ahead(feet, Vec3::NEG_Z, &lean(50.0)).is_none(), "a 50-degree lean is refused");
+    }
 }
