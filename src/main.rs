@@ -35,6 +35,7 @@ mod native_map;
 mod city;
 mod map_menu;
 mod wind;
+mod sound;
 
 use bevy::prelude::*;
 
@@ -90,6 +91,6 @@ fn main() {
             city::CityPlugin,
         ))
         // a tuple takes at most 15 plugins
-        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin))
+        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin, sound::SoundPlugin))
         .run();
 }
