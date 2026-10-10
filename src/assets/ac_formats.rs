@@ -295,24 +295,34 @@ pub fn parse_texture(d: &[u8]) -> Option<AcTexture> {
     if !(1..=4096).contains(&w) || !(1..=4096).contains(&h) || !(1..=13).contains(&mips) {
         return None;
     }
-    for (block, bc3) in [(8u32, false), (16u32, true)] {
-        let size = chain_size(w, h, block, mips);
-        if let Some(off) = (0x20..0x100.min(d.len().saturating_sub(4))).find(|&o| u32_at(d, o) == Some(size)) {
-            let data = d.get(off + 4..off + 4 + size as usize)?;
-            let mut out = Vec::new();
-            let (mut mw, mut mh, mut p) = (w, h, 0usize);
-            for _ in 0..mips {
-                let bytes = (mw.div_ceil(4).max(1) * mh.div_ceil(4).max(1) * block) as usize;
-                out.push(decode_bc(&data[p..p + bytes], mw, mh, bc3));
-                p += bytes;
-                mw = (mw / 2).max(1);
-                mh = (mh / 2).max(1);
-            }
-            let (address, filter) = texture_sampler_fields(d);
-            return Some(AcTexture { width: w, height: h, mips: out, srgb: u32_at(d, 28) == Some(1), address, filter });
-        }
+    let (off, block, bc3) = find_chain(d, w, h, mips)?;
+    let size = chain_size(w, h, block, mips);
+    let data = d.get(off + 4..off + 4 + size as usize)?;
+    let mut out = Vec::new();
+    let (mut mw, mut mh, mut p) = (w, h, 0usize);
+    for _ in 0..mips {
+        let bytes = (mw.div_ceil(4).max(1) * mh.div_ceil(4).max(1) * block) as usize;
+        out.push(decode_bc(&data[p..p + bytes], mw, mh, bc3));
+        p += bytes;
+        mw = (mw / 2).max(1);
+        mh = (mh / 2).max(1);
     }
-    None
+    let (address, filter) = texture_sampler_fields(d);
+    Some(AcTexture { width: w, height: h, mips: out, srgb: u32_at(d, 28) == Some(1), address, filter })
+}
+
+/// The mip chain's size field, (offset, block bytes, bc3): the data size at +0x4F (RE/09 §4.1) when it is a BC1 or BC3
+/// chain size, else the first offset holding one. The fixed offset comes first because the header can hold a value
+/// equal to a chain size before it (GFX_Dust_Sand_01, 256² BC3 with one mip: 65536 at +0x2E as well).
+fn find_chain(d: &[u8], w: u32, h: u32, mips: u32) -> Option<(usize, u32, bool)> {
+    let formats = [(8u32, false), (16u32, true)];
+    if let Some(&(block, bc3)) = formats.iter().find(|&&(block, _)| u32_at(d, 0x4F) == Some(chain_size(w, h, block, mips))) {
+        return Some((0x4F, block, bc3));
+    }
+    formats.into_iter().find_map(|(block, bc3)| {
+        let size = chain_size(w, h, block, mips);
+        (0x20..0x100.min(d.len().saturating_sub(4))).find(|&o| u32_at(d, o) == Some(size)).map(|o| (o, block, bc3))
+    })
 }
 
 /// A TextureMap's BC mip chain kept compressed (for GPU upload): (width, height, mips, bc3, blocks of all mips).
@@ -323,13 +333,9 @@ pub fn parse_texture_blocks(d: &[u8]) -> Option<(u32, u32, u32, bool, Vec<u8>)> 
     if !(1..=4096).contains(&w) || !(1..=4096).contains(&h) || !(1..=13).contains(&mips) {
         return None;
     }
-    for (block, bc3) in [(8u32, false), (16u32, true)] {
-        let size = chain_size(w, h, block, mips);
-        if let Some(off) = (0x20..0x100.min(d.len().saturating_sub(4))).find(|&o| u32_at(d, o) == Some(size)) {
-            return Some((w, h, mips, bc3, d.get(off + 4..off + 4 + size as usize)?.to_vec()));
-        }
-    }
-    None
+    let (off, block, bc3) = find_chain(d, w, h, mips)?;
+    let size = chain_size(w, h, block, mips);
+    Some((w, h, mips, bc3, d.get(off + 4..off + 4 + size as usize)?.to_vec()))
 }
 
 fn rgb565(c: u16) -> [u8; 3] {
