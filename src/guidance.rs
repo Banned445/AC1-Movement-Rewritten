@@ -451,6 +451,81 @@ impl GuidanceWorld {
         self.report_indexed(centre, forward, min, max, clip).world
     }
 
+    /// The filtered report the ledge, climb-grid, pull-down and ladder side-jump searches read (RE/24 GUIDE-2): the edges
+    /// within `radius` of `centre`, every Ladder edge as it is (the probes clip their finds to the report with Ladder
+    /// edges exempt, GUIDE-3), every other edge with the ladder zones cut out (`sub_1170880` → `sub_116F060`: per ladder
+    /// a box right = n × up, forward = n, up = along the ladder, origin its lower end, ±0.3 across, ±0.75 in front /
+    /// behind, from 0.2 m below to 0.2 m past it; `CutReport` mode 2 Exclude, exempt mask 8) and, with `steep`, those
+    /// steeper than 40° removed (`GuidanceReport__RemoveSteepEdges` 0x66C350). PORT: the depth filter that follows
+    /// (`sub_B27E80` / `sub_B28180`: a 0.1 m depth map along each edge, intervals under the threshold rejected) is not
+    /// applied; its sampled segments and frame are not decoded yet.
+    pub fn ledge_report(&self, centre: Vec3, radius: f32, steep: bool) -> GuidanceWorld {
+        let near = |e: &GuidanceEdge| {
+            let (lo, hi) = (e.p0.min(e.p1), e.p0.max(e.p1));
+            centre.clamp(lo, hi).distance_squared(centre) <= radius * radius
+        };
+        // the ladder zones: (origin, right, forward, up, length)
+        let zones: Vec<(Vec3, Vec3, Vec3, Vec3, f32)> = self
+            .edges
+            .iter()
+            .filter(|e| e.subtype == GuidanceSubType::Ladder && near(e))
+            .filter_map(|e| {
+                let (b, t) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
+                let up = (t - b).normalize_or_zero();
+                let fwd = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+                let right = fwd.cross(Vec3::Y).normalize_or_zero();
+                (up != Vec3::ZERO && right != Vec3::ZERO).then_some((b, right, fwd, up, (t - b).length()))
+            })
+            .collect();
+        let mut out = GuidanceWorld { haystacks: self.haystacks.clone(), ..Default::default() };
+        for e in self.edges.iter().filter(|e| near(e)) {
+            if e.subtype == GuidanceSubType::Ladder {
+                out.edges.push(e.clone());
+                continue;
+            }
+            if steep && (e.p1 - e.p0).normalize_or_zero().y.abs() > 0.642_787_6 {
+                continue;
+            }
+            let mut pieces = vec![(e.p0, e.p1)];
+            for &(o, r, f, u, len) in &zones {
+                let local = |p: Vec3| {
+                    let d = p - o;
+                    Vec3::new(d.dot(r), d.dot(f), d.dot(u))
+                };
+                let mid = Vec3::new(0.0, 0.0, len * 0.5);
+                let half = Vec3::new(0.3, 0.75, len * 0.5 + 0.2);
+                let mut next = Vec::new();
+                for (a, b) in pieces {
+                    let ab = b - a;
+                    let l2 = ab.length_squared();
+                    match clip_segment(local(a) - mid, local(b) - mid, half) {
+                        Some((ia, ib)) if l2 > 1e-12 => {
+                            // the inside part as parameters along a → b, then keep what lies outside it
+                            let back = |l: Vec3| {
+                                let l = l + mid;
+                                o + r * l.x + f * l.y + u * l.z
+                            };
+                            let (ta, tb) = ((back(ia) - a).dot(ab) / l2, (back(ib) - a).dot(ab) / l2);
+                            let (t0, t1) = (ta.min(tb).clamp(0.0, 1.0), ta.max(tb).clamp(0.0, 1.0));
+                            if t0 > 1e-4 {
+                                next.push((a, a + ab * t0));
+                            }
+                            if t1 < 1.0 - 1e-4 {
+                                next.push((a + ab * t1, b));
+                            }
+                        }
+                        _ => next.push((a, b)),
+                    }
+                }
+                pieces = next;
+            }
+            for (a, b) in pieces {
+                out.edges.push(GuidanceEdge { p0: a, p1: b, ..e.clone() });
+            }
+        }
+        out
+    }
+
     /// `report` with each report edge's index in this world and, for a clipped report, the lengths cut off its two ends
     /// (the contact's runtime scratch, `sub_6764E0`; none for Beam edges).
     pub fn report_indexed(&self, centre: Vec3, forward: Vec3, min: Vec3, max: Vec3, clip: bool) -> Report {
@@ -818,6 +893,23 @@ mod tests {
         let long = chains.iter().find(|c| c.links.len() == 2).expect("the two pieces form one chain");
         let ends = [long.start().x, long.end().x];
         assert!(ends.contains(&0.0) && ends.contains(&2.5), "{ends:?}");
+    }
+
+    #[test]
+    fn the_ledge_report_carves_round_ladders_and_drops_steep_edges() {
+        // RE/24 GUIDE-2: sub_116F060's ladder zone (±0.3 across, ±0.75 in front / behind, 0.2 m past the ends) is cut out
+        // of every non-ladder edge; edges steeper than 40° are removed; the ladder itself stays
+        let ladder = GuidanceEdge { p0: Vec3::new(2.0, 0.0, 0.0), p1: Vec3::new(2.0, 4.0, 0.0), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::Ladder };
+        let steep = ledge(Vec3::new(5.0, 1.0, 0.0), Vec3::new(5.5, 2.0, 0.0));
+        let g = GuidanceWorld { edges: vec![ledge(Vec3::new(0.0, 2.0, 0.0), Vec3::new(4.0, 2.0, 0.0)), ladder.clone(), steep], ..Default::default() };
+        let r = g.ledge_report(Vec3::new(2.0, 2.0, 0.0), 10.0, true);
+        assert!(r.edges.iter().any(|e| e.subtype == GuidanceSubType::Ladder), "the ladder stays");
+        let mut xs: Vec<(f32, f32)> = r.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab).map(|e| (e.p0.x.min(e.p1.x), e.p0.x.max(e.p1.x))).collect();
+        xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(xs.len(), 2, "the ledge is cut in two, the steep edge dropped: {xs:?}");
+        assert!((xs[0].1 - 1.7).abs() < 1e-4 && (xs[1].0 - 2.3).abs() < 1e-4, "{xs:?}");
+        // the carve-only report (the ladder's side jump) keeps the steep edge
+        assert_eq!(g.ledge_report(Vec3::new(2.0, 2.0, 0.0), 10.0, false).edges.len(), 4);
     }
 
     #[test]

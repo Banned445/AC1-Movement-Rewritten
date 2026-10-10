@@ -430,7 +430,7 @@ pub fn update_ledge(
                 super::passover::PassOverOut::PullDown { far, normal } => {
                     // pull-down type 4 (0xDE0220): Ledge SubState 11 from the far edge
                     data.ledge.pass_over = None;
-                    let entry = match ledge_moves::pulldown_passover(far, normal, body.feet, p.hand, p.w, &guidance, &collision) {
+                    let entry = match ledge_moves::pulldown_passover(far, normal, body.feet, p.hand, p.w, &guidance.ledge_report(far, 2.5, true), &collision) {
                         Ok(moves) => super::ground::pulldown_ledge_entry(moves, normal, body.feet),
                         Err(orient) => super::ground::pulldown_release_entry(orient, normal, body.feet),
                     };
@@ -603,6 +603,10 @@ pub fn update_ledge(
         // the interpreter's latched stick in the character's frame (`GoAssassinActionInterpreter__LedgeState` 0xEEC356:
         // the angle of +0x1310 from stick-up; RB held reads the unmirrored +0x1300, 0xEEC256; RE/24 INPUT-4)
         let dir = if pad.speed01 > 0.0 { Some(quantize(pad.actor_dir(facing, pad.buttons[13]), facing)) } else { None };
+        // the ledge report (`HumanLedge__BuildLedgeReport` 0xDDC620 → HumanData +116): ladder zones carved, steep edges
+        // removed; ProbeLateral, FindCornerEdges, FindVerticalRows, the side jumps and TryJumpUpToClimb read it
+        // (RE/24 GUIDE-2). Its largest box reaches 3 m sideways from the hands.
+        let report = guidance.ledge_report(hand_mid(d), 3.5, true);
         // the interpreter's ledge state (`GoAssassinActionInterpreter__LedgeState` 0xEEBFD0, RE/03 7.12): the
         // empty-hand buffer lets go (event 4, 0xDDB450 -> LetGoToInAir) ...
         if pad.hand_buffered() {
@@ -674,7 +678,7 @@ pub fn update_ledge(
                     }
                 }
                 // sub_DD8F70: the feet, hands and hand-step rows for this direction
-                let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, dir == LedgeDir::Up, &guidance);
+                let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, dir == LedgeDir::Up, &report);
                 // TryTransitionToClimb 0xDD46A0: both rows → the climb pose of those holds (both hands on the hands row,
                 // both feet on the feet row). PORT: its body boxes (0xB2DF90) are not tested.
                 if let (Some(feet_row), Some(hands_row)) = (rows.feet, rows.hands) {
@@ -738,7 +742,7 @@ pub fn update_ledge(
                 if dir == LedgeDir::Up {
                     // TryJumpUpOrSideJump 0xDE05E0 (up) → TryJumpUpToClimb 0xDD5E10: the jump up to climb holds.
                     // (The game's +1848 pending-step check is implicit: the decision only runs between moves.)
-                    if let Some((mv, e)) = ledge_moves::try_jump_up_to_climb(d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                    if let Some((mv, e)) = ledge_moves::try_jump_up_to_climb(d.hand_l, d.hand_r, n, body.feet, d.hang_type, &report, &collision) {
                         start_move(d, mv, "jump up to climb");
                         d.then_climb = Some(e);
                         continue;
@@ -764,7 +768,7 @@ pub fn update_ledge(
                 let (mover, other) = if move_right_hand { (d.hand_r, d.hand_l) } else { (d.hand_l, d.hand_r) };
                 // Movement_ChooseAction 0xDE29E0, left / right, with the preference +1856 = 0 (the ctor's value; nothing
                 // else sets it): ProbeLateral 0xDD9640 first (the rows and the shimmy target)
-                let (rows, target) = ledge_moves::probe_lateral(mover, other, n, dv, d.alt_flag, &guidance, &collision);
+                let (rows, target) = ledge_moves::probe_lateral(mover, other, n, dv, d.alt_flag, &report, &collision);
                 // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side
                 if let Some((mv, e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance) {
                     start_move(d, mv, "side to ladder");
@@ -810,22 +814,22 @@ pub fn update_ledge(
                 }
                 // the near corner: FindCornerEdges(dir, 1) 0xDD0600 → climb holds 16 / 8 / 4 round it, TryTurnCorner(dir,
                 // 1) 0xDD3BB0
-                let near = ledge_moves::corner_rows(true, right_dir, d.hand_l, d.hand_r, n, &guidance);
+                let near = ledge_moves::corner_rows(true, right_dir, d.hand_l, d.hand_r, n, &report);
                 if let Some(e) = climb_holds(&near, &[2, 1, 0]) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
-                if let Some(mv) = ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                if let Some(mv) = ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &report, &collision) {
                     start_move(d, mv, "corner (inner)");
                     continue;
                 }
                 // TryJumpUpOrSideJump 0xDE05E0: a ladder (0xDD55F0), then a ledge (0xDDD490)
-                if let Some((mv, e)) = ledge_moves::try_side_jump_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision) {
+                if let Some((mv, e)) = ledge_moves::try_side_jump_to_ladder(right_dir, n, body.feet, d.hang_type, &report, &collision) {
                     start_move(d, mv, "side jump to ladder");
                     d.then_ladder = Some(e);
                     continue;
                 }
-                if let Some((mv, climb)) = ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                if let Some((mv, climb)) = ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &report, &collision) {
                     if climb.is_some() {
                         // onto climb holds (type 0): the Climb context takes over at the end
                         start_move(d, mv, "side jump to climb");
@@ -839,12 +843,12 @@ pub fn update_ledge(
                     continue;
                 }
                 // the far corner: FindCornerEdges(dir, 0) → climb holds round it, TryTurnCorner(dir, 0)
-                let far = ledge_moves::corner_rows(false, right_dir, d.hand_l, d.hand_r, n, &guidance);
+                let far = ledge_moves::corner_rows(false, right_dir, d.hand_l, d.hand_r, n, &report);
                 if let Some(e) = climb_holds(&far, &[2, 1, 0]) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
-                if let Some(mv) = ledge_moves::try_corner(false, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                if let Some(mv) = ledge_moves::try_corner(false, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &report, &collision) {
                     start_move(d, mv, "corner (outer)");
                     continue;
                 }

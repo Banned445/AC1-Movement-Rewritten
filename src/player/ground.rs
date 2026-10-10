@@ -1154,7 +1154,8 @@ pub fn update_ground(
         // than 2 m, body space) and, out of the ledge stop, the empty hand pressed within the last 0.2 s
         // (`sub_ED4A20(3, 0.2)`, dword_170861C). Either profile.
         if pad.hand_pressed_ago <= PULLDOWN_HAND_WINDOW && !busy && ab.allows(Ability::Climb) {
-            if let Some(entry) = try_pulldown(body.feet, body.forward(), &guidance, &collision) {
+            // the pull-down report (`sub_DDCB20`: ladders carved, steep removed; RE/24 GUIDE-2)
+            if let Some(entry) = try_pulldown(body.feet, body.forward(), &guidance.ledge_report(body.feet, 2.5, true), &collision) {
                 pad.consume_hand();
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
                 continue;

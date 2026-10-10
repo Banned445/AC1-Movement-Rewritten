@@ -681,7 +681,9 @@ pub fn update_ladder(
                 // the main state's sub-states is not modelled)
                 if !stepping && stick && sd.dot(fwd).abs() < 0.342 && ab.allows(super::abilities::Ability::Climb) {
                     let right = sd.dot(super::right_of(fwd)) >= 0.0;
-                    if let Some(side) = side_move(right, body.feet, l.n, &guidance, &collision) {
+                    // `HumanLadder__FindSideJump` 0xE228E0 carves the ladder zones out of its query (`sub_1170880` at 0xE22C81;
+                    // no steep removal; RE/24 GUIDE-2)
+                    if let Some(side) = side_move(right, body.feet, l.n, &guidance.ledge_report(body.feet, 4.0, false), &collision) {
                         match side {
                             LadderSide::Hang(e) | LadderSide::Jump(e) => {
                                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));

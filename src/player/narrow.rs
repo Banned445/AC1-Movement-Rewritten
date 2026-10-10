@@ -1100,7 +1100,8 @@ pub fn update_narrow(
         let can_pull_down = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::PilotisWait);
         if can_pull_down && pad.hand_just_pressed() {
             let camera_dir = Vec3::new(camera.yaw.sin(), 0.0, camera.yaw.cos());
-            if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), camera_dir, &guidance, &collision) {
+            // the pull-down report (`sub_DDCB20`, RE/24 GUIDE-2)
+            if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), camera_dir, &guidance.ledge_report(n.stand(), 2.5, true), &collision) {
                 pad.hand_pressed_ago = f32::INFINITY;
                 body.feet = n.stand();
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
