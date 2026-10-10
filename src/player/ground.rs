@@ -1387,34 +1387,33 @@ pub fn ground_loss(feet: Vec3, velocity: Vec3, guidance: &GuidanceWorld, collisi
 /// 1. climb start: hand holds 1.8–2.4 m up and foot holds 1.2 m below them (vt764/768, FromGround);
 /// 2. a ledge with the hands 0.7–3.0 m up → the standing straight jump at it (0xB21DA0 bands: knee / waist
 ///    heights pull straight up onto the top, higher ones end hanging).
-/// The climb start from the ground (event 50, guard `sub_D83920` -> `sub_B2E860` on the interpreter's hold reports).
-/// PORT: the reports are guidance probes in reach (0.75 m, front half): a hand hold 1.5 m or more above the feet at
-/// 1.8 / 2.4 m and foot holds two rows below it.
+/// The climb start from the ground (event 50, guard `sub_D83920` → `sub_B2E860`). The edges of a report box at the
+/// root facing the character (±0.75 m to the side, 0 … 1.2 m ahead, −0.9 … +2.1 m up, whole edges); three passes, the
+/// box 0.95 m ahead facing forward, then 0.8 m ahead facing 90° left and 90° right (a side wall), each at the feet's
+/// height + 0, +0.6, −0.6 m: a feet hold (box half extents 0.25 / 0.75 / 0.3, the reference 0.2 m back, 45°, mask 50),
+/// then a hand hold 1.2 m above it (0.25 / 0.3 / 0.3). Both hands on the hand hold, both feet on the feet hold.
+/// PORT: the pose's validity (`sub_B2E160`) and the path tests of the side passes (`sub_B15ED0`) are not modelled.
 fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &GuidanceWorld) -> Option<ClimbEntry> {
-    let reach = |h: f32| {
-        guidance
-            .probe(feet + Vec3::Y * h, GRAB_PROBE_RADIUS, 0.225, Some(forward), std::f32::consts::FRAC_PI_2)
-            .filter(|hit| (hit.point - feet).dot(forward) > 0.0)
-    };
-    for h in [1.8f32, 2.4] {
-        if let Some(hand) = reach(h) {
-            if hand.point.y - feet.y < 1.5 {
-                continue;
-            }
-            let foot = guidance.probe(hand.point - Vec3::Y * CLIMB_ROW * CLIMB_HAND_ROWS as f32, 0.2, 0.15, Some(forward), 0.785);
-            if let Some(foot) = foot {
-                return Some(ClimbEntry {
-                    entry_type: ClimbEntryType::FromGround,
-                    hand_l: hand.point,
-                    hand_r: hand.point,
-                    foot_l: foot.point,
-                    foot_r: foot.point,
-                    normal: hand.wall_normal,
-                    from_feet: feet,
-                    foot_right,
-                    action: None,
-                });
-            }
+    let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let report = guidance.report(feet, forward, Vec3::new(-0.75, 0.0, -0.9), Vec3::new(0.75, 1.2, 2.1), false);
+    let right = super::right_of(forward);
+    let mask = crate::guidance::MASK_CLIMB_HOLDS;
+    for (ahead, facing) in [(0.95f32, forward), (0.8, -right), (0.8, right)] {
+        for k in [0.0f32, 0.6, -0.6] {
+            let c = feet + forward * ahead + Vec3::Y * k;
+            let Some(foot) = report.probe_facing(c, facing, Vec3::new(0.25, 0.75, 0.3), 0.2, 0.785_398_2, mask) else { continue };
+            let Some(hand) = report.probe_facing(foot.point + Vec3::Y * 1.2, facing, Vec3::new(0.25, 0.3, 0.3), 0.2, 0.785_398_2, mask) else { continue };
+            return Some(ClimbEntry {
+                entry_type: ClimbEntryType::FromGround,
+                hand_l: hand.point,
+                hand_r: hand.point,
+                foot_l: foot.point,
+                foot_r: foot.point,
+                normal: hand.wall_normal,
+                from_feet: feet,
+                foot_right,
+                action: None,
+            });
         }
     }
     None

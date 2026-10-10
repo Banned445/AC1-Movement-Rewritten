@@ -441,6 +441,35 @@ fn nearest_to_x_line(a: Vec3, b: Vec3, x_ref: f32) -> Vec3 {
     a + d * t
 }
 
+impl GuidanceWorld {
+    /// A guidance report (`GuidanceZone__Query` 0x5AB580 with a GuidanceZoneBox): the edges meeting the box at
+    /// `centre` facing `forward` (right = forward × up, up = world up) between the local corners `min` and `max`, as a
+    /// world of their own; `clip` cuts each edge to the box, else whole edges are kept. Edge indices are the report's.
+    pub fn report(&self, centre: Vec3, forward: Vec3, min: Vec3, max: Vec3, clip: bool) -> GuidanceWorld {
+        let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+        let right = forward.cross(Vec3::Y);
+        let mid = (min + max) * 0.5;
+        let half = (max - min) * 0.5;
+        let local = |p: Vec3| {
+            let d = p - centre;
+            Vec3::new(d.dot(right), d.dot(forward), d.y) - mid
+        };
+        let world = |l: Vec3| {
+            let l = l + mid;
+            centre + right * l.x + forward * l.y + Vec3::Y * l.z
+        };
+        let edges = self
+            .edges
+            .iter()
+            .filter_map(|e| {
+                let (a, b) = clip_segment(local(e.p0), local(e.p1), half)?;
+                Some(if clip { GuidanceEdge { p0: world(a), p1: world(b), ..e.clone() } } else { e.clone() })
+            })
+            .collect();
+        GuidanceWorld { edges, ..Default::default() }
+    }
+}
+
 /// The edge-piece shortening (`sub_116D3C0`) every Human box probe passes (0.1 m).
 pub const PROBE_STEP: f32 = 0.1;
 
