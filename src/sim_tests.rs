@@ -2764,58 +2764,97 @@ fn a_free_hang_drops_into_a_wall_hang_on_the_ledge_below() {
     assert!((l.hand_l.y - 2.4).abs() < 0.05 && (l.hand_l.z + 19.1).abs() < 0.05, "hands on wall H: {:?}", l.hand_l);
 }
 
-/// Replays every recording in `port/bugs/*/input.txt` through the gameplay systems (no rendering, animation or IK)
-/// and checks each frame's context, root and heading against the `state.txt` captured in the game. Run with
-/// `cargo test --release replay_bug_recordings -- --ignored --nocapture`; set `AC_BUG=<folder name>` for one bug.
+/// Replays every recording in `bugs/*/input.txt` through the gameplay systems (no rendering, animation or IK) and
+/// compares each frame's context, root and heading with the capture. Run with
+/// `cargo test --release replay_bug_recordings -- --ignored --nocapture`; `AC_BUG=<folder name>` for one bug.
+///
+/// Two kinds of capture (RE/16 M1 / M2):
+/// - a **report** carries a written note (beyond the template line): the bug as it happened. It is replayed and
+///   listed, never asserted: a difference usually means the behaviour changed since;
+/// - a **fixture** (the template note only: scripted `AC_BUG_AT` captures) is the regression baseline. It is compared
+///   with its `baseline.txt` when it has one, else with the `state.txt` it was captured with.
+///
+/// `AC_REBASELINE=1` writes each fixture's `baseline.txt` from this replay (the capture's own `state.txt` is kept).
 #[test]
 #[ignore]
 fn replay_bug_recordings() {
     use crate::recorder::{bugs_dir, gameplay_key, Recording};
     let only = std::env::var("AC_BUG").ok();
+    let rebaseline = std::env::var_os("AC_REBASELINE").is_some();
     let Ok(entries) = std::fs::read_dir(bugs_dir()) else {
         eprintln!("no bugs folder at {}", bugs_dir().display());
         return;
     };
+    let keys = |text: &str| -> std::collections::BTreeMap<u64, String> {
+        text.lines()
+            .filter_map(|l| {
+                let key = l.split(" | ").next()?.trim().to_string();
+                Some((key.split_whitespace().next()?.parse().ok()?, key))
+            })
+            .collect()
+    };
     let mut failures = Vec::new();
-    for e in entries.flatten() {
+    let (mut fixtures, mut reports, mut written) = (0, 0, 0);
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
         let dir = e.path();
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         if only.as_ref().is_some_and(|o| *o != name) {
             continue;
         }
         let Some(rec) = Recording::load(&dir) else { continue };
-        let state = std::fs::read_to_string(dir.join("state.txt")).unwrap_or_default();
-        let want: std::collections::HashMap<u64, String> = state
-            .lines()
-            .filter_map(|l| {
-                let key = l.split(" | ").next()?.to_string();
-                Some((key.split_whitespace().next()?.parse().ok()?, key))
-            })
-            .collect();
+        let note = std::fs::read_to_string(dir.join("note.txt")).unwrap_or_default();
+        let report = note.lines().skip(1).any(|l| !l.trim().is_empty());
+        let state = keys(&std::fs::read_to_string(dir.join("state.txt")).unwrap_or_default());
+        let baseline = std::fs::read_to_string(dir.join("baseline.txt")).ok().map(|t| keys(&t));
+        let want = if report { &state } else { baseline.as_ref().unwrap_or(&state) };
         let mut s = Sim::new_raw(rec.start_feet, rec.start_heading);
         let mut first_diff = None;
         let mut compared = 0;
+        let mut replayed = String::new();
         for (i, f) in rec.frames.iter().enumerate() {
             s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(f.dt_nanos)));
             f.apply(&mut s.app.world_mut().resource_mut::<PadInput>());
             s.app.update();
-            if let Some(w) = want.get(&(i as u64)) {
-                compared += 1;
+            if state.contains_key(&(i as u64)) {
                 let got = gameplay_key(i as u64, s.loco(), s.body());
-                if first_diff.is_none() && got != *w {
-                    first_diff = Some(format!("frame {i}: game `{w}` replay `{got}`"));
+                if let Some(w) = want.get(&(i as u64)) {
+                    compared += 1;
+                    if first_diff.is_none() && got != *w {
+                        first_diff = Some(format!("frame {i}: capture `{w}` replay `{got}`"));
+                    }
                 }
+                replayed.push_str(&got);
+                replayed.push('\n');
             }
         }
+        if report {
+            reports += 1;
+            match &first_diff {
+                None => eprintln!("{name} (report): {compared} frames compared, identical"),
+                Some(d) => eprintln!("{name} (report, not asserted): differs at {d}"),
+            }
+            continue;
+        }
+        fixtures += 1;
+        if rebaseline {
+            std::fs::write(dir.join("baseline.txt"), &replayed).expect("baseline.txt");
+            written += 1;
+            eprintln!("{name}: baseline written ({compared} frames)");
+            continue;
+        }
+        let against = if baseline.is_some() { "baseline" } else { "state" };
         match first_diff {
-            None => eprintln!("{name}: {} frames replayed, {compared} compared, identical", rec.frames.len()),
+            None => eprintln!("{name}: {} frames replayed, {compared} compared with the {against}, identical", rec.frames.len()),
             Some(d) => {
-                eprintln!("{name}: DIFFERS at {d}");
+                eprintln!("{name}: DIFFERS from the {against} at {d}");
                 failures.push(name);
             }
         }
     }
-    assert!(failures.is_empty(), "replays differ: {failures:?}");
+    eprintln!("{fixtures} fixtures, {reports} reports{}", if rebaseline { format!(", {written} baselines written") } else { String::new() });
+    assert!(failures.is_empty(), "fixtures differ: {failures:?} (AC_REBASELINE=1 rewrites their baselines)");
 }
 
 #[test]

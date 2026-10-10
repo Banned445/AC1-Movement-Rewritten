@@ -36,16 +36,18 @@ use crate::player::{Body, HumanDataBundle, LimbTargets, Locomotion, Player, Play
 pub const RING_SECONDS: f32 = 10.0;
 
 /// Where bug folders go: `bugs/` in the crate root when started by cargo (`cargo run` / `cargo test` set
-/// `CARGO_MANIFEST_DIR` at run time), else `bugs/` next to the executable, like `game_dir.txt`. Read at run time so
-/// no build-machine path is baked into the binary.
+/// `CARGO_MANIFEST_DIR` at run time) or when the exe runs from a checkout's `target/` folder (the first ancestor with a
+/// `Cargo.toml` and `src/`, so a `cargo clean` cannot take the captures with it), else `bugs/` next to the
+/// executable, like `game_dir.txt`. Read at run time so no build-machine path is baked into the binary.
 pub fn bugs_dir() -> std::path::PathBuf {
     if let Some(root) = std::env::var_os("CARGO_MANIFEST_DIR") {
         return std::path::PathBuf::from(root).join("bugs");
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("bugs")))
-        .unwrap_or_else(|| std::path::PathBuf::from("bugs"))
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    if let Some(root) = exe_dir.as_ref().and_then(|d| d.ancestors().find(|a| a.join("Cargo.toml").is_file() && a.join("src").is_dir())) {
+        return root.join("bugs");
+    }
+    exe_dir.map(|d| d.join("bugs")).unwrap_or_else(|| std::path::PathBuf::from("bugs"))
 }
 
 /// One recorded frame of input.
