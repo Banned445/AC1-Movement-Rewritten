@@ -581,6 +581,8 @@ pub fn fall_grasp_weights(smoothed: Vec3, facing: Vec3) -> [f32; 6] {
 
 // Action ids used by the exe (RE/13 §4). Ledge tables 0x1A2C490.. (shimmy), 0x1A2C4C0.. (vertical steps).
 const ACT_HANG_WALL: u32 = 0x0106_F2E8;
+/// `PlayIdleOrBlocked` 0xDD3A10's blocked actions (wall hang): [up, down, left, right].
+const ACT_LEDGE_BLOCKED: [u32; 4] = [0x5823_575D, 0x5823_575A, 0x5823_575B, 0x5823_575C];
 const ACT_HANG_FREE: u32 = 0x0127_19F1;
 const ACT_HANG_WALLFREE: u32 = 0x0106_F2E9;
 const ACT_PULLUP_WALL: u32 = 0x0106_D2C5;
@@ -988,7 +990,19 @@ fn choose_clip(
                     _ if !wall && crate::player::ledge::wall_below_hands((l.hand_l + l.hand_r) * 0.5, l.normal, &collision) => {
                         action(&lib, &[ACT_HANG_WALLFREE], true, 0, Some(0.15), Some("hang_free"))
                     }
-                    _ => action(&lib, &[if wall { ACT_HANG_WALL } else { ACT_HANG_FREE }], true, 0, Some(0.15), Some(if wall { "hang_wall" } else { "hang_free" })),
+                    // `PlayIdleOrBlocked` 0xDD3A10 (wall hang, no pending step): the stick held with no move possible plays
+                    // the blocked action of its direction (RE/24 LEDGE-20); the free hang plays nothing for it
+                    a if wall && matches!(a, "blocked up" | "blocked down" | "end of ledge" | "shimmy blocked (obstacle / inner corner)") => {
+                        let id = match a {
+                            "blocked up" => ACT_LEDGE_BLOCKED[0],
+                            "blocked down" => ACT_LEDGE_BLOCKED[1],
+                            _ if l.blocked_right => ACT_LEDGE_BLOCKED[3],
+                            _ => ACT_LEDGE_BLOCKED[2],
+                        };
+                        action(&lib, &[id], true, 0, Some(0.15), None)
+                    }
+                    // the wall hang's idle blends in over 0.5 s (0xDD3A10: 0x0106F2E8, 0x3F000000)
+                    _ => action(&lib, &[if wall { ACT_HANG_WALL } else { ACT_HANG_FREE }], true, 0, Some(if wall { 0.5 } else { 0.15 }), Some(if wall { "hang_wall" } else { "hang_free" })),
                 }
             }
             ActorContextId::Climb => {
@@ -1538,6 +1552,10 @@ mod tests {
         // the repeat count: idles loop, the pull-up plays once
         assert_eq!(lib.graph.actions[&0x0106_F2E8].repeat, 0);
         assert_eq!(lib.graph.actions[&0x0106_D2C5].repeat, 1);
+        // the wall hang's blocked actions (0xDD3A10, RE/24 LEDGE-20) are in the graph
+        for id in ACT_LEDGE_BLOCKED {
+            assert!(lib.graph.actions.contains_key(&id), "blocked action {id:#x}");
+        }
     }
 
     #[test]

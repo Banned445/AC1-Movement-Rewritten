@@ -171,6 +171,8 @@ pub struct HumanLedgeData {
     pub pending_vstep: Option<(usize, bool)>,
     /// The jump off's stored target (event 2 → 0xDD2CA0 copies it to LedgeData+64), jumped at when the rebound ends.
     pub jump_off: Option<super::air::InAirEntry>,
+    /// The last lateral move that was blocked went right (picks `PlayIdleOrBlocked`'s blocked action, 0xDD3A10).
+    pub blocked_right: bool,
     moves: Vec<RootInterp>,
     after: Option<After>,
     /// Running corner turn / ledge jump / hop up (`ledge_moves`).
@@ -915,6 +917,7 @@ pub fn update_ledge(
                     continue;
                 }
                 // PORT: TrySwitchHangType's corner variants (0xDE1060 with 1 / 2) are not modelled
+                d.blocked_right = right_dir;
                 d.last_action = if target.is_none() && rows.iter().all(|r| r.is_none()) { "shimmy blocked (obstacle / inner corner)" } else { "end of ledge" };
             }
         }
