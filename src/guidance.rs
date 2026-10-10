@@ -541,8 +541,9 @@ impl GuidanceWorld {
             if perp.dot(low) < 0.0 {
                 perp = -perp;
             }
-            // the signed turn about up from `dir` to `perp` (Math__SignedAngleAroundAxis 0x55E570)
-            let turn = dir.cross(perp).dot(Vec3::Y).atan2(dir.dot(perp));
+            // the signed angle about up from the edge's perpendicular to the reference (`GuidanceChainBuilder__CollectCandidates`
+            // 0x677B00: Math__SignedAngleAroundAxis(&perp, ref, &up), 0x55E470 / 0x55E2C0; RE/24 GUIDE-8)
+            let turn = perp.cross(dir).dot(Vec3::Y).atan2(perp.dot(dir));
             if !p.ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&turn)) {
                 continue;
             }
@@ -804,6 +805,19 @@ mod tests {
         let long = chains.iter().find(|c| c.links.len() == 2).expect("the two pieces form one chain");
         let ends = [long.start().x, long.end().x];
         assert!(ends.contains(&0.0) && ends.contains(&2.5), "{ends:?}");
+    }
+
+    #[test]
+    fn the_chain_angle_runs_from_the_edges_perpendicular_to_the_reference() {
+        // 0x677B00: Math__SignedAngleAroundAxis(&perp, ref, &up) (RE/24 GUIDE-8). An edge turned +30° about up has its
+        // perpendicular 30° past the reference, so the angle back to the reference is −30°
+        let r = Quat::from_rotation_y(30f32.to_radians());
+        let e = GuidanceEdge { p0: r * Vec3::new(-1.0, 2.0, 0.0), p1: r * Vec3::new(1.0, 2.0, 0.0), n0: Vec3::Y, n1: r * Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab };
+        let g = GuidanceWorld { edges: vec![e], ..Default::default() };
+        let q = |ranges| g.chains(&ChainParams { dir: Vec3::NEG_Z, right: Vec3::X, ranges, parallel: 45f32.to_radians(), mask: MASK_CATCH }).len();
+        let a = 45f32.to_radians();
+        assert_eq!(q([(-a, 0.0), (0.0, 0.0)]), 1, "−30° is in [−45°, 0]");
+        assert_eq!(q([(0.0, 0.0), (0.0, a)]), 0, "and not in [0, 45°]");
     }
 
     #[test]
