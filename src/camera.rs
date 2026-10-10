@@ -297,6 +297,56 @@ pub const R6V: R6v = R6v {
     y: R6vAxis { min: 0.523_599, max: 0.785_398, accel: 0.523_599, filter: 0.09, edge: 0.65 },
 };
 
+/// 0x5FAFC0's pad path: dead zone, the axis filter, then the R6V speed per axis. Returns (Δyaw, Δe, active, hard).
+fn r6v_step(r6v: &R6v, prev_v: &mut Vec2, speed_v: &mut Vec2, stick: Vec2, dt: f32) -> (f32, f32, bool, bool) {
+    let raw = stick;
+    // 0x5F9C00
+    let dz = |v: f32| {
+        let m = (v.abs() - r6v.dead_zone).max(0.0) / (1.0 - r6v.dead_zone);
+        m.copysign(v) * (v != 0.0) as i32 as f32
+    };
+    let mut cur = Vec2::new(dz(raw.x), dz(raw.y));
+    let active = cur.x.abs() > 0.0005 || cur.y.abs() > 0.0005;
+    let len = raw.length();
+    let hard_x = raw.x.abs() > r6v.x.edge && len >= r6v.full;
+    let hard_y = raw.y.abs() > r6v.y.edge && len >= r6v.full;
+    // 0x5F9CB0: a sign reversal resets the axis speed, else the value lags toward the stick
+    for i in 0..2 {
+        let (prev, t) = (prev_v[i], if i == 0 { r6v.x.filter } else { r6v.y.filter });
+        if (prev > 0.0 && cur[i] < 0.0) || (prev < 0.0 && cur[i] > 0.0) {
+            speed_v[i] = 0.0;
+        } else if t > 0.0001 {
+            cur[i] = (cur[i] - prev) * (dt / t).min(1.0) + prev;
+        }
+        if cur[i].abs() < 0.0001 { cur[i] = 0.0; }
+        prev_v[i] = cur[i];
+    }
+    // 0x5FAD80 (SInterpParams type 1: linear)
+    let axis = |speed: &mut f32, v: f32, a: &R6vAxis, hard: bool| {
+        if hard {
+            if *speed < a.max {
+                if *speed < a.min {
+                    *speed = if r6v.ramp <= 0.0 { a.min } else { (a.min - *speed) * r6v.ramp + *speed };
+                }
+                *speed = (*speed + a.accel * dt).min(a.max);
+            }
+        } else {
+            let x = if len >= r6v.full && a.edge > 0.0 { v.abs() / a.edge } else { v.abs() };
+            *speed = if x <= 0.0 { 0.0 } else if x > 1.0 { a.min } else { a.min * x };
+        }
+        *speed * dt
+    };
+    let mut sx = speed_v.x;
+    let mut sy = speed_v.y;
+    let mut dyaw = axis(&mut sx, cur.x, &r6v.x, hard_x);
+    let mut de = axis(&mut sy, cur.y, &r6v.y, hard_y);
+    *speed_v = Vec2::new(sx, sy);
+    if cur.x < 0.0 { dyaw = -dyaw; }
+    // stick up lowers the camera (e falls): it looks up
+    if cur.y > 0.0 { de = -de; }
+    (dyaw, de, active, hard_x || hard_y)
+}
+
 /// The lazy follow's ResponseCurve (FreeRoamingCamera ctor 0x693AE0 → `ResponseCurve__AddKey`; piecewise linear,
 /// `ResponseCurve__Evaluate` 0x5631D0).
 const FOLLOW_CURVE: [(f32, f32); 5] = [(0.0, 0.1), (0.25, 0.4), (0.5, 0.75), (0.75, 0.9), (1.0, 1.0)];
@@ -851,54 +901,9 @@ impl NativeCamera {
         }
     }
 
-    /// 0x5FAFC0's pad path: dead zone, 0.09 s filter, then the R6V speed per axis. Returns (Δyaw, Δe, active, hard).
+    /// 0x5FAFC0's pad path with this camera's control (`R6V`).
     fn r6v(&mut self, stick: Vec2, dt: f32) -> (f32, f32, bool, bool) {
-        let raw = stick;
-        // 0x5F9C00
-        let dz = |v: f32| {
-            let m = (v.abs() - R6V.dead_zone).max(0.0) / (1.0 - R6V.dead_zone);
-            m.copysign(v) * (v != 0.0) as i32 as f32
-        };
-        let mut cur = Vec2::new(dz(raw.x), dz(raw.y));
-        let active = cur.x.abs() > 0.0005 || cur.y.abs() > 0.0005;
-        let len = raw.length();
-        let hard_x = raw.x.abs() > R6V.x.edge && len >= R6V.full;
-        let hard_y = raw.y.abs() > R6V.y.edge && len >= R6V.full;
-        // 0x5F9CB0: a sign reversal resets the axis speed, else the value lags toward the stick
-        for i in 0..2 {
-            let (prev, t) = (self.r6v_prev[i], if i == 0 { R6V.x.filter } else { R6V.y.filter });
-            if (prev > 0.0 && cur[i] < 0.0) || (prev < 0.0 && cur[i] > 0.0) {
-                self.r6v_speed[i] = 0.0;
-            } else if t > 0.0001 {
-                cur[i] = (cur[i] - prev) * (dt / t).min(1.0) + prev;
-            }
-            if cur[i].abs() < 0.0001 { cur[i] = 0.0; }
-            self.r6v_prev[i] = cur[i];
-        }
-        // 0x5FAD80 (SInterpParams type 1: linear)
-        let axis = |speed: &mut f32, v: f32, a: &R6vAxis, hard: bool| {
-            if hard {
-                if *speed < a.max {
-                    if *speed < a.min {
-                        *speed = if R6V.ramp <= 0.0 { a.min } else { (a.min - *speed) * R6V.ramp + *speed };
-                    }
-                    *speed = (*speed + a.accel * dt).min(a.max);
-                }
-            } else {
-                let x = if len >= R6V.full && a.edge > 0.0 { v.abs() / a.edge } else { v.abs() };
-                *speed = if x <= 0.0 { 0.0 } else if x > 1.0 { a.min } else { a.min * x };
-            }
-            *speed * dt
-        };
-        let mut sx = self.r6v_speed.x;
-        let mut sy = self.r6v_speed.y;
-        let mut dyaw = axis(&mut sx, cur.x, &R6V.x, hard_x);
-        let mut de = axis(&mut sy, cur.y, &R6V.y, hard_y);
-        self.r6v_speed = Vec2::new(sx, sy);
-        if cur.x < 0.0 { dyaw = -dyaw; }
-        // stick up lowers the camera (e falls): it looks up
-        if cur.y > 0.0 { de = -de; }
-        (dyaw, de, active, hard_x || hard_y)
+        r6v_step(&R6V, &mut self.r6v_prev, &mut self.r6v_speed, stick, dt)
     }
 
     /// +332 = 0x692D90: heading, lazy follow, e → distance / pitch, the swing round obstacles and the collision
@@ -1011,6 +1016,153 @@ impl NativeCamera {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// First-person camera
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The first-person camera's PadR6VCameraControl (AssassinFirstPersonCameraSettings, Camera Switcher 0x262, its +28;
+/// serializer 0x5FA620): slower than LowHigh's, filter 0.07 s.
+pub const FIRST_PERSON_R6V: R6v = R6v {
+    dead_zone: 0.3,
+    full: 0.95,
+    ramp: 0.5,
+    mouse: 0.05 * 0.033,
+    x: R6vAxis { min: 1.396_263, max: 2.356_194, accel: 1.745_329, filter: 0.07, edge: 0.65 },
+    y: R6vAxis { min: 1.308_997, max: 1.954_769, accel: 1.308_997, filter: 0.07, edge: 0.65 },
+};
+
+/// AssassinFirstPersonCameraSettings (Camera Switcher 0x262; CameraSettings 0x6AEB50 / 0x5DCD90 / 0x5DB460,
+/// FirstPersonCameraSettings 0x6961E0).
+pub struct FirstPersonSettings {
+    /// +8 priority (over LowHigh's 10, under the Leap of Faith's 3500) and +12 blend-in (s).
+    pub priority: i32,
+    pub blend_in: f32,
+    /// +32: the view's field of view (rad).
+    pub fov: f32,
+    /// +224 / +228 pitch and +232 / +236 yaw limits (rad).
+    pub pitch: [f32; 2],
+    pub yaw: [f32; 2],
+    /// +272 / +276: the yaw and pitch SmoothCDAngle rates toward the input (0x696E90).
+    pub omega_yaw: f32,
+    pub omega_pitch: f32,
+}
+
+pub const FIRST_PERSON: FirstPersonSettings = FirstPersonSettings {
+    priority: 26,
+    blend_in: 0.375,
+    fov: 0.872_665,
+    pitch: [-1.308_997, 1.308_997],
+    yaw: [-PI, PI],
+    omega_yaw: 50.0,
+    omega_pitch: 50.0,
+};
+
+/// The head bone the first-person TargetHeadBoneMonitor (Camera Switcher 0x3C7DF4E9) tracks.
+const FP_HEAD_BONE: u32 = 0x07C1_59A2;
+
+/// FirstPersonCameraActivator (+68 of the settings; 0xCD3360): pad button 2 (Head), enter and exit after holding it
+/// 0 s, stick flag +16 = 0 (moving the stick leaves).
+const FP_BUTTON: usize = 2;
+
+/// The first-person camera: the activator (0xCD3360 / 0xCD3070) and FirstPersonCamera__Update 0x696E90.
+#[derive(Default, Clone, Debug)]
+pub struct FirstPerson {
+    pub active: bool,
+    /// The activator may toggle again (+57): set once the button is released.
+    armed: bool,
+    /// Where the player stood when it started (+64).
+    entry: Vec3,
+    prev_buttons: [bool; 16],
+    /// Yaw / pitch (game convention, as NativeCamera) and the input's targets, with velocities (+256..+288).
+    pub yaw: f32,
+    pub pitch: f32,
+    yaw_target: f32,
+    pitch_target: f32,
+    yaw_vel: f32,
+    pitch_vel: f32,
+    r6v_prev: Vec2,
+    r6v_speed: Vec2,
+}
+
+/// What the activator reads.
+pub struct FpInput {
+    pub buttons: [bool; 16],
+    /// The movement stick after the pad's dead zone (the ControlScheme's stick 0, a4 +1472).
+    pub move_stick: Vec2,
+    pub root: Vec3,
+    /// Standing on the ground (the activator's actor checks, 0xCD31F5.., leave on anything else).
+    /// PORT (hypothesis): the AI interface tests (10, 18, 9) stand for "not in a normal ground state".
+    pub on_ground: bool,
+}
+
+impl FirstPerson {
+    /// 0xCD3070: leave on another button (pad 0, 1, 3, 14, 15 pressed, or 0 held), the movement stick past 0.0005,
+    /// leaving the ground, or 0.1 m from where it started.
+    fn should_exit(&self, inp: &FpInput) -> bool {
+        let pressed = |i: usize| inp.buttons[i] && !self.prev_buttons[i];
+        inp.buttons[0]
+            || [1, 3, 14, 15].iter().any(|&i| pressed(i))
+            || inp.move_stick.length() > 0.0005
+            || !inp.on_ground
+            || (self.active && inp.root.distance(self.entry) >= 0.1)
+    }
+
+    /// 0xCD3360. Returns true when it switched on or off this frame.
+    pub fn activator(&mut self, inp: &FpInput) -> bool {
+        let held = inp.buttons[FP_BUTTON];
+        let was = self.active;
+        if self.active && self.should_exit(inp) {
+            self.active = false;
+        } else if self.armed && held && !self.should_exit(inp) {
+            // hold time 0 (+8 / +12): the press toggles it
+            self.armed = false;
+            if !self.active { self.entry = inp.root; }
+            self.active = !self.active;
+        }
+        if !self.armed && !held {
+            self.armed = true;
+        }
+        self.prev_buttons = inp.buttons;
+        self.active != was
+    }
+
+    /// Starting: the view keeps the previous camera's heading.
+    /// PORT (hypothesis): the yaw comes from the camera it replaces and the pitch starts level.
+    pub fn activate(&mut self, yaw: f32) {
+        self.yaw = yaw;
+        self.yaw_target = yaw;
+        self.pitch = 0.0;
+        self.pitch_target = 0.0;
+        self.yaw_vel = 0.0;
+        self.pitch_vel = 0.0;
+        self.r6v_prev = Vec2::ZERO;
+        self.r6v_speed = Vec2::ZERO;
+    }
+
+    /// 0x696E90: the eye at the tracked head (TargetHeadBoneMonitor, offset +256 = 0), yaw and pitch eased toward the
+    /// input with ω 50 (snapped in mouse mode).
+    pub fn update(&mut self, inp: &CamInput, head: Vec3) -> CamView {
+        let (dyaw, dpitch) = if inp.mouse_mode {
+            let d = inp.mouse * FIRST_PERSON_R6V.mouse;
+            (d.x, d.y)
+        } else {
+            let (dx, dy, _, _) = r6v_step(&FIRST_PERSON_R6V, &mut self.r6v_prev, &mut self.r6v_speed, inp.stick, inp.dt);
+            (dx, dy)
+        };
+        let s = &FIRST_PERSON;
+        self.yaw_target = wrap(self.yaw_target + dyaw).clamp(s.yaw[0], s.yaw[1]);
+        self.pitch_target = (self.pitch_target + dpitch).clamp(s.pitch[0], s.pitch[1]);
+        if inp.mouse_mode {
+            self.yaw = self.yaw_target;
+            self.pitch = self.pitch_target;
+        } else {
+            smooth_cd_angle(&mut self.yaw, self.yaw_target, &mut self.yaw_vel, s.omega_yaw, inp.dt);
+            smooth_cd_angle(&mut self.pitch, self.pitch_target, &mut self.pitch_vel, s.omega_pitch, inp.dt);
+        }
+        CamView { eye: head, look_at: head - orbit_offset(self.yaw, self.pitch, 1.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Bevy glue
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -1038,6 +1190,8 @@ struct FollowState {
     /// The Leap of Faith camera and whether it is the one shown (priority 3500 over LowHigh's 10).
     lof: NativeCamera,
     lof_active: bool,
+    /// The first-person camera (priority 26).
+    fp: FirstPerson,
     blend: Option<SwitchBlend>,
     mouse_mode: bool,
     /// The rig values this system wrote last frame, to see placements by other systems (scenarios, replays).
@@ -1059,11 +1213,13 @@ fn follow(
     mut rig: ResMut<CameraRig>,
     player: Query<(&Transform, Option<&crate::player::Body>, Option<&crate::player::Locomotion>, Option<&crate::player::HumanDataBundle>), (With<Player>, Without<MainCamera>)>,
     fly: Option<Res<crate::debug_fly::DebugFly>>,
-    mut cam: Query<&mut Transform, With<MainCamera>>,
+    mut cam: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
+    rigs: Query<&crate::model::Rig, With<Player>>,
+    joints: Query<&GlobalTransform>,
     mut state: Local<FollowState>,
 ) {
     use crate::player::ActorContextId as C;
-    let (Ok((p, body, loco, data)), Ok(mut c)) = (player.single(), cam.single_mut()) else { return };
+    let (Ok((p, body, loco, data)), Ok((mut c, mut projection))) = (player.single(), cam.single_mut()) else { return };
     // Ghost mode's debug camera (`DebugCameraToggleEvent`; PORT: it holds still and keeps Altaïr in view)
     if fly.as_ref().is_some_and(|f| f.active && f.free_camera) {
         c.look_at(p.translation + Vec3::Y * 1.5, Vec3::Y);
@@ -1120,8 +1276,24 @@ fn follow(
         fall_drop,
         reset: std::mem::take(&mut events.reset),
     };
+    // the first-person activator (0xCD3360): Head toggles it while standing still
+    let buttons = if menu.open { [false; 16] } else { pad.as_ref().map_or([false; 16], |p| p.buttons) };
+    let fp_was = st.fp.active;
+    st.fp.activator(&FpInput { buttons, move_stick, root: p.translation, on_ground: matches!(ctx, Some(C::Ground)) });
     // the switcher: the active camera with the highest priority; a newly active FreeRoaming camera takes the previous
     // one's yaw and elevation (FreeRoamingCamera__Activate 0x6910C0 with the previous camera) and blends in
+    if st.fp.active != fp_was && !st.lof_active {
+        if st.fp.active {
+            let yaw = st.cam.yaw;
+            st.fp.activate(yaw);
+            st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: FIRST_PERSON.blend_in });
+        } else {
+            // back to LowHigh, which takes the first-person heading
+            st.cam.activate(&inp);
+            st.cam.yaw = st.fp.yaw;
+            st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: st.cam.profile.blend_in });
+        }
+    }
     if leap != st.lof_active {
         let (from, to) = if leap { (&st.cam, &mut st.lof) } else { (&st.lof, &mut st.cam) };
         let (yaw, e) = (from.yaw, from.e);
@@ -1132,7 +1304,23 @@ fn follow(
         st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: to.profile.blend_in });
         st.lof_active = leap;
     }
-    let view = if st.lof_active { st.lof.update(&inp, &*collision) } else { st.cam.update(&inp, &*collision) };
+    // the tracked head (last propagated pose; PORT: 1.6 m above the feet without a skeleton)
+    let head = rigs.single().ok()
+        .and_then(|r| r.bone_ids.iter().position(|&b| b == FP_HEAD_BONE).and_then(|i| joints.get(r.joints[i]).ok()))
+        .map_or(p.translation + Vec3::Y * S.target_height, |g| g.translation());
+    let first_person = st.fp.active && !st.lof_active;
+    let view = if st.lof_active {
+        st.lof.update(&inp, &*collision)
+    } else if first_person {
+        st.fp.update(&inp, head)
+    } else {
+        st.cam.update(&inp, &*collision)
+    };
+    // the active camera's field of view (+32)
+    if let Projection::Perspective(pp) = &mut *projection {
+        let fov = if first_person { FIRST_PERSON.fov } else { S.fov };
+        if pp.fov != fov { pp.fov = fov; }
+    }
     // the landing camera shake (FX_Camera_Shake_Assassins_Fall)
     if rig.shake > 0.0 {
         st.shake.start(rig.shake);
@@ -1153,9 +1341,10 @@ fn follow(
     c.translation += r * shake_pos;
     c.rotation *= shake_rot;
     let shown = if st.lof_active { &st.lof } else { &st.cam };
-    rig.yaw = wrap(PI - shown.yaw);
-    rig.pitch = -shown.pitch;
-    rig.distance = shown.dist;
+    let (yaw, pitch) = if first_person { (st.fp.yaw, st.fp.pitch) } else { (shown.yaw, shown.pitch) };
+    rig.yaw = wrap(PI - yaw);
+    rig.pitch = -pitch;
+    rig.distance = if first_person { 0.0 } else { shown.dist };
     st.written = Some((rig.yaw, rig.pitch, rig.distance));
 }
 
@@ -1460,4 +1649,55 @@ mod tests {
         let target = Vec3::Y * (0.3 + S.target_height);
         assert!(((eye - target).length() - 3.5).abs() < 1e-3, "follow must see this frame's IK-adjusted visual: {eye:?}");
     }
+
+    fn fp_input(buttons: &[usize], stick: Vec2, root: Vec3) -> FpInput {
+        let mut b = [false; 16];
+        for &i in buttons { b[i] = true; }
+        FpInput { buttons: b, move_stick: stick, root, on_ground: true }
+    }
+
+    #[test]
+    fn head_toggles_first_person_and_moving_leaves_it() {
+        let mut fp = FirstPerson::default();
+        // armed once the button has been up
+        assert!(!fp.activator(&fp_input(&[], Vec2::ZERO, Vec3::ZERO)));
+        assert!(fp.activator(&fp_input(&[FP_BUTTON], Vec2::ZERO, Vec3::ZERO)) && fp.active, "press enters");
+        assert!(!fp.activator(&fp_input(&[FP_BUTTON], Vec2::ZERO, Vec3::ZERO)), "held: no repeat");
+        fp.activator(&fp_input(&[], Vec2::ZERO, Vec3::ZERO));
+        assert!(fp.activator(&fp_input(&[FP_BUTTON], Vec2::ZERO, Vec3::ZERO)) && !fp.active, "a second press leaves");
+        // the movement stick, another button or 0.1 m of drift leave (0xCD3070)
+        for exit in [
+            fp_input(&[], Vec2::new(0.0, 0.01), Vec3::ZERO),
+            fp_input(&[3], Vec2::ZERO, Vec3::ZERO),
+            fp_input(&[], Vec2::ZERO, Vec3::new(0.1, 0.0, 0.0)),
+        ] {
+            let mut fp = FirstPerson::default();
+            fp.activator(&fp_input(&[], Vec2::ZERO, Vec3::ZERO));
+            fp.activator(&fp_input(&[FP_BUTTON], Vec2::ZERO, Vec3::ZERO));
+            fp.activator(&fp_input(&[], Vec2::ZERO, Vec3::ZERO));
+            assert!(fp.active);
+            assert!(fp.activator(&exit) && !fp.active);
+        }
+        // it does not start while the stick is moving
+        let mut fp = FirstPerson::default();
+        fp.activator(&fp_input(&[], Vec2::ZERO, Vec3::ZERO));
+        assert!(!fp.activator(&fp_input(&[FP_BUTTON], Vec2::new(0.5, 0.0), Vec3::ZERO)));
+    }
+
+    #[test]
+    fn first_person_looks_from_the_head_and_clamps_the_pitch() {
+        let mut fp = FirstPerson::default();
+        fp.activate(0.0);
+        let head = Vec3::new(1.0, 1.7, 2.0);
+        let v = fp.update(&input(1.0 / 60.0), head);
+        assert_eq!(v.eye, head);
+        // yaw 0 looks the way the orbit camera at yaw 0 looks (its eye on -Z of the target, facing +Z)
+        assert!((v.look_at - head - Vec3::Z).length() < 1e-4, "{:?}", v.look_at - head);
+        // the stick held down for 3 s pitches down to the 75° limit
+        let mut inp = input(1.0 / 60.0);
+        inp.stick = Vec2::new(0.0, -1.0);
+        for _ in 0..180 { fp.update(&inp, head); }
+        assert!((fp.pitch - FIRST_PERSON.pitch[1]).abs() < 0.01, "{}", fp.pitch);
+    }
 }
+
