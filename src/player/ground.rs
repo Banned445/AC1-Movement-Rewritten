@@ -708,7 +708,8 @@ pub fn update_ground(
         // or else `HumanGround__Move_CanStop` 0xD7ED30 (the playing action is not the locomotion): the wait at once.
         if GAME_GROUND_TREE && mv_speed <= 0.0 {
             if let Some(t) = g.tr.filter(|t| !t.to_wait) {
-                let can_run_stop = g.high_profile && g.speed_param > BAND_WALK && !super::anim_gate::locked(&t.action)
+                // HG+1500 is MoveBlend's band flag s > 0.25 (0xDA18FF), not the profile (RE/24 GROUND-21)
+                let can_run_stop = g.speed_param > BAND_WALK && !super::anim_gate::locked(&t.action)
                     && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || t.phase > 0.33);
                 if can_run_stop {
                     // RunStop_Enter reads the transition still playing (its word, its normalised time)
@@ -811,14 +812,14 @@ pub fn update_ground(
         }
         // The run stop is allowed by Data+0x11F, which the input interpreter sets (IHumanGround vt136 0xDB31B0, from
         // 0xEE6783 / 0xEE67EE / 0xEE67FC): 1 with the stick released, and with the stick held more than 135 deg from the
-        // facing (dot < -0.7071); 0 otherwise. Its guard (0xD7EC90) also needs the high profile (HG+1500). So
+        // facing (dot < -0.7071); 0 otherwise. Its guard (0xD7EC90) also needs HG+1500, MoveBlend's band flag s > 0.25. So
         // pulling the stick back at a run skids (run stop), and the Idle that follows pivots (state 25): the skid turn.
         let reversed = pad.speed01 > 0.0 && pad.dir_move.dot(body.forward()) < -std::f32::consts::FRAC_1_SQRT_2;
         // in front of the locomotion the guard also accepts the skid-turn exits (legacy 96 / 97) and any transition
         // past 0.33 of its normalised time that is not locked (0xD7EC90)
         let tr_allows_stop = g.tr.is_none_or(|t| !t.to_wait && !super::anim_gate::locked(&t.action)
             && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || t.phase > 0.33));
-        if reversed && g.high_profile && g.speed_param > 0.25 && g.oneshot.is_none() && tr_allows_stop {
+        if reversed && g.speed_param > BAND_WALK && g.oneshot.is_none() && tr_allows_stop {
             g.start_run_stop();
         }
         if mv_speed <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_none() && g.tr.is_none() {
@@ -844,9 +845,9 @@ pub fn update_ground(
         // allows leaving for moving (0x200 / 0x800), which the anim gate above does
         // pivot (Movement state 25, `HumanGround__Pivot_Enter` 0xDA6150): the wanted heading more than 90 deg (HG+0x720)
         // from the current one, from standing (guard 0xD84B10) or from a low-profile walk (Move guard 0xD84F10: the
-        // current profile HG+1500 low). The turn action from the table at 0x1A2C120 by side, [from, to] profile and
+        // band flag HG+1500 clear: s ≤ 0.25, RE/24 GROUND-21). The turn action from the table at 0x1A2C120 by side, [from, to] profile and
         // leading foot, blending its 90 / 180 deg clips by (|a| - 90 deg) / 90 deg; the clip's root yaw turns the body.
-        if moving && !busy && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none() && off > std::f32::consts::FRAC_PI_2 && (g.speed_param <= 0.0 || (!prev_high && g.speed_param <= BAND_WALK)) {
+        if moving && !busy && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none() && off > std::f32::consts::FRAC_PI_2 && g.speed_param <= BAND_WALK {
             let left = mv_dir.dot(super::right_of(body.forward())) < 0.0;
             // the player's EntityDescriptorType is Main (entity+168 & 7 == 1): `Pivot_Enter` 0xDA6150 then sets the
             // destination profile HG+1504 to the current one HG+1500, so the player only plays the low → low and
