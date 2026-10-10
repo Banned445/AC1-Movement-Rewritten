@@ -541,9 +541,14 @@ pub(crate) fn solve_limbs(
             let anim_contact = contact_of(i, global[chains[i][2]].pos, n);
             // the clip's contact tags decide attach / travel / release when the clip has them (game);
             // otherwise the context's timing is used
-            let g = match limb_tag(&contacts, i) {
-                Some(tag) => ik.limbs[i].update_tagged(wanted[i], anim_contact, tag, dt),
-                None => ik.limbs[i].update(wanted[i], anim_contact, targets.transit, dt),
+            // a suspended IK (the context skipped LimbIK__PostUpdate) applies nothing and keeps the limb's state
+            let g = if targets.suspended {
+                None
+            } else {
+                match limb_tag(&contacts, i) {
+                    Some(tag) => ik.limbs[i].update_tagged(wanted[i], anim_contact, tag, dt),
+                    None => ik.limbs[i].update(wanted[i], anim_contact, targets.transit, dt),
+                }
             };
             goals[i] = g.map(|g| (g, ik.limbs[i].weight));
         }

@@ -2517,6 +2517,24 @@ fn pull_up_ends_standing_still() {
 }
 
 #[test]
+fn the_ledge_suspends_the_limb_ik_through_the_pull_up() {
+    use crate::player::ledge::{ledge_ik_runs, LedgeSubState as S};
+    // sub_DCD910: the limb IK runs in SubStates 0, 1, 3, 4, 6, 8, 11, 13 only (RE/24 ANIM-10)
+    for (st, runs) in [(S::Movement, true), (S::HandPlacement, true), (S::HangWallReception, true), (S::PullDown, true), (S::Grasp, true),
+                       (S::Pullup, false), (S::HangFreeReception, false), (S::TurnCorner, false), (S::TransitionInFromClimb, false), (S::ParallelJump, false)] {
+        assert_eq!(ledge_ik_runs(st), runs, "{st:?}");
+    }
+    let mut s = hang_at(Vec3::new(12.0, 2.6, 41.7), Vec3::NEG_Z);
+    let limbs = |s: &Sim| *s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap();
+    assert!(!limbs(&s).suspended && limbs(&s).hands.is_some(), "the hang pins the hands");
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ledge.sub_state == S::Pullup), "no pull-up");
+    assert!(limbs(&s).suspended, "the pull-up runs no limb IK, from its first frame");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
+    assert!(!limbs(&s).suspended);
+}
+
+#[test]
 fn a_jump_that_clips_a_higher_roof_lip_steps_onto_it() {
     // stepped roofs 3.2 -> 4.4 (2 m gap): the jump's foot catches the lip
     let mut s = Sim::new(Vec3::new(5.5, 3.2, 24.0), -std::f32::consts::FRAC_PI_2);

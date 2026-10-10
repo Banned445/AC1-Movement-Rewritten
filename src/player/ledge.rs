@@ -50,6 +50,15 @@ pub enum LedgeSubState {
     ParallelJump = 14,
 }
 
+/// The ledge sub-states whose update runs the limb IK (`sub_DCD910` 0xDCD910: SubState 0, 1, 3, 4, 6, 8, 11, 13; RE/24
+/// ANIM-10). Entry (0) only while the swing back / its `_b` hop / `step1_to_hangwall` plays, and Pullup (4) only while
+/// `xx_h_hangfree_tr_hangwall` (0x01B702FD) plays. PORT: the port plays those three in its own moves (which release the
+/// hands) and the free → wall hang switch as a move (LEDGE-9), so both read as off here. The swing (8) runs in
+/// `LedgeData::swing`.
+pub fn ledge_ik_runs(s: LedgeSubState) -> bool {
+    matches!(s, LedgeSubState::Movement | LedgeSubState::HandPlacement | LedgeSubState::HangWallReception | LedgeSubState::PullDown | LedgeSubState::Grasp)
+}
+
 /// `HumanLedgeData::LedgeHangType` (desc 0x1994E68). WallFree is treated as Free by the game.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LedgeHangType {
@@ -357,6 +366,7 @@ pub fn update_ledge(
         if loco.current != ActorContextId::Ledge {
             continue;
         }
+        limbs.suspended = false;
         if loco.just_switched {
             loco.just_switched = false;
             limbs.feet = None;
@@ -451,9 +461,11 @@ pub fn update_ledge(
                 m.duration = t;
             }
         }
-        // the pull-up clip carries the hands from the lip onto the top: no hand pinning (game: the
-        // animation's contact tags release them)
-        limbs.hands = (d.sub_state != LedgeSubState::Pullup).then_some((d.hand_l, d.hand_r));
+        // the limb IK runs only in some sub-states (`sub_DCD910` from `HumanLedge__Update` 0xDE3EC8): elsewhere the
+        // animation alone shows, released at once (RE/24 ANIM-10)
+        let ik_runs = ledge_ik_runs(d.sub_state);
+        limbs.suspended = !ik_runs;
+        limbs.hands = ik_runs.then_some((d.hand_l, d.hand_r));
         limbs.normal = n;
         limbs.transit = d.moves.first().map(|m| m.duration).unwrap_or(SHIMMY_OPEN_TIME) * 0.8;
         // the feet follow the hang clip (braced against the wall, or dangling); only the hands are pinned
@@ -652,6 +664,8 @@ pub fn update_ledge(
                         start_move(d, mv, if one_hand { "pull-up (one hand)" } else { "pull-up" });
                         d.queue = rest.into_iter().collect();
                         d.sub_state = LedgeSubState::Pullup;
+                        limbs.suspended = !ledge_ik_runs(d.sub_state);
+                        limbs.hands = None;
                         continue;
                     }
                 }

@@ -125,6 +125,9 @@ pub struct LimbTargets {
     /// The limb-IK body adjustments switched on (LimbIK +656, `crate::ik::ADJUST_*`): the climb sets both on entry
     /// (`HumanClimb__EnterCommon` 0xDE97B0) and clears them on exit (`HumanClimb__ExitCleanup` 0xDE9A00).
     pub adjust: u8,
+    /// The limb IK is not run this frame (the context's update skips `LimbIK__PostUpdate`): nothing is applied and the
+    /// limbs' state is kept, so the animation alone shows, with no fade (the ledge's sub-state gate 0xDCD910).
+    pub suspended: bool,
 }
 
 /// Linear root interpolation used by all discrete moves (`sub_711130` / `sub_7113F0(human+80)`).
@@ -304,6 +307,9 @@ pub fn release_limbs(mut q: Query<(&Locomotion, &mut LimbTargets), With<Player>>
         }
         if loco.current != ActorContextId::Climb {
             limbs.adjust = 0;
+        }
+        if loco.current != ActorContextId::Ledge {
+            limbs.suspended = false;
         }
     }
 }
