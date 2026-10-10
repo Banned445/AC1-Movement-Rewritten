@@ -140,8 +140,8 @@ pub fn catch_time(wall: bool, long: bool) -> f32 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum After {
     Hang,
-    /// Second hand of a vertical hand-over-hand step still to move: (hand index, target).
-    SecondHand(usize, Vec3),
+    /// The first half of a vertical hand-over-hand step ended: the second hand (index) waits for the stick (up?).
+    SecondHand(usize, bool),
     StandOnTop,
 }
 
@@ -166,6 +166,9 @@ pub struct HumanLedgeData {
     pub step_seq: u32,
     /// Running vertical hand step: (first hand was the left one, this is the second half).
     pub vstep: Option<(bool, bool)>,
+    /// A vertical step's second hand still to move (+1848, `ContinuePendingVerticalStep` 0xDCF3C0): (that hand's index,
+    /// the pending direction is up, +1852). The hands stay split until the stick asks for it (RE/24 LEDGE-4).
+    pub pending_vstep: Option<(usize, bool)>,
     moves: Vec<RootInterp>,
     after: Option<After>,
     /// Running corner turn / ledge jump / hop up (`ledge_moves`).
@@ -201,6 +204,7 @@ impl HumanLedgeData {
         self.swing = None;
         self.alt_flag = false; // EnterCommon 0xDE26D0 clears +0x85
         self.blocked_up = false;
+        self.pending_vstep = None;
         self.moves.clear();
         self.mv = None;
         self.hang_set = false;
@@ -584,15 +588,10 @@ pub fn update_ledge(
                     switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });
                     continue;
                 }
-                Some(After::SecondHand(i, target)) => {
-                    // ContinuePendingVerticalStep 0xDCF3C0: the second hand follows next
-                    if i == 0 { d.hand_l = target } else { d.hand_r = target }
-                    let to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
-                    d.vstep = Some((i == 1, true));
-                    d.moves.push(RootInterp::new(body.feet, to, VSTEP_SECOND_TIME));
-                    d.step_seq += 1;
-                    d.after = Some(After::Hang);
-                    continue;
+                Some(After::SecondHand(i, up)) => {
+                    // the first half ends in Movement with the step pending (+1848); `PlayIdleOrBlocked` plays nothing
+                    // while it is set (0xDD3A2B), so the half-step pose holds until the stick asks for the second hand
+                    d.pending_vstep = Some((i, up));
                 }
                 _ => {}
             }
@@ -643,10 +642,41 @@ pub fn update_ledge(
         }
         let Some(dir) = dir else {
             d.blocked_up = false;
-            d.last_action = "idle";
+            if d.pending_vstep.is_none() {
+                d.last_action = "idle";
+            }
             continue;
         };
         let right = right_of(facing);
+        // ContinuePendingVerticalStep 0xDCF3C0: with a step pending a lateral stick becomes the pending direction; the
+        // second step then runs the vertical path again (`FindVerticalRows` 0xDD8F70) with the climb transition, the hang
+        // switch, the jump up and the wall jump up refusing while it is pending. No hit: the first hand's own point
+        // (0xDD94A6). `PickVerticalHandAndAnim` 0xDCB3E0 moves the pending hand with the clip of the stick's direction,
+        // so a reversed stick steps that hand the other way (RE/24 LEDGE-4).
+        if let Some((second, pending_up)) = d.pending_vstep {
+            let up = match dir {
+                LedgeDir::Left | LedgeDir::Right => pending_up,
+                LedgeDir::Up => true,
+                LedgeDir::Down => false,
+            };
+            let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, up, &report);
+            let (first_p, second_p) = if second == 0 { (d.hand_r, d.hand_l) } else { (d.hand_l, d.hand_r) };
+            let along = right * (second_p - first_p).dot(right);
+            let target = match rows.step {
+                Some(h) => h.point + right * (second_p - hand_mid(d)).dot(right),
+                None => first_p + along,
+            };
+            if second == 0 { d.hand_l = target } else { d.hand_r = target }
+            d.pending_vstep = None;
+            let to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
+            d.vstep = Some((second == 1, true));
+            d.moves.push(RootInterp::new(body.feet, to, VSTEP_SECOND_TIME));
+            d.step_seq += 1;
+            d.after = Some(After::Hang);
+            d.sub_state = LedgeSubState::HandPlacement;
+            d.last_action = if up { "hand step up" } else { "hand step down" };
+            continue;
+        }
         match dir {
             LedgeDir::Up | LedgeDir::Down => {
                 let sign = if dir == LedgeDir::Up { 1.0 } else { -1.0 };
@@ -706,7 +736,7 @@ pub fn update_ledge(
                     };
                     d.moves.push(RootInterp::new(body.feet, mid_root, first_time));
                     d.step_seq += 1;
-                    d.after = Some(if first_left { After::SecondHand(1, tr) } else { After::SecondHand(0, tl) });
+                    d.after = Some(if first_left { After::SecondHand(1, sign > 0.0) } else { After::SecondHand(0, sign > 0.0) });
                     d.sub_state = LedgeSubState::HandPlacement;
                     d.blocked_up = false;
                     d.last_action = if sign > 0.0 { "hand step up" } else { "hand step down" };

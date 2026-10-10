@@ -965,11 +965,13 @@ fn choose_clip(
                         };
                         action(&lib, &[ACT_SHIMMY[wi][k]], false, token, Some(0.08), None)
                     }
-                    "hand step up" | "hand step down" if moving => {
+                    "hand step up" | "hand step down" if moving || l.pending_vstep.is_some() => {
                         let (first_left, second) = l.vstep.unwrap_or((true, false));
                         let down = l.last_action == "hand step down";
                         let k = (down as usize) * 4 + (second as usize) * 2 + (!first_left) as usize;
-                        action(&lib, &[ACT_VSTEP[wi][k]], false, token, Some(0.1), None)
+                        // a pending second hand holds the first half's last pose (0xDD3A2B plays nothing meanwhile)
+                        let r = action(&lib, &[ACT_VSTEP[wi][k]], false, token, Some(0.1), None);
+                        if l.pending_vstep.is_some() { r.map(|r| Request { hold: true, ..r }) } else { r }
                     }
                     "pull-up" if moving => {
                         let ids: Vec<u32> = if wall {

@@ -1952,6 +1952,29 @@ fn the_stick_into_a_wall_behind_turns_the_character_round() {
     assert!(s.body().feet.z > 8.4 && s.body().feet.z < 8.7, "stays at the wall: {:?}", s.body().feet);
 }
 
+/// The vertical hand step's second hand waits for the stick (RE/24 LEDGE-4, `ContinuePendingVerticalStep` 0xDCF3C0):
+/// on part B's stone ledge (2.6 m, face x 35.92) with the second ledge 0.6 m above, the stick up moves one hand; released,
+/// the hands stay split; pushed again (even sideways), the other hand follows.
+#[test]
+fn a_vertical_hand_step_waits_for_the_stick_for_the_second_hand() {
+    let mut s = hang_at(Vec3::new(35.92, 2.6, 45.5), Vec3::NEG_X);
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ledge.last_action == "hand step up"), "no hand step: {}", s.data().ledge.last_action);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ledge.pending_vstep.is_some()), "first half never ended");
+    s.run(1.0);
+    let l = &s.data().ledge;
+    assert!(l.pending_vstep.is_some() && (l.hand_l.y - l.hand_r.y).abs() > 0.5, "hands split while waiting: {:?} {:?}", l.hand_l, l.hand_r);
+    // a lateral stick is taken as the pending direction
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ledge.pending_vstep.is_none()), "second hand never moved");
+    assert_eq!(s.data().ledge.last_action, "hand step up");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ledge.sub_state == crate::player::ledge::LedgeSubState::Movement), "second half never ended");
+    let l = &s.data().ledge;
+    assert!((l.hand_l.y - 3.2).abs() < 0.05 && (l.hand_r.y - 3.2).abs() < 0.05, "both hands on the upper ledge: {:?} {:?}", l.hand_l, l.hand_r);
+}
+
 // ---------------------------------------------------------------- swing bars (RE/03 §7.10)
 
 /// bug-1791661604: the far jump from the 3.5 m roof (x 5..11, z 9..15) at the 3.2 m block's -Z face (z 21.5) is a

@@ -268,6 +268,8 @@ const CLIMB_WALLS_X: &[(f32, (f32, f32), f32, (i32, i32))] = &[
 const WALL_LEDGES: &[(Vec3, Vec3, Vec3)] = &[
     // along part B's -X face, meeting part A's ledge at the inner corner (x 36, z 49.7)
     (Vec3::new(35.92, 2.6, 44.0), Vec3::new(35.92, 2.6, 49.7), Vec3::NEG_X),
+    // a second stone ledge 0.6 m above it on the same face (z 44..47): the vertical hand step (RE/24 LEDGE-4)
+    (Vec3::new(35.92, 3.2, 44.0), Vec3::new(35.92, 3.2, 47.0), Vec3::NEG_X),
 ];
 
 /// Climb tower face: x range, face z (normal -Z), band heights 0.6 m apart, plus a missing patch.
