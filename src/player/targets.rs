@@ -30,8 +30,9 @@ pub struct JumpTarget {
 /// `xx_h_air_*_to_freestep` and arrival plays the free-step reception, 0xB1EC40 / 0xE07D00). 0x8000 is the
 /// air-assassination target (its flight is `…_to_assassinate`), not plain ground.
 pub const TARGET_GROUND: u32 = super::jump_blend::TARGET_FREESTEP;
-/// Ledge hang targets: 0x40 = wall hang (flight `…_to_surface`, wall reception), 0x80 = free hang (flight
-/// `…_to_swing`, swing reception) (0xB1EC40 / 0xE07D00).
+/// Ledge hang targets: 0x40 = wall hang (flight `…_to_surface`), 0x80 = free hang (flight `…_to_swing`) (0xB1EC40).
+/// The arrival (0xE07D00) picks the reception by the foot holds, not the type: holds → the wall reception, none → the
+/// swing for 0x80 (RE/24 AIR-37).
 pub const TARGET_LEDGE: u32 = 0x40;
 /// PORT: thickest wall top offered as a pass-over target (type 2).
 pub const PASSOVER_MAX_THICKNESS: f32 = 1.0;

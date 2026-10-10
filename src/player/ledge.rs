@@ -258,6 +258,17 @@ pub fn feet_supports(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     support_ray(c - right_of(facing) * 0.2, n, 0.625, 0.1, collision) || support_ray(c, n, 0.625, -0.1, collision)
 }
 
+/// `sub_B15C30`: the jump arrival's foot holds under a hold point `hand` (`HumanInAir__CheckJumpTargetArrival`
+/// 0xE07D00, generic branch 0xE093FC): two `sub_11718B0` searches 1.0 m below it and 0.15 m into the wall, one
+/// 0.15 m to the left raised 0.05 m and one 0.15 m to the right lowered 0.05 m (box half extents 0.4 / 0.625 / 0.2;
+/// the offset is in the wall's frame, x across, z up). Both feet must find the wall.
+pub fn reception_feet(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let c = hand - Vec3::Y + facing * 0.15;
+    let across = facing.cross(Vec3::Y);
+    support_ray(c - across * 0.15, n, 0.625, 0.05, collision) && support_ray(c + across * 0.15, n, 0.625, -0.05, collision)
+}
+
 /// Foot supports for a hang at `mid` (`sub_DE0A60` from TrySwitchHangType 0xDE1060): two rays of 1.2 m toward
 /// the wall, starting 1 m below the hands, 0.5 m back from the wall and 0.1 m to either side (collision layer
 /// 43). Returns (left foot hits, right foot hits).

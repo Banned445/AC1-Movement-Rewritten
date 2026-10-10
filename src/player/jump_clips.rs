@@ -249,6 +249,10 @@ pub const ACTIONS: &[(u32, &[&[&str]])] = &[
     (0x2084b614, &[
         &["xx_h_kiosk_front_monkeybar_right_footr_tr_fall"],
     ]),
+    (0x8e5444ee, &[
+        &["xx_hangwall_reception_front_straight_min_a", "xx_hangwall_reception_front_30_out_min_a", "xx_hangwall_reception_front_45_in_min_a", "xx_hangwall_reception_front_straight_max_a", "xx_hangwall_reception_front_30_out_max_a", "xx_hangwall_reception_front_45_in_max_a"],
+        &["xx_hangwall_reception_front_straight_min_b", "xx_hangwall_reception_front_30_out_min_b", "xx_hangwall_reception_front_45_in_min_b", "xx_hangwall_reception_front_straight_max_b", "xx_hangwall_reception_front_30_out_max_b", "xx_hangwall_reception_front_45_in_max_b"],
+    ]),
     (0x491228ae, &[
         &["xx_h_climbing_hangwall_tr_climb1m_up_l_hand_2_a"],
     ]),

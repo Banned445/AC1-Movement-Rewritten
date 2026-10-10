@@ -1888,6 +1888,27 @@ fn running_jump_at_a_railing_vaults_it() {
 
 // ---------------------------------------------------------------- swing bars (RE/03 §7.10)
 
+/// bug-1791661604: the far jump from the 3.5 m roof (x 5..11, z 9..15) at the 3.2 m block's -Z face (z 21.5) is a
+/// free-hang jump (0x80: the edge lies in the third zone, which clears 0x40, 0xE1A81F), but the block is solid below
+/// the edge, so the arrival finds foot holds (`sub_B15C30`) and plays the wall reception, not the swing (0xE093FC).
+#[test]
+fn a_free_hang_jump_at_a_wall_lands_feet_on_the_wall() {
+    use crate::player::ledge::LedgeHangType;
+    // the free run off the roof edge (high profile, Legs held), as recorded
+    let mut s = Sim::new(Vec3::new(8.2, 3.5, 11.0), std::f32::consts::PI);
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.body().feet);
+    assert_eq!(s.data().air.target.expect("a target").type_flags, crate::player::targets::TARGET_LEDGE_FREE);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge), "never caught: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.data().ledge.swing.is_none(), "swings in front of a wall");
+    let m = s.data().ledge.mv.expect("the wall reception");
+    assert_eq!(m.seq[0].map(|a| a.id), Some(crate::player::ledge_moves::RECEPTION_WALL_OTHER));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "reception never ended");
+    assert_eq!(s.data().ledge.hang_type, LedgeHangType::Wall, "feet on the wall");
+}
+
 #[test]
 fn swing_from_bar_to_bar() {
     use crate::player::swing::{SwingPhase, SWING_CYCLE, SWING_LANDING, TAKEOFF_SWING};

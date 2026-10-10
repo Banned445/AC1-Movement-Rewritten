@@ -590,6 +590,7 @@ pub fn update_air(
                         body.feet = aim;
                     }
                     // hand-off by target type (ledge targets → Ledge context)
+                    let mut no_arrival = false;
                     if let Some((mid, normal)) = air.target.and_then(|t| t.hang) {
                         // the reception by the flight that arrived (CheckJumpTargetArrival 0xE07D00)
                         let t = air.target.unwrap();
@@ -598,13 +599,31 @@ pub fn update_air(
                             None => LedgeArrival::Surface { free: t.type_flags == super::targets::TARGET_LEDGE_FREE },
                         };
                         let mut e = LedgeEntry::at(mid, normal, body.feet, LedgeSubState::HangWallReception);
-                        if matches!(arrival, LedgeArrival::Surface { free: true }) {
-                            // no foot holds: SwingReception (Ledge SubState 8), `swing`
-                            swing_on = true;
-                        } else {
-                            e.entry_move = Some(ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, &collision));
+                        match arrival {
+                            // the generic branch (0xE093CC): foot holds on the wall (`sub_B15C30`) → the wall
+                            // reception (SubState 6) whatever the jump type; no holds → the swing (SubState 8) for a
+                            // free-hang jump (0x80), else no arrival (the air catch takes over)
+                            LedgeArrival::Surface { free } => {
+                                if super::ledge::reception_feet(mid, normal, &collision) {
+                                    let arrival = LedgeArrival::Surface { free: false };
+                                    let mut m = ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, &collision);
+                                    if free {
+                                        ledge_moves::use_free_jump_wall_reception(&mut m);
+                                    }
+                                    e.entry_move = Some(m);
+                                    hang_on = Some(e);
+                                } else if free {
+                                    swing_on = true;
+                                    hang_on = Some(e);
+                                } else {
+                                    no_arrival = true;
+                                }
+                            }
+                            LedgeArrival::Straight(_) => {
+                                e.entry_move = Some(ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, &collision));
+                                hang_on = Some(e);
+                            }
                         }
-                        hang_on = Some(e);
                     }
                     // ladder target (0x1000): 0xE07D00 plays `ARRIVE_TARGET`, interpolates the root onto it (0.2 s) and
                     // sets Ladder EntryType 1 (state 2 waits for the action, then the low wait)
@@ -654,6 +673,8 @@ pub fn update_air(
                     }
                     match then_fall_to {
                         _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() || ladder_on.is_some() || kiosk_on.is_some() => {}
+                        // 0xE07D00 returns 0: the jump ends with no reception and the fall's air catch takes over
+                        _ if no_arrival => air.mode = AirMode::Fall { steer_to: None },
                         Some(p) if collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_none() => {
                             air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
                         }

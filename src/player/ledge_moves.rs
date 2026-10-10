@@ -60,6 +60,7 @@ pub const HOP_UP: u32 = 0x4CD6_8F4F;
 pub const HOP_UP_B: u32 = 0x4CD6_8F50;
 
 pub const DUMPED_ACTIONS: &[u32] = &[
+    RECEPTION_WALL_OTHER,
     0x491228AE, 0x491228AF, 0x491228B0, 0x491228B1, 0x491228B2, 0x491228B3,
     0x491228C6, 0x491228C7, 0x491228C8, 0x491228C9, 0x491228CA, 0x491228CB,
     0x491228CC, 0x491228CD, 0x491228CE, 0x491228CF, 0x491228D0, 0x491228D1,
@@ -1214,8 +1215,11 @@ pub const ACT_KNEE_TO_FREESTEP: [u32; 2] = [0x248E_9730, 0x248E_9731];
 /// Running jump onto a wall-hang ledge (target type 0x40): `air_surface_tr_hangwall_reception_{straight,
 /// 30_out,45_in}_{min,max}` then `hangwall_reception_*_{a,b}` (3 items × 6 clips; 0xE07D00 → 0xE02BA0).
 pub const RECEPTION_SURFACE_WALL: u32 = 0x011F_F16A;
-/// Running jump onto a free-hang ledge (type 0x80): the swing cycle (0xE07D00, Ledge SubState 8).
+/// Running jump onto a free-hang ledge (type 0x80) without foot holds: the swing cycle (0xE07D00, Ledge SubState 8).
 pub const SWING_RECEPTION: u32 = 0x023E_0C60;
+/// The wall reception of any other jump type with foot holds (0xE07D00 → 0xE02BA0, timed 0.1666 s; the free-hang jump
+/// 0x80 landing on a wall): `hangwall_reception_*_{a,b}` (2 items × 6 clips, then `0x8E5444F0` (c) by the graph).
+pub const RECEPTION_WALL_OTHER: u32 = 0x8E54_44EE;
 
 /// The bands of `Human__SetupJumpToHandTarget` 0xB21DA0 (standing straight jump at a hand target) by the
 /// hand height above the feet `dz`: flight action, its 2-clip blend weight, the root offset from the hand
@@ -1287,12 +1291,27 @@ pub fn hang_jump_in_beam(dz: f32, wall: bool) -> Option<HangJumpIn> {
     Some(j)
 }
 
+/// The free-hang jump (0x80) that finds foot holds (0xE07D00 → `HumanInAir__PlayLedgeReception` 0xE02BA0 with
+/// `RECEPTION_WALL_OTHER` instead of `RECEPTION_SURFACE_WALL`): the wall reception's actions swapped for it, same clip
+/// weights (straight, min). PORT: the game times the reception's root interpolation to 0.1666 s; the port keeps the
+/// clips' own durations.
+pub fn use_free_jump_wall_reception(m: &mut LedgeMove) {
+    let w = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let item = |i: usize| jump_blend::action_items(RECEPTION_WALL_OTHER).filter(|it| it.len() > i).map(|_| ActionBlend::new(RECEPTION_WALL_OTHER, i, &w));
+    let seq = [item(0), item(1), None, None];
+    let durations = seq_durations(&seq);
+    if durations.iter().sum::<f32>() > 0.0 {
+        m.seq = seq;
+        m.durations = durations;
+    }
+}
+
 /// How a jump at a ledge is received when it arrives (CheckJumpTargetArrival 0xE07D00).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LedgeArrival {
     /// From the standing straight jump (0xB21DA0).
     Straight(HangJumpIn),
-    /// From a running jump (0xB20200) onto a ledge: wall reception (type 0x40) or the swing (0x80).
+    /// From a running jump (0xB20200) onto a ledge: the wall reception with foot holds, else the swing (type 0x80).
     Surface { free: bool },
 }
 
