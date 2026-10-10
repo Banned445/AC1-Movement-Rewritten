@@ -1201,6 +1201,31 @@ pub const CLIMB_OUT: [u32; 2] = [0x035F_11AF, 0x035F_11B0];
 /// keeps the interpolation running. The action is not in its list of follow-ups, so when it ends the default stand-up
 /// applies (flag 0x40 → NarrowObject with `hangknee_tr_freestep_entry`, PORT: Ground after `ACT_KNEE_TO_FREESTEP`).
 /// Returns the knee move and the free step onto the top.
+/// `Human__KneeCatchRoomOnTop` 0xB2E240 (the climb out, 0xDF1730, and the knee catch, 0xE0D58B; RE/24 CLIMB-5): room
+/// above an edge `target` for the kneeling body, `into` pointing over the top. No floor is required:
+/// 1. a box 0.35–1.8 m above the edge from 1.0 m out to 0.3 m in (centre target − 0.35·f + 1.075 up, half 0.3 / 0.65 /
+///    0.725) is empty (its first contact from the near face lies 1.3 m or more in, `sub_B2A070`);
+/// 2. a thin column 0.1–1.8 m straight above the edge (half 0.1 / 0.1 / 0.85) is empty;
+/// 3. a thin box tilted 30° about f × up (`sub_55E390` −0.5236 on both f and up), centred 0.4 m out from the edge along
+///    the tilted f (target − 0.4·f′), half 0.1 / 0.1 / 0.5 along (across, f′, up′), is empty (`Human__BoxQueryEmpty`).
+pub fn knee_room_on_top(target: Vec3, into: Vec3, collision: &CollisionWorld) -> bool {
+    let f = Vec3::new(into.x, 0.0, into.z).normalize_or_zero();
+    if f == Vec3::ZERO {
+        return false;
+    }
+    let across = f.cross(Vec3::Y).normalize_or_zero();
+    let axes = [across, f, Vec3::Y];
+    if !collision.obb_free(target - f * 0.35 + Vec3::Y * 1.075, axes, Vec3::new(0.3, 0.65, 0.725)) {
+        return false;
+    }
+    if !collision.obb_free(target + Vec3::Y * 0.95, axes, Vec3::new(0.1, 0.1, 0.85)) {
+        return false;
+    }
+    let tilt = Quat::from_axis_angle(across, -0.523_598_8);
+    let (tf, tu) = (tilt * f, tilt * Vec3::Y);
+    collision.obb_free(target - tf * 0.4, [across, tf, tu], Vec3::new(0.1, 0.1, 0.5))
+}
+
 pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) -> (LedgeMove, LedgeMove) {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mid = (hand_l + hand_r) * 0.5;
@@ -1209,6 +1234,7 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
     let durations = seq_durations(&seq);
     let durations = if durations.iter().sum::<f32>() > 0.0 { durations } else { [PULLUP_WALL_TIME * 0.5, 0.0, 0.0, 0.0] };
     let knee = mid + facing * 0.1;
+    let found = seq.iter().any(|a| a.is_some());
     let base = LedgeMove {
         kind: MoveKind::Pullup,
         seq,
@@ -1218,7 +1244,9 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
         to: knee,
         facing_from: facing,
         facing_to: facing,
-        follow_disp: false,
+        // target + 0.1·into, `sub_711130` with the action as its 11th argument: the hangknee clip's own root displacement
+        // plus a linear correction (0xDF1CBB → RootInterp+200, RE/24 CLIMB-5)
+        follow_disp: found,
         lead: 0.0,
         table: None,
         end_free: false,
@@ -1860,6 +1888,25 @@ mod tests {
         let mut g = GuidanceWorld::default();
         g.edges.push(GuidanceEdge { p0: Vec3::new(-5.0, 2.6, 0.0), p1: Vec3::new(5.0, 2.6, 0.0), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab });
         (c, g)
+    }
+
+    /// RE/24 CLIMB-5: `Human__KneeCatchRoomOnTop` tests room above the edge, not a floor: a 0.2 m thin wall top has room
+    /// (the old floor test refused it); a wall rising 0.5 m above the top within 0.3 m of the edge refuses; one set 0.8 m
+    /// back does not.
+    #[test]
+    fn the_climb_out_needs_room_above_the_edge_not_a_floor() {
+        let wall = |extra: Option<Aabb3>| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, 0.0), max: Vec3::new(2.0, 3.0, 0.2) });
+            c.boxes.extend(extra);
+            c
+        };
+        let (edge, into) = (Vec3::new(0.0, 3.0, 0.0), Vec3::Z);
+        assert!(knee_room_on_top(edge, into, &wall(None)), "a thin wall top has room");
+        let close = Aabb3 { min: Vec3::new(-2.0, 3.5, 0.1), max: Vec3::new(2.0, 5.0, 0.2) };
+        assert!(!knee_room_on_top(edge, into, &wall(Some(close))), "a wall above the top within 0.3 m refuses");
+        let far = Aabb3 { min: Vec3::new(-2.0, 3.0, 0.8), max: Vec3::new(2.0, 5.0, 1.2) };
+        assert!(knee_room_on_top(edge, into, &wall(Some(far))), "a wall 0.8 m back leaves room");
     }
 
     /// RE/24 LEDGE-8: ProbeLateral's free-space test is a body-length capsule (0xDD996B, `sub_B18C30`): a crate at leg

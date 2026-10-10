@@ -1492,13 +1492,15 @@ pub fn update_climb(
             }
         }
         // no grid move: going up with the hands on a top edge → climb out (TryReachLedgeAbove 0xDF1730). Only from the
-        // level poses (the pose record's "uneven" field must be 0: poses 0 / 3); 2m (pose 3) picks the 2m clip.
-        // PORT: the game's standable test sub_B2E240 is the collision ground test at the top.
+        // level poses (the pose record's "uneven" field must be 0: poses 0 / 3); 2m (pose 3) picks the 2m clip. The test
+        // is room above the edge for the kneeling body (`Human__KneeCatchRoomOnTop` 0xB2E240), not a floor: thin wall tops
+        // climb out, a wall 0.3–1.8 m above the top within 0.3 m refuses (RE/24 CLIMB-5). PORT: the target is the hands'
+        // midpoint on the top edge; the game takes the grid's row-4 cells, else a box probe from the root + 0.8 up + 0.5
+        // forward with the reference 1.5 m up (0xDF19BD).
         if matches!(dir, 0 | 1 | 6 | 7) && matches!(d.pose, 0 | 3) {
             let mid = (d.hand_l + d.hand_r) * 0.5;
-            let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
-            let top_edge = collision.ground_height(top + Vec3::Y * 0.05, 0.3).is_some_and(|h| (h - mid.y).abs() < 0.25);
-            if top_edge {
+            let on_top_edge = guidance.on_edge(mid, n, 0.15).is_some();
+            if on_top_edge && super::ledge_moves::knee_room_on_top(mid, -n, &collision) {
                 let (knee, stand) = super::ledge_moves::climb_out_moves(d.pose == 3, body.feet, d.hand_l, d.hand_r, n);
                 let entry = LedgeEntry {
                     hand_l: d.hand_l,

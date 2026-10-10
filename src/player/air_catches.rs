@@ -174,7 +174,7 @@ pub const KNEE_CATCH: [u32; 2] = [0x1F0C_05A7, 0x1F0C_05A6];
 /// one facing the character within 70° (`sub_116FF40`, step 0.1, mask 386); no jump target may be ahead, and the drop
 /// in front of the edge (`Human__MeasureDropBeyondEdge` 0.7 / 0.3) must exceed 0.5 m. `sub_B2E240` then wants room on
 /// the top (two sweeps from 1.075 m and 0.95 m above it, 0.3 m clear past 1.0 / 0.6 m). Returns the edge point and its
-/// wall normal. PORT: the drop is one ray down 0.3 m out from the edge; the room on top is the capsule fitting 0.35 m in.
+/// wall normal. PORT: the drop is one ray down 0.3 m out from the edge.
 pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
     let r = super::right_of(f);
@@ -214,7 +214,8 @@ pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidance
     if below <= 0.5 {
         return None;
     }
-    collision.capsule_fits(p - n * 0.35 + Vec3::Y * 0.05).then_some((p, n))
+    // `sub_B2E240` = `Human__KneeCatchRoomOnTop` (room above the edge, no floor test; RE/24 CLIMB-5)
+    super::ledge_moves::knee_room_on_top(p, -n, collision).then_some((p, n))
 }
 
 /// InAir sub-state 3, the edge landing (`CheckAirCatch` LABEL_140, 0xE0D684): at a flat ground contact
