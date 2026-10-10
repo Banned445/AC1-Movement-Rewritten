@@ -288,9 +288,95 @@ pub(crate) fn seq_durations(seq: &[Option<ActionBlend>; 4]) -> [f32; 4] {
     d
 }
 
-/// `HumanLedge__FindCornerEdges` 0xDD0600 (same-height row) + `HumanLedge__TryTurnCorner` 0xDD3BB0.
-/// `right` = moving right. Probe: inner = hands mid + 0.6·move − 0.6·facing; outer = hands mid +
-/// 0.3·facing + 0.2·move; radius 0.25, vertical 0.4, edges whose wall the character would face within 50°.
+/// Five rows of edge hits at height offsets −1.8, −1.2, −0.6, 0, +0.6 m (the ledge searches' row layout: ProbeLateral
+/// 0xDD9640 at +288, FindCornerEdges 0xDD0600 at +1904 / +2304, 80 bytes each).
+pub type EdgeRows = [Option<crate::guidance::GuidanceHit>; 5];
+
+/// The row height offsets (from the lead hand or the hands' midpoint).
+pub const ROW_OFFSETS: [f32; 5] = [-1.8, -1.2, -0.6, 0.0, 0.6];
+
+/// `HumanLedge__FindCornerEdges` 0xDD0600: the five rows of the corner's other face. The box (0x1170A70 on the ledge
+/// report: half extents 0.25 / 0.4 / 0.3, 50°, the reference 0.2 m back, mask 50) faces that face: `inner` (near) =
+/// hands mid (lower hand) + 0.6·move − 0.6·facing, facing along the move; outer (far) = hands mid + 0.3·move +
+/// 0.3·facing, facing back against the move.
+pub fn corner_rows(inner: bool, right: bool, hand_l: Vec3, hand_r: Vec3, n: Vec3, guidance: &GuidanceWorld) -> EdgeRows {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let side = if right { right_of(facing) } else { -right_of(facing) };
+    let mut base = (hand_l + hand_r) * 0.5;
+    base.y = hand_l.y.min(hand_r.y);
+    let (p, zone_forward) = if inner { (base + side * 0.6 - facing * 0.6, side) } else { (base + facing * 0.3 + side * 0.3, -side) };
+    ROW_OFFSETS.map(|dy| guidance.probe_facing(p + Vec3::Y * dy, zone_forward, Vec3::new(0.25, 0.4, 0.3), 0.2, 0.872_664_6, MASK_CLIMB_HOLDS))
+}
+
+/// `HumanLedge__ProbeLateral` 0xDD9640 for a shimmy step (`closing` = the alternation flag +133: the trailing hand
+/// closes). The moving hand `mover`, the other one `other`, `dv` the move direction:
+/// - the reach (not closing): a sphere (r 0.15) swept 1.55 m along the move from the moving hand pulled 0.15 m back,
+///   0.75 m out from the wall and 0.2 m up gives d = free distance − 0.15; d < 0.7 is blocked (no rows); the width
+///   w = min(d − 0.4, 1 − |handL − handR|);
+/// - the closing step: w = |handL − handR| − 0.15.
+///
+/// Five rows (moving hand −1.8 … +0.6 m): a box from 0.1 m beyond the moving hand to w + 0.1 m (half extents w/2 /
+/// 0.5 / 0.3, 45°, mask 50, on the ledge report) with the reference at its far end, 0.2 m back from the wall: the
+/// farthest reachable point.
+///
+/// The shimmy target (row 3, the moving hand's height): reaching, the hit at least 0.15 m beyond moving hand + 0.1·move;
+/// closing, the hit unless it lies more than 0.3 m from the other hand, or none: then the other hand's own point (the
+/// hands come together).
+pub fn probe_lateral(mover: Vec3, other: Vec3, n: Vec3, dv: Vec3, closing: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> (EdgeRows, Option<Vec3>) {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let spacing = (mover - other).length();
+    let width = if closing {
+        spacing - 0.15
+    } else {
+        let origin = mover - dv * SHIMMY_SWEEP_R + n * SHIMMY_SWEEP_OUT + Vec3::Y * SHIMMY_SWEEP_UP;
+        let d = collision.sphere_free_distance(origin, dv, SHIMMY_SWEEP_R, SHIMMY_SWEEP_LEN) - SHIMMY_SWEEP_R;
+        if d < SHIMMY_MIN_FREE {
+            return ([None; 5], None);
+        }
+        (d - SHIMMY_WALL_MARGIN).min(SHIMMY_MAX_SPACING - spacing)
+    };
+    if width <= 0.0 {
+        return ([None; 5], if closing { Some(other) } else { None });
+    }
+    let half = Vec3::new(width * 0.5, 0.5, 0.3);
+    let right = facing.cross(Vec3::Y);
+    let rows = ROW_OFFSETS.map(|dy| {
+        let centre = mover + dv * (width * 0.5 + 0.1) + Vec3::Y * dy;
+        let reference = centre + dv * (width * 0.5) - facing * 0.2;
+        guidance.probe_box(centre, right, facing, Vec3::Y, half, reference, 0.785_398_2, crate::guidance::PROBE_STEP, MASK_CLIMB_HOLDS)
+    });
+    let row = rows[3].map(|h| h.point);
+    let flat = |a: Vec3, b: Vec3| Vec2::new(a.x - b.x, a.z - b.z).length();
+    let target = if closing {
+        Some(row.filter(|&p| flat(other, p) <= 0.3).unwrap_or(other))
+    } else {
+        row.filter(|&p| (mover + dv * 0.1).distance(p) >= SHIMMY_MIN_STEP)
+    };
+    (rows, target)
+}
+
+/// `HumanLedge__TrySideMoveToClimbHolds` 0xDD48B0 on a row source (ProbeLateral's or a corner's): `band` 0 up (flag 4:
+/// feet row 2, hands row 4), 1 level (8: rows 1 / 3), 2 down (16: rows 0 / 2). Both hands go to the hand row's hit and
+/// both feet to the feet row's (climb pose 0), then the transition `LEDGE_SIDE_TO_CLIMB` plays. Not during a closing
+/// step (+133). PORT: the clearance tests (`Human__ClimbBodyBoxesFree` 0xB2DF90, `Human__LateralPathFree` 0xB2A410,
+/// 1.8 m) are not modelled.
+pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang: LedgeHangType, feet: Vec3) -> Option<super::climb::ClimbEntry> {
+    let (fi, hi) = [(2usize, 4usize), (1, 3), (0, 2)][band];
+    let (foot, hand) = (rows[fi]?, rows[hi]?);
+    Some(super::climb::ClimbEntry {
+        entry_type: super::climb::ClimbEntryType::FromLedge,
+        hand_l: hand.point,
+        hand_r: hand.point,
+        foot_l: foot.point,
+        foot_r: foot.point,
+        normal: hand.wall_normal,
+        from_feet: feet,
+        foot_right: false,
+        action: Some(super::climb::LEDGE_SIDE_TO_CLIMB[right as usize][band][(hang != LedgeHangType::Wall) as usize]),
+    })
+}
+
+/// `HumanLedge__TryTurnCorner` 0xDD3BB0 on FindCornerEdges' same-height row (row 3). `right` = moving right.
 pub fn try_corner(
     inner: bool,
     right: bool,
@@ -303,15 +389,7 @@ pub fn try_corner(
     collision: &CollisionWorld,
 ) -> Option<LedgeMove> {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let side = if right { right_of(facing) } else { -right_of(facing) };
-    let mut base = (hand_l + hand_r) * 0.5;
-    base.y = hand_l.y.min(hand_r.y);
-    let (p, new_facing) = if inner {
-        (base + side * 0.6 - facing * 0.6, side)
-    } else {
-        (base + facing * 0.3 + side * 0.2, -side)
-    };
-    let hit = guidance.probe(p, 0.25, 0.4, Some(new_facing), 50f32.to_radians())?;
+    let hit = corner_rows(inner, right, hand_l, hand_r, n, guidance)[3]?;
     let nn = hit.wall_normal;
     let new_hang = hang_type_at(hit.point, nn, collision);
     // a wall hang needs foot holds on the new wall (sub_B16130)

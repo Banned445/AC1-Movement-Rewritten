@@ -6,7 +6,8 @@
 //! - All movement is discrete: pick new hand targets, then interpolate the root over the move's
 //!   animation length (PLACEHOLDER durations until clips are decoded). SubState HandPlacement (3)
 //!   while a step runs, Movement (1) otherwise.
-//! - Shimmy (ProbeLateral 0xDD9640 / StartHandStep 0xDDE0C0): alternating hands; free-space sphere
+//! - Shimmy (ProbeLateral 0xDD9640 / StartHandStep 0xDDE0C0): alternating hands, the lead reaching the farthest point
+//!   of a box beyond it, the trailing hand closing to 0.15 m of it; free-space sphere
 //!   sweep; step = min(d âˆ’ 0.4, 1.0 âˆ’ spacing); blocked if d âˆ’ 0.15 < 0.7; min step 0.15; chain ends
 //!   handled implicitly (no edge further on â†’ no step).
 //! - Up/down: transition to Climb when wall holds exist (TryTransitionToClimb 0xDD46A0), else
@@ -289,35 +290,6 @@ pub fn hang_root_at(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, co
     }
 }
 
-/// `HumanLedge__TrySideMoveToClimbHolds` 0xDD48B0 on ProbeLateral's rows (0xDD9640: lead-hand height offsets −1.8,
-/// −1.2, −0.6, 0, +0.6): `band` 0 up (feet −0.6, hands +0.6), 1 level (feet −1.2, hands 0), 2 down (feet −1.8, hands
-/// −0.6). Both hands go to the hand row's hold and both feet to the feet row's (climb pose 0), then the transition
-/// `LEDGE_SIDE_TO_CLIMB` plays. PORT: the rows are guidance probes (r 0.5, vertical 0.3) one shimmy step along the
-/// move; the game's clearance tests (sub_B2DF90, lateral 1.8 m sub_B2A410) are not modelled.
-#[allow(clippy::too_many_arguments)]
-fn side_climb_entry(band: usize, right: bool, mover: Vec3, dv: Vec3, step: f32, n: Vec3, hang: LedgeHangType, feet: Vec3, guidance: &GuidanceWorld) -> Option<ClimbEntry> {
-    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let (fy, hy) = [(-0.6, 0.6), (-1.2, 0.0), (-1.8, -0.6)][band];
-    let row = |y: f32| {
-        guidance
-            .probe(mover + dv * step + Vec3::Y * y, 0.5, 0.3, Some(facing), 0.785)
-            .filter(|h| (h.point - mover).dot(dv) > SHIMMY_MIN_STEP && (h.point.y - (mover.y + y)).abs() <= 0.3)
-            .map(|h| h.point)
-    };
-    let (foot, hand) = (row(fy)?, row(hy)?);
-    Some(ClimbEntry {
-        entry_type: ClimbEntryType::FromLedge,
-        hand_l: hand,
-        hand_r: hand,
-        foot_l: foot,
-        foot_r: foot,
-        normal: n,
-        from_feet: feet,
-        foot_right: false,
-        action: Some(super::climb::LEDGE_SIDE_TO_CLIMB[right as usize][band][(hang != LedgeHangType::Wall) as usize]),
-    })
-}
-
 /// Ledge stick quantization (QuantizeStickDirection 0xDD1920): |a| â‰¤ 45Â° up, beyond 135Â° down,
 /// otherwise left/right. `a` is measured from the character facing (into the wall).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,7 +341,7 @@ pub fn update_ledge(
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, &mut LimbTargets), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
-    'players: for (mut loco, mut body, mut data, mut limbs) in &mut q {
+    for (mut loco, mut body, mut data, mut limbs) in &mut q {
         if loco.current != ActorContextId::Ledge {
             continue;
         }
@@ -758,125 +730,99 @@ pub fn update_ledge(
             }
             LedgeDir::Left | LedgeDir::Right => {
                 d.blocked_up = false;
-                // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side comes first
-                if let Some((mv, e)) = ledge_moves::try_side_to_ladder(dir == LedgeDir::Right, n, body.feet, d.hang_type, &guidance) {
+                let right_dir = dir == LedgeDir::Right;
+                let dv = if right_dir { right } else { -right };
+                // lead hand = hand on the move side; roles swap when the alternation flag is set
+                let move_right_hand = right_dir != d.alt_flag;
+                let (mover, other) = if move_right_hand { (d.hand_r, d.hand_l) } else { (d.hand_l, d.hand_r) };
+                // Movement_ChooseAction 0xDE29E0, left / right, with the preference +1856 = 0 (the ctor's value; nothing
+                // else sets it): ProbeLateral 0xDD9640 first (the rows and the shimmy target)
+                let (rows, target) = ledge_moves::probe_lateral(mover, other, n, dv, d.alt_flag, &guidance, &collision);
+                // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side
+                if let Some((mv, e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance) {
                     start_move(d, mv, "side to ladder");
                     d.then_ladder = Some(e);
                     continue;
                 }
-                let dv = if dir == LedgeDir::Right { right } else { -right };
-                // lead hand = hand on the move side; roles swap when the alternation flag is set
-                let move_right_hand = (dir == LedgeDir::Right) != d.alt_flag;
-                let (mover, other) = if move_right_hand { (d.hand_r, d.hand_l) } else { (d.hand_l, d.hand_r) };
-                let mut side_step = None;
-                let target = if !d.alt_flag {
-                    // reach step: free-space sweep from the lead hand, out from the wall and up
-                    let origin = mover - dv * SHIMMY_SWEEP_R + n * SHIMMY_SWEEP_OUT + Vec3::Y * SHIMMY_SWEEP_UP;
-                    let free = collision.sphere_free_distance(origin, dv, SHIMMY_SWEEP_R, SHIMMY_SWEEP_LEN);
-                    if free - SHIMMY_SWEEP_R < SHIMMY_MIN_FREE {
-                        // blocked: inner corner (0xDD0600 inner + 0xDD3BB0), else side jump, else blocked
-                        let right_dir = dir == LedgeDir::Right;
-                        if let Some(mv) = ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
-                            start_move(d, mv, "corner (inner)");
-                        } else if let Some((mv, e)) = ledge_moves::try_side_jump_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision) {
-                            // the ladder is tried before the ledge side jump (0xDE05E0)
-                            start_move(d, mv, "side jump to ladder");
-                            d.then_ladder = Some(e);
-                        } else if let Some((mv, climb)) = ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
-                            if climb.is_some() {
-                                // onto climb holds (type 0): the Climb context takes over at the end
-                                start_move(d, mv, "side jump to climb");
-                                d.then_climb = climb;
-                            } else {
-                                let (mv, tail) = ledge_moves::second_hand_grab(mv, &guidance, &collision);
-                                start_move(d, mv, "side jump");
-                                d.queue = tail.into_iter().collect();
-                            }
-                        } else {
-                            d.last_action = "shimmy blocked (obstacle / inner corner)";
-                        }
-                        continue;
-                    }
-                    let step = (free - SHIMMY_WALL_MARGIN).min(SHIMMY_MAX_SPACING - spacing);
-                    side_step = Some(step);
-                    // Movement_ChooseAction 0xDE29E0 with the preference +1856 = 0 (the ctor's value; nothing else sets
-                    // it): climb holds down, then level, before the shimmy
-                    for band in [2usize, 1] {
-                        if let Some(e) = side_climb_entry(band, dir == LedgeDir::Right, mover, dv, step, n, d.hang_type, body.feet, &guidance) {
-                            switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
-                            continue 'players;
-                        }
-                    }
-                    // furthest point along the edge chain within `step` (implicit chain end)
-                    let mut s = step;
-                    let mut found = None;
-                    while s >= SHIMMY_MIN_STEP {
-                        if let Some(h) = guidance.on_edge(mover + dv * s, n, 0.06) {
-                            found = Some(h.point);
-                            break;
-                        }
-                        s -= 0.05;
-                    }
-                    found
-                } else {
-                    // closing step: trailing hand catches up to HAND_SPACING from the lead
-                    guidance.on_edge(other - dv * HAND_SPACING, n, 0.1).map(|h| h.point)
+                // TrySideMoveToClimbHolds 0xDD48B0 on a row source, the bands in order (none during a closing step)
+                let (alt, hang_type, feet) = (d.alt_flag, d.hang_type, body.feet);
+                let climb_holds = |rows: &ledge_moves::EdgeRows, bands: &[usize]| {
+                    if alt { None } else { bands.iter().find_map(|&b| ledge_moves::side_move_to_climb_holds(rows, b, right_dir, hang_type, feet)) }
                 };
-                let Some(t) = target else {
-                    let right_dir = dir == LedgeDir::Right;
-                    // no shimmy step: climb holds up (preference 0, 0xDE2C7D)
-                    if let Some(step) = side_step {
-                        if let Some(e) = side_climb_entry(0, right_dir, mover, dv, step, n, d.hang_type, body.feet, &guidance) {
-                            switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
-                            continue;
-                        }
-                    }
-                    // end of the edge: inner corner, side jump (to a ladder first, 0xDE05E0), outer corner
-                    // (Movement_ChooseAction 0xDE29E0 order)
-                    if ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision).is_none() {
-                        if let Some((mv, e)) = ledge_moves::try_side_jump_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision) {
-                            start_move(d, mv, "side jump to ladder");
-                            d.then_ladder = Some(e);
-                            continue;
-                        }
-                    }
-                    let mv = ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision)
-                        .map(|m| (m, "corner (inner)", None))
-                        .or_else(|| ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision).map(|(m, c)| (m, if c.is_some() { "side jump to climb" } else { "side jump" }, c)))
-                        .or_else(|| ledge_moves::try_corner(false, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision).map(|m| (m, "corner (outer)", None)));
-                    match mv {
-                        Some((mv, what, Some(climb))) => {
-                            start_move(d, mv, what);
-                            d.then_climb = Some(climb);
-                        }
-                        Some((mv, what, None)) => {
-                            // a long jump into a free hang lands on one hand, then the second hand reaches (state 17)
-                            let (mv, tail) = ledge_moves::second_hand_grab(mv, &guidance, &collision);
-                            start_move(d, mv, what);
-                            d.queue = tail.into_iter().collect();
-                        }
-                        None => d.last_action = "end of ledge",
-                    }
-                    continue;
-                };
-                let (nl, nr) = if move_right_hand { (d.hand_l, t) } else { (t, d.hand_r) };
-                if let Some(nt) = needs_switch(d.hang_type, (nl + nr) * 0.5, n, &collision) {
-                    let mv = ledge_moves::switch_move(if dir == LedgeDir::Right { 3 } else { 2 }, nt == LedgeHangType::Wall, body.feet, nl, nr, n, &collision);
-                    // the switch carries this shimmy step's hand move: the alternation advances as for the step
-                    d.alt_flag = !d.alt_flag;
-                    start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
+                // climb holds down, then level (16 / 8 on ProbeLateral's rows)
+                if let Some(e) = climb_holds(&rows, &[2, 1]) {
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
-                if move_right_hand { d.hand_r = t } else { d.hand_l = t }
-                d.alt_flag = !d.alt_flag;
-                d.force_free = false;
-                let to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
-                // after the toggle: alt_flag set = this was the lead hand's reach (open), clear = closing step
-                d.moves.push(RootInterp::new(body.feet, to, if d.alt_flag { SHIMMY_OPEN_TIME } else { SHIMMY_CLOSE_TIME }));
-                d.step_seq += 1;
-                d.after = Some(After::Hang);
-                d.sub_state = LedgeSubState::HandPlacement;
-                d.last_action = if dir == LedgeDir::Right { "shimmy right" } else { "shimmy left" };
+                // StartHandStep 0xDDE0C0: the shimmy step onto row 3's target
+                if let Some(t) = target {
+                    let (nl, nr) = if move_right_hand { (d.hand_l, t) } else { (t, d.hand_r) };
+                    if let Some(nt) = needs_switch(d.hang_type, (nl + nr) * 0.5, n, &collision) {
+                        let mv = ledge_moves::switch_move(if right_dir { 3 } else { 2 }, nt == LedgeHangType::Wall, body.feet, nl, nr, n, &collision);
+                        // the switch carries this shimmy step's hand move: the alternation advances as for the step
+                        d.alt_flag = !d.alt_flag;
+                        start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
+                        continue;
+                    }
+                    if move_right_hand { d.hand_r = t } else { d.hand_l = t }
+                    d.alt_flag = !d.alt_flag;
+                    d.force_free = false;
+                    let to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
+                    // after the toggle: alt_flag set = this was the lead hand's reach (open), clear = closing step
+                    d.moves.push(RootInterp::new(body.feet, to, if d.alt_flag { SHIMMY_OPEN_TIME } else { SHIMMY_CLOSE_TIME }));
+                    d.step_seq += 1;
+                    d.after = Some(After::Hang);
+                    d.sub_state = LedgeSubState::HandPlacement;
+                    d.last_action = if right_dir { "shimmy right" } else { "shimmy left" };
+                    continue;
+                }
+                // climb holds up (4)
+                if let Some(e) = climb_holds(&rows, &[0]) {
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
+                    continue;
+                }
+                // the near corner: FindCornerEdges(dir, 1) 0xDD0600 → climb holds 16 / 8 / 4 round it, TryTurnCorner(dir,
+                // 1) 0xDD3BB0
+                let near = ledge_moves::corner_rows(true, right_dir, d.hand_l, d.hand_r, n, &guidance);
+                if let Some(e) = climb_holds(&near, &[2, 1, 0]) {
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
+                    continue;
+                }
+                if let Some(mv) = ledge_moves::try_corner(true, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                    start_move(d, mv, "corner (inner)");
+                    continue;
+                }
+                // TryJumpUpOrSideJump 0xDE05E0: a ladder (0xDD55F0), then a ledge (0xDDD490)
+                if let Some((mv, e)) = ledge_moves::try_side_jump_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision) {
+                    start_move(d, mv, "side jump to ladder");
+                    d.then_ladder = Some(e);
+                    continue;
+                }
+                if let Some((mv, climb)) = ledge_moves::try_side_jump(right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                    if climb.is_some() {
+                        // onto climb holds (type 0): the Climb context takes over at the end
+                        start_move(d, mv, "side jump to climb");
+                        d.then_climb = climb;
+                    } else {
+                        // a long jump into a free hang lands on one hand, then the second hand reaches (state 17)
+                        let (mv, tail) = ledge_moves::second_hand_grab(mv, &guidance, &collision);
+                        start_move(d, mv, "side jump");
+                        d.queue = tail.into_iter().collect();
+                    }
+                    continue;
+                }
+                // the far corner: FindCornerEdges(dir, 0) → climb holds round it, TryTurnCorner(dir, 0)
+                let far = ledge_moves::corner_rows(false, right_dir, d.hand_l, d.hand_r, n, &guidance);
+                if let Some(e) = climb_holds(&far, &[2, 1, 0]) {
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
+                    continue;
+                }
+                if let Some(mv) = ledge_moves::try_corner(false, right_dir, d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                    start_move(d, mv, "corner (outer)");
+                    continue;
+                }
+                // PORT: TrySwitchHangType's corner variants (0xDE1060 with 1 / 2) are not modelled
+                d.last_action = if target.is_none() && rows.iter().all(|r| r.is_none()) { "shimmy blocked (obstacle / inner corner)" } else { "end of ledge" };
             }
         }
     }

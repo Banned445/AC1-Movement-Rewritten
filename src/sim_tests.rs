@@ -546,6 +546,20 @@ fn shimmy_is_stopped_by_the_pillar() {
     assert!(s.data().ledge.last_action.contains("blocked"), "{}", s.data().ledge.last_action);
 }
 
+#[test]
+fn shimmy_reaches_out_then_brings_the_hands_together() {
+    // ProbeLateral 0xDD9640 row 3: the reach takes the farthest point of the edge within w = min(d − 0.4, 1 − |hands|)
+    // beyond 0.1 m (the piece trimmed 0.1 m); the closing step's box ends 0.05 m short of the lead hand and the trimmed
+    // piece 0.15 m short, so the hands come together. On a long edge they alternate 1.0 / 0.15 m apart.
+    let mut s = hang_on_jump_up_wall();
+    s.pad(Vec3::NEG_X, 1.0, false, false); // away from the pillar
+    let spacing = |s: &Sim| (s.data().ledge.hand_l - s.data().ledge.hand_r).length();
+    assert!(s.run_until(3.0, |s| spacing(s) > 0.95), "the reach opens the hands to 1 m: {}", spacing(&s));
+    assert!(s.run_until(2.0, |s| spacing(s) < 0.3), "the closing step brings them together: {}", spacing(&s));
+    assert!((spacing(&s) - 0.15).abs() < 0.02, "{}", spacing(&s));
+    assert!(s.run_until(2.0, |s| spacing(s) > 0.95), "and the next reach: {}", spacing(&s));
+}
+
 /// Free-hang balcony slab: top 2.9 m, x -1..5, front edge z 35.4 (normal -Z), nothing below.
 fn hang_on_balcony() -> Sim {
     let mut s = Sim::new(Vec3::new(2.0, 0.0, 33.0), FACE_PZ);

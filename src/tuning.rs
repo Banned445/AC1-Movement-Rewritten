@@ -118,7 +118,8 @@ pub const SHIMMY_MIN_FREE: f32 = 0.7;
 pub const SHIMMY_WALL_MARGIN: f32 = 0.4;
 pub const SHIMMY_MAX_SPACING: f32 = 1.0;
 pub const SHIMMY_MIN_STEP: f32 = 0.15;
-/// PLACEHOLDER: hand spacing after a closing step (the game re-snaps the trailing hand to the chain).
+/// PLACEHOLDER: the hand spacing of a new hang (entries, jumps, corners): the game puts both hand records on one hold
+/// and derives the pose from it (sub_B15AD0 / sub_B157B0). The shimmy's own spacing comes from ProbeLateral 0xDD9640.
 pub const HAND_SPACING: f32 = 0.4;
 /// Lost-ledge check radius = 0.25 + half the hand spacing. HasLostLedge 0xDD20D0
 pub const LOST_LEDGE_R: f32 = 0.25;
