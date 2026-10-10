@@ -1592,7 +1592,8 @@ pub fn static_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, c
     let mut candidates = Vec::new();
     for p in &sets {
         for chain in world.chains(p) {
-            let Some(hit) = world.grab_point_toward(&chain, feet, Some(fwd), &[0.5, 0.5], 0.25, &cuts) else { continue };
+            // a4 = a5 = forward (0xE16E37 / 0xE16E38)
+            let Some(hit) = world.grab_point_toward(&chain, feet, Some(fwd), Some(fwd), &[0.5, 0.5], 0.25, &cuts) else { continue };
             if world.edges[hit.edge].subtype == S::Quadruped || hit.wall_normal == Vec3::ZERO {
                 continue;
             }

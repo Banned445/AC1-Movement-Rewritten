@@ -589,13 +589,16 @@ impl GuidanceWorld {
     /// left). That point is carried onto the links by the plane across the line (the chain's two free link ends pulled
     /// in by the positive trims, `sub_9765E0`); when no link meets the plane, the link end nearest along the line.
     pub fn grab_point(&self, chain: &Chain, target: Vec3, offsets: &[f32], margin: f32, cuts: &[(f32, f32)]) -> Option<GuidanceHit> {
-        self.grab_point_toward(chain, target, None, offsets, margin, cuts)
+        self.grab_point_toward(chain, target, None, None, offsets, margin, cuts)
     }
 
     /// `grab_point` with a preferred direction (the jumper's facing in 0xE165D0): the chain is measured across it (its end
     /// carried onto the vertical plane through its start whose normal is `pref`), so the grab point lies straight along
-    /// `pref` from the target.
-    pub fn grab_point_toward(&self, chain: &Chain, target: Vec3, pref: Option<Vec3>, offsets: &[f32], margin: f32, cuts: &[(f32, f32)]) -> Option<GuidanceHit> {
+    /// `pref` from the target. `along` (a5): the target is carried onto the chain's vertical plane along this direction
+    /// before the clamp (`Vec_ProjectOntoPlane` 0x9470B0; the air catches pass their box forward, RE/24 GUIDE-9); without
+    /// it, perpendicularly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn grab_point_toward(&self, chain: &Chain, target: Vec3, pref: Option<Vec3>, along: Option<Vec3>, offsets: &[f32], margin: f32, cuts: &[(f32, f32)]) -> Option<GuidanceHit> {
         let cut_at = |edge: usize, p: Vec3| {
             let c = cuts.get(edge).copied().unwrap_or((0.0, 0.0));
             let e = &self.edges[edge];
@@ -628,7 +631,16 @@ impl GuidanceWorld {
         let v = (b0 - a0).normalize_or_zero();
         let lo = a0 + v * (margin - trim_s.max(0.0)).min(span);
         let hi = b0 - v * (margin - trim_e.max(0.0)).min(span);
-        let q = if (b0 - a0).dot(hi - lo) > 0.0 { closest_on_segment(lo, hi, target.with_y(s.y)) } else { (lo + hi) * 0.5 };
+        // the target carried onto the chain's vertical plane along `along` (0x9470B0: p + t·dir, t = −((p − s)·n) / (dir·n))
+        let projected = {
+            let p = target.with_y(s.y);
+            let n = Vec3::new(-u.z, 0.0, u.x).normalize_or_zero();
+            match along.map(|a| a.with_y(0.0).normalize_or_zero()).filter(|a| a.dot(n).abs() > 1e-6) {
+                Some(a) => p + a * (-(p - s).dot(n) / a.dot(n)),
+                None => p,
+            }
+        };
+        let q = if (b0 - a0).dot(hi - lo) > 0.0 { closest_on_segment(lo, hi, projected) } else { (lo + hi) * 0.5 };
         let along = Vec3::new(u.x, 0.0, u.z).normalize_or_zero();
         let n = chain.links.len();
         let mut nearest: Option<(f32, Vec3, usize)> = None;
@@ -673,7 +685,7 @@ impl GuidanceWorld {
         let grab = |r: Vec3| {
             chains
                 .iter()
-                .filter_map(|c| report.world.grab_point(c, r, &[0.5, 0.1], margin, &report.cuts))
+                .filter_map(|c| report.world.grab_point_toward(c, r, None, Some(forward), &[0.5, 0.1], margin, &report.cuts))
                 .min_by(|a, b| a.point.distance_squared(r).total_cmp(&b.point.distance_squared(r)))
         };
         let (a, b) = (grab(world(refs[0]))?, grab(world(refs[1]))?);
@@ -819,6 +831,18 @@ mod tests {
         let a = 45f32.to_radians();
         assert_eq!(q([(-a, 0.0), (0.0, 0.0)]), 1, "−30° is in [−45°, 0]");
         assert_eq!(q([(0.0, 0.0), (0.0, a)]), 0, "and not in [0, 45°]");
+    }
+
+    #[test]
+    fn the_grab_point_is_carried_along_the_callers_direction() {
+        // FindGrabPoint 0x66E150 → Vec_ProjectOntoPlane 0x9470B0 along a5 (the air catches' box forward, RE/24 GUIDE-9)
+        let g = GuidanceWorld { edges: vec![ledge(Vec3::new(0.0, 2.0, 0.0), Vec3::new(3.0, 2.0, 0.0))], ..Default::default() };
+        let chain = Chain { links: vec![(0, Vec3::new(0.0, 2.0, 0.0), Vec3::new(3.0, 2.0, 0.0))] };
+        let target = Vec3::new(1.0, 2.0, -0.5);
+        let perp = g.grab_point(&chain, target, &[0.5, 0.1], 0.1, &[]).unwrap();
+        assert!((perp.point.x - 1.0).abs() < 1e-4, "{:?}", perp.point);
+        let slanted = g.grab_point_toward(&chain, target, None, Some(Vec3::new(1.0, 0.0, 1.0)), &[0.5, 0.1], 0.1, &[]).unwrap();
+        assert!((slanted.point.x - 1.5).abs() < 1e-4, "{:?}", slanted.point);
     }
 
     #[test]
