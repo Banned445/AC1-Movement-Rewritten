@@ -485,3 +485,24 @@ fn damascus_lod_cross_fade_draws_the_next_lod_on_top() {
     s.run(0.5);
     assert_eq!(s.stats().fading, 0);
 }
+
+/// Debug: the guidance subtypes the city's cells carry around each spawn (RE/24 LEDGE-17: are the swing bars Pole
+/// edges, subtype 4?). `cargo test probe_damascus_guidance_subtypes -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn probe_damascus_guidance_subtypes() {
+    use crate::guidance::GuidanceSubType;
+    for spawn in SPAWNS {
+        let Some(s) = CitySim::new(spawn) else { return };
+        let g = s.guidance();
+        let mut counts = std::collections::BTreeMap::new();
+        for e in g.edges.iter().filter(|e| e.subtype != GuidanceSubType::None) {
+            *counts.entry(format!("{:?}", e.subtype)).or_insert(0usize) += 1;
+        }
+        let poles: Vec<_> = g.edges.iter().filter(|e| e.subtype == GuidanceSubType::Pole).take(8).map(|e| (e.p0, e.p1, e.n0, e.n1)).collect();
+        eprintln!("{spawn}: {counts:?}");
+        for p in poles {
+            eprintln!("  pole {:.2?} -> {:.2?} n0 {:.2?} n1 {:.2?} len {:.2} dy {:.2}", p.0, p.1, p.2, p.3, p.0.distance(p.1), (p.1.y - p.0.y).abs());
+        }
+    }
+}
