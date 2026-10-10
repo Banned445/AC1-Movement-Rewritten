@@ -1051,7 +1051,7 @@ fn follow(
     }
     let (shake_pos, shake_rot) = st.shake.step(time.delta_secs());
     c.translation = view.eye;
-    // (hypothesis): the view is built from the smoothed eye toward the look-at point (+128)
+    // the view (0x694080): yaw and pitch of the look-at point (+128) seen from the smoothed eye
     c.look_at(view.look_at, Vec3::Y);
     let r = c.rotation;
     c.translation += r * shake_pos;
@@ -1067,9 +1067,9 @@ fn follow(
 /// six CameraFXInterface channels; five have zero amplitude and
 /// ShakePitch = k · env(t) · 30 · fbm(t, 20·(200 + 200·t)) over t ∈ [0, 1] s (tracks in 1/120 s, 0x597D20), with
 /// env = 1.5 → 0.1 at 0.4 s → 0 at 1 s and a one-octave fBm (H 0.1, lacunarity 0.1) of Noise__Perlin2D.
-/// LIVE: nothing in the exe reads CameraFXInterface (its global 0x1A283E0 is only written) and the channel's unit is
-/// unknown, so the port computes the shake but does not apply it until the running game shows whether it is visible.
-pub const APPLY_FALL_SHAKE: bool = false;
+/// The camera switcher adds the channels to the final view (0x4BF9D0, through its CameraFXInterface pointer +304):
+/// angles in degrees × π/180, each scaled by the active camera's CameraSettings +44..+64 (all 1.0 for LowHighProfile).
+pub const APPLY_FALL_SHAKE: bool = true;
 
 #[derive(Default)]
 pub struct ShakeState {
@@ -1084,7 +1084,7 @@ impl ShakeState {
         self.t = 0.0;
     }
 
-    /// The shake's pitch at FX time `t` (the channel's unit, (hypothesis) degrees).
+    /// The shake's pitch at FX time `t`, degrees.
     pub fn pitch(&mut self, t: f32) -> f32 {
         if !(0.0..=1.0).contains(&t) { return 0.0; }
         let env = if t < 0.4 { 1.5 + (0.1 - 1.5) * t / 0.4 } else { 0.1 * (1.0 - (t - 0.4) / 0.6) };
@@ -1098,6 +1098,7 @@ impl ShakeState {
         if self.t > 1.0 { self.intensity = 0.0; return (Vec3::ZERO, Quat::IDENTITY); }
         let pitch = self.pitch(self.t);
         if !APPLY_FALL_SHAKE { return (Vec3::ZERO, Quat::IDENTITY); }
+        // (hypothesis): a positive ShakePitch tilts the view up, about the camera's own right axis
         (Vec3::ZERO, Quat::from_rotation_x(pitch.to_radians()))
     }
 }
