@@ -3835,6 +3835,18 @@ fn the_ability_stack_gates_the_jump() {
 }
 
 #[test]
+fn sprint_needs_the_sprint_max_speed() {
+    use crate::player::abilities::AbilitySet;
+    // vt144 Sprint = MaxSpeed 4 and Legs (0xEE709F, RE/24 GROUND-22): with MaxSpeed Run the high-profile run never sprints
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.app.world_mut().insert_resource(AbilitySet { flags: u64::MAX, max_speed: 3, all_actions: true, high_profile: true });
+    s.pad(Vec3::NEG_Z, 1.0, true, true);
+    s.run(2.0);
+    assert!(!s.ground().sprint);
+    assert_ne!(speed_band(s.ground().speed_param), SpeedBand::Sprint);
+}
+
+#[test]
 fn walk_speed_ability_keeps_the_ground_in_low_profile() {
     use crate::player::abilities::AbilitySet;
     // IHumanGround vt12 SetHighProfile = high && MaxSpeed > Walk (0xEE70F9, RE/24 INPUT-10)

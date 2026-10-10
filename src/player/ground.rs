@@ -288,6 +288,7 @@ impl HumanGroundData {
     /// locomotion starts at once on the exit foot of the item (`HumanGround__PickLocomotionFoot` 0xD86760).
     fn enter_move(&mut self, from: ActionBlend, layout: u8) {
         use super::ground_tree::{authored_transition, pick_locomotion_foot};
+        self.reset_move_entry();
         match authored_transition(from.id, from.item, super::move_blend::ACT_GROUND_LOCOMOTION) {
             Some((ta, ua, ub)) if self.start_transition(ta, ua, ub, layout, from.weights(), Some((from.id, from.item))) => {}
             _ => {
@@ -327,10 +328,19 @@ impl HumanGroundData {
         }
     }
 
+    /// `HumanGround__Move_EnterBody` 0xD94A60 on every Move entry: the MoveBlend slowdown (HG+1740) and settle (HG+1744)
+    /// timers and the lean (Data+212) start from 0 (RE/24 GROUND-13).
+    fn reset_move_entry(&mut self) {
+        self.blend.slowdown = 0.0;
+        self.blend.settle = 0.0;
+        self.blend.lean = 0.0;
+    }
+
     /// `HumanGround__PlayStartMove` 0xD98990 (Idle → Move): the locomotion entered through the start transition of the
     /// profile and leading foot (0.2 s AROLLBROLL from B only), weights walk (low) / jog (high), the speed parameter
     /// set to 0.25 / 0.5 and layout 7. A left foot ahead hands over to locomotion item 1.
     pub fn play_start_move(&mut self) {
+        self.reset_move_entry();
         let foot = (self.blend.foot != 0) as usize;
         let id = START_MOVE[self.high_profile as usize][foot];
         if jump_blend::action_items(id).is_none() {
@@ -400,7 +410,9 @@ impl HumanGroundData {
                 }
             }
             TreeState::Landing if LANDINGS_TO_WAIT.contains(&ended.id) => self.enter_wait(ended, high),
-            TreeState::Landing if stick => {
+            // `Guard_LandingToMove` 0xD7F0F0 has no stick test: a completed landing always enters Move (layout 6); with
+            // the stick released the next update's Move guards hand over to Idle (RE/24 GROUND-6)
+            TreeState::Landing => {
                 self.speed_param = if !high { 0.25 } else if !self.sprint { 0.5 } else { 1.0 };
                 self.blend.speed_param = self.speed_param;
                 self.enter_move(ended, 6);
@@ -432,6 +444,7 @@ impl HumanGroundData {
                 self.speed_param = 0.5;
                 self.blend.speed_param = 0.5;
                 let (action, dest) = if footl { (RUN_STOP_EXIT[0], 1) } else { (RUN_STOP_EXIT[1], 0) };
+                self.reset_move_entry();
                 self.start_transition(action, 0, dest, 1, &[], Some((ended.id, ended.item)));
             }
             // state 24 completed (0xDA90A0)
@@ -458,7 +471,7 @@ impl HumanGroundData {
                     }
                 }
             }
-            TreeState::Pivot | TreeState::RunStop | TreeState::Landing => self.enter_wait(ended, high),
+            TreeState::Pivot | TreeState::RunStop => self.enter_wait(ended, high),
             // the other one-shots (climb / ledge / hay exits, lean exits …): the item's authored transition into the
             // locomotion with the default layout, PORT s ≥ 0.25 / 0.5 (TransitionSetupDataToMovement modes 3 / 4, the
             // exits' own setups are not traced), or into the wait
@@ -746,8 +759,10 @@ pub fn update_ground(
         let prev_high = g.high_profile;
         // IHumanGround vt12 SetHighProfile: high profile only above MaxSpeed Walk (0xEE70F9, RE/24 INPUT-10)
         g.high_profile = pad.high_profile && ab.max_speed() > 1;
-        g.sprint = pad.high_profile && pad.legs_held; // sprint = high profile + legs (RE/01 §6.2)
-        g.sub_state = if !GAME_GROUND_EXTRAS && g.sprint { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
+        // vt144 Sprint (Data+291) = MaxSpeed Sprint and Legs held (0xEE709F); MoveBlend applies it only in high profile
+        // (RE/24 GROUND-22)
+        g.sprint = ab.max_speed() == 4 && pad.legs_held;
+        g.sub_state = if !GAME_GROUND_EXTRAS && g.sprint && g.high_profile { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
 
         // turn attenuation (interpreter 0xEE65A0): beyond 45° slow down; forced to 1 in low profile. The angle is +0x1264,
         // the curved stick's (+0x1270) before the wall slide (0xEE69DA).
@@ -772,7 +787,7 @@ pub fn update_ground(
         };
 
         // speed parameter: target = base + 0.25·stick (RE/02 §1)
-        let base = if g.sprint {
+        let base = if g.sprint && g.high_profile {
             BASE_SPRINT
         } else if g.high_profile {
             BASE_HIGH_PROFILE
@@ -1690,5 +1705,33 @@ impl AnyHit for std::ops::RangeInclusive<f32> {
     fn any_hit(self, f: impl Fn(f32) -> bool) -> bool {
         let (a, b) = (*self.start(), *self.end());
         (0..=5).any(|i| f(a + (b - a) * i as f32 / 5.0))
+    }
+}
+
+#[cfg(test)]
+mod reanalysis_tests {
+    use super::*;
+
+    #[test]
+    fn a_completed_landing_enters_move_without_the_stick() {
+        // Guard_LandingToMove 0xD7F0F0 has no stick test (RE/24 GROUND-6); the landings that end in the wait keep theirs
+        let mut g = HumanGroundData { owner: TreeState::Landing, high_profile: true, ..Default::default() };
+        let mut h = 0.0;
+        g.after_oneshot(ActionBlend::new(jump_blend::LAND_FORWARD_MOVE[0], 0, &[1.0]), false, 0.0, &mut h);
+        assert!(g.speed_param >= 0.5, "entered Move at the profile's speed: {}", g.speed_param);
+        let mut g = HumanGroundData { owner: TreeState::Landing, high_profile: true, ..Default::default() };
+        g.after_oneshot(ActionBlend::new(jump_blend::LAND_FORWARD_STOP[0], 0, &[1.0]), false, 0.0, &mut h);
+        assert_eq!(g.speed_param, 0.0, "a stop landing goes to the wait");
+    }
+
+    #[test]
+    fn a_move_entry_resets_the_blend_timers_and_the_lean() {
+        // HumanGround__Move_EnterBody 0xD94A60 (RE/24 GROUND-13)
+        let mut g = HumanGroundData { high_profile: true, ..Default::default() };
+        g.blend.slowdown = 0.7;
+        g.blend.settle = 0.4;
+        g.blend.lean = 0.3;
+        g.play_start_move();
+        assert_eq!((g.blend.slowdown, g.blend.settle, g.blend.lean), (0.0, 0.0, 0.0));
     }
 }
