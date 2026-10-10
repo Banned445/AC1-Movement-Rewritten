@@ -699,6 +699,17 @@ pub fn update_ledge(
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
                     continue;
                 }
+                // TrySwitchHangType 0xDE1060 (vertical) comes right after the climb transition, before the free-hang drop
+                // and the hand step (0xDE2D77..0xDE2E12, RE/24 LEDGE-10): both hand targets are the step row point, the
+                // foot rays start there (LEDGE-9). PORT: the game decides with the step clip's end-frame moving foot (+ a
+                // ±0.15 m jitter, `QuickWallTestForStep` 0xDD1DC0); the port uses the switch's own rays.
+                if let Some(h) = rows.step {
+                    if let Some(nt) = needs_switch(d.hang_type, h.point, n, &collision) {
+                        let mv = ledge_moves::switch_move(if sign > 0.0 { 0 } else { 1 }, nt == LedgeHangType::Wall, body.feet, h.point, h.point, n, &collision);
+                        start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
+                        continue;
+                    }
+                }
                 // TryFreeHangDropToClimb 0xDDF390 (free hang, down): drop onto holds below and ahead
                 if dir == LedgeDir::Down {
                     if let Some((mv, e)) = ledge_moves::try_free_hang_drop(d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
@@ -716,16 +727,6 @@ pub fn update_ledge(
                     let along = |p: Vec3| right * (p - mid).dot(right);
                     let tl = h.point + along(d.hand_l);
                     let tr = h.point + along(d.hand_r);
-                    // the destination needs the other hang type: the switch replaces the hand step (0xDE29E0 order:
-                    // TrySwitchHangType before StartHandStep). `TrySwitchHangType` 0xDE1060 (vertical): both hand targets
-                    // are the step row point, the foot rays start there (RE/24 LEDGE-9). PORT: the game decides with the
-                    // step clip's end-frame moving foot (+ a ±0.15 m jitter, `QuickWallTestForStep` 0xDD1DC0); the port
-                    // uses the switch's own rays.
-                    if let Some(nt) = needs_switch(d.hang_type, h.point, n, &collision) {
-                        let mv = ledge_moves::switch_move(if sign > 0.0 { 0 } else { 1 }, nt == LedgeHangType::Wall, body.feet, h.point, h.point, n, &collision);
-                        start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
-                        continue;
-                    }
                     // first hand moves now, the second one next (pending vertical step)
                     let first_left = !d.alt_flag;
                     d.alt_flag = !d.alt_flag;
