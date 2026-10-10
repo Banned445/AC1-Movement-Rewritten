@@ -321,6 +321,9 @@ pub struct HumanClimbData {
     pub look: Option<u32>,
     /// +86: the running move ends standing on the ground (TryDropToLedgeBelow 0xDF1D20 → 0xDEA4D0 → 0xDE9C60).
     pub to_ground: bool,
+    /// The climb-down's landing between two edges (`sub_DECEA0` type 2, +4624 == 2): the move ends in the beam context
+    /// facing along it (`MoveEndsOnNarrow` 0xDE8280 → `SwitchToNarrow_FromClimb` 0xDF3E20; RE/24 CLIMB-4).
+    pub to_narrow: Option<Vec3>,
     /// The Ground follow-up of the running move when it is a corner move (flag 4612): `CORNER_TO_GROUND_B`.
     pub ground_follow: Option<u32>,
     /// A corner move turns the root from one heading to another over the move (StartMove 0xDFA0C0: the target
@@ -359,6 +362,7 @@ impl HumanClimbData {
     pub fn enter(&mut self, e: ClimbEntry) {
         self.grid_move = false;
         self.rebound = None;
+        self.to_narrow = None;
         if e.entry_type == ClimbEntryType::FromGround {
             self.enter_from_ground(e);
             return;
@@ -991,6 +995,51 @@ fn lean_guard(d: &HumanClimbData, sides: &[Option<(Hold, Hold)>; 2], dir: usize,
     }
 }
 
+/// `sub_DECEA0` 0xDECEA0, the climb-down's first landing search (RE/24 CLIMB-4). With f = the flat facing and S = up × f
+/// (the character's left), a plane zone at the root − 0.3 m + 0.4 m to the right (half 0.8 m along S, 0.6 m up;
+/// hypothesis: those axes) takes the report's edges running out from the wall: their flattened wall normal within 45°
+/// of S (A) or beyond 135° (B), crossing the plane through that point with normal f. A and B: type 2, the landing their
+/// midpoint, facing along the beam (toward f). One: type 1, the landing 0.3 m into its top (or the root itself when it
+/// is already 0.3 m inside), facing f. Returns (type, landing, facing).
+fn drop_landing(report: &GuidanceWorld, root: Vec3, facing: Vec3) -> Option<(u8, Vec3, Vec3)> {
+    let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
+    if f == Vec3::ZERO {
+        return None;
+    }
+    let left = Vec3::Y.cross(f).normalize_or_zero();
+    let p = root - Vec3::Y * 0.3 - left * 0.4;
+    let cos45 = std::f32::consts::FRAC_1_SQRT_2;
+    let mut best: [Option<(f32, Vec3, Vec3)>; 2] = [None, None];
+    for e in report.edges.iter().filter(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab) {
+        let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+        let class = if n.dot(left) > cos45 { 0 } else if n.dot(left) < -cos45 { 1 } else { continue };
+        let (da, db) = ((e.p0 - p).dot(f), (e.p1 - p).dot(f));
+        if da * db > 0.0 || (da - db).abs() < 1e-5 {
+            continue;
+        }
+        let q = e.p0 + (e.p1 - e.p0) * (da / (da - db));
+        let rel = q - p;
+        if rel.dot(left).abs() > 0.8 || rel.y.abs() > 0.6 {
+            continue;
+        }
+        let dist = rel.length();
+        if best[class].is_none_or(|(b, _, _)| dist < b) {
+            best[class] = Some((dist, q, n));
+        }
+    }
+    match best {
+        [Some((_, a, _)), Some((_, b, _))] => {
+            let along = (a - b).cross(Vec3::Y).normalize_or(f);
+            Some((2, (a + b) * 0.5, if along.dot(f) >= 0.0 { along } else { -along }))
+        }
+        [Some((_, q, n)), None] | [None, Some((_, q, n))] => {
+            let inside = (Vec3::new(root.x - q.x, 0.0, root.z - q.z)).dot(-n);
+            Some((1, if inside >= 0.3 { root } else { q - n * 0.3 }, f))
+        }
+        _ => None,
+    }
+}
+
 fn lean_angle(a: Vec3, b: Vec3, facing: Vec3) -> f32 {
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
     let side = right_of(f);
@@ -1269,6 +1318,20 @@ pub fn update_climb(
                     d.move_seq += 1;
                     d.settle = Some((r.ids[2], move_time(Some(r.ids[2]))));
                     continue;
+                }
+                if d.to_ground && d.to_narrow.is_some() {
+                    // +86 with +4624 == 2 → the beam (`FillNarrow_FromClimb` 0xDEEDD0: NarrowData +200 = 1, facing = the
+                    // entity's forward). PORT: the port's beam context needs a Beam edge there; otherwise Ground.
+                    let face = d.to_narrow.take().unwrap();
+                    if let Some((p0, p1, point)) = super::narrow::beam_at(body.feet, face, &guidance, &collision) {
+                        d.to_ground = false;
+                        let axis = Vec3::new(p1.x - p0.x, 0.0, p1.z - p0.z).normalize_or_zero();
+                        limbs.hands = None;
+                        limbs.feet = None;
+                        let e = super::narrow::BeamEntry { p0, p1, point, from: body.feet, toward_p1: axis.dot(face) >= 0.0, mode: super::narrow::BeamEntryMode::Reception, foot: 0, action: None, facing: face };
+                        switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(e));
+                        continue;
+                    }
                 }
                 if d.to_ground {
                     // Move state end with +86 → sub_DEA4D0 → fill sub_DE9C60: Ground with `climb_{1m,2m}_tr_h_wait_b`
@@ -1557,10 +1620,24 @@ pub fn update_climb(
                 continue;
             }
         }
-        // TryDropToLedgeBelow 0xDF1D20 (down dirs, level poses 0 / 3): ground within 1.3 m of a ray from the root + 0.5 m
-        // → `climb_{1m,2m}_tr_h_wait_hipm_footl_a` while the root moves onto it, then Ground. PORT: the first search
-        // (sub_DECEA0, a landing point ahead with a 1.7 m ray) is not decoded; only the ray under the root is used.
+        // TryDropToLedgeBelow 0xDF1D20 (down dirs, level poses 0 / 3): first the landing beside the wall (`sub_DECEA0`, a
+        // 1.7 m ray from it + 0.5 m), else ground within 1.3 m of a ray from the root + 0.5 m → `climb_{1m,2m}_tr_h_wait_
+        // hipm_footl_a` while the root moves onto it, then Ground (or the beam, type 2) (RE/24 CLIMB-4)
         if matches!(dir, 2 | 3 | 8 | 9) && matches!(d.pose, 0 | 3) {
+            if let Some((ty, landing, face)) = drop_landing(&guidance, body.feet, facing) {
+                let from = landing + Vec3::Y * 0.5;
+                let target = collision.ground_height(from, 1.7).map(|h| Vec3::new(landing.x, h, landing.z)).unwrap_or(landing);
+                let id = CLIMB_TO_GROUND[(d.pose == 3) as usize];
+                d.move_action = Some(id);
+                d.move_seq += 1;
+                d.moving = Some(RootInterp::new(body.feet, target, move_time(Some(id))));
+                d.turn = (face.dot(facing) < 0.999).then(|| (body.heading, heading_of(face)));
+                d.to_ground = true;
+                d.to_narrow = (ty == 2).then_some(face);
+                d.look = None;
+                d.last_action = "climb down to the ground";
+                continue;
+            }
             let from = body.feet + Vec3::Y * 0.5;
             if let Some(h) = collision.ground_height(from, 1.5).filter(|h| from.y - h <= 1.3) {
                 let id = CLIMB_TO_GROUND[(d.pose == 3) as usize];
@@ -1614,6 +1691,30 @@ mod tests {
 
     fn hold(pos: Vec3) -> Hold {
         Hold { pos, normal: Vec3::NEG_Z, edge: 0, centred: true, kind: 0 }
+    }
+
+    /// RE/24 CLIMB-4: `sub_DECEA0` finds a landing beside the wall from edges running out from it. Facing the wall (+Z),
+    /// the left (up × f) is +X and the zone sits 0.4 m to the right; a 0.4 m wide wall top sticking out from the wall
+    /// below-right of the root (edges along Z at x −0.2 / −0.6, normals ±X) gives a type-2 landing at their midpoint facing
+    /// along it; only its +X edge gives type 1, 0.3 m onto the top.
+    #[test]
+    fn the_climb_down_finds_a_landing_beside_the_wall() {
+        use crate::guidance::{GuidanceEdge, GuidanceSubType};
+        let root = Vec3::new(0.0, 1.0, -0.4);
+        let edge = |x: f32, n: Vec3| GuidanceEdge { p0: Vec3::new(x, 0.8, -2.0), p1: Vec3::new(x, 0.8, 0.0), n0: Vec3::Y, n1: n, subtype: GuidanceSubType::LedgeGrab };
+        let mut g = GuidanceWorld::default();
+        g.edges.push(edge(-0.2, Vec3::X));
+        g.edges.push(edge(-0.6, Vec3::NEG_X));
+        let (ty, landing, face) = drop_landing(&g, root, Vec3::Z).expect("a landing");
+        assert_eq!(ty, 2);
+        assert!((landing - Vec3::new(-0.4, 0.8, landing.z)).length() < 1e-4, "midway between the edges: {landing:?}");
+        assert!(face.dot(Vec3::Z).abs() > 0.99 && face.dot(Vec3::Z) > 0.0, "facing along the top, toward the wall: {face:?}");
+        let mut one = GuidanceWorld::default();
+        one.edges.push(edge(-0.2, Vec3::X));
+        let (ty, landing, _) = drop_landing(&one, root, Vec3::Z).expect("a landing");
+        assert_eq!(ty, 1);
+        assert!((landing.x + 0.5).abs() < 1e-4, "0.3 m onto the top: {landing:?}");
+        assert!(drop_landing(&GuidanceWorld::default(), root, Vec3::Z).is_none());
     }
 
     /// RE/24 CLIMB-3: `sub_DF47E0` refuses an up move whose hands' lean (in the facing plane) drops by more than 30°
