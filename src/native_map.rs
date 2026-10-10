@@ -233,7 +233,7 @@ pub(crate) fn filter_accepts(g: &crate::assets::world::NativeGuidance, a: Vec3, 
     let floor_wall = (a.y > cos && wall(b)) || (b.y > cos && wall(a));
     let ceiling_wall = (a.y < -cos && wall(b)) || (b.y < -cos && wall(a));
     let slab = (a.y > cos && b.y < -cos) || (b.y > cos && a.y < -cos);
-    // PORT: wall/wall dihedral uses the unsigned normal angle; native signed edge-axis test remains open.
+    // the wall/wall corner test reduces to the unsigned angle between the normals (RE/24 GUIDE-11)
     let corner = wall(a) && wall(b) && a.normalize_or_zero().dot(b.normalize_or_zero()).clamp(-1.0, 1.0).acos() > g.filter_corner_angle;
     (g.filter_flags & 1 != 0 && corner) || (g.filter_flags & 2 != 0 && floor_wall) || (g.filter_flags & 4 != 0 && ceiling_wall) || (g.filter_flags & 16 != 0 && slab)
 }
