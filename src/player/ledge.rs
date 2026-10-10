@@ -261,6 +261,20 @@ fn hand_mid(d: &HumanLedgeData) -> Vec3 {
     (d.hand_l + d.hand_r) * 0.5
 }
 
+/// `TrySwitchHangType` 0xDE1060 with a corner variant (a3 1 near / 2 far): the corner row's point (row 3) for both
+/// hands, the foot rays in the frame turned onto the corner's face; the switch clips by the move direction, the root
+/// interpolated to the new hang turning to the new face. Refused on a closing step (+133) and while a step is pending.
+fn corner_switch(d: &HumanLedgeData, rows: &ledge_moves::EdgeRows, right_dir: bool, feet: Vec3, facing: Vec3, collision: &CollisionWorld) -> Option<ledge_moves::LedgeMove> {
+    if d.alt_flag || d.pending_vstep.is_some() {
+        return None;
+    }
+    let h = rows[3]?;
+    let nt = needs_switch(d.hang_type, h.point, h.wall_normal, collision)?;
+    let mut mv = ledge_moves::switch_move(if right_dir { 3 } else { 2 }, nt == LedgeHangType::Wall, feet, h.point, h.point, h.wall_normal, collision);
+    mv.facing_from = facing;
+    Some(mv)
+}
+
 /// Both hands hold Pole edges (the swing bars; contact kinds +1792 / +1796 == 3, `SyncLimbContacts` 0xDD0390).
 pub fn hands_on_pole(d: &HumanLedgeData, n: Vec3, guidance: &GuidanceWorld) -> bool {
     [d.hand_l, d.hand_r].iter().all(|h| guidance.on_edge(*h, n, 0.15).is_some_and(|hit| guidance.edges[hit.edge].subtype == crate::guidance::GuidanceSubType::Pole))
@@ -928,6 +942,12 @@ pub fn update_ledge(
                     start_move(d, mv, "corner (inner)");
                     continue;
                 }
+                // TrySwitchHangType(dir, 1) 0xDE1060: the near corner's row point, the foot rays in the frame turned onto
+                // the corner's face (0xDE12CE), refused on a closing step (RE/24 LEDGE-10)
+                if let Some(mv) = corner_switch(d, &near, right_dir, body.feet, facing, &collision) {
+                    start_move(d, mv, if mv.end_wall { "switch to wall hang (corner)" } else { "switch to free hang (corner)" });
+                    continue;
+                }
                 // TryJumpUpOrSideJump 0xDE05E0: a ladder (0xDD55F0), then a ledge (0xDDD490)
                 if let Some((mv, e)) = ledge_moves::try_side_jump_to_ladder(right_dir, n, body.feet, d.hang_type, &report, &collision) {
                     start_move(d, mv, "side jump to ladder");
@@ -957,10 +977,41 @@ pub fn update_ledge(
                     start_move(d, mv, "corner (outer)");
                     continue;
                 }
-                // PORT: TrySwitchHangType's corner variants (0xDE1060 with 1 / 2) are not modelled
+                // TrySwitchHangType(dir, 2): the far corner's row point (0xDE1347, RE/24 LEDGE-10)
+                if let Some(mv) = corner_switch(d, &far, right_dir, body.feet, facing, &collision) {
+                    start_move(d, mv, if mv.end_wall { "switch to wall hang (corner)" } else { "switch to free hang (corner)" });
+                    continue;
+                }
                 d.blocked_right = right_dir;
                 d.last_action = if target.is_none() && rows.iter().all(|r| r.is_none()) { "shimmy blocked (obstacle / inner corner)" } else { "end of ledge" };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collision::Aabb3;
+    use crate::guidance::GuidanceHit;
+
+    /// RE/24 LEDGE-10: past a corner the turn fails when the new face needs the other hang type; `TrySwitchHangType`
+    /// with the corner variant switches onto that face instead. A wall hang (face z 0) whose corner face (x 0, normal +X)
+    /// is an overhang slab with nothing below switches to a free hang turned onto it.
+    #[test]
+    fn a_corner_onto_an_overhang_switches_a_wall_hang_to_a_free_hang() {
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(-5.0, 0.0, 0.0), max: Vec3::new(0.0, 2.6, 1.0) });
+        c.boxes.push(Aabb3 { min: Vec3::new(0.0, 2.3, 0.0), max: Vec3::new(1.0, 2.6, 1.0) });
+        let d = HumanLedgeData { hang_type: LedgeHangType::Wall, ..Default::default() };
+        let corner = GuidanceHit { point: Vec3::new(1.0, 2.6, 0.4), edge: 0, wall_normal: Vec3::X, dir: Vec3::Z };
+        let rows: ledge_moves::EdgeRows = [None, None, None, Some(corner), None];
+        let mv = corner_switch(&d, &rows, false, Vec3::new(-0.2, 1.5, -0.4), Vec3::Z, &c).expect("a switch onto the corner face");
+        assert!(mv.end_free && !mv.end_wall, "to a free hang");
+        assert!((mv.hand_l - corner.point).length() < 1e-5 && (mv.hand_r - corner.point).length() < 1e-5, "both hands on the corner point");
+        assert!(mv.facing_from.dot(Vec3::Z) > 0.99 && mv.facing_to.dot(Vec3::NEG_X) > 0.99, "turns from the old face to the corner face");
+        // refused on a closing step
+        let closing = HumanLedgeData { hang_type: LedgeHangType::Wall, alt_flag: true, ..Default::default() };
+        assert!(corner_switch(&closing, &rows, false, Vec3::ZERO, Vec3::Z, &c).is_none());
     }
 }
