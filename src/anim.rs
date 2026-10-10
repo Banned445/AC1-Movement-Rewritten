@@ -621,6 +621,12 @@ fn sim_request(p: &mut AnimPlayer, lib: &AnimLibrary, b: &crate::player::jump_bl
     Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false, blend: None })
 }
 
+/// The seam from a queued transition action's last item into the requested action's first item (`loop_from`, on the
+/// first pass only: a loop back to `loop_from` comes from the action's own last item).
+fn queued_seam(loop_from: usize, from: usize, to: usize) -> bool {
+    loop_from > 0 && from + 1 == loop_from && to == loop_from
+}
+
 /// Both items (footl, footr) of the ground locomotion action with all 17 clips loaded.
 fn ground_items(lib: &AnimLibrary) -> Option<Vec<ItemPlay>> {
     lib.action_items(ACT_GROUND_LOCOMOTION).filter(|items| items.len() == 2 && items.iter().all(|i| i.layers.len() == 17))
@@ -1231,10 +1237,15 @@ pub fn apply_clip(
             // its own blend, or the game's transition where one action ends and another begins
             let a_state = (p.items.clone(), p.item, 1.0, false);
             let cur = p.items[p.item].clone();
+            let from = p.item;
             p.item = if p.item + 1 < p.items.len() { p.item + 1 } else { p.loop_from.min(p.items.len() - 1) };
             let nxt = &p.items[p.item];
             let nxt_switch = nxt.action != cur.action && nxt.action != 0;
-            let b = if nxt_switch {
+            // the requested action queued behind a transition action enters with the transition's blend B, stored on
+            // its first item (`AnimSlot__SetAction` 0x727F70 pushes the destination with blend B, 0x7286CA; it is not
+            // looked up again; RE/24 ANIM-2)
+            let queued_seam = queued_seam(p.loop_from, from, p.item);
+            let b = if nxt_switch && !queued_seam {
                 game_transition(&lib, Some(&cur), nxt.action).map(|t| t.blend_a).unwrap_or_default()
             } else {
                 nxt.blend
@@ -1527,6 +1538,15 @@ mod tests {
         assert!(times(Some(0.167), 0.2).is_empty());
         // the loop wrapped: the tail of the cycle, then its start
         assert_eq!(times(Some(0.68), 0.05), vec![0.7, 0.0]);
+    }
+
+    #[test]
+    fn the_queued_destination_keeps_the_transitions_blend_b() {
+        // items [transition a, transition b, dest 0, dest 1], loop_from 2 (RE/24 ANIM-2)
+        assert!(queued_seam(2, 1, 2), "transition → destination: blend B");
+        assert!(!queued_seam(2, 0, 1), "inside the transition");
+        assert!(!queued_seam(2, 3, 2), "the destination looping back");
+        assert!(!queued_seam(0, 0, 1), "no queued transition");
     }
 
     #[test]
