@@ -719,9 +719,9 @@ pub fn try_climb_reach(
         let ids = CLIMB_REACH_TABLE[0][long as usize][right as usize];
         return Some(ClimbReachTarget::Climb(super::climb::ClimbReach::new(ids, holds, normals, None)));
     }
-    let r = right_of(-nn);
-    let c = hit.point + side * HAND_SPACING * 0.5;
-    let (hl, hr) = (c - r * HAND_SPACING * 0.5, c + r * HAND_SPACING * 0.5);
+    // both hand records are the hit (`ReachOtherSurfaceSide` 0xDF7FBC copies it into +3280 and +3360; RE/24 CLIMB-8); the
+    // second hand's reach (state 17) spreads them
+    let (hl, hr) = (hit.point, hit.point);
     // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
     let hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
     let to = hang_root_at(hl, hr, nn, hang, collision);

@@ -1460,18 +1460,27 @@ pub fn update_climb(
             }
         }
         // TryLedgeGrab 0xDF0980: the hold the failed move reached for becomes a hang (between the reach's two passes)
+        // Both hands go onto the one hold (LimbIK targets 0 and 1, 0xDF0EF0 / 0xDF0F32; the Ledge context spreads them
+        // later). The wall hang first (`Human__FindWallHangFeetSupports` 0xB16130, `WallHangBodyBoxFree` 0xB2DC80,
+        // `LateralPathFree` 1.8 / 1.1), else the free hang (`FreeHangBodyBoxesFree`, `LateralPathFree` 1.8 / 2.4)
+        // (0xDF0DFF) (RE/24 CLIMB-8). PORT / LIVE: climbing down at the bottom picks the row-3 hold 1.2 m up, whose wall
+        // hang's root is 0.1 m above the floor; the game's body box (root … root + 1.3 m) would not refuse it, yet the
+        // climber is seen to step off there (RE/20 item 10). The port keeps its stand-in: the hang's feet 0.3 m clear of
+        // the floor.
         if let Some((h, actions)) = ledge_grab(&grid, d.pose, dir) {
             let hn = h.normal;
             let hf = -Vec3::new(hn.x, 0.0, hn.z).normalize_or(facing);
-            let e0 = LedgeEntry::at(guidance.fit_hands(h.pos, hn), hn, body.feet, LedgeSubState::TransitionInFromClimb);
-            // the feet supports (sub_B16130)
-            let hang = if super::ledge::feet_supports((e0.hand_l + e0.hand_r) * 0.5, hn, &collision) { super::ledge::LedgeHangType::Wall } else { super::ledge::LedgeHangType::Free };
-            let wall = hang == super::ledge::LedgeHangType::Wall;
-            let root = super::ledge::hang_root_at(e0.hand_l, e0.hand_r, hn, hang, &collision);
-            // PORT: the game's test that keeps a climber near the ground from hanging is not identified; the port wants
-            // the hang's feet 0.3 m clear of the floor (LIVE: RE/18 §7.3). The lateral path tests are not modelled.
-            let off_floor = collision.floor_height_below(root + Vec3::Y * 0.05, 0.35).is_none();
-            if off_floor && hang_boxes_free(&collision, root, hf, wall) {
+            let e0 = LedgeEntry::at(h.pos, hn, body.feet, LedgeSubState::TransitionInFromClimb);
+            let e0 = LedgeEntry { hand_l: h.pos, hand_r: h.pos, ..e0 };
+            let fits = |hang: super::ledge::LedgeHangType| {
+                let root = super::ledge::hang_root(h.pos, h.pos, hn, hang);
+                let off_floor = collision.floor_height_below(root + Vec3::Y * 0.05, 0.35).is_none();
+                off_floor && hang_boxes_free(&collision, root, hf, hang == super::ledge::LedgeHangType::Wall) && lateral_path_free(&collision, body.feet, facing, root, hf)
+            };
+            let wall_ok = super::ledge::feet_supports(h.pos, hn, &collision) && fits(super::ledge::LedgeHangType::Wall);
+            let hang = if wall_ok { Some(super::ledge::LedgeHangType::Wall) } else { fits(super::ledge::LedgeHangType::Free).then_some(super::ledge::LedgeHangType::Free) };
+            if let Some(hang) = hang {
+                let wall = hang == super::ledge::LedgeHangType::Wall;
                 let action = actions[!wall as usize];
                 let mv = super::ledge_moves::climb_to_hang_move(body.feet, e0.hand_l, e0.hand_r, hn, action, hang, &collision);
                 let e = LedgeEntry { entry_move: Some(mv), ..e0 };
