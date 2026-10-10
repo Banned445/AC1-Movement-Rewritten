@@ -553,16 +553,35 @@ fn climbing_under_wall_k_bay_never_puts_the_body_inside_it() {
 }
 
 /// Climb wall M from the ground at `x` and push up (light, SHORT moves) until both feet stand on the 2.4 m band.
+/// On the climb wall (face z −10.58, normal −Z) at `x`, the feet on the band at `feet_y`, the hands 1.2 m above
+/// (pose 0). The tests start there directly: with the LONG table always first (RE/24 CLIMB-2) a climber on evenly
+/// banded walls settles level at 1.8 / 3.0 m, not 2.4 m.
+fn climb_at_feet(x: f32, feet_y: f32) -> Sim {
+    climb_at(x, feet_y, -10.58)
+}
+
+/// As `climb_at_feet` on a wall whose holds lie at `face_z` (normal −Z).
+fn climb_at(x: f32, feet_y: f32, face_z: f32) -> Sim {
+    use crate::player::climb::{ClimbEntry, ClimbEntryType};
+    use crate::player::{switch_context, TransitionSetup};
+    let from = Vec3::new(x, feet_y - 0.1, face_z - 0.42);
+    let mut s = Sim::new(from, FACE_PZ);
+    {
+        let player = s.player;
+        let w = s.app.world_mut();
+        let mut q = w.query::<(&mut Locomotion, &mut HumanDataBundle)>();
+        let (mut loco, mut data) = q.get_mut(w, player).unwrap();
+        let (hands, feet) = (Vec3::new(x, feet_y + 1.2, face_z), Vec3::new(x, feet_y, face_z));
+        let e = ClimbEntry { entry_type: ClimbEntryType::Default, hand_l: hands, hand_r: hands, foot_l: feet, foot_r: feet, normal: Vec3::NEG_Z, from_feet: from, foot_right: false, action: None };
+        switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
+    }
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Climb, "not climbing at {x}");
+    s
+}
+
 fn climb_wall_m_to_feet_at(x: f32) -> Sim {
-    let mut s = Sim::new(Vec3::new(x, 0.0, -11.4), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
-    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
-    s.pad(Vec3::Z, 0.45, true, false);
-    let level = |s: &Sim| {
-        let c = &s.data().climb;
-        c.moving.is_none() && (c.foot_l.y - 2.4).abs() < 0.01 && (c.foot_r.y - 2.4).abs() < 0.01
-    };
-    assert!(s.run_until(10.0, level), "feet never reached 2.4 m: {:?} {:?}", s.data().climb.foot_l, s.data().climb.foot_r);
+    let mut s = climb_at_feet(x, 2.4);
     s.pad(Vec3::Z, 0.0, true, false);
     s.run(0.2);
     s
@@ -3237,7 +3256,8 @@ fn a_climb_hold_that_disappears_drops_the_climber() {
     // unloaded, sub_E55A10 fails)
     let mut s = Sim::new(Vec3::new(-20.0, 0.0, 26.5), FACE_PZ);
     s.pad(Vec3::Z, 1.0, true, true);
-    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb));
+    // the wall run's probe D takes the highest band in reach (`SortCandidates`, RE/24 WALL-6), then the hang climbs on
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Climb));
     s.pad(Vec3::Z, 0.0, true, false);
     assert!(s.run_until(2.0, |s| s.data().climb.moving.is_none()));
     s.run(0.2);
@@ -3256,7 +3276,8 @@ fn climbing_up_to_a_top_edge_climbs_out_onto_the_roof() {
     // climb the tower's middle column to the top (9.6 m): TryReachLedgeAbove 0xDF1730, hangknee, then the free step
     let mut s = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
     s.pad(Vec3::Z, 1.0, true, true);
-    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb));
+    // the wall run's probe D takes the highest band in reach (`SortCandidates`, RE/24 WALL-6), then the hang climbs on
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Climb));
     s.pad(Vec3::Z, 1.0, true, false);
     let out = s.run_until(30.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::Pullup) && s.loco().current == ActorContextId::Ledge);
     assert!(out, "never climbed out: climb {:?} pose {}", s.data().climb.last_action, s.data().climb.pose);
@@ -3276,7 +3297,8 @@ fn climbing_down_to_the_bottom_steps_off_onto_the_ground() {
     // under the root and the climber stands up (climb_{1m,2m}_tr_h_wait_a, then Ground with the _b action)
     let mut s = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
     s.pad(Vec3::Z, 1.0, true, true);
-    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb));
+    // the wall run's probe D takes the highest band in reach (`SortCandidates`, RE/24 WALL-6), then the hang climbs on
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Climb));
     s.pad(Vec3::Z, 1.0, true, false);
     assert!(s.run_until(10.0, |s| s.data().climb.foot_l.y.min(s.data().climb.foot_r.y) > 2.0), "never climbed up");
     s.pad(Vec3::NEG_Z, 1.0, true, false);
@@ -3343,15 +3365,7 @@ fn a_long_reach_from_the_climb_into_a_free_hang_catches_one_handed() {
     // TryReachOtherSurface 0xDF9B30: wall P's holds end at x -56; slab Q (x -54.2..-53.0, top 3.6, nothing below) is a
     // free-hang edge at hand height past the gap. Pushing left (+X) at the end of the holds plays
     // `climb1m_tr_hangfree_left_3` (start in the climb, loop into the Ledge context), caught on one hand (SecondHandGrab)
-    let mut s = Sim::new(Vec3::new(-56.8, 0.0, -11.4), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
-    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
-    s.pad(Vec3::Z, 0.45, true, false);
-    let level = |s: &Sim| {
-        let c = &s.data().climb;
-        c.moving.is_none() && (c.foot_l.y - 2.4).abs() < 0.01 && (c.foot_r.y - 2.4).abs() < 0.01
-    };
-    assert!(s.run_until(10.0, level), "feet never reached 2.4 m: {:?} {:?}", s.data().climb.foot_l, s.data().climb.foot_r);
+    let mut s = climb_at_feet(-56.8, 2.4);
     s.pad(Vec3::X, 0.45, true, false);
     let reached = s.run_until(6.0, |s| s.loco().current == ActorContextId::Ledge);
     assert!(reached, "no reach: {} feet {:?} {:?}", s.data().climb.last_action, s.data().climb.foot_l, s.data().climb.foot_r);
@@ -3373,15 +3387,7 @@ fn a_long_reach_from_the_climb_into_a_free_hang_catches_one_handed() {
 /// Grab the wall in front (facing +Z), climb with a light push until both feet are on the 2.4 m band, then push left
 /// (+X) lightly until `done`.
 fn climb_then_left(start: Vec3, done: impl Fn(&Sim) -> bool) -> Sim {
-    let mut s = Sim::new(start, FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
-    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
-    s.pad(Vec3::Z, 0.45, true, false);
-    let level = |s: &Sim| {
-        let c = &s.data().climb;
-        c.moving.is_none() && (c.foot_l.y - 2.4).abs() < 0.01 && (c.foot_r.y - 2.4).abs() < 0.01
-    };
-    assert!(s.run_until(10.0, level), "feet never reached 2.4 m: {:?} {:?}", s.data().climb.foot_l, s.data().climb.foot_r);
+    let mut s = climb_at_feet(start.x, 2.4);
     s.pad(Vec3::X, 0.45, true, false);
     let ok = s.run_until(8.0, &done);
     assert!(ok, "never got there: {} feet {:?} {:?}", s.data().climb.last_action, s.data().climb.foot_l, s.data().climb.foot_r);
@@ -4190,15 +4196,7 @@ fn climbing_sideways_hangs_from_a_wall_top_at_the_hands() {
     use crate::player::climb::CLIMB_TO_HANG;
     // TrySideLedgeGrab 0xDF22C0 (near): block Z stands square to wall Y on the left (+X), its top edge (3.6 m, facing -X)
     // level with the hands and no holds for the feet: pushing left hangs from it (`xx_l_climb_1m_l_hangwall`)
-    let mut s = Sim::new(Vec3::new(-116.9, 0.0, -136.4), FACE_PZ);
-    s.pad(Vec3::Z, 1.0, true, true);
-    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.body().feet);
-    s.pad(Vec3::Z, 0.45, true, false);
-    let level = |s: &Sim| {
-        let c = &s.data().climb;
-        c.moving.is_none() && (c.foot_l.y - 2.4).abs() < 0.01 && (c.foot_r.y - 2.4).abs() < 0.01
-    };
-    assert!(s.run_until(10.0, level), "feet never reached 2.4 m: {:?}", s.data().climb.foot_l);
+    let mut s = climb_at(-116.9, 2.4, -135.58);
     s.pad(Vec3::X, 0.45, true, false);
     assert!(s.run_until(6.0, |s| s.loco().current == ActorContextId::Ledge), "never hung: {} {:?}", s.data().climb.last_action, s.data().climb.foot_l);
     assert_eq!(s.data().climb.last_action, "side ledge grab");
@@ -4553,3 +4551,4 @@ fn a_ladder_leaning_over_the_climber_swings_him_onto_its_top_side() {
     assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ground), "never reached the top: {:?} {:?}", s.data().ladder.phase, s.body().feet);
     assert!((s.body().feet.y - 4.5).abs() < 0.1 && s.body().feet.z < -122.6, "on the block: {:?}", s.body().feet);
 }
+

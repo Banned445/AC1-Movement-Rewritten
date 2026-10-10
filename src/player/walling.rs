@@ -14,7 +14,7 @@ use super::ledge_moves::{self, LedgeMove, MoveKind};
 use super::targets::JumpTarget;
 use super::{right_of, switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, TransitionSetup};
 use crate::collision::CollisionWorld;
-use crate::guidance::{GuidanceSubType, GuidanceWorld};
+use crate::guidance::GuidanceWorld;
 use crate::input::PadInput;
 use crate::tuning::PULLUP_IN;
 
@@ -275,30 +275,67 @@ struct LedgeCandidate {
     dist: f32,
 }
 
-/// `FindLedgeCandidates` 0xE36BD0 (reduced): LedgeGrab edges facing the character within 45°, whose closest
-/// point to the probe origin lies in the game's box: ±`width` sideways, 0..`height` above it and 0..`depth` ahead
-/// (arguments a6 / a7 / a8: the box centre is origin + a7/2·up + a8/2·forward). Nearest first. PORT: the fan of
-/// runtime edges of radius a9 (`sub_B28090` / `sub_B28260`, −75°…+135°: capsules, barrels) is not modelled.
-fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: f32, height: f32, depth: f32) -> Vec<LedgeCandidate> {
-    let r = right_of(facing);
-    let mut out: Vec<(f32, LedgeCandidate)> = Vec::new();
-    for e in &g.edges {
-        if e.subtype != GuidanceSubType::LedgeGrab || (-e.n1).dot(facing) < 45f32.to_radians().cos() {
+/// `HumanWalling__FindLedgeCandidates` 0xE36BD0 (RE/24 WALL-5 / WALL-6): the report of the game's box (±`width` sideways,
+/// 0..`height` up, 0..`depth` ahead of `origin`), type mask 0x182 (LedgeGrab, Quadruped, Kiosk), edges steeper than 40°
+/// removed (`GuidanceReport__RemoveSteepEdges`); chains (`GuidanceChain__Build`: reference −forward, walls turned within
+/// ±45°); per chain the grab point from the **root** along the flat forward (`GuidanceChain__FindGrabPoint`, hand offsets
+/// [0.5, 0.1], margin 0.3: a chain leaving less than 0.5 m on a side is dropped); a clear ray (layer 5) from the root −
+/// 0.5·forward to the grab + 0.05·n. Sorted by height (`SortCandidates` 0xE36A40): highest first, or lowest first for
+/// probe C. PORT: the fan of runtime edges (`sub_B28090` / `sub_B28260`: capsules, barrels) is not modelled.
+fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: f32, height: f32, depth: f32, highest_first: bool, collision: &CollisionWorld) -> Vec<LedgeCandidate> {
+    use crate::guidance::ChainParams;
+    let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
+    let right = f.cross(Vec3::Y);
+    let report = g.report_indexed(origin, f, Vec3::new(-width, 0.0, 0.0), Vec3::new(width, depth, height), true);
+    let keep: Vec<usize> = (0..report.world.edges.len())
+        .filter(|&i| {
+            let e = &report.world.edges[i];
+            (1u32 << e.subtype as u32) & 0x182 != 0 && (e.p1 - e.p0).normalize_or_zero().y.abs() <= 0.642_787_6
+        })
+        .collect();
+    let world = GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() };
+    let cuts: Vec<(f32, f32)> = keep.iter().map(|&i| report.cuts.get(i).copied().unwrap_or((0.0, 0.0))).collect();
+    let q = std::f32::consts::FRAC_PI_4;
+    let params = ChainParams { dir: -f, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: 1 };
+    let mut out: Vec<LedgeCandidate> = Vec::new();
+    for chain in world.chains(&params) {
+        let Some(hit) = world.grab_point_toward(&chain, root, Some(f), Some(f), &[0.5, 0.1], 0.3, &cuts) else { continue };
+        let n = Vec3::new(hit.wall_normal.x, 0.0, hit.wall_normal.z).normalize_or_zero();
+        if n == Vec3::ZERO {
             continue;
         }
-        let q = e.closest_point(origin);
-        let d = q - origin;
-        let up = d.y;
-        let ahead = d.dot(facing);
-        let lat = d.dot(r);
-        if up < 0.0 || up > height || lat.abs() > width || !(0.0..=depth).contains(&ahead) {
+        let (from, to) = (root - f * 0.5, hit.point + n * 0.05);
+        let v = to - from;
+        let len = v.length();
+        if len > 1e-4 && collision.ray_distance(from, v / len, len, crate::layers::CHARACTER) < len - 1e-4 {
             continue;
         }
-        let dist = Vec2::new(d.x, d.z).length();
-        out.push((ahead.abs() + up * 0.01, LedgeCandidate { point: q, normal: e.n1, edge_dir: (e.p1 - e.p0).normalize_or_zero(), height: q.y - root.y, dist }));
+        let d = hit.point - origin;
+        out.push(LedgeCandidate { point: hit.point, normal: n, edge_dir: hit.dir, height: hit.point.y - root.y, dist: Vec2::new(d.x, d.z).length() });
     }
-    out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    out.into_iter().map(|x| x.1).collect()
+    if highest_first {
+        out.sort_by(|a, b| b.point.y.total_cmp(&a.point.y));
+    } else {
+        out.sort_by(|a, b| a.point.y.total_cmp(&b.point.y));
+    }
+    out
+}
+
+/// Probe D's second blend axis (WALL-8): the wall-hang foot support under the hands (the `sub_B16130` box 1.0 m below,
+/// 0.125 m into the wall) carried onto the hands' level; its flat offset d from the hands' midpoint gives o = min(d, 0.75)
+/// / 0.75 when d ≈ 0 or it points back toward the character, else 0.
+fn foot_offset(mid: Vec3, n: Vec3, f: Vec3, collision: &CollisionWorld) -> f32 {
+    let c = mid - Vec3::Y + f * 0.125;
+    let from = c - f * 0.625;
+    let d = collision.sphere_free_distance(from, f, 0.01, 1.25);
+    if d >= 1.25 - 1e-3 {
+        return 0.0;
+    }
+    let foot = from + f * d;
+    let off = Vec3::new(foot.x - mid.x, 0.0, foot.z - mid.z);
+    let dist = off.length();
+    let _ = n;
+    if dist < 1e-4 || off.dot(f) < 0.0 { dist.min(0.75) / 0.75 } else { 0.0 }
 }
 
 /// `HumanWalling__ClassifyLedgeCandidate` 0xE341D0: the room behind the edge. A cast (`sub_E1C820`, 2 m, layer 5)
@@ -382,7 +419,7 @@ fn pullup_exit(id: u32, b: f32, root: Vec3, c: &LedgeCandidate) -> LedgeEntry {
 /// Probes after EntryB (UpdateWallingSubState 0xE37590, command 0): A = pull-up, B = free hang.
 fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &CollisionWorld) -> Option<LedgeEntry> {
     // A: FindLedge(pos, 0.3h, 1.05h+0.05, h, 0.8): 0.25h ≤ height ≤ h, room on top
-    for c in find_ledge(g, root, root, facing, 0.3 * H, 1.05 * H + 0.05, H) {
+    for c in find_ledge(g, root, root, facing, 0.3 * H, 1.05 * H + 0.05, H, true, collision) {
         if (0.25 * H..=H).contains(&c.height) && classify(&c, collision) == 1 {
             let b = ((c.height.max(0.3) - 0.3 * H) / (0.7 * H)).clamp(0.0, 1.0);
             return Some(pullup_exit(ENTRY_TO_KNEE, b, root, &c));
@@ -392,7 +429,7 @@ fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Collisio
     // behind the root (the box reaches 0.35 m forward from 0.6 m behind), not the wall's own top. Free hang, 4-way
     // blend (0xE37A07 … 0xE37F06).
     let o = root + Vec3::Y * 1.5 - facing * 0.6;
-    if let Some(c) = find_ledge(g, o, root, facing, 0.3 * H, H + 0.05, 0.25 * H + 0.1).into_iter().find(|c| classify(c, collision) != 0) {
+    if let Some(c) = find_ledge(g, o, root, facing, 0.3 * H, H + 0.05, 0.25 * H + 0.1, true, collision).into_iter().find(|c| classify(c, collision) != 0) {
         let hb = (c.height - 1.5).clamp(0.0, 1.0);
         // the "max" weight: 1 − (flat distance from the probe origin − 0.1) / 0.7
         let near = (1.0 - (c.dist - 0.1) / 0.7).clamp(0.0, 1.0);
@@ -412,7 +449,7 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
     // C: FindLedge(pos − 0.6·fwd + up, 0.3h, 1.7h+0.1, 0.8h, 1.2), within 0.25h+0.1 flat of the probe origin
     // (0xE38586): again an overhanging edge, not the wall's top.
     let oc = root - facing * 0.6 + Vec3::Y;
-    for c in find_ledge(g, oc, root, facing, 0.3 * H, 1.7 * H + 0.1, 0.8 * H) {
+    for c in find_ledge(g, oc, root, facing, 0.3 * H, 1.7 * H + 0.1, 0.8 * H, false, collision) {
         if c.dist < 0.25 * H + 0.1 && (2.0 * H..2.7 * H + 0.1).contains(&c.height) && classify(&c, collision) != 0 {
             // weights (0xE3870C … 0xE38855): height past 2 m × nearness ((0.7 − dist) / 0.7)
             let hb = (c.height - 2.0).clamp(0.0, 1.0);
@@ -425,7 +462,7 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
     }
     // D: FindLedge(pos − 0.6·fwd, 0.8h, 2.7h+0.1, 1.5h, 1.2) (0xE3863F)
     let od = root - facing * 0.6;
-    for c in find_ledge(g, od, root, facing, 0.8 * H, 2.7 * H + 0.1, 1.5 * H) {
+    for c in find_ledge(g, od, root, facing, 0.8 * H, 2.7 * H + 0.1, 1.5 * H, true, collision) {
         let class = classify(&c, collision);
         if class == 0 {
             continue;
@@ -434,11 +471,28 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
             return Some(pullup_exit(STEP1_TO_KNEE, (c.height - 0.5 * H) / (0.5 * H), root, &c));
         }
         if (H..2.7 * H + 0.1).contains(&c.height) {
-            // clips 251 / 430 cm (above the ground at the step's start, root + 1.0 … + 2.8) × 0 / 50 cm
-            let hb = ((c.height - H) / (1.8 * H)).clamp(0.0, 1.0);
-            let w = [1.0 - hb, hb, 0.0, 0.0];
-            let (hl, hr) = hands(&c);
-            let to = hang_root(hl, hr, c.normal, LedgeHangType::Wall);
+            // the wall hang (0xE38C4A, RE/24 WALL-9): a hand pair around the candidate (`Guidance__ProbeBoxHandPair`: box at
+            // the candidate, axes flat forward / up, half 1.0 / 0.3 / 0.3, refs (∓0.3, −0.15, 0) local, 70°, step 0.4,
+            // mask 306) and feet supports at the hands' midpoint (`Human__FindWallHangFeetSupports` 0xB16130); either
+            // fails → the next candidate
+            let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
+            let r = f.cross(Vec3::Y);
+            let local = |x: f32| c.point + r * x - f * 0.15;
+            let Some([a, b]) = g.probe_facing_pair(c.point, f, Vec3::new(1.0, 0.3, 0.3), [local(-0.3), local(0.3)], 1.221_730_4, 0.4, crate::guidance::MASK_CATCH) else { continue };
+            let (hl, hr) = (a.point, b.point);
+            let mid = (hl + hr) * 0.5;
+            let n = Vec3::new(a.wall_normal.x, 0.0, a.wall_normal.z).normalize_or(c.normal);
+            if !super::ledge::feet_supports(mid, n, collision) {
+                continue;
+            }
+            // clips 251 / 430 cm × 000 / 050 cm: v = min((height − h) / 1.5h, 1) (0xE39069, WALL-7); o = the foot support's
+            // offset from the hands on the hands' level, min(d, 0.75) / 0.75 when it points back toward the character, else
+            // 0 (0xE38F9D…0xE3903B, WALL-8). PORT: LedgeData+112 = o is not carried into the hang.
+            let v = ((c.height - H) / (1.5 * H)).clamp(0.0, 1.0);
+            let o = foot_offset(mid, n, f, collision);
+            let w = [(1.0 - v) * (1.0 - o), v * (1.0 - o), (1.0 - v) * o, v * o];
+            let to = hang_root(hl, hr, n, LedgeHangType::Wall);
+            let c = LedgeCandidate { normal: n, ..c };
             return Some(exit([blended(STEP1_TO_HANGWALL, 0, &w), blended(STEP1_TO_HANGWALL, 1, &w), None, None], root, to, &c, (false, true, false)));
         }
     }
@@ -626,6 +680,24 @@ mod wall_entry_tests {
         let feet = out * 0.8;
         let (_, n) = wall_ahead(feet, -out, &c).expect("an oblique wall");
         assert!(n.dot(out) > 0.999, "not snapped to an axis: {n:?}");
+    }
+
+    /// RE/24 WALL-6 / WALL-9: probe D tries the highest candidate first; a slab jutting out over open space (its edge at
+    /// 3.4 m, 0.6 m out from the wall: beyond probe C's 0.35 m, whose free hang would take it) has no feet supports under
+    /// it, so the next one down, the wall's own top at 2.0 m, is hung from instead.
+    #[test]
+    fn probe_d_skips_a_lip_without_feet_for_the_next_band_down() {
+        use crate::guidance::{GuidanceEdge, GuidanceSubType};
+        let edge = |y: f32, z: f32| GuidanceEdge { p0: Vec3::new(-3.0, y, z), p1: Vec3::new(3.0, y, z), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab };
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(-3.0, 0.0, 0.0), max: Vec3::new(3.0, 2.0, 1.0) });
+        c.boxes.push(Aabb3 { min: Vec3::new(-3.0, 3.2, -0.6), max: Vec3::new(3.0, 3.4, 0.0) });
+        let mut g = GuidanceWorld::default();
+        g.edges.push(edge(2.0, 0.0));
+        g.edges.push(edge(3.4, -0.6));
+        let root = Vec3::new(0.0, 1.0, -0.5);
+        let e = probe_vertical(&g, root, Vec3::Z, &c).expect("a wall hang");
+        assert!((e.hand_l.y - 2.0).abs() < 0.05 && (e.hand_r.y - 2.0).abs() < 0.05, "the wall top, not the lip: {:?} {:?}", e.hand_l, e.hand_r);
     }
 
     /// RE/24 WALL-3: a wall leaning back 15° moves the contact along its tilted normal; one leaning 50° is refused.
