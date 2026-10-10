@@ -574,7 +574,10 @@ pub fn update_ledge(
                 d.force_free = false;
                 d.mv = None;
                 d.sub_state = LedgeSubState::Movement;
-                if !matches!(mv.kind, ledge_moves::MoveKind::SwitchHang { .. }) {
+                if let ledge_moves::MoveKind::SideJump { .. } = mv.kind {
+                    // the table jump into a hang: +133 = the hand targets 0.3 m or more apart (`sub_DCBCD0`, RE/24 LEDGE-14)
+                    d.alt_flag = (mv.hand_l - mv.hand_r).length() >= 0.3;
+                } else if !matches!(mv.kind, ledge_moves::MoveKind::SwitchHang { .. }) {
                     d.alt_flag = false;
                 }
             } else {

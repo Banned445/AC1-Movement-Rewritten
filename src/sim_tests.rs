@@ -2952,15 +2952,17 @@ fn a_wall_hang_jumps_up_to_climb_holds_above() {
     s.pad(Vec3::Z, 1.0, false, false); // up
     let jumped = s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::JumpUpToClimb));
     assert!(jumped, "no jump up to climb: {}", s.data().ledge.last_action);
-    let [start, lp, end] = LEDGE_JUMP_TABLE[0][0].1;
+    let [start, lp, _end] = LEDGE_JUMP_TABLE[0][0].1;
     let mv = s.data().ledge.mv.unwrap();
+    // the start plays in the Ledge context on its own displacement, the loop in the Climb context with the linear
+    // interpolation to the climb pose (0xDDCE40 / 0xDD8290, RE/24 LEDGE-14)
     assert_eq!(mv.seq[0].map(|a| a.id), Some(start));
-    assert_eq!(mv.seq[1].map(|a| a.id), Some(lp));
+    assert!(mv.seq[1].is_none() && mv.table == Some((1, 0)));
     s.pad(Vec3::Z, 0.0, false, false);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Climb), "never reached the climb: {}", s.data().ledge.last_action);
     let c = &s.data().climb;
     assert_eq!(c.entry_type, ClimbEntryType::FromLedgeParallelJump);
-    assert_eq!(c.move_action, Some(end), "the end item plays in the climb");
+    assert_eq!(c.move_action, Some(lp), "the loop plays in the climb");
     assert!((c.hand_l.y - 4.1).abs() < 0.05 && (c.foot_l.y - 2.9).abs() < 0.05, "hands {:?} feet {:?}", c.hand_l, c.foot_l);
     let want = crate::player::climb::climb_root(c.foot_l, c.foot_r, c.normal);
     // the root reaches the climb pose
@@ -4028,7 +4030,7 @@ fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
     use crate::player::ledge_moves::LEDGE_JUMP_TABLE;
     // the 2.6 m wall x -140..-137 (face z -135.3) and the climb wall x -135.4..-131.4 beside it: shimmying left (+X, facing +Z)
     // to the edge's end, the side jump (0xDDD490) finds the 2.4 m band with the 1.2 m band below it for the feet →
-    // type 0: the start and loop in the Ledge context, the end item in the Climb context (RE/18 §7.2)
+    // type 0: the start in the Ledge context, the loop in the Climb context (RE/24 LEDGE-14)
     let mut s = hang_at(Vec3::new(-137.8, 2.6, -135.3), Vec3::NEG_Z);
     s.pad(Vec3::X, 1.0, false, false);
     // the jump plays its own start and loop clips (bug-1791664645: they were not in the clip table, so the root slid
@@ -4036,7 +4038,8 @@ fn a_hang_at_the_end_of_a_ledge_jumps_sideways_onto_climb_holds() {
     assert!(s.run_until(6.0, |s| s.data().ledge.last_action == "side jump to climb"), "no side jump: {}", s.data().ledge.last_action);
     let mv = s.data().ledge.mv.expect("the side jump");
     let starts: Vec<u32> = (0..2).flat_map(|f| [2, 3, 6, 7].map(|k| LEDGE_JUMP_TABLE[f][k].1[0])).collect();
-    assert!(mv.seq[0].is_some_and(|a| starts.contains(&a.id)) && mv.seq[1].is_some() && mv.follow_disp, "the jump's clips: {:?}", mv.seq);
+    // the start on its own displacement here, the loop in the Climb context (RE/24 LEDGE-14)
+    assert!(mv.seq[0].is_some_and(|a| starts.contains(&a.id)) && mv.table == Some((1, 0)), "the jump's clips: {:?}", mv.seq);
     assert!(s.run_until(6.0, |s| s.loco().current == ActorContextId::Climb), "never reached the climb: {:?} ledge {}", s.loco().current, s.data().ledge.last_action);
     assert_eq!(s.data().ledge.last_action, "side jump to climb");
     s.pad(Vec3::X, 0.0, false, false);

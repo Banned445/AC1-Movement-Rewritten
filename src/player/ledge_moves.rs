@@ -76,6 +76,7 @@ pub fn rebound_move(from: Vec3, n: Vec3, jd: Vec3, hand_l: Vec3, hand_r: Vec3) -
         facing_to: facing,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: true,
         end_stand: false,
@@ -212,6 +213,11 @@ pub struct LedgeMove {
     pub follow_disp: bool,
     /// Interpolator only: the root holds still for this long first (the hop's `_a` item).
     pub lead: f32,
+    /// A table ledge jump's root path (RE/24 LEDGE-14): (start items, linear items). The start items' own displacement
+    /// moves the root (no interpolator, `StartLedgeJump` 0xDDCE40); the next items interpolate it linearly to `to`
+    /// (`sub_DD8550` → `sub_711130` in spline mode over the loop's blended duration); any later item holds it there
+    /// (the end action is the hang idle's entry, `sub_DCF280`). None: `follow_disp` / the interpolator as usual.
+    pub table: Option<(usize, usize)>,
     /// The move ends in a free hang whatever the wall below (the hop, 0xDDAB00 sets LedgeHangType 1).
     pub end_free: bool,
     /// The move ends in a wall hang (free → wall switch, wall receptions).
@@ -265,7 +271,17 @@ impl LedgeMove {
         let total = self.duration();
         self.t = (self.t + dt).min(total);
         let s = self.t / total;
-        let p = if self.follow_disp {
+        let p = if let Some((k, m)) = self.table {
+            let to_world = |d: [f32; 3]| right_of(self.facing_from) * d[0] + self.facing_from * d[1] + Vec3::Y * d[2];
+            let t_start: f32 = self.durations.iter().take(k).sum();
+            let t_loop: f32 = self.durations.iter().skip(k).take(m).sum();
+            if self.t < t_start {
+                self.from + to_world(self.disp(self.t))
+            } else {
+                let start_end = self.from + to_world(self.disp(t_start));
+                start_end.lerp(self.to, ((self.t - t_start) / t_loop.max(1e-4)).clamp(0.0, 1.0))
+            }
+        } else if self.follow_disp {
             let to_world = |d: [f32; 3]| right_of(self.facing_from) * d[0] + self.facing_from * d[1] + Vec3::Y * d[2];
             let end = self.from + to_world(self.disp(total));
             self.from + to_world(self.disp(self.t)) + (self.to - end) * s
@@ -506,6 +522,7 @@ pub fn try_corner(
         facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: hang == LedgeHangType::Free,
         end_wall: hang == LedgeHangType::Wall,
         end_stand: false,
@@ -562,26 +579,25 @@ pub fn try_side_jump(
                 continue;
             }
             let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][long as usize * 4 + 2 + right as usize];
-            let [st, lp, end] = entry.1;
-            let seq = [single(st, 0), single(lp, 0), None, None];
+            let [st, lp, _end] = entry.1;
+            // category 0 (RE/24 LEDGE-14): the start in the Ledge context on its own displacement, the loop in the Climb
+            // context with the linear interpolation to the climb pose (0xDD8290, as `try_jump_up_to_climb`)
+            let seq = [single(st, 0), None, None, None];
             let durations = seq_durations(&seq);
             let found = durations.iter().sum::<f32>() > 0.0;
-            // the end item plays in the climb (as `try_jump_up_to_climb`, 0xDD8CF0): the jump part ends where the end
-            // item's own displacement starts
-            let end_disp = single(end, 0).map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
             let fto = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
-            let to = target - (right_of(fto) * end_disp[0] + fto * end_disp[1] + Vec3::Y * end_disp[2]);
-            let mv = LedgeMove {
+            let mut mv = LedgeMove {
                 kind: MoveKind::SideJump { long },
                 seq,
-                durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
+                durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME * 0.5, 0.0, 0.0, 0.0] },
                 t: 0.0,
                 from: root,
-                to,
+                to: root,
                 facing_from: facing,
                 facing_to: fto,
-                follow_disp: found,
+                follow_disp: false,
                 lead: 0.0,
+                table: Some((1, 0)),
                 end_free: false,
                 end_wall: false,
                 end_stand: false,
@@ -589,6 +605,8 @@ pub fn try_side_jump(
                 hand_r: hr,
                 normal: nn,
             };
+            mv.to = mv.natural_end();
+            let _ = target;
             let climb = super::climb::ClimbEntry {
                 entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
                 hand_l: hl,
@@ -596,9 +614,9 @@ pub fn try_side_jump(
                 foot_l: fl,
                 foot_r: fr,
                 normal: nn,
-                from_feet: to,
+                from_feet: mv.to,
                 foot_right: false,
-                action: Some(end),
+                action: single(lp, 0).map(|_| lp),
             };
             return Some((mv, Some(climb)));
         }
@@ -610,6 +628,9 @@ pub fn try_side_jump(
         }
         let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };
         let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][(ty * 2 + long as usize) * 4 + 2 + right as usize];
+        // categories 1 / 2 (RE/24 LEDGE-14): the start on its own displacement, the loop interpolating the root linearly to
+        // the wall / free pose and setting +104 by it (`sub_DD8550` 0xDD8550), the end the hang idle's entry
+        // (`sub_DCF280`, the root held)
         let seq = [single(entry.1[0], 0), single(entry.1[1], 0), single(entry.1[2], 0), None];
         let durations = seq_durations(&seq);
         let found = durations.iter().sum::<f32>() > 0.0;
@@ -622,10 +643,11 @@ pub fn try_side_jump(
             to,
             facing_from: facing,
             facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
-            follow_disp: found,
+            follow_disp: false,
             lead: 0.0,
-            end_free: false,
-            end_wall: false,
+            table: found.then_some((1, 1)),
+            end_free: new_hang == LedgeHangType::Free,
+            end_wall: new_hang == LedgeHangType::Wall,
             end_stand: false,
             hand_l: hl,
             hand_r: hr,
@@ -726,6 +748,7 @@ pub fn try_climb_reach(
         facing_to: fc,
         follow_disp: found,
         lead: 0.0,
+        table: None,
         end_free: ty == 2,
         end_wall: ty == 1,
         end_stand: false,
@@ -781,6 +804,7 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
         facing_from: mv.facing_to,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: true,
         hand_l: hl,
         hand_r: hr,
@@ -840,6 +864,7 @@ pub fn try_hop_up(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHa
             // `_a` plays in place, `_b` moves the root with the interpolator (0xDDAB00 → sub_711130)
             follow_disp: false,
             lead: da,
+            table: None,
             end_free: true,
             end_wall: false,
             end_stand: false,
@@ -893,25 +918,27 @@ pub fn try_jump_up_to_climb(
         return None;
     }
     let entry = LEDGE_JUMP_TABLE[0][0];
-    let [start, lp, end] = entry.1;
-    let seq = [single(start, 0), single(lp, 0), None, None];
+    let [start, lp, _end] = entry.1;
+    // category 0 (RE/24 LEDGE-14): the start plays in the Ledge context, its own displacement moving the root
+    // (`StartLedgeJump` 0xDDCE40 sets no interpolator); `FillClimb_AfterLedgeJump` 0xDD8290 then plays the loop in the
+    // Climb context, interpolating the root linearly to the climb pose (the climb entry's action). PORT: the end action
+    // (the climb wait's entry, ClimbData+96) is not played.
+    let seq = [single(start, 0), None, None, None];
     let durations = seq_durations(&seq);
     let found = durations.iter().sum::<f32>() > 0.0;
-    // the end item plays in the climb (sub_DD8290): the jump part ends where the end item's own displacement
-    // starts
-    let end_disp = single(end, 0).map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
-    let to = target - (right_of(facing) * end_disp[0] + facing * end_disp[1] + Vec3::Y * end_disp[2]);
-    let mv = LedgeMove {
+    let _ = target;
+    let mut mv = LedgeMove {
         kind: MoveKind::JumpUpToClimb,
         seq,
-        durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
+        durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME * 0.5, 0.0, 0.0, 0.0] },
         t: 0.0,
         from: root,
-        to,
+        to: root,
         facing_from: facing,
         facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
-        follow_disp: found,
+        follow_disp: false,
         lead: 0.0,
+        table: Some((1, 0)),
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -919,6 +946,7 @@ pub fn try_jump_up_to_climb(
         hand_r: upper.point,
         normal: nn,
     };
+    mv.to = mv.natural_end();
     let climb = super::climb::ClimbEntry {
         entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
         hand_l: upper.point,
@@ -926,9 +954,9 @@ pub fn try_jump_up_to_climb(
         foot_l: lower.point,
         foot_r: lower.point,
         normal: nn,
-        from_feet: to,
+        from_feet: mv.to,
         foot_right: false,
-        action: Some(end),
+        action: single(lp, 0).map(|_| lp),
     };
     Some((mv, climb))
 }
@@ -1020,6 +1048,7 @@ pub fn try_free_hang_drop(
         facing_to: new_facing,
         follow_disp: false,
         lead: da,
+        table: None,
         end_free: false,
         end_wall: true,
         end_stand: false,
@@ -1084,6 +1113,7 @@ pub fn try_side_jump_to_ladder(
         facing_to: -ln,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1148,6 +1178,7 @@ pub fn try_side_to_ladder(
             facing_to: -ln,
             follow_disp: false,
             lead: 0.0,
+            table: None,
             end_free: false,
             end_wall: false,
             end_stand: false,
@@ -1189,6 +1220,7 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
         facing_to: facing,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1231,6 +1263,7 @@ pub fn knee_catch_moves(action: u32, from: Vec3, edge: Vec3, n: Vec3) -> (LedgeM
         facing_to: facing,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1423,6 +1456,7 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
         facing_to: facing,
         follow_disp: found,
         lead: 0.0,
+        table: None,
         end_free,
         end_wall: false,
         end_stand,
@@ -1459,6 +1493,7 @@ pub fn climb_jump_move(from: Vec3, cur_hands: Vec3, hand_l: Vec3, hand_r: Vec3, 
         facing_to: facing,
         follow_disp: found,
         lead: 0.0,
+        table: None,
         end_free: true,
         end_wall: false,
         end_stand: false,
@@ -1494,6 +1529,7 @@ pub fn climb_to_hang_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, actio
         facing_to: facing,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: hang != LedgeHangType::Wall,
         end_wall: hang == LedgeHangType::Wall,
         end_stand: false,
@@ -1548,6 +1584,7 @@ pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3
             facing_to: facing,
             follow_disp: found,
             lead: 0.0,
+            table: None,
             end_free: false,
             end_wall: false,
             end_stand,
@@ -1605,6 +1642,7 @@ pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec
         // the root interpolator over the action (0xDE1060 → sub_711130)
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: !to_wall,
         end_wall: to_wall,
         end_stand: false,
@@ -1638,6 +1676,7 @@ pub fn wallfree_to_wall_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) ->
         facing_to: facing,
         follow_disp: d > 0.0,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: true,
         end_stand: false,
@@ -1738,6 +1777,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
             facing_to: facing_in,
             follow_disp: false,
             lead: 0.0,
+            table: None,
             end_free: false,
             end_wall: false,
             end_stand: false,
@@ -1761,6 +1801,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
             facing_to: ft,
             follow_disp: false,
             lead: 0.0,
+            table: None,
             end_free,
             end_wall,
             end_stand: false,
