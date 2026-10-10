@@ -189,7 +189,10 @@ impl NativePlacement {
     pub fn world_edges(&self) -> Vec<(bool, GuidanceEdge)> {
         let convert = |p: Vec3| Vec3::new(p.x, p.z, -p.y);
         self.guidance.edges.iter().map(|e| {
-            (self.guidance.active && e.enabled, GuidanceEdge {
+            // a disabled edge is skipped only when the component's validity flag (+0x30, the last stream byte) is set:
+            // `GuidanceSystem__QueryBox` 0x66A4E0 runs `IsObjectValid` 0x5452F0 (the enabled bit and EdgeFilter) only
+            // then (RE/24 GUIDE-10; the Masyaf village sample has no disabled edges, 2026-10-10)
+            (self.guidance.active && (e.enabled || !self.guidance.check_world_orientation), GuidanceEdge {
                 p0: convert(self.transform.transform_point3(self.guidance.vertices[e.vertices[0]])),
                 p1: convert(self.transform.transform_point3(self.guidance.vertices[e.vertices[1]])),
                 n0: convert(self.transform.transform_vector3(e.normals[0])),
@@ -240,6 +243,11 @@ mod tests {
         let mut guidance = parse_guidance(&fixture()).unwrap();
         assert_eq!(guidance.edges[0].subtype, GuidanceSubType::Ladder);
         guidance.edges[0].enabled = false;
+        // a disabled edge is dropped only when the validity flag (+0x30) is set (0x66A4E0, RE/24 GUIDE-10)
+        guidance.check_world_orientation = false;
+        let kept = NativePlacement { id: 1, name: "synthetic".into(), transform: Mat4::IDENTITY, guidance: guidance.clone() };
+        assert!(kept.world_edges()[0].0, "the flag clear keeps a disabled edge");
+        guidance.check_world_orientation = true;
         let placement = NativePlacement { id: 1, name: "synthetic".into(), transform: Mat4::from_translation(Vec3::new(10.0, 20.0, 30.0)), guidance };
         let edges = placement.world_edges();
         assert_eq!(edges.len(), 1);
