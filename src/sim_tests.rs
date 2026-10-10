@@ -1738,19 +1738,39 @@ fn send_obstacle_collision(s: &mut Sim) -> bool {
     true
 }
 
+/// The lean (ObstacleCollision) starts in high profile with the stick pushed into a wall at least 0.7 m high (owner's
+/// live check 2026-10-10, bug-1791665811; PORT sender); low profile and a 0.6 m box only block the run.
 #[test]
-fn running_into_walls_does_not_lean() {
-    // event 42 is unreachable from player input (RE/02 §4.5): the 1.1 m wall, the 0.6 m box and the 2.4 m wall at
-    // 30 deg only block the run
-    for (from, dir) in [(Vec3::new(30.0, 0.0, -1.0), Vec3::NEG_Z), (Vec3::new(9.0, 0.0, 3.0), Vec3::NEG_Z), (Vec3::new(-3.0, 0.0, -4.0), Vec3::new(0.5, 0.0, -0.866))] {
+fn pushing_into_a_wall_in_high_profile_puts_the_hands_on_it() {
+    use crate::player::collide::CollideKind;
+    let leans = |from: Vec3, dir: Vec3, high: bool| {
         let mut s = Sim::new(from, 0.0);
-        s.pad(dir, 1.0, true, false);
-        for _ in 0..180 {
-            s.run(1.0 / 60.0 + 1e-4);
-            assert!(s.ground().collide.is_none(), "leaned at {:?}", s.body().feet);
-        }
+        s.pad(dir, 1.0, high, false);
+        let leaned = s.run_until(3.0, |s| s.ground().collide.is_some());
         assert_eq!(s.loco().current, ActorContextId::Ground);
-    }
+        leaned.then(|| s.ground().collide.unwrap().kind)
+    };
+    // the 2.4 m wall (face z -7.7), straight on and at 30 deg: the hands (the 1.1 m wall is a free-run hop-up target
+    // in high profile, 0xEE7F7A, so it is climbed, not leaned on)
+    assert_eq!(leans(Vec3::new(-3.0, 0.0, -4.0), Vec3::NEG_Z, true), Some(CollideKind::Hand));
+    assert_eq!(leans(Vec3::new(-3.0, 0.0, -4.0), Vec3::new(0.5, 0.0, -0.866), true), Some(CollideKind::Hand));
+    // the 0.6 m box: no lean (the foot type is not observed); low profile: no lean
+    assert_eq!(leans(Vec3::new(9.0, 0.0, 3.0), Vec3::NEG_Z, true), None);
+    assert_eq!(leans(Vec3::new(-3.0, 0.0, -4.0), Vec3::NEG_Z, false), None);
+}
+
+/// bug-1791665811: snug against the 3.2 m block (back face z 26.5), high profile with the stick into it, Legs starts
+/// the wall run: the game's input test reads the stick, not the wanted speed the wall slide zeroed (0xEE7E73).
+#[test]
+fn snug_against_a_wall_legs_starts_the_wall_climb() {
+    let mut s = Sim::new(Vec3::new(7.46, 0.0, 26.9), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(1.0);
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    // the hands are on the wall (the lean), and the wall run starts from it (event 49 in the lean, RE/24 WALL-19)
+    assert!(s.ground().collide.is_some_and(|c| c.phase == crate::player::collide::CollidePhase::Wait), "not leaning: {:?}", s.ground().collide.map(|c| c.phase));
+    s.press_legs();
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Walling), "no wall climb: {:?} collide {:?}", s.loco().current, s.ground().collide.map(|c| c.phase));
 }
 
 #[test]

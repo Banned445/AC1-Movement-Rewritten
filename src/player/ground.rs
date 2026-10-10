@@ -728,6 +728,13 @@ pub fn update_ground(
         // so Idle can pivot round to face it (RE/24 GROUND-10, bug-1791664621). PORT: the stick inside the dead zone
         // (DestSpeedRatio 0 without a wall) does not steer yet; that half of GROUND-10 waits for its live check.
         let wall_stopped = GAME_GROUND_TREE && pad.speed01 > 0.0 && mv_speed <= 0.0;
+        // The wall run's input (0xEE65A0): Legs pressed with the stick within 45° of the facing, or (free running,
+        // 0xEE7E50) Legs held with the stick past the dead zone and within 60° (`flt_1694AC8`).
+        let wall_run_input = {
+            let pressed = pad.jump_buffered() && pad.speed01 > 0.0 && pad.dir.dot(body.forward()) >= 45f32.to_radians().cos();
+            let held = pad.legs_held && pad.magnitude > crate::tuning::STICK_DEADZONE && pad.dir.dot(body.forward()) >= 60f32.to_radians().cos();
+            pressed || held
+        };
         // HG+1532: the signed angle from the current heading to the wanted one (Movement_PreUpdate 0xD97E30, no speed test).
         let stick_turn = if mv_speed > 0.0 || wall_stopped { angle_diff(heading_of(mv_dir), body.heading) } else { 0.0 };
         // A transition into the locomotion (the Move state's transition path) keeps steering and the other requests
@@ -978,6 +985,19 @@ pub fn update_ground(
         // ---------------------------------------------------------------- obstacle collision / lean (sub-state 5)
         if let Some(mut c) = g.collide {
             g.sub_state = HumanGroundSubState::ObstacleCollision;
+            // event 49 in the lean (`ObstacleCollision` handler 0xDA6FF0: HG+1492 clear → FindWallingWall → 0xDA5680,
+            // RE/24 WALL-19): the wall run starts from the lean with the same input as from Movement
+            if g.high_profile && wall_run_input && ab.allows(Ability::Walling) && c.phase == super::collide::CollidePhase::Wait {
+                if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
+                    if pad.jump_buffered() {
+                        pad.consume_jump();
+                    }
+                    g.collide = None;
+                    let from = body.feet;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
+                    continue;
+                }
+            }
             let stick = (pad.speed01 > 0.0).then_some(pad.dir);
             let (mut feet, mut heading) = (body.feet, body.heading);
             let out = super::collide::update(&mut c, dt, stick, pad.high_profile, &mut feet, &mut heading);
@@ -1031,11 +1051,11 @@ pub fn update_ground(
         // (0xDA54F0: the playing item allows a mode exit, then the wall test 0xE18390).
         // Free running starts it without a press too (0xEE7E50, verified live): Legs held, the stick past the dead zone
         // and within 60 degrees of the facing (`flt_1694AC8`), then the same guard (RE/02 4.7).
-        let pressed = pad.jump_buffered() && pad.dir.dot(body.forward()) >= 45f32.to_radians().cos();
-        let held = pad.legs_held && pad.magnitude > crate::tuning::STICK_DEADZONE && pad.dir.dot(body.forward()) >= 60f32.to_radians().cos();
-        if g.high_profile && moving && (pressed || held) && ab.allows(Ability::Walling) {
+        // Both read the stick itself (+0x1240 > 0.35, its angle +0x1244), not the wanted speed: snug against the wall
+        // the wall slide zeroes the speed (0xEDD7C0 result 2) but the wall run still starts (bug-1791665811).
+        if g.high_profile && wall_run_input && !busy && ab.allows(Ability::Walling) {
             if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
-                if pressed {
+                if pad.jump_buffered() {
                     pad.consume_jump();
                 }
                 let from = body.feet;
@@ -1348,9 +1368,26 @@ pub fn update_ground(
         if stopping && collision.ground_support(r.position).is_none() {
             r.position = before;
         }
-        // Running into a wall does not lean: ObstacleCollision (event 42) is only sent from the interpreter's jump
-        // branch behind a flag the jump-target scorer never sets, so the player cannot reach it in v1.02 (RE/02 §4.5).
-        // The state itself (`collide`) is kept as decoded; nothing in the port enters it.
+        // ObstacleCollision (sub-state 5, the two-hand lean). LIVE (owner, 2026-10-10): in high profile the game puts
+        // the hands on a wall the character is pushed into, and left / right pushes away from it. PORT: the sender is
+        // not traced: the interpreter's event-42 path is dead (0xE96BF0 only writes 0 to its flag, 0xE97581; RE/02
+        // §4.5), so another poster (e.g. `HumanGround__PostEventTop` 0xDB5030) must send it. The stand-in: high profile,
+        // the stick pushing into a wall at least 0.7 m high (the hand type; the foot type is not observed) within 45°
+        // of the facing, on snapped ground (event 42's guard 0xB25230). The wall run and the jumps above go first.
+        if g.high_profile && pad.speed01 > 0.0 && (r.hit_wall || wall_stopped) && !busy && g.oneshot.is_none() && g.ledge_stop.is_none() && body.stick_residual.abs() <= 0.2 {
+            if let Some((contact, n, height)) = super::collide::obstacle_ahead(r.position, forward, &collision).filter(|&(_, n, h)| h >= 0.7 && pad.dir.dot(-n) > std::f32::consts::FRAC_1_SQRT_2) {
+                if let Some(c) = super::collide::enter(r.position, body.heading, contact, n, height, g.pose_seq) {
+                    g.pose_seq = c.seq;
+                    g.collide = Some(c);
+                    g.tr = None;
+                    g.speed_param = 0.0;
+                    g.blend.speed_param = 0.0;
+                    body.feet = r.position;
+                    body.velocity = Vec3::ZERO;
+                    continue;
+                }
+            }
+        }
         if let Some(ls) = g.ledge_stop {
             // PORT: the stop clip's root motion may not carry the feet past the edge (the game places the edge
             // report so the clip ends on it; its sender is not traced)

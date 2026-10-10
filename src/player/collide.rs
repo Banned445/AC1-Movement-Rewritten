@@ -92,9 +92,9 @@ fn blend(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
 
 /// Event 42's contact (0xB25230) for the port's capsule: the obstacle face just ahead, ≥ 0.5 m above the feet and
 /// within 45° of the facing. Returns (contact on the face at the feet height, outward normal, obstacle height).
-/// The event is unreachable from player input in v1.02 (RE/02 §4.5), so only the tests use this. PORT: how the sender
-/// measures the height is not traced; this takes the top of the box it touches.
-#[allow(dead_code)]
+/// The port's stand-in sender uses it (high profile, the stick into a wall; ground.rs, owner's live check 2026-10-10;
+/// the interpreter's own event-42 path is dead, RE/02 §4.5). PORT: how the sender measures the height is not traced;
+/// this takes the top of the box it touches.
 pub fn obstacle_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> Option<(Vec3, Vec3, f32)> {
     let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let probe = feet + f * (crate::tuning::CAPSULE_RADIUS + 0.08) + Vec3::Y * 0.55;
@@ -112,7 +112,6 @@ pub fn obstacle_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> 
 /// `HumanGround__ObstacleCollision_Enter` 0xD9CB90. The game also turns the step offset off
 /// (`CharacterController__SetStepOffsetEnabled(0)`, RE/24 GUIDE-20); the port's state moves the root by its warp and never
 /// runs the capsule, so there is nothing to switch.
-#[allow(dead_code)]
 pub fn enter(feet: Vec3, heading: f32, contact: Vec3, n: Vec3, height: f32, seq: u32) -> Option<Collide> {
     let (kind, lo, hi, id) = if height >= 0.7 * H { (CollideKind::Hand, 0.7 * H, 1.5 * H, COLLIDE_HAND) } else { (CollideKind::Foot, 0.5 * H, 0.7 * H, COLLIDE_FOOT) };
     let h = ((height - lo) / (hi - lo)).clamp(0.0, 1.0);
