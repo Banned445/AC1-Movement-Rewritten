@@ -3466,18 +3466,33 @@ fn a_landing_hands_over_through_its_authored_transition() {
 
 #[test]
 fn a_pivot_hands_over_through_the_turn_start() {
+    // `HumanGround__PlayTurnStartMove` 0xD99710 decides by the profile the pivot started in (HG+1500, RE/24 GROUND-12)
+    // a pivot started in high profile → layout 2, s 0.5
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.run(0.2);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.ground().owner, crate::player::ground::TreeState::Pivot);
+    assert!(s.run_until(1.0, |s| s.ground().tr.is_some()), "no turn start");
+    let t = s.ground().tr.unwrap();
+    assert_eq!(t.layout, 2);
+    assert!(!t.fast_start);
+    assert!((s.ground().speed_param - 0.5).abs() < 0.02, "{}", s.ground().speed_param);
+    // a 180 deg turn weights the 180 clip pair
+    assert!(t.action.weights()[3] > 0.9, "{:?}", t.action.weights());
+    // started low with the high profile pressed with the stick: layout 3 at s 0.5 (slots 4 / 5), the fast start
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
     s.run(0.2);
     s.pad(Vec3::Z, 1.0, true, false);
     s.run(1.0 / 60.0 + 1e-4);
     assert_eq!(s.ground().owner, crate::player::ground::TreeState::Pivot);
-    // `HumanGround__PlayTurnStartMove` 0xD99710: high profile → layout 2, s 0.5
     assert!(s.run_until(1.0, |s| s.ground().tr.is_some()), "no turn start");
     let t = s.ground().tr.unwrap();
-    assert_eq!(t.layout, 2);
+    assert_eq!(t.layout, 3);
+    assert!(t.fast_start);
     assert!((s.ground().speed_param - 0.5).abs() < 0.02, "{}", s.ground().speed_param);
-    // a 180 deg turn weights the 180 clip pair
-    assert!(t.action.weights()[3] > 0.9, "{:?}", t.action.weights());
+    assert!(t.action.weights()[5] > 0.9, "{:?}", t.action.weights());
 }
 
 #[test]

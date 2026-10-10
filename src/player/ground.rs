@@ -118,6 +118,8 @@ pub struct HumanGroundData {
     pub owner: TreeState,
     /// HG+688 (0x2B0): the pivot's turn angle, read by the turn start's layouts 2 / 3.
     pub pivot_turn: f32,
+    /// HG+1500 when the pivot started: the turn start's layout follows it (`HumanGround__PlayTurnStartMove` 0xD99710).
+    pub pivot_high: bool,
     /// HG+1780: the interpreter's quick-reversal flag (vt976, `player::interpreter`); the run stop turns into the skid
     /// turn on it, the skid turn is not left for Move while it is set, and the crouch walk pivots on it (RE/24 INPUT-7).
     pub quick_turn: bool,
@@ -424,14 +426,21 @@ impl HumanGroundData {
                 self.enter_wait(ended, high);
             }
             // state 25 (0xDA9120) → `HumanGround__PlayTurnStartMove` 0xD99710: the locomotion through the pivot's
-            // authored transition; high profile: layout 2, s 0.5; low: layout 3, s 0.25 (0.5 with the high profile
-            // wanted, at the faster rate). The pivot's root yaw has already turned the body (the exe catches CurHeading
-            // up by HG+688 here).
+            // authored transition, by the profile the pivot started in (HG+1500): high: layout 2, s 0.5; low: layout 3,
+            // s 0.25 (slots 2 / 3), or with the high profile now wanted (HG+1504) s 0.5 (slots 4 / 5) at the faster rate
+            // 2 − t (HG+1832 bit 0, 0xD99904; RE/24 GROUND-12). The pivot's root yaw has already turned the body (the
+            // exe catches CurHeading up by HG+688 here).
             TreeState::Pivot if stick => {
-                let layout = if high { 2 } else { 3 };
-                self.speed_param = if high { 0.5 } else { 0.25 };
+                let start_high = self.pivot_high;
+                let layout = if start_high { 2 } else { 3 };
+                self.speed_param = if start_high || high { 0.5 } else { 0.25 };
                 self.blend.speed_param = self.speed_param;
                 self.enter_move(ended, layout);
+                if !start_high && high {
+                    if let Some(t) = self.tr.as_mut() {
+                        t.fast_start = true;
+                    }
+                }
             }
             TreeState::Pivot | TreeState::RunStop | TreeState::Landing => self.enter_wait(ended, high),
             // the other one-shots (climb / ledge / hay exits, lean exits …): the item's authored transition into the
@@ -813,6 +822,7 @@ pub fn update_ground(
                 g.play_oneshot(ActionBlend::new(id, 0, &[1.0 - w, w]));
                 g.tr = None;
                 g.owner = TreeState::Pivot;
+                g.pivot_high = prev_high;
                 // HG+688 := HG+1532 (`HumanGround__Pivot_Enter` 0xDA6150), read by the turn start's layouts
                 g.pivot_turn = stick_turn;
                 g.speed_param = 0.0;
