@@ -227,6 +227,28 @@ fn contact_state(c: &AnimClip, t: f32) -> ContactState {
     s
 }
 
+/// The next contact of a released limb is searched through the rest of the playing action, each later item in its
+/// dominant clip (`LimbIK__GetNextContactTime` 0xE56220 → `sub_5085C0` 0x50864E–0x50872D, forward to the action's last
+/// item, no wrap), not only in the current clip (RE/24 ANIM-7). `later`: the dominant clips of the action's following
+/// items, in order. Times stay in the current clip's seconds: the rest of this item, then each later clip's length.
+fn extend_next_on<'a>(s: &mut ContactState, cur: &AnimClip, later: impl Iterator<Item = &'a AnimClip>) {
+    if !s.tagged {
+        return;
+    }
+    let mut offset = cur.duration;
+    for c in later {
+        for b in 0..8 {
+            if s.bits >> b & 1 != 0 || s.next_on[b].is_some() {
+                continue;
+            }
+            if let Some(kt) = c.contacts.iter().find(|(_, v)| v >> b & 1 != 0).map(|k| k.0) {
+                s.next_on[b] = Some(offset + kt);
+            }
+        }
+        offset += c.duration;
+    }
+}
+
 /// Playback state on the player.
 #[derive(Component, Default)]
 pub struct AnimPlayer {
@@ -1279,7 +1301,15 @@ pub fn apply_clip(
         let item = p.items[p.item].clone();
 
         // contact tags of the dominant clip (for the limb IK); ACTBlendAcuatorMode FROMA keeps A's while blending
-        p.contacts = lib.dominant(&item).map(|c| contact_state(c, p.phase * c.duration)).unwrap_or_default();
+        p.contacts = lib
+            .dominant(&item)
+            .map(|c| {
+                let mut s = contact_state(c, p.phase * c.duration);
+                let later = p.items.iter().skip(p.item + 1).take_while(|it| item.action != 0 && it.action == item.action).filter_map(|it| lib.dominant(it));
+                extend_next_on(&mut s, c, later);
+                s
+            })
+            .unwrap_or_default();
 
         // event keys the dominant clip passed since the last frame
         p.events.clear();
@@ -1547,6 +1577,19 @@ mod tests {
         assert!(!queued_seam(2, 0, 1), "inside the transition");
         assert!(!queued_seam(2, 3, 2), "the destination looping back");
         assert!(!queued_seam(0, 0, 1), "no queued transition");
+    }
+
+    #[test]
+    fn the_next_contact_is_found_in_the_actions_later_items() {
+        // a hand lets go in item a and grabs again 0.1 s into item b: the limb travels instead of releasing
+        let a = AnimClip { duration: 0.5, contacts: vec![(0.0, 0b110000), (0.3, 0b100000)], ..default() };
+        let b = AnimClip { duration: 0.6, contacts: vec![(0.0, 0b100000), (0.1, 0b110000)], ..default() };
+        let mut s = contact_state(&a, 0.4);
+        assert_eq!(s.next_on[4], None);
+        extend_next_on(&mut s, &a, [&b].into_iter());
+        assert!((s.next_on[4].unwrap() - 0.6).abs() < 1e-5, "{:?}", s.next_on[4]);
+        // a bit that comes back in the current clip keeps that time
+        assert_eq!(s.next_on[5], None, "bit 5 is on");
     }
 
     #[test]
