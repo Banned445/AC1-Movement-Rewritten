@@ -1062,11 +1062,20 @@ fn follow(
     st.written = Some((rig.yaw, rig.pitch, rig.distance));
 }
 
-/// PORT: stand-in for the shake FX until its node graph is decoded (RE/21 §3); a decaying shake scaled by the intensity.
-#[derive(Default, Clone, Copy, Debug)]
+/// The landing shake `FX_Camera_Shake_Assassins_Fall` (HumanFXPack_AlTair +88, FX 0x17C9A6D2; RE/21 §3), started by
+/// a > 3 m landing with its parameter 0xBE93B29C = min((drop − 3)/7, 1) (0xE05940). Its FXCameraOperator drives the
+/// six CameraFXInterface channels; five have zero amplitude and
+/// ShakePitch = k · env(t) · 30 · fbm(t, 20·(200 + 200·t)) over t ∈ [0, 1] s (tracks in 1/120 s, 0x597D20), with
+/// env = 1.5 → 0.1 at 0.4 s → 0 at 1 s and a one-octave fBm (H 0.1, lacunarity 0.1) of Noise__Perlin2D.
+/// LIVE: nothing in the exe reads CameraFXInterface (its global 0x1A283E0 is only written) and the channel's unit is
+/// unknown, so the port computes the shake but does not apply it until the running game shows whether it is visible.
+pub const APPLY_FALL_SHAKE: bool = false;
+
+#[derive(Default)]
 pub struct ShakeState {
     intensity: f32,
     t: f32,
+    noise: Option<crate::wind::Noise2Tables>,
 }
 
 impl ShakeState {
@@ -1075,13 +1084,21 @@ impl ShakeState {
         self.t = 0.0;
     }
 
+    /// The shake's pitch at FX time `t` (the channel's unit, (hypothesis) degrees).
+    pub fn pitch(&mut self, t: f32) -> f32 {
+        if !(0.0..=1.0).contains(&t) { return 0.0; }
+        let env = if t < 0.4 { 1.5 + (0.1 - 1.5) * t / 0.4 } else { 0.1 * (1.0 - (t - 0.4) / 0.6) };
+        let noise = self.noise.get_or_insert_with(crate::wind::Noise2Tables::new);
+        self.intensity * env * 30.0 * noise.noise(t, 20.0 * (200.0 + 200.0 * t))
+    }
+
     pub fn step(&mut self, dt: f32) -> (Vec3, Quat) {
         if self.intensity <= 0.0 { return (Vec3::ZERO, Quat::IDENTITY); }
         self.t += dt;
-        let k = (1.0 - self.t * 2.0).max(0.0) * self.intensity;
-        if k <= 0.0 { self.intensity = 0.0; return (Vec3::ZERO, Quat::IDENTITY); }
-        let t = self.t;
-        (Vec3::new((t * 53.0).sin(), (t * 71.0).sin(), 0.0) * k * 0.08, Quat::IDENTITY)
+        if self.t > 1.0 { self.intensity = 0.0; return (Vec3::ZERO, Quat::IDENTITY); }
+        let pitch = self.pitch(self.t);
+        if !APPLY_FALL_SHAKE { return (Vec3::ZERO, Quat::IDENTITY); }
+        (Vec3::ZERO, Quat::from_rotation_x(pitch.to_radians()))
     }
 }
 
@@ -1242,6 +1259,21 @@ mod tests {
         inp.fall_drop = None;
         for _ in 0..240 { cam.update(&inp, &Open); }
         assert!(cam.offset.length() < 0.01);
+    }
+
+    #[test]
+    fn camera_fall_shake_follows_the_fx_envelope() {
+        let mut s = ShakeState::default();
+        s.start(1.0);
+        // bounded by k · env · 30 · |noise| and gone after one second
+        for i in 0..=100 {
+            let t = i as f32 / 100.0;
+            let env = if t < 0.4 { 1.5 - 1.4 * t / 0.4 } else { 0.1 * (1.0 - (t - 0.4) / 0.6) };
+            assert!(s.pitch(t).abs() <= env * 30.0 + 1e-3);
+        }
+        assert_eq!(s.pitch(1.5), 0.0);
+        s.start(0.0);
+        assert_eq!(s.step(0.016), (Vec3::ZERO, Quat::IDENTITY));
     }
 
     #[test]
