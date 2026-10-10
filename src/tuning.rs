@@ -245,7 +245,8 @@ pub const IK_RETARGET_DIST: f32 = 0.02;
 /// Wrist relative to the edge point it grips. Game data: the wall hang root is 1.1 m below / 0.5 m out
 /// from the hands (0xDD6730) while xx_h_hangwall_wait puts the wrists 1.0 m above / 0.45 m in front of
 /// its root (→ wrist ~0.1 m below / 0.05 m out), and every hang/climb clip curls the middle finger 0.07 m
-/// forward / 0.12 m up from the wrist. PORT: 0.08 / 0.04 so the curled fingers end over the lip.
+/// forward / 0.12 m up from the wrist. PORT fallback only (a rig without the knuckle / toe bones): the game puts the
+/// middle-finger knuckle and the toe joint on the hold (`ik::LIMB_EFFECTORS`, RE/24 ANIM-8).
 pub const IK_HAND_DROP: f32 = -0.08;
 pub const IK_HAND_OUT: f32 = 0.04;
 /// Ankle relative to the foot hold: level with it, 0.17 m out (xx_climb_wait_*: ankles 0.32 m in front
