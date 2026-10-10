@@ -1577,18 +1577,24 @@ pub fn update_climb(
         // 2.25 m, 0.8 m out from the wall → the impulse (StartRelease 0xDE96A0) and the jump up into a free hang
         // (0xDF9650). The search (sub_1171050, mask 50, 45°): a box at that centre, half extents 0.375 / 0.5 / 0.75,
         // whose edges face the way the wall does (an overhang's front), and the nearest edge to each hand reference
-        // (∓0.2, −0.5, −0.75) in the box frame; both hands must find one. PORT: the body clearance test (sub_B2DD50)
-        // is not run; the hang is entered at the hands' midpoint.
+        // (∓0.2, −0.5, −0.75) in the box frame; both hands must find one, each keeping its own hit (+3280 / +3360), and the
+        // free-hang pose of the two (`sub_B15AD0`) must pass `Human__FreeHangBodyBoxesFree` 0xB2DD50 (0xDF3209, RE/24
+        // CLIMB-9).
         if matches!(dir, 0 | 1 | 6 | 7) {
             let hands = (d.hand_l + d.hand_r) * 0.5;
             let at = Vec3::new(hands.x, body.feet.y + CLIMB_JUMP_UP, hands.z) - facing * CLIMB_JUMP_OUT;
             let right = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero().cross(Vec3::Y);
             let local = |x: f32| at + right * x - facing * 0.5 - Vec3::Y * 0.75;
             let hit = guidance.probe_facing_pair(at, facing, CLIMB_JUMP_HALF, [local(-0.2), local(0.2)], 0.785_398_2, crate::guidance::PROBE_STEP, crate::guidance::MASK_CLIMB_HOLDS);
+            let hit = hit.filter(|[a, b]| {
+                let n = a.wall_normal;
+                let hf = -Vec3::new(n.x, 0.0, n.z).normalize_or(facing);
+                hang_boxes_free(&collision, super::ledge::hang_root(a.point, b.point, n, super::ledge::LedgeHangType::Free), hf, false)
+            });
             if let Some([a, b]) = hit {
                 let n = a.wall_normal;
-                let point = (a.point + b.point) * 0.5;
-                let mut e = LedgeEntry::at(point, n, body.feet, LedgeSubState::HangWallReception);
+                let mut e = LedgeEntry::at((a.point + b.point) * 0.5, n, body.feet, LedgeSubState::HangWallReception);
+                (e.hand_l, e.hand_r) = (a.point, b.point);
                 e.entry_move = Some(super::ledge_moves::climb_jump_move(body.feet, hands, e.hand_l, e.hand_r, n, &collision));
                 d.look = None;
                 d.last_action = "jump up";

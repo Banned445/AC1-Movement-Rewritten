@@ -477,6 +477,8 @@ fn climb_jumps_up_to_an_overhang_when_the_holds_run_out() {
     assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ledge), "never jumped: {:?} {:?}", s.data().climb.last_action, s.body().feet);
     assert_eq!(s.data().climb.last_action, "jump up");
     let mv = s.data().ledge.mv.expect("the jump");
+    // each hand keeps its own hit, ∓0.2 m in the search frame (+3280 / +3360, RE/24 CLIMB-9)
+    assert!((mv.hand_l - mv.hand_r).length() > 0.3, "the two hits, not one point: {:?} {:?}", mv.hand_l, mv.hand_r);
     assert_eq!(mv.kind, MoveKind::Arrival);
     assert_eq!(mv.seq.map(|a| a.map(|a| a.id)), [Some(climb::CLIMB_IMPULSE), Some(climb::CLIMB_JUMP_SWINGBACK), None, None]);
     s.pad(Vec3::Z, 0.0, false, false);
