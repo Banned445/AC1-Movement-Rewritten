@@ -830,3 +830,118 @@ fn probe_dump_modifier_records() {
         println!("{name}@{at}: {}", hex.join(""));
     }
 }
+
+/// Does any game-fix clip animate the head skeleton's own bones (face, eyelids, jaw)?
+/// `cargo test probe_head_bone_tracks -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn probe_head_bone_tracks() {
+    use super::ac_formats::parse_skeleton;
+    use super::forge::crc32;
+    let names: HashMap<u32, String> = HashMap::new();
+    let mut forge = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let entry = forge.find("Rank 9").cloned().unwrap();
+    let res = forge.resources(&entry).unwrap();
+    let skel = |n: &str| res.iter().find(|r| r.name == n && r.class_hash == crc32("Skeleton")).map(|r| parse_skeleton(&r.payload)).unwrap();
+    let main: std::collections::HashSet<u32> = skel("UCMA_Altair").iter().map(|b| b.bone_id).collect();
+    let head: Vec<u32> = skel("UCMA_Altair_Head").iter().map(|b| b.bone_id).filter(|id| !main.contains(id)).collect();
+    println!("head-only bones: {}", head.iter().map(|id| names.get(id).cloned().unwrap_or(format!("{id:08x}"))).collect::<Vec<_>>().join(" "));
+    let mut hits: HashMap<u32, usize> = HashMap::new();
+    let mut clips = 0;
+    for r in game_fix() {
+        let Ok(a) = decode(&r.payload) else { continue };
+        clips += 1;
+        let (rot, pos) = bone_tracks(&a);
+        for id in &head {
+            if rot.contains_key(id) || pos.contains_key(id) { *hits.entry(*id).or_default() += 1; }
+        }
+    }
+    println!("{clips} clips; head-only bones with tracks: {hits:?}");
+    let hs = skel("UCMA_Altair_Head");
+    let ms = skel("UCMA_Altair");
+    for id in hits.keys() {
+        if let Some(b) = hs.iter().find(|b| b.bone_id == *id) {
+            let parent = b.parent.map(|p| hs[p].bone_id);
+            println!("bone {id:08x}: parent {:08x?} (in main: {}), global pos {:?}", parent, parent.is_some_and(|p| ms.iter().any(|m| m.bone_id == p)), b.global_pos);
+        }
+    }
+    for &name in super::altair::PARTS.iter().chain(super::altair::EXTRA_PARTS) {
+        let Some(r) = res.iter().find(|r| r.name == name && r.class_hash == crc32("Mesh")) else { continue };
+        let Some(m) = super::ac_formats::parse_mesh(&r.payload) else { continue };
+        let mut w: HashMap<u32, f32> = HashMap::new();
+        for sm in &m.submeshes {
+            for v in sm.vstart as usize..(sm.vstart + sm.vcount) as usize {
+                for k in 0..4 {
+                    if let Some(b) = sm.palette.get(m.bone_idx[v][k] as usize).and_then(|&mb| m.bones.get(mb as usize)) {
+                        if hits.contains_key(&b.bone_id) { *w.entry(b.bone_id).or_default() += m.bone_w[v][k] as f32 / 255.0; }
+                    }
+                }
+            }
+        }
+        if !w.is_empty() { println!("{name}: {w:?}"); }
+    }
+}
+
+/// How far the clips turn the eye bones from their rest rotation (degrees).
+/// `cargo test probe_eye_track_range -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn probe_eye_track_range() {
+    use super::ac_formats::parse_skeleton;
+    use super::forge::crc32;
+    let mut forge = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    let entry = forge.find("Rank 9").cloned().unwrap();
+    let res = forge.resources(&entry).unwrap();
+    let mut head = res.iter().find(|r| r.name == "UCMA_Altair_Head" && r.class_hash == crc32("Skeleton")).map(|r| parse_skeleton(&r.payload)).unwrap();
+    head.extend(res.iter().find(|r| r.name == "UCMA_Altair" && r.class_hash == crc32("Skeleton")).map(|r| parse_skeleton(&r.payload)).unwrap());
+    for id in [0x1810_0292u32, 0x1CE9_2143, 0x07C1_59A2] {
+        let rest = head.iter().find(|b| b.bone_id == id).map(|b| Quat::from_array(b.local_rot).normalize()).unwrap();
+        println!("rest {id:08x}: {rest:?}");
+        let (mut worst, mut n, mut sum) = (0.0f32, 0, 0.0f32);
+        for r in game_fix() {
+            let Ok(a) = decode(&r.payload) else { continue };
+            let (rot, _) = bone_tracks(&a);
+            if let Some(k) = rot.get(&id) {
+                for (_, q) in k.iter() {
+                    let q = Quat::from_array(*q).normalize();
+                    let d = q.angle_between(rest).to_degrees();
+                    worst = worst.max(d);
+                    sum += d;
+                    n += 1;
+                }
+            }
+        }
+        println!("eye {id:08x}: max {worst:.1} deg, mean {:.1} deg over {n} samples", sum / n.max(1) as f32);
+        let mut shown = 0;
+        for r in game_fix() {
+            if shown >= 3 { break; }
+            let Ok(a) = decode(&r.payload) else { continue };
+            if let Some(k) = bone_tracks(&a).0.get(&id) {
+                println!("  {}: {} keys, first {:?}, last {:?}", r.name, k.len(), k.first(), k.last());
+                shown += 1;
+            }
+        }
+    }
+}
+
+/// Which clips key the eye bones (by name prefix), and do any movement-graph clips?
+#[test]
+#[ignore]
+fn probe_eye_track_clips() {
+    let (_, graph, _) = super::anims::load_locomotion(&game_dir()).unwrap();
+    let used: std::collections::HashSet<u32> = graph.actions.values().flat_map(|a| a.items.iter().flat_map(|i| i.animations.iter().copied())).collect();
+    let mut prefixes: HashMap<String, usize> = HashMap::new();
+    let mut in_graph = Vec::new();
+    for r in game_fix() {
+        let Ok(a) = decode(&r.payload) else { continue };
+        let (rot, _) = bone_tracks(&a);
+        if !rot.contains_key(&0x1810_0292) { continue; }
+        let p: String = r.name.split('_').take(2).collect::<Vec<_>>().join("_");
+        *prefixes.entry(p).or_default() += 1;
+        if used.contains(&r.id) { in_graph.push(r.name.clone()); }
+    }
+    let mut v: Vec<_> = prefixes.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("prefixes: {:?}", &v[..v.len().min(25)]);
+    println!("movement-graph clips keying the eyes: {} {:?}", in_graph.len(), &in_graph[..in_graph.len().min(20)]);
+}
