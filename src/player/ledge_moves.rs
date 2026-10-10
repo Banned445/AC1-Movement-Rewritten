@@ -298,22 +298,34 @@ pub const ROW_OFFSETS: [f32; 5] = [-1.8, -1.2, -0.6, 0.0, 0.6];
 
 /// `HumanLedge__FindCornerEdges` 0xDD0600: the five rows of the corner's other face. The box (0x1170A70 on the ledge
 /// report: half extents 0.25 / 0.4 / 0.3, 50°, the reference 0.2 m back, mask 50) faces that face: `inner` (near) =
-/// hands mid (lower hand) + 0.6·move − 0.6·facing, facing along the move; outer (far) = hands mid + 0.3·move +
-/// 0.3·facing, facing back against the move.
+/// hands mid (lower hand) + 0.6·move − 0.6·facing, facing along the move; outer (far) = hands mid + 0.2·move +
+/// 0.3·facing, facing back against the move (base − move − 1.8 z, then + 0.3·forward + 1.2·move, 0xDD0797; RE/24
+/// LEDGE-12).
 pub fn corner_rows(inner: bool, right: bool, hand_l: Vec3, hand_r: Vec3, n: Vec3, guidance: &GuidanceWorld) -> EdgeRows {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let side = if right { right_of(facing) } else { -right_of(facing) };
     let mut base = (hand_l + hand_r) * 0.5;
     base.y = hand_l.y.min(hand_r.y);
-    let (p, zone_forward) = if inner { (base + side * 0.6 - facing * 0.6, side) } else { (base + facing * 0.3 + side * 0.3, -side) };
+    let (p, zone_forward) = if inner { (base + side * 0.6 - facing * 0.6, side) } else { (base + facing * 0.3 + side * 0.2, -side) };
     ROW_OFFSETS.map(|dy| guidance.probe_facing(p + Vec3::Y * dy, zone_forward, Vec3::new(0.25, 0.4, 0.3), 0.2, 0.872_664_6, MASK_CLIMB_HOLDS))
+}
+
+/// A capsule swept along `dir`: the nearest free distance of spheres (radius `r`) spaced at most 0.1 m along the segment
+/// `a`–`b` shortened by `r` at both ends (`sub_B18C30` 0xB18C30). PORT: sampled spheres stand in for the capsule cast.
+fn capsule_free_distance(a: Vec3, b: Vec3, dir: Vec3, r: f32, max: f32, collision: &CollisionWorld) -> f32 {
+    let axis = b - a;
+    let len = axis.length();
+    let (a, b) = if len > 2.0 * r { (a + axis / len * r, b - axis / len * r) } else { ((a + b) * 0.5, (a + b) * 0.5) };
+    let n = (((b - a).length() / 0.1).ceil() as usize).max(1);
+    (0..=n).map(|k| collision.sphere_free_distance(a.lerp(b, k as f32 / n as f32), dir, r, max)).fold(max, f32::min)
 }
 
 /// `HumanLedge__ProbeLateral` 0xDD9640 for a shimmy step (`closing` = the alternation flag +133: the trailing hand
 /// closes). The moving hand `mover`, the other one `other`, `dv` the move direction:
-/// - the reach (not closing): a sphere (r 0.15) swept 1.55 m along the move from the moving hand pulled 0.15 m back,
-///   0.75 m out from the wall and 0.2 m up gives d = free distance − 0.15; d < 0.7 is blocked (no rows); the width
-///   w = min(d − 0.4, 1 − |handL − handR|);
+/// - the reach (not closing): a capsule (r 0.15, `sub_B18C30` 0xB18C30) from the moving hand pulled 0.15 m back,
+///   0.75 m out from the wall and 0.2 m up, down to 1.1 m (wall hang) / 2.4 m (free hang) below the hand
+///   (0xDD996B..0xDD99F1), swept 1.55 m along the move, gives d = free distance − 0.15; d < 0.7 is blocked (no rows);
+///   the width w = min(d − 0.4, 1 − |handL − handR|) (RE/24 LEDGE-8: the body, not only the hands, must have room);
 /// - the closing step: w = |handL − handR| − 0.15.
 ///
 /// Five rows (moving hand −1.8 … +0.6 m): a box from 0.1 m beyond the moving hand to w + 0.1 m (half extents w/2 /
@@ -323,14 +335,15 @@ pub fn corner_rows(inner: bool, right: bool, hand_l: Vec3, hand_r: Vec3, n: Vec3
 /// The shimmy target (row 3, the moving hand's height): reaching, the hit at least 0.15 m beyond moving hand + 0.1·move;
 /// closing, the hit unless it lies more than 0.3 m from the other hand, or none: then the other hand's own point (the
 /// hands come together).
-pub fn probe_lateral(mover: Vec3, other: Vec3, n: Vec3, dv: Vec3, closing: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> (EdgeRows, Option<Vec3>) {
+pub fn probe_lateral(mover: Vec3, other: Vec3, n: Vec3, dv: Vec3, closing: bool, hang: LedgeHangType, guidance: &GuidanceWorld, collision: &CollisionWorld) -> (EdgeRows, Option<Vec3>) {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let spacing = (mover - other).length();
     let width = if closing {
         spacing - 0.15
     } else {
-        let origin = mover - dv * SHIMMY_SWEEP_R + n * SHIMMY_SWEEP_OUT + Vec3::Y * SHIMMY_SWEEP_UP;
-        let d = collision.sphere_free_distance(origin, dv, SHIMMY_SWEEP_R, SHIMMY_SWEEP_LEN) - SHIMMY_SWEEP_R;
+        let top = mover - dv * SHIMMY_SWEEP_R + n * SHIMMY_SWEEP_OUT + Vec3::Y * SHIMMY_SWEEP_UP;
+        let drop = if hang == LedgeHangType::Wall { 1.1 } else { 2.4 };
+        let d = capsule_free_distance(top, top - Vec3::Y * (drop + SHIMMY_SWEEP_UP), dv, SHIMMY_SWEEP_R, SHIMMY_SWEEP_LEN, collision) - SHIMMY_SWEEP_R;
         if d < SHIMMY_MIN_FREE {
             return ([None; 5], None);
         }
@@ -1747,4 +1760,38 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
         )
     };
     Ok([orient, descent, reception])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collision::Aabb3;
+    use crate::guidance::{GuidanceEdge, GuidanceSubType};
+
+    /// A 3 m wall (face z 0, normal -Z) with a ledge at 2.6 m, x -5..5, and optionally a crate at leg height beside the
+    /// hang (x 0.6..1.4, 0.5..1.6 m up, against the wall).
+    fn wall(crate_beside: bool) -> (CollisionWorld, GuidanceWorld) {
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(-5.0, 0.0, 0.0), max: Vec3::new(5.0, 2.6, 1.0) });
+        if crate_beside {
+            c.boxes.push(Aabb3 { min: Vec3::new(0.6, 0.5, -0.9), max: Vec3::new(1.4, 1.6, 0.0) });
+        }
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: Vec3::new(-5.0, 2.6, 0.0), p1: Vec3::new(5.0, 2.6, 0.0), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab });
+        (c, g)
+    }
+
+    /// RE/24 LEDGE-8: ProbeLateral's free-space test is a body-length capsule (0xDD996B, `sub_B18C30`): a crate at leg
+    /// height beside a wall hang blocks the shimmy toward it; the hands alone would pass over it.
+    #[test]
+    fn an_obstacle_at_leg_height_blocks_the_shimmy() {
+        let (mover, other, n) = (Vec3::new(0.15, 2.6, 0.0), Vec3::new(-0.15, 2.6, 0.0), Vec3::NEG_Z);
+        let (c, g) = wall(false);
+        assert!(probe_lateral(mover, other, n, Vec3::X, false, LedgeHangType::Wall, &g, &c).1.is_some(), "free wall: a step");
+        let (c, g) = wall(true);
+        assert!(probe_lateral(mover, other, n, Vec3::X, false, LedgeHangType::Wall, &g, &c).1.is_none(), "crate at the legs: blocked");
+        // the crate is below the hands and 0.75 m out reaches it: the old sphere at hand height found it free
+        let origin = mover - Vec3::X * SHIMMY_SWEEP_R + n * SHIMMY_SWEEP_OUT + Vec3::Y * SHIMMY_SWEEP_UP;
+        assert!(c.sphere_free_distance(origin, Vec3::X, SHIMMY_SWEEP_R, SHIMMY_SWEEP_LEN) >= SHIMMY_SWEEP_LEN - 1e-3);
+    }
 }
