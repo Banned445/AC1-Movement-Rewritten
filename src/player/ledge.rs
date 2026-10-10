@@ -422,6 +422,8 @@ pub fn update_ledge(
                     data.ledge.pass_over = None;
                     body.grounded = true;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });
+                    // entry mode 12: the roll ending (0xDCFA40, RE/24 GROUND-4)
+                    data.ground.enter_roll_ending(super::anim_gate::word(&p.action));
                 }
                 super::passover::PassOverOut::PullDown { far, normal } => {
                     // pull-down type 4 (0xDE0220): Ledge SubState 11 from the far edge

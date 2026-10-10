@@ -145,6 +145,8 @@ pub enum TreeState {
     RunTurn,
     /// State 25 (`HumanGround__Pivot_Update` 0xDA9120).
     Pivot,
+    /// State 20 (entry mode 12, `HumanGround__RollEnding_Update` 0xDA8EA0): the pass-over's roll onto the ground.
+    RollEnding,
 }
 
 /// `HumanGround__LookDown_Enter` 0xD9FC80: `xx_l_ledge_lookdown_{front,left,right}_foot{l,r}` (by the leading foot)
@@ -328,6 +330,25 @@ impl HumanGroundData {
         }
     }
 
+    /// Entry mode 12 (`HumanLedge__SetupPassOverToGround` 0xDCFA40 → `Movement_EnterBody` 0xD92C40 case 12): state 20, high
+    /// profile, s 0.5, the roll ending of the foot the vault's item word gives (Data+556 = 2 − ((word & 0xC) ≠ 4), read
+    /// by `PickLocomotionFoot` 0xD86760: 1 → foot 0, 2 → foot 1; table 0x1A2C0D4) (RE/24 GROUND-4).
+    pub fn enter_roll_ending(&mut self, vault_word: Option<u16>) {
+        use super::ground_tree::ROLL_ENDING;
+        let foot = match vault_word {
+            Some(w) if w & 0xC == 4 => 1,
+            _ => 0,
+        };
+        if jump_blend::action_items(ROLL_ENDING[foot]).is_none() {
+            return;
+        }
+        self.high_profile = true;
+        self.speed_param = 0.5;
+        self.blend.speed_param = 0.5;
+        self.play_oneshot(ActionBlend::new(ROLL_ENDING[foot], 0, &[1.0]));
+        self.owner = TreeState::RollEnding;
+    }
+
     /// `HumanGround__Move_EnterBody` 0xD94A60 on every Move entry: the MoveBlend slowdown (HG+1740) and settle (HG+1744)
     /// timers and the lean (Data+212) start from 0 (RE/24 GROUND-13).
     fn reset_move_entry(&mut self) {
@@ -471,7 +492,15 @@ impl HumanGroundData {
                     }
                 }
             }
-            TreeState::Pivot | TreeState::RunStop => self.enter_wait(ended, high),
+            // state 20 (0xDA8EA0): moving → `PlayRollEndingExitMove` 0xD8B780 (s 0.5, 0x082FB27C into locomotion item 1,
+            // setup mode 4, layout 1); else Idle through the roll ending's own transition into the wait
+            TreeState::RollEnding if stick => {
+                self.speed_param = 0.5;
+                self.blend.speed_param = 0.5;
+                self.reset_move_entry();
+                self.start_transition(super::ground_tree::ROLL_ENDING_EXIT, 0, 1, 1, &[], Some((ended.id, ended.item)));
+            }
+            TreeState::Pivot | TreeState::RunStop | TreeState::RollEnding => self.enter_wait(ended, high),
             // the other one-shots (climb / ledge / hay exits, lean exits …): the item's authored transition into the
             // locomotion with the default layout, PORT s ≥ 0.25 / 0.5 (TransitionSetupDataToMovement modes 3 / 4, the
             // exits' own setups are not traced), or into the wait
@@ -1718,6 +1747,30 @@ mod reanalysis_tests {
         let mut g = HumanGroundData { owner: TreeState::Landing, high_profile: true, ..Default::default() };
         g.after_oneshot(ActionBlend::new(jump_blend::LAND_FORWARD_STOP[0], 0, &[1.0]), false, 0.0, &mut h);
         assert_eq!(g.speed_param, 0.0, "a stop landing goes to the wait");
+    }
+
+    #[test]
+    fn the_pass_over_rolls_onto_the_ground() {
+        // entry mode 12 → state 20 (RE/24 GROUND-4): the roll ending by the vault's word, then Move through 0x082FB27C
+        use super::super::ground_tree::{ROLL_ENDING, ROLL_ENDING_EXIT};
+        if jump_blend::action_items(ROLL_ENDING[0]).is_none() {
+            return;
+        }
+        let mut g = HumanGroundData::default();
+        g.enter_roll_ending(Some(0x0004));
+        assert_eq!(g.owner, TreeState::RollEnding);
+        assert_eq!(g.oneshot.map(|o| o.blend.id), Some(ROLL_ENDING[1]), "word bits 2-3 = 1 → Data+556 = 2 → foot 1");
+        assert_eq!(g.speed_param, 0.5);
+        let ended = g.oneshot.unwrap().blend;
+        let mut h = 0.0;
+        g.after_oneshot(ended, true, 0.0, &mut h);
+        assert_eq!(g.tr.map(|t| t.action.id), Some(ROLL_ENDING_EXIT));
+        let mut g = HumanGroundData::default();
+        g.enter_roll_ending(Some(0x0008));
+        assert_eq!(g.oneshot.map(|o| o.blend.id), Some(ROLL_ENDING[0]));
+        let ended = g.oneshot.unwrap().blend;
+        g.after_oneshot(ended, false, 0.0, &mut h);
+        assert_eq!(g.speed_param, 0.0, "no stick: the wait");
     }
 
     #[test]
