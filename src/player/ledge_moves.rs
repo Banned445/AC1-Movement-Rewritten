@@ -998,7 +998,7 @@ pub fn try_side_jump_to_ladder(
     let side = if right { right_of(facing) } else { -right_of(facing) };
     let free = hang != LedgeHangType::Wall;
     let centre = root + side * 1.7 + if free { Vec3::Y * 0.5 - facing * 0.15 } else { -Vec3::Y * 0.5 + facing * 0.35 };
-    let hit = guidance.probe_box(centre, right_of(facing), facing, Vec3::Y, Vec3::new(0.8, 0.5, 0.5), centre, std::f32::consts::PI, 0.1, 8)?;
+    let hit = guidance.probe_box(centre, right_of(facing), facing, Vec3::Y, Vec3::new(0.8, 0.5, 0.5), centre, std::f32::consts::PI, 0.1, crate::guidance::MASK_LADDER)?;
     let e = &guidance.edges[hit.edge];
     let ln = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
     if ln.dot(facing).abs() <= std::f32::consts::FRAC_1_SQRT_2 {
