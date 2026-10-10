@@ -3764,7 +3764,7 @@ fn the_ability_stack_gates_the_jump() {
     for allowed in [false, true] {
         let mut s = Sim::new(Vec3::new(0.0, 0.0, 4.0), FACE_PZ);
         let flags = if allowed { u64::MAX } else { !(1u64 << Ability::Jump as u32) };
-        s.app.world_mut().insert_resource(AbilitySet { flags, max_speed: 4, all_actions: true });
+        s.app.world_mut().insert_resource(AbilitySet { flags, max_speed: 4, all_actions: true, high_profile: true });
         s.pad(Vec3::Z, 1.0, true, false);
         s.run(0.4);
         s.press_legs();
@@ -3775,11 +3775,23 @@ fn the_ability_stack_gates_the_jump() {
     for allowed in [false, true] {
         let mut s = Sim::new(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
         let flags = if allowed { u64::MAX } else { !(1u64 << Ability::Grasp as u32) };
-        s.app.world_mut().insert_resource(AbilitySet { flags, max_speed: 4, all_actions: true });
+        s.app.world_mut().insert_resource(AbilitySet { flags, max_speed: 4, all_actions: true, high_profile: true });
         s.pad(Vec3::ZERO, 0.0, false, false);
         s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
         assert_eq!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ladder), allowed);
     }
+}
+
+#[test]
+fn walk_speed_ability_keeps_the_ground_in_low_profile() {
+    use crate::player::abilities::AbilitySet;
+    // IHumanGround vt12 SetHighProfile = high && MaxSpeed > Walk (0xEE70F9, RE/24 INPUT-10)
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.app.world_mut().insert_resource(AbilitySet { flags: u64::MAX, max_speed: 1, all_actions: true, high_profile: true });
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(1.5);
+    assert!(!s.ground().high_profile);
+    assert_eq!(speed_band(s.ground().speed_param), SpeedBand::Walk);
 }
 
 #[test]

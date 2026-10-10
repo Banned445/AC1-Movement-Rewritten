@@ -717,7 +717,8 @@ pub fn update_ground(
         let busy = g.oneshot.is_some() || g.tr.is_some_and(|t| t.to_wait);
         let moving = mv_speed > 0.0 && !busy;
         let prev_high = g.high_profile;
-        g.high_profile = pad.high_profile;
+        // IHumanGround vt12 SetHighProfile: high profile only above MaxSpeed Walk (0xEE70F9, RE/24 INPUT-10)
+        g.high_profile = pad.high_profile && ab.max_speed() > 1;
         g.sprint = pad.high_profile && pad.legs_held; // sprint = high profile + legs (RE/01 §6.2)
         g.sub_state = if !GAME_GROUND_EXTRAS && g.sprint { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
 

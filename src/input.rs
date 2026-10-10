@@ -9,7 +9,7 @@
 //! as is, and a length over 1 is normalised. Keys give ±1 per axis (0x90A780), so diagonals are unit length.
 //! PORT: Left Alt scales the keyboard stick by 0.6 so keyboard players can reach the walk-slow band (no game key).
 
-use bevy::input::gamepad::{Gamepad, GamepadButton};
+use bevy::input::gamepad::{AxisSettings, Gamepad, GamepadButton, GamepadSettings};
 use bevy::prelude::*;
 
 use crate::camera::CameraRig;
@@ -95,7 +95,18 @@ pub struct InputPlugin;
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
-            .add_systems(PreUpdate, read_pad);
+            .add_systems(PreUpdate, (raw_gamepad_axes, read_pad).chain());
+    }
+}
+
+/// The game reads the thumbsticks unfiltered (`PadXenon__Update` 0x98CE60: thumb / 32767) and applies only its own
+/// 0.35 radial dead zone. Bevy's default axis settings rescale each axis from a 0.05 dead zone and drop changes under
+/// 0.01, which would move the game's bands (0.35 / 0.9); every gamepad gets pass-through settings (RE/24 INPUT-11).
+fn raw_gamepad_axes(mut pads: Query<&mut GamepadSettings, Added<GamepadSettings>>) {
+    for mut settings in &mut pads {
+        if let Ok(raw) = AxisSettings::new(-1.0, 0.0, 0.0, 1.0, 0.0) {
+            settings.default_axis_settings = raw;
+        }
     }
 }
 
@@ -193,7 +204,8 @@ pub fn read_pad(
     let forward = Vec3::new(-rig.yaw.sin(), 0.0, -rig.yaw.cos());
     let right = Vec3::new(forward.z * -1.0, 0.0, forward.x);
     let dir = (forward * stick.y + right * stick.x).normalize_or_zero();
-    let high = buttons[12];
+    // without the HighProfile ability the flag is forced off (`ReadInput` 0xEEDEC4)
+    let high = buttons[12] && crate::player::abilities::of(abilities.as_deref()).allows_high_profile();
 
     pad.dir = dir;
     pad.magnitude = mag;
@@ -215,5 +227,17 @@ pub fn read_pad(
         pad.hand_pressed_ago = 0.0;
     } else {
         pad.hand_pressed_ago += time.delta_secs();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn the_gamepad_axes_pass_through_unfiltered() {
+        // no per-axis dead zone, no change threshold: only the game's 0.35 radial dead zone applies
+        assert!(AxisSettings::new(-1.0, 0.0, 0.0, 1.0, 0.0).is_ok());
+        assert_eq!(stick_response(Vec2::new(0.3, 0.1)), Vec2::ZERO);
+        assert_eq!(stick_response(Vec2::new(0.4, 0.0)), Vec2::new(0.4, 0.0));
     }
 }
