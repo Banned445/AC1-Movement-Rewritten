@@ -11,7 +11,6 @@ pub struct CubeTexture {
 }
 
 /// Rank 9 TextureGradient's uncompressed pixel stream (archive layout, RE/09 §9).
-/// PORT: BGRA interpretation still requires native upload-format tracing.
 pub fn parse_gradient(p: &[u8]) -> Option<AcTexture> {
     let word = |o| p.get(o..o + 4).map(|b: &[u8]| u32::from_le_bytes(b.try_into().unwrap()));
     if word(4)? != crc32("TextureGradient") { return None; }
@@ -21,7 +20,9 @@ pub fn parse_gradient(p: &[u8]) -> Option<AcTexture> {
     if word(79)? as usize != bytes { return None; }
     let mut rgba = p.get(83..83 + bytes)?.to_vec();
     for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
-    Some(AcTexture { width: w, height: h, mips: vec![rgba], srgb: false })
+    // PixelFormat_RGBA8888 (+20 = 0) is uploaded as D3DFMT_A8R8G8B8, whose bytes are B, G, R, A
+    let (address, filter) = super::ac_formats::texture_sampler_fields(p);
+    Some(AcTexture { width: w, height: h, mips: vec![rgba], srgb: word(28)? == 1, address, filter })
 }
 
 /// Eye reflection map: six BC3 face chains (archive layout, RE/09 §9).

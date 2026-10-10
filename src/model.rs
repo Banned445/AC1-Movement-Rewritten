@@ -2,7 +2,7 @@
 //! as skinned meshes driven by his movement skeleton and supplemental visual descendants.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
@@ -152,12 +152,8 @@ fn attach_altair(
         img.texture_descriptor.mip_level_count = t.mips.len() as u32;
         img.data = Some(t.mips.concat());
         if CHARACTER_VISUAL_FIXES {
-            // The outfit UVs tile beyond [0, 1]; clamp sampling smears the atlas border (RE/09 §6).
-            img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                address_mode_u: ImageAddressMode::Repeat,
-                address_mode_v: ImageAddressMode::Repeat,
-                ..ImageSamplerDescriptor::linear()
-            });
+            // the TextureMap's authored sampler: the outfit maps wrap (their UVs tile beyond [0, 1]) and filter linearly
+            img.sampler = ImageSampler::Descriptor(crate::assets::ac_formats::texture_sampler(t));
         }
         tex_handles.insert(*id, images.add(img));
     }
@@ -177,9 +173,8 @@ fn attach_altair(
             TextureDimension::D2, format, RenderAssetUsages::RENDER_WORLD);
         image.texture_descriptor.mip_level_count = t.mips.len() as u32;
         image.data = Some(t.mips.concat());
-        let ramp = model.parts.iter().flat_map(|p| &p.materials).any(|m| m.ramp == Some(*id));
-        let mode = if ramp { ImageAddressMode::ClampToEdge } else { ImageAddressMode::Repeat };
-        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor { address_mode_u: mode, address_mode_v: mode, ..ImageSamplerDescriptor::linear() });
+        // the authored sampler: the ramps clamp U and wrap V, the maps wrap
+        image.sampler = ImageSampler::Descriptor(crate::assets::ac_formats::texture_sampler(t));
         material_handles.insert(*id, images.add(image));
     }
     let mut cube_handles = std::collections::HashMap::new();
