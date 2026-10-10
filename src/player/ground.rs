@@ -609,7 +609,7 @@ pub fn update_ground(
                 // Event47 takes a hand report first; event48 is the no-target fallback (0xEE84FE-0xEE858B).
                 let request=pad.high_profile && !pad.legs_held && pad.magnitude<=0.35 && g.legs_released_ago<0.5;
                 if request && extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed+dt>=0.2 {
-                    extra.target=static_hand_target(body.feet,body.forward(),&guidance,&collision);
+                    extra.target=static_hand_target(body.feet,body.forward(),&guidance,&collision,false);
                 }
                 let (out,delta)=extra.advance(dt,pad.magnitude>0.35,request,g.blend.foot);
                 match out {
@@ -1419,23 +1419,46 @@ fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &Gui
     None
 }
 
-/// The hand target of a standing straight jump (0xB21DA0): a ledge in the 0.75 m grab probe whose hands are
-/// 0.53–3.0 m above the feet; `beam` selects the `beam_jumpstraight_*` flights (jump from the beam impulsion).
-pub fn straight_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld, beam: bool) -> Option<JumpTarget> {
-    let reach = |h: f32| {
-        guidance
-            .probe(feet + Vec3::Y * h, GRAB_PROBE_RADIUS, 0.225, Some(forward), std::f32::consts::FRAC_PI_2)
-            .filter(|hit| (hit.point - feet).dot(forward) > 0.0)
-    };
-    let hand = [0.6f32, 0.9, 1.3, 1.7, 2.1, 2.5, 2.9]
-        .into_iter()
-        .filter_map(reach)
-        .find(|h| (GRAB_MIN_HEIGHT..=STRAIGHT_JUMP_MAX).contains(&(h.point.y - feet.y)))?;
-    let n = hand.wall_normal;
-    // both hands on the edge (not past its end)
-    let point = guidance.fit_hands(hand.point, n);
-    straight_target(feet,point,n,collision,beam)
+/// The beam's obstacle hand target (`sub_F7DB30`, from event 17 on a beam: 0xEE9AF0 → 0xF7EF90 → 0xF70E50 →
+/// 0xB21DA0): the edges of a report box at the stand point facing `dir` (±0.3 m to the side, 0 … 0.7 m ahead,
+/// 0.3 … 1.4 m up, whole edges), not Quadruped, Kiosk or Rope, the wall facing `dir` within 45° and no steeper than
+/// 40° (0xB12480). The hold: the stand point carried across onto the edge line, then the nearest point of the edge
+/// shortened 0.5 m at both ends. A wall right over the edge (the top ray of `static_target_type`: from the hold + 0.5·n
+/// + 0.3 m up back toward the wall, 1.75 m, less 0.5 under 0.3) rejects it. `Human__PickStaticReport` 0xE97720 picks
+/// one (`choose_static_report`), and the straight jump takes it.
+/// PORT: the obstacle contact the search needs (`Human__GetObstacleContact` 0xB25230) is the caller's box test.
+pub fn beam_obstacle_target(stand: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+    use crate::guidance::GuidanceSubType as S;
+    let dir = dir.with_y(0.0).normalize_or_zero();
+    let report = guidance.report(stand, dir, Vec3::new(-0.3, 0.0, 0.3), Vec3::new(0.3, 0.7, 1.4), false);
+    let mut reports = Vec::new();
+    for e in &report.edges {
+        if matches!(e.subtype, S::Quadruped | S::Kiosk | S::Rope) {
+            continue;
+        }
+        let low = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
+        let low = low.with_y(0.0).normalize_or_zero();
+        if low == Vec3::ZERO || dir.angle_between(-low) >= std::f32::consts::FRAC_PI_4 {
+            continue;
+        }
+        let d = e.p1 - e.p0;
+        let len = d.length();
+        if len < 1e-6 || (d / len).y.abs() > 0.643 {
+            continue;
+        }
+        let u = d / len;
+        let on_line = e.p0 + u * (stand - e.p0).dot(u);
+        let hold = if len <= 1.0 { (e.p0 + e.p1) * 0.5 } else { crate::guidance::closest_on_segment(e.p0 + u * 0.5, e.p1 - u * 0.5, on_line) };
+        let top = collision.ray_distance(hold + low * 0.5 + Vec3::Y * 0.3, -low, 1.75, crate::layers::MAIN_CHARACTER) - 0.5;
+        if top < 0.3 {
+            continue;
+        }
+        reports.push((hold, low));
+    }
+    let i = super::ground_extras::choose_static_report(stand, dir, &reports)?;
+    straight_target(stand, reports[i].0, reports[i].1, collision, true)
 }
+
 fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bool)->Option<JumpTarget> {
     let wall = super::ledge::hang_type_at(point, n, collision) == super::ledge::LedgeHangType::Wall;
     let dz = point.y - feet.y;
@@ -1446,26 +1469,61 @@ fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bo
     Some(JumpTarget { position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None, ladder: None })
 }
 
-/// Stationary request's box is initialized by 0x1610920 / 0x1610970, consumed by 0xB10990.
-/// The holds in that box are kept by 0xE165D0's types and clearance rays (`ground_extras::static_target_type`),
-/// then 0xE97720 picks one. PORT: the box query stands in for the guidance chain walk (`GuidanceChain__FindGrabPoint`);
-/// rope/kiosk/pole reports and owner validity cannot be synthesized by this adapter.
-fn static_hand_target(feet:Vec3,forward:Vec3,guidance:&GuidanceWorld,collision:&CollisionWorld)->Option<JumpTarget> {
-    let right=super::right_of(forward);
-    let mut candidates=Vec::new();
-    for edge in &guidance.edges {
-        let one=GuidanceWorld{edges:vec![edge.clone()],..Default::default()};
-        let Some(hit)=one.probe_box(feet+forward*0.5+Vec3::Y*1.85,right,forward,Vec3::Y,
-            Vec3::new(0.5,1.0,1.35),feet,120f32.to_radians(),0.0,1<<1) else {continue;};
-        let point=guidance.fit_hands(hit.point,hit.wall_normal);
-        if !(GRAB_MIN_HEIGHT..=STRAIGHT_JUMP_MAX).contains(&(point.y-feet.y)) {continue;}
-        if super::ground_extras::static_target_type(feet,forward,point,hit.wall_normal,collision).is_none() {continue;}
-        if let Some(target)=straight_target(feet,point,hit.wall_normal,collision,false) {
-            candidates.push((point,hit.wall_normal,target));
+/// The standing request's hand targets (`Human__EvaluateStaticHandTargets` 0xE165D0; the box initialised by
+/// 0x1610920 / 0x1610970 and consumed by 0xB10990: the feet + 0.5 m ahead + 1.85 m up, half extents 0.5 / 1.0 / 1.35).
+/// The box's edges of mask 306 cut to it, none steeper than 40°, every end's scratch set to 0.5 (`sub_E14DB0`); three
+/// chain sets (`sub_116CD50`): walls facing the jumper (within 45° of −forward), and the two sides (walls turned up to
+/// 45° from right / left, edges along the forward axis). On each chain the grab point toward the facing from the feet
+/// (`GuidanceChain__FindGrabPoint` with the forward as the preferred direction, hand offsets 0.5 / 0.5, margin 0.25: the
+/// 0.5 scratch cancels the offsets), not Quadruped, the wall within 120° of the facing; then its type and path rays
+/// (`ground_extras::static_target_type`), and 0xE97720 picks one (`choose_static_report`).
+/// PORT: the owner entity's validity (0xE165D0's +100 / +102 checks) and the a10 chain variant (sub_B27F70 /
+/// sub_B28260) are not modelled.
+pub fn static_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld, beam: bool) -> Option<JumpTarget> {
+    use crate::guidance::{ChainParams, GuidanceSubType as S, MASK_CATCH};
+    let fwd = forward.with_y(0.0).normalize_or_zero();
+    let right = fwd.cross(Vec3::Y);
+    let half = Vec3::new(0.5, 1.0, 1.35);
+    let report = guidance.report_indexed(feet + fwd * 0.5 + Vec3::Y * 1.85, fwd, -half, half, true);
+    // the query's mask and GuidanceReport__RemoveSteepEdges 0x66C350
+    let keep: Vec<usize> = (0..report.world.edges.len())
+        .filter(|&i| {
+            let e = &report.world.edges[i];
+            (1u32 << e.subtype as u32) & MASK_CATCH != 0 && (e.p1 - e.p0).normalize_or_zero().y.abs() <= 0.643
+        })
+        .collect();
+    let world = GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() };
+    let cuts = vec![(0.5f32, 0.5f32); world.edges.len()];
+    let q = std::f32::consts::FRAC_PI_4;
+    let sets = [
+        ChainParams { dir: -fwd, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: 1 },
+        ChainParams { dir: right, right: fwd, ranges: [(0.0, 0.0), (0.0, q)], parallel: q, mask: 1 },
+        ChainParams { dir: -right, right: fwd, ranges: [(-q, 0.0), (0.0, 0.0)], parallel: q, mask: 1 },
+    ];
+    let mut candidates = Vec::new();
+    for p in &sets {
+        for chain in world.chains(p) {
+            let Some(hit) = world.grab_point_toward(&chain, feet, Some(fwd), &[0.5, 0.5], 0.25, &cuts) else { continue };
+            if world.edges[hit.edge].subtype == S::Quadruped || hit.wall_normal == Vec3::ZERO {
+                continue;
+            }
+            if fwd.angle_between(-hit.wall_normal) >= 120f32.to_radians() {
+                continue;
+            }
+            let point = hit.point;
+            if !(GRAB_MIN_HEIGHT..=STRAIGHT_JUMP_MAX).contains(&(point.y - feet.y)) {
+                continue;
+            }
+            if super::ground_extras::static_target_type(feet, fwd, point, hit.wall_normal, collision).is_none() {
+                continue;
+            }
+            if let Some(target) = straight_target(feet, point, hit.wall_normal, collision, beam) {
+                candidates.push((point, hit.wall_normal, target));
+            }
         }
     }
-    let reports:Vec<_>=candidates.iter().map(|c|(c.0,c.1)).collect();
-    super::ground_extras::choose_static_report(feet,forward,&reports).map(|i|candidates[i].2)
+    let reports: Vec<_> = candidates.iter().map(|c| (c.0, c.1)).collect();
+    super::ground_extras::choose_static_report(feet, fwd, &reports).map(|i| candidates[i].2)
 }
 
 /// Pull-down type Wait (1) from Movement (0xDB1470 event 70 → fill 0xD843E0 → PullDown_Enter 0xDDE4D0): a

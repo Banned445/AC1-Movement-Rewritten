@@ -1481,11 +1481,12 @@ fn empty_hand_on_a_beam_reaches_climb_holds() {
 
 #[test]
 fn walking_a_beam_into_an_obstacle_jumps_to_its_hand_target() {
+    // sub_F7DB30: the obstacle's top edge 1.2 m above the beam lies in the report box (0.3 … 1.4 m up, 0.7 m ahead)
     let mut s = on_free_beam(87.5);
     s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3 {
-        min:Vec3::new(88.0,0.0,69.5),max:Vec3::new(89.0,6.0,70.5) });
+        min:Vec3::new(88.0,0.0,69.5),max:Vec3::new(89.0,5.2,70.5) });
     s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>().edges.push(crate::guidance::GuidanceEdge {
-        p0:Vec3::new(88.0,6.0,69.5),p1:Vec3::new(88.0,6.0,70.5),n0:Vec3::Y,n1:Vec3::NEG_X,
+        p0:Vec3::new(88.0,5.2,69.5),p1:Vec3::new(88.0,5.2,70.5),n0:Vec3::Y,n1:Vec3::NEG_X,
         subtype:crate::guidance::GuidanceSubType::LedgeGrab });
     s.pad(Vec3::X,1.0,false,false);
     assert!(s.run_until(0.5,|s|s.loco().current==ActorContextId::InAir),"no obstacle hand jump");

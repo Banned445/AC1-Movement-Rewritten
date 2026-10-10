@@ -586,6 +586,13 @@ impl GuidanceWorld {
     /// left). That point is carried onto the links by the plane across the line (the chain's two free link ends pulled
     /// in by the positive trims, `sub_9765E0`); when no link meets the plane, the link end nearest along the line.
     pub fn grab_point(&self, chain: &Chain, target: Vec3, offsets: &[f32], margin: f32, cuts: &[(f32, f32)]) -> Option<GuidanceHit> {
+        self.grab_point_toward(chain, target, None, offsets, margin, cuts)
+    }
+
+    /// `grab_point` with a preferred direction (the jumper's facing in 0xE165D0): the chain is measured across it (its end
+    /// carried onto the vertical plane through its start whose normal is `pref`), so the grab point lies straight along
+    /// `pref` from the target.
+    pub fn grab_point_toward(&self, chain: &Chain, target: Vec3, pref: Option<Vec3>, offsets: &[f32], margin: f32, cuts: &[(f32, f32)]) -> Option<GuidanceHit> {
         let cut_at = |edge: usize, p: Vec3| {
             let c = cuts.get(edge).copied().unwrap_or((0.0, 0.0));
             let e = &self.edges[edge];
@@ -593,7 +600,10 @@ impl GuidanceWorld {
         };
         let (first, last) = (chain.links[0], chain.links[chain.links.len() - 1]);
         let (cut_s, cut_e) = (cut_at(first.0, first.1), cut_at(last.0, last.2));
-        let (s, e) = (chain.start().with_y(target.y), chain.end().with_y(target.y));
+        let (s, mut e) = (chain.start().with_y(target.y), chain.end().with_y(target.y));
+        if let Some(p) = pref.map(|p| p.with_y(0.0).normalize_or_zero()).filter(|p| *p != Vec3::ZERO) {
+            e -= p * (e - s).dot(p);
+        }
         let d = e - s;
         if Vec3::new(d.x, 0.0, d.z).length() <= 0.0005 {
             return None;

@@ -1080,12 +1080,12 @@ pub fn update_narrow(
 
         // Event 17: walking into an obstacle with stick input searches a hand jump target before
         // pull-down / climb (0xEE9AF0 → 0xF7EF90 / 0xF7DB30 → 0xF70E50 → 0xB21DA0).
-        // PORT: the existing standing hand probe and an oriented contact box replace the native
-        // report classification/rays; exact obstacle target selection remains a parity task.
+        // The search is sub_F7DB30 (`ground::beam_obstacle_target`). PORT: an oriented contact box stands in for the
+        // obstacle contact (Human__GetObstacleContact 0xB25230).
         if BEAM_COMPLETION && n.kind == NarrowKind::Beam && matches!(n.state, BeamState::Start | BeamState::Walk)
             && stick && !collision.obb_free(n.stand() + pad.dir * 0.45 + Vec3::Y * 0.8,
                 [super::right_of(pad.dir), Vec3::Y, pad.dir], Vec3::new(0.2, 0.3, 0.1)) {
-            if let Some(target) = super::ground::straight_hand_target(n.stand(), pad.dir, &guidance, &collision, true) {
+            if let Some(target) = super::ground::beam_obstacle_target(n.stand(), pad.dir, &guidance, &collision) {
                 let entry = InAirEntry::JumpToTarget { from: n.stand(), target, speed_param: 0.0, foot_left: n.foot == 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 continue;
@@ -1169,7 +1169,9 @@ pub fn update_narrow(
             if n.state == BeamState::ImpulseWait || (BEAM_COMPLETION && n.state == BeamState::ImpulseIn) {
                 // events 5 / 6 (+148, 0xF717D0): the jump on the spot, at a hand target when there is one
                 pad.consume_jump();
-                n.hand_target = super::ground::straight_hand_target(feet, facing, &guidance, &collision, true);
+                // the on-the-spot jump's target (events 5 / 6 carry it; 0xF717D0 takes it given): (hypothesis) the
+                // interpreter's standing request, as on the ground (0xE165D0, `ground::static_hand_target`)
+                n.hand_target = super::ground::static_hand_target(feet, facing, &guidance, &collision, true);
                 let id = if n.hand_target.is_some() { BEAM_IMPULSE_TO_JUMP } else { BEAM_IMPULSE_TO_CLEAR };
                 n.play(BeamState::JumpOnPlace, item(id, 0, &[]));
             } else if !stick {
