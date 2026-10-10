@@ -1558,21 +1558,16 @@ fn edge_report(feet: Vec3, forward: Vec3, reach: f32, min_cos: f32, guidance: &G
     edge_report_drop(feet, forward, reach, min_cos, 2.0, guidance, collision).map(|r| (r.0, r.1))
 }
 
-/// `edge_report` with the drop limit and the drop: a front LedgeGrab edge whose closest point is within `reach` of the
-/// feet horizontally. Returns (point, outward normal, drop).
+/// `edge_report` with the drop limit and the drop. The interpreter's report: the foot-level edge reports (IHuman vt132
+/// `Human__BuildEdgeReports` 0xB1BC50: 0.75 m, drops of 0.45 m or more), the one within `reach` whose normal is closest
+/// to the facing (IHuman vt136 0xB17EF0, within acos(`min_cos`)); then `HumanGround__ClassifyEdgeSide` 0xD9D7F0: a drop
+/// over 1.3 m and the signed distance within `reach` (front), and the caller's drop limit. Returns (point, outward
+/// normal, drop).
 fn edge_report_drop(feet: Vec3, forward: Vec3, reach: f32, min_cos: f32, min_drop: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3, f32)> {
-    let hit = guidance.probe(feet + forward * reach, reach, 0.2, None, std::f32::consts::PI)?;
-    if Vec2::new(hit.point.x - feet.x, hit.point.z - feet.z).length() > reach + 1e-3 {
-        return None;
-    }
-    let n = hit.wall_normal;
-    let nf = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    if nf.dot(forward) <= min_cos {
-        return None;
-    }
-    let below = collision.ground_height(hit.point + n * 0.6 - Vec3::Y * 0.05, 50.0).unwrap_or(hit.point.y - 100.0);
-    let drop = hit.point.y - below;
-    (drop > min_drop).then_some((hit.point, n, drop))
+    use super::jump_candidates::{edge_reports, pick_report};
+    let reports = edge_reports(feet, 0.75, 0.45, guidance, collision);
+    let r = pick_report(&reports, feet, forward, reach + 1e-3, min_cos.clamp(-1.0, 1.0).acos())?;
+    (r.drop > 1.3 && r.drop > min_drop && r.dist <= reach + 1e-3).then_some((r.point, r.normal, r.drop))
 }
 
 /// The step off an edge (event 68's action 0xD9D1F0, the parameter = 1.0 in high profile): facing more than 120 degrees

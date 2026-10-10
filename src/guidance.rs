@@ -64,9 +64,10 @@ pub struct GuidanceHit {
 }
 
 impl GuidanceWorld {
-    /// Closest LedgeGrab point to `p` within `radius` horizontally and `vtol` vertically, on an edge
-    /// whose slope is ≤ 40° (RE/06 post-filter) and whose wall faces `facing` within `max_angle`
-    /// (facing = direction the character looks, i.e. into the wall).
+    /// PORT (legacy): the closest LedgeGrab point to `p` within `radius` horizontally and `vtol` vertically, on an edge
+    /// whose slope is ≤ 40° (RE/06 post-filter) and whose wall faces `facing` within `max_angle`. Only the pre-A2 air
+    /// catch uses it (`tuning::AIR_CATCHES = false`); every Human search now runs the game's own queries
+    /// (`probe_facing`, `probe_facing_pair`, `step_search`, `vertical_search`, `handhold_pair`, `chains`).
     pub fn probe(&self, p: Vec3, radius: f32, vtol: f32, facing: Option<Vec3>, max_angle: f32) -> Option<GuidanceHit> {
         let mut best: Option<(f32, GuidanceHit)> = None;
         for (i, e) in self.edges.iter().enumerate() {
