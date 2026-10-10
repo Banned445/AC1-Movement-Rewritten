@@ -1313,6 +1313,29 @@ fn pressing_legs_with_the_stick_at_the_wall_rebounds_straight_back() {
     assert!((s.body().feet.x - x0).abs() < 0.3, "straight back, not sideways: {:?} from x {x0}", s.body().feet);
 }
 
+/// RE/24 WALL-13: the push direction reads the stick's angle to the facing as last written while the stick was past 0.35
+/// (+0x1244). Released after pointing sideways (90°), Legs starts no rebound (the zero stick); released after pointing at
+/// the wall, it rebounds straight back.
+#[test]
+fn a_released_stick_rebounds_only_if_it_last_pointed_at_the_wall() {
+    use crate::player::walling::WallingSubState;
+    let mut s = wall_run_at(82.0);
+    assert!(s.run_until(1.0, |s| s.data().walling.sub_state == WallingSubState::Vertical), "no vertical step");
+    s.pad(Vec3::X, 1.0, true, true);
+    s.run(0.05);
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    s.press_legs();
+    s.run(0.1);
+    assert_eq!(s.loco().current, ActorContextId::Walling, "the stale sideways angle starts no rebound");
+    let mut s = wall_run_at(82.0);
+    assert!(s.run_until(1.0, |s| s.data().walling.sub_state == WallingSubState::Vertical), "no vertical step");
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.run(0.05);
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir), "the stale angle at the wall rebounds straight back");
+}
+
 #[test]
 fn walk_across_a_beam_onto_the_far_platform() {
     use crate::player::narrow::{BeamState, BEAM_WALK};

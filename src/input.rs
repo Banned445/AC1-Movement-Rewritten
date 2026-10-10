@@ -54,6 +54,9 @@ pub struct PadInput {
     /// Interp +0x824 / +0x826: the stick's magnitude band this frame and the last (0: ≤ 0.35, 1: ≤ 0.9, 2: ≤ 1.0;
     /// `sub_EE1710` → 0x717B70, `sub_55EAE0` 0x55ED93; RE/24 INPUT-12).
     pub band: u8,
+    /// Interpreter +0x1244: the signed angle from the stick to the facing, written only while the stick is past 0.35
+    /// (`ReadInput` 0xEEE250 → 0xEEE2F3): with the stick released it keeps the last value (RE/24 WALL-13).
+    pub stick_facing_angle: f32,
     pub band_prev: u8,
     /// The camera yaw `dir` was built with (camera manager +0xE0): the live yaw, or the one before a camera cut while
     /// the input latch holds. `None`: the live `CameraRig` yaw (scripted tests).

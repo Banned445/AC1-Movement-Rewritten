@@ -535,16 +535,16 @@ pub fn update_walling(
         // The interpreter's walling state (0xEE05E0) sets the input direction (+0x20, `SetInputDirection` 0xE36250)
         // only while Legs was pressed within 0.3 s (interp +0x1126): straight back from the wall when the stick points
         // within 50° of the facing, else along the stick; zero otherwise. It always sends command 0 (+0x38,
-        // `SetActionCommand` 0xE337D0): the player's wall run never falls off by command. PORT: a neutral stick pushes
-        // straight back (the game keeps the last stick angle).
+        // `SetActionCommand` 0xE337D0): the player's wall run never falls off by command. The angle is +0x1244, written
+        // only while the stick is past 0.35, so with the stick released the last angle decides: within 50° straight back,
+        // else the (near-)zero stick, which starts no rebound (0xE3930A / 0xE376EB: |dir| ≤ 0.0005) (RE/24 WALL-13).
         let push = pad.jump_buffered().then(|| {
-            let stick = Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or_zero();
-            if pad.speed01 <= 0.0 || stick == Vec3::ZERO || stick.angle_between(facing) < PUSH_STRAIGHT_BACK {
+            if pad.stick_facing_angle.abs() < PUSH_STRAIGHT_BACK {
                 normal
             } else {
-                stick
+                Vec3::new(pad.dir.x, 0.0, pad.dir.z) * pad.magnitude.min(1.0)
             }
-        });
+        }).filter(|d| d.length() > 0.0005);
         // A ladder beside the wall (the interpreter's first test, 0xEE05E0 → IHumanWalling slots 7 / 8): taken at the end of a
         // Vertical step with the stick toward it; it comes before the push-off.
         if sub == WallingSubState::Vertical && done && pad.speed01 > 0.0 {
@@ -562,13 +562,18 @@ pub fn update_walling(
         if let Some(push) = push.filter(|_| rebound) {
             pad.consume_jump();
             let from = body.feet;
-            let (dir, target) = rebound_jump(from, normal, push, &guidance, &collision);
-            if let Some(c) = camera.as_mut() {
-                // ActorState 67 (CameraReset)
-                c.reset = true;
+            // the foot: the playing item's word bits 2–3 (0xE36660, 1 = left ahead; RE/24 WALL-11)
+            let foot_left = w.current().and_then(|(a, _)| super::anim_gate::word(&a)).is_none_or(|word| (word >> 2) & 3 != 2);
+            let (dir, target, fallback) = rebound_jump(from, normal, push, &guidance, &collision);
+            if fallback {
+                if let Some(c) = camera.as_mut() {
+                    // ActorState 67 (CameraReset) only with the fallback target (0xE368D9, RE/24 WALL-12)
+                    c.reset = true;
+                }
             }
             body.heading = super::heading_of(dir);
-            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
+            // PORT: the kind-0 takeoff until jump kind 2 (the rebound takeoff 0x01157C6B / C, RE/24 WALL-10 / AIR-5)
+            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left }));
             continue;
         }
         if !done {
@@ -611,8 +616,10 @@ pub fn update_walling(
 /// `HumanWalling__ReboundJump` 0xE365C0: the character turns away from the wall; the push-off direction is kept within
 /// ±89° of the wall normal (beyond ±90° it is turned to ±89°). A jump target along it (IHuman vt56, the ground jumps'
 /// guidance search, picked by `sub_E96BF0`), else the fallback pos + 7·dir − 3·up; jump `sub_B27180`(…, 2), flag +0x31,
-/// ActorState 67 (camera reset). Returns the direction and the target. PORT: the target search is `find_jump_target`.
-fn rebound_jump(from: Vec3, normal: Vec3, push: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> (Vec3, JumpTarget) {
+/// ActorState 67 (camera reset, fallback only). The scorer sees the character turned away from the wall (facing = the
+/// normal) and the clamped push as the wanted direction (0xE367CC, RE/24 WALL-11). Returns the direction, the target and
+/// whether it is the fallback.
+fn rebound_jump(from: Vec3, normal: Vec3, push: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> (Vec3, JumpTarget, bool) {
     let n = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
     let mut dir = Vec3::new(push.x, 0.0, push.z).normalize_or(n);
     if dir.dot(n) <= 0.0 {
@@ -620,15 +627,11 @@ fn rebound_jump(from: Vec3, normal: Vec3, push: Vec3, guidance: &GuidanceWorld, 
         let side = if n.cross(dir).y >= 0.0 { 1.0 } else { -1.0 };
         dir = Quat::from_rotation_y(max * side) * n;
     }
-    let target = super::targets::find_jump_target(from, dir, guidance, collision).unwrap_or(JumpTarget {
-        position: from + dir * 7.0 - Vec3::Y * 3.0,
-        type_flags: jump_blend::TARGET_FREESTEP,
-        hang: None,
-        straight: None,
-        pass: None,
-        ladder: None,
-    });
-    (dir, target)
+    let found = super::targets::find_target(from, n, dir, &super::jump_candidates::Query::TAP, false, guidance, collision);
+    match found {
+        Some(t) => (dir, t, false),
+        None => (dir, JumpTarget { position: from + dir * 7.0 - Vec3::Y * 3.0, type_flags: jump_blend::TARGET_FREESTEP, hang: None, straight: None, pass: None, ladder: None }, true),
+    }
 }
 
 #[cfg(test)]

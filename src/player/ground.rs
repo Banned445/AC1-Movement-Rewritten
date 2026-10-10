@@ -1045,6 +1045,40 @@ pub fn update_ground(
             }
         }
 
+        // The interpreter tests the ground ladder (0xEE7147) and the empty-hand climb start (0xEE7255) before the wall-run
+        // press (0xEE78C9) and the held start (0xEE7E50) (RE/24 WALL-16).
+        // ---------------------------------------------------------------- ladder (event 38)
+        // Guard `sub_B239D0` (0xD83970): a ladder within reach, the character on its front within 90°; the entry from
+        // the top within 1.5 m of it. PORT triggers (event 38's sender is not traced): walking into the ladder's foot
+        // facing it; from the top, low profile + Legs at its top facing out over it.
+        {
+            let top_req = !g.high_profile && pad.jump_buffered();
+            if (moving || top_req) && !busy && ab.allows(Ability::Ladder) {
+                if let Some((base, top, n, from_top)) = super::ladder::find_ladder(body.feet, body.forward(), 0.8, &guidance) {
+                    if from_top == top_req {
+                        if from_top {
+                            pad.consume_jump();
+                        }
+                        let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None, ..Default::default() };
+                        switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- climb / grab requests
+        // Climbing from the ground is the empty-hand press (0xEE7255: the Climb ability, `Pad__JustPressed(3)` ->
+        // IHumanGround vt840 = CanHandleEvent(50) -> vt844, event 50 -> the Climb context, fill 0xD83950; RE/02 4.7).
+        let forward = body.forward();
+        if pad.hand_just_pressed() && ab.allows(Ability::Climb) {
+            // leading foot (Human__GetLeadingFoot 0xB18850): the playing locomotion item, footl = left ahead
+            if let Some(entry) = climb_start_entry(body.feet, forward, g.blend.foot != 0, &guidance) {
+                pad.consume_hand();
+                switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
+                continue;
+            }
+        }
         // ---------------------------------------------------------------- wall run (Walling, event 49)
         // Input handler 0xEE65A0 (tested before the jumps and the grab): high profile, Legs pressed, the stick
         // pushed within 45° of the facing (> 0.35), ability Walling, and IHumanGround vt112 = event 49's guard
@@ -1098,38 +1132,6 @@ pub fn update_ground(
             }
         }
 
-        // ---------------------------------------------------------------- ladder (event 38)
-        // Guard `sub_B239D0` (0xD83970): a ladder within reach, the character on its front within 90°; the entry from
-        // the top within 1.5 m of it. PORT triggers (event 38's sender is not traced): walking into the ladder's foot
-        // facing it; from the top, low profile + Legs at its top facing out over it.
-        {
-            let top_req = !g.high_profile && pad.jump_buffered();
-            if (moving || top_req) && !busy && ab.allows(Ability::Ladder) {
-                if let Some((base, top, n, from_top)) = super::ladder::find_ladder(body.feet, body.forward(), 0.8, &guidance) {
-                    if from_top == top_req {
-                        if from_top {
-                            pad.consume_jump();
-                        }
-                        let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None, ..Default::default() };
-                        switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // ---------------------------------------------------------------- climb / grab requests
-        // Climbing from the ground is the empty-hand press (0xEE7255: the Climb ability, `Pad__JustPressed(3)` ->
-        // IHumanGround vt840 = CanHandleEvent(50) -> vt844, event 50 -> the Climb context, fill 0xD83950; RE/02 4.7).
-        let forward = body.forward();
-        if pad.hand_just_pressed() && ab.allows(Ability::Climb) {
-            // leading foot (Human__GetLeadingFoot 0xB18850): the playing locomotion item, footl = left ahead
-            if let Some(entry) = climb_start_entry(body.feet, forward, g.blend.foot != 0, &guidance) {
-                pad.consume_hand();
-                switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
-                continue;
-            }
-        }
         // ---------------------------------------------------------------- ledge stop (event 69 / sub-state 38)
         if let Some(ls) = g.ledge_stop {
             // pull-down EdgeStop (LedgeStop_HandleEvent 0xDA4D90, event 70). Sender (0xEE8977–0xEE89AF): in the ledge

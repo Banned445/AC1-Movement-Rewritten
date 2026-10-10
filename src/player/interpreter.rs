@@ -139,6 +139,13 @@ pub fn update_interpreter(
     // a new frame: a switch made last frame no longer skips anything (`AIActor__UpdateContexts` 0x55F6A9 cleared the
     // byte right after the update that switched; RE/24 INPUT-1)
     loco.switched_this_frame = false;
+    // +0x1244 (0xEEE250): the stick's angle to the facing, only while the stick is past 0.35
+    if pad.magnitude > 0.35 {
+        let (s, f) = (Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or_zero(), body.forward());
+        if s != Vec3::ZERO {
+            pad.stick_facing_angle = s.cross(f).y.atan2(s.dot(f));
+        }
+    }
 
     // the state machine follows the locomotion context; the enter functions' input side effects (RE/24 INPUT-3)
     if it.ctx != Some(loco.current) {
