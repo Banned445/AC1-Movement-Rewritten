@@ -99,20 +99,24 @@ fn start_loading(mut s: ResMut<Sounds>) {
     s.loading = Some(slot);
 }
 
-/// The switch values the port knows.
-/// PORT: none yet. Switch 0 is the surface material (ContactTable_AlTair groups the contact sounds by the same 0..22
-/// material ids the footstep events switch on); the others (1, 3, 4, 5, 10..16) are not identified. The game reads
-/// them from the sound object type's callback (`dword_1A16DD8 + 188 * type + 16`), registered at runtime.
+/// The switch values the port knows: 0 = the surface's sound material (CollisionMaterial +8 under the player; the
+/// ContactTable groups the contact sounds by the same ids).
+/// PORT: the other switches (1, 3, 4, 5, 10..16) are not identified; their default event plays. The game reads every
+/// switch from the sound object type's callback (`dword_1A16DD8 + 188 * type + 16`), registered at runtime.
 /// LIVE: read that table in the running game to find the callback and the values it returns.
-fn switch_value(_var: u32) -> Option<u32> {
-    None
+fn switch_value(var: u32, material: Option<u16>) -> Option<u32> {
+    match var {
+        0 => material.map(u32::from),
+        _ => None,
+    }
 }
 
 fn play_anim_sounds(
     mut commands: Commands,
     mut s: ResMut<Sounds>,
     mut clips: ResMut<Assets<PcmClip>>,
-    players: Query<&AnimPlayer>,
+    players: Query<(&AnimPlayer, &GlobalTransform)>,
+    collision: Res<crate::collision::CollisionWorld>,
 ) {
     if let Some(slot) = s.loading.clone() {
         let done = slot.lock().unwrap().take();
@@ -133,7 +137,13 @@ fn play_anim_sounds(
     if !s.enabled {
         return;
     }
-    for p in &players {
+    for (p, at) in &players {
+        if p.events.is_empty() {
+            continue;
+        }
+        // the surface under the feet (the rig root stands on the ground)
+        let material = collision.material_below(at.translation() + Vec3::Y * 0.3, 1.5);
+        let switch = |var| switch_value(var, material);
         for e in &p.events {
             let event = match e.kind {
                 EventKind::Audio { sound } => bank.event_for_resource(sound),
@@ -141,8 +151,8 @@ fn play_anim_sounds(
                 EventKind::Other(_) => None,
             };
             let Some(event) = event else { continue };
-            let voices = bank.resolve(event, &switch_value, &mut s.picker);
-            debug!("sound: {} t={:.3} event {event:08x} -> {} voice(s)", e.clip, e.time, voices.len());
+            let voices = bank.resolve(event, &switch, &mut s.picker);
+            debug!("sound: {} t={:.3} event {event:08x} material {material:?} -> {} voice(s)", e.clip, e.time, voices.len());
             for v in voices {
                 let Some(handle) = clip_for(&mut s, &bank, &mut clips, &v) else { continue };
                 commands.spawn((

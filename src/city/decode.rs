@@ -267,9 +267,14 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
         let rb = Mat4::from_cols_array(&m);
         if !rb.is_finite() || m[3] != 0.0 || m[7] != 0.0 || m[11] != 0.0 || m[15] != 1.0 { return Err("collision: invalid rigid-body matrix".into()); }
         let world = transform * rb;
-        for t in mesh.indices.chunks_exact(3) {
+        let mut sound = std::collections::HashMap::new();
+        for (k, t) in mesh.indices.chunks_exact(3).enumerate() {
+            let id = mesh.materials.get(k).copied().unwrap_or(0);
+            let material = *sound.entry(id).or_insert_with(|| {
+                (id != 0).then(|| data.archives.get(id).ok()).flatten().and_then(|r| crate::assets::static_mesh::collision_material_sound(r.class_hash, &r.payload))
+            });
             let v = [0, 1, 2].map(|k| world.transform_point3(mesh.vertices[t[k] as usize]));
-            if let Some(t) = Triangle::new(v, layer) { o.collision.push(t); }
+            if let Some(t) = Triangle::new(v, layer) { o.collision.push(t.with_material(material)); }
         }
     }
     // --- guidance
