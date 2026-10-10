@@ -109,7 +109,9 @@ pub fn obstacle_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> 
     (height >= 0.5).then_some((Vec3::new(c.x, feet.y, c.z), n, height))
 }
 
-/// `HumanGround__ObstacleCollision_Enter` 0xD9CB90.
+/// `HumanGround__ObstacleCollision_Enter` 0xD9CB90. The game also turns the step offset off
+/// (`CharacterController__SetStepOffsetEnabled(0)`, RE/24 GUIDE-20); the port's state moves the root by its warp and never
+/// runs the capsule, so there is nothing to switch.
 #[allow(dead_code)]
 pub fn enter(feet: Vec3, heading: f32, contact: Vec3, n: Vec3, height: f32, seq: u32) -> Option<Collide> {
     let (kind, lo, hi, id) = if height >= 0.7 * H { (CollideKind::Hand, 0.7 * H, 1.5 * H, COLLIDE_HAND) } else { (CollideKind::Foot, 0.5 * H, 0.7 * H, COLLIDE_FOOT) };

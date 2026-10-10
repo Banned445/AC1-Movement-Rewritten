@@ -237,9 +237,11 @@ fn hand_mid(d: &HumanLedgeData) -> Vec3 {
 }
 
 /// The ray part of `sub_11718B0` (a wall support for a foot): from `centre` + `up`·z, `half_depth` m out from the wall,
-/// a ray of 2·`half_depth` toward it. PORT: the game takes only bodies flagged as foot surfaces (0x10000000; none for
-/// those `sub_E1C1F0` rejects) and falls back to Surface guidance edges facing within 45° (sliced every `step`); the
-/// port's static collision counts as support everywhere and the fallback is not searched.
+/// a ray of 2·`half_depth` toward it, on layer 43 (`sub_11718B0`). A hit on a body owned by a component (flag
+/// 0x10000000, the same tag `ContactManager__GroundMaterial` 0x55A580 tests) is a support, which is all the port's
+/// static collision; a hit on a FuzzyZone layer (24 / 26 / 25 / 33 / 41, `sub_E1C1F0`) aborts with no support (fuzzy
+/// zones are not imported). PORT: only a miss or an unowned body falls back to Surface guidance edges facing within 45°
+/// (sliced every `step`), which is not searched (RE/24 GUIDE-12).
 pub fn support_ray(centre: Vec3, n: Vec3, half_depth: f32, z: f32, collision: &CollisionWorld) -> bool {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let start = centre + Vec3::Y * z - facing * half_depth;
