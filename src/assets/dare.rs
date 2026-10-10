@@ -148,8 +148,8 @@ impl SoundBank {
                 let (Some(var), Some(default), Some(n)) = (u32_at(o, 0x10), u32_at(o, 0x14), u32_at(o, 0x1C)) else { return };
                 let cases: Vec<(u32, u32)> =
                     (0..n as usize).filter_map(|j| Some((u32_at(o, 0x68 + 12 * j)?, u32_at(o, 0x68 + 12 * j + 8)?))).collect();
-                // PORT: the port has no switch values yet (surface material etc.); without one the default plays,
-                // or the first case when there is no default.
+                // no value for this switch (the port knows switch 0, the surface material): the default plays.
+                // PORT: the first case when there is no default.
                 let chosen = switch(var)
                     .and_then(|v| cases.iter().find(|c| c.1 == v).map(|c| c.0))
                     .or_else(|| self.objects.contains_key(&default).then_some(default))

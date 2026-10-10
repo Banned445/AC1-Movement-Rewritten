@@ -155,6 +155,7 @@ fn play_anim_sounds(
             debug!("sound: {} t={:.3} event {event:08x} material {material:?} -> {} voice(s)", e.clip, e.time, voices.len());
             for v in voices {
                 let Some(handle) = clip_for(&mut s, &bank, &mut clips, &v) else { continue };
+                // PORT: played at the listener (non-spatial); the play event's 3D parameters (+0x20..) are not applied
                 commands.spawn((
                     AudioPlayer::<PcmClip>(handle),
                     PlaybackSettings::DESPAWN.with_volume(Volume::Decibels(v.gain_db)).with_speed(v.speed),
