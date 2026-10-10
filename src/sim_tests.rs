@@ -335,6 +335,52 @@ fn a_light_stick_push_still_climbs_with_long_moves() {
     assert!(used_long, "no LONG move with a light push: {:?}", s.data().climb.move_action);
 }
 
+/// Start climbing the tower from the ground and let the entry finish.
+fn climbing_the_tower() -> Sim {
+    let mut s = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand();
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb), "did not start climbing");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().climb.moving.is_none()), "the entry never ended");
+    s
+}
+
+/// RE/24 CLIMB-7: the jump off the climb plays the rebound (0x011FFC1A) in place first, then jumps facing away.
+#[test]
+fn the_jump_off_the_climb_plays_the_rebound_first() {
+    use crate::player::ledge_moves::REBOUND;
+    let mut s = climbing_the_tower();
+    let at = s.body().feet;
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.press_legs();
+    assert!(s.run_until(0.2, |s| s.data().climb.rebound.is_some()), "no rebound");
+    assert_eq!(s.data().climb.move_action, Some(REBOUND[0]));
+    s.run(0.05);
+    assert_eq!(s.loco().current, ActorContextId::Climb, "still on the wall during the rebound");
+    assert!((s.body().feet - at).length() < 1e-3, "the root holds during the rebound");
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::InAir), "never jumped");
+    assert!(s.body().forward().z < -0.9, "facing away from the wall: {:?}", s.body().forward());
+}
+
+/// RE/24 CLIMB-6: the empty hand releases with the lost-grip fall (0x1120E17B, the hold the root + 1.2 m up), also
+/// mid-move during a grid move (+4620).
+#[test]
+fn the_climb_release_is_the_lost_grip_fall_and_works_mid_move() {
+    use crate::player::climb::LOST_GRIP;
+    let mut s = climbing_the_tower();
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().climb.moving.is_some() && s.data().climb.grid_move), "no grid move");
+    let root = s.body().feet;
+    s.press_hand();
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.loco().current, ActorContextId::InAir, "released mid-move");
+    assert!(s.data().air.fall_action.is_some_and(|a| a.id == LOST_GRIP), "the lost-grip fall action");
+    let hold = s.data().air.release_hold.expect("a released hold");
+    assert!((hold.y - (root.y + 1.2)).abs() < 0.1, "the hold 1.2 m above the root: {hold:?} root {root:?}");
+}
+
 #[test]
 fn a_hang_over_climb_holds_climbs_back_down_with_the_transition_clip() {
     // hang from the tower's top edge (9.6 m), then push down: TryTransitionToClimb 0xDD46A0 with the down table

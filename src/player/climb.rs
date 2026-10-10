@@ -308,6 +308,11 @@ pub struct HumanClimbData {
     pub tilt_from: Quat,
     pub last_action: &'static str,
     pub moving: Option<RootInterp>,
+    /// HumanClimb+4620: set by `ChooseMove` for grid moves and corner climbs (0xDFE321 / 0xDFE443); while it is set the
+    /// release (event 3) and the jump (event 2) are accepted mid-move (RE/24 CLIMB-6 / CLIMB-7).
+    pub grid_move: bool,
+    /// The jump off's stored target while the rebound plays (state 5, `HumanClimb__EnterKnockedOff` 0xDEA500, misnamed).
+    pub rebound: Option<InAirEntry>,
     /// Action (animation graph id) of the running grid move, from the SHORT/LONG table entry.
     pub move_action: Option<u32>,
     /// Incremented per grid move (restarts the move clip).
@@ -352,6 +357,8 @@ impl ClimbReach {
 
 impl HumanClimbData {
     pub fn enter(&mut self, e: ClimbEntry) {
+        self.grid_move = false;
+        self.rebound = None;
         if e.entry_type == ClimbEntryType::FromGround {
             self.enter_from_ground(e);
             return;
@@ -934,6 +941,7 @@ fn start_corner_climb(d: &mut HumanClimbData, heading: f32, feet: Vec3, (f, h, _
     d.set_frame();
     d.turn = Some((heading, heading_of(-d.normal)));
     d.moving = Some(RootInterp::new(feet, d.frame.root, move_time(Some(id))));
+    d.grid_move = true;
     d.last_action = label;
 }
 
@@ -1171,6 +1179,42 @@ pub fn update_climb(
         // a moving limb lands on its new hold a little before the root settles
         limbs.transit = d.moving.map(|m| m.duration).unwrap_or(CLIMB_MOVE_TIME) * 0.8;
 
+        // the interpreter's climb state (`GoAssassinActionInterpreter__ClimbState` 0xEE5EB0): in Wait, and mid-move during a
+        // grid move or corner climb (+4620, guards 0xDF926B / 0xDF92B3 / 0xDF9129)
+        if d.rebound.is_none() && (d.moving.is_none() || d.grid_move) {
+            // the empty-hand buffer → event 3 → `HumanClimb__FillInAirData_LostGrip` 0xDF3300: the lost-grip fall action
+            // 0x1120E17B (blend 0.2), the released hold the root + 1.2 m up (InAirData+400, RE/24 CLIMB-6)
+            if pad.hand_buffered() {
+                pad.consume_hand();
+                limbs.hands = None;
+                limbs.feet = None;
+                d.moving = None;
+                d.grid_move = false;
+                let hold = body.feet + Vec3::Y * 1.2;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Climb, speed_param: 0.0 }));
+                data.air.fall_action = super::ledge_moves::single_item(LOST_GRIP, 0);
+                data.air.release_hold = Some(hold);
+                continue;
+            }
+            // high profile with the Legs buffer → event 2 (`sub_DF9BE0` / `sub_DEA560`): the target stored, state 5, the
+            // rebound `xx_h_hangwall_tr_rebound_footl` (0x011FFC1A, locked) in place, then the jump when it is done
+            // (`StateKnockedOff_Update` 0xDEE840 → fill `sub_DEAE30`, RE/24 CLIMB-7). PORT: the kind-0 takeoff until AIR-5.
+            if pad.high_profile && pad.jump_buffered() {
+                if let Some(jd) = super::targets::jump_off_wall_dir((pad.speed01 > 0.0).then_some(pad.dir_snap), n) {
+                    pad.consume_jump();
+                    let id = super::ledge_moves::REBOUND[0];
+                    d.rebound = Some(super::targets::jump_off_wall_entry(body.feet, jd, &guidance, &collision));
+                    d.grid_move = false;
+                    d.turn = None;
+                    d.move_action = Some(id);
+                    d.move_seq += 1;
+                    d.moving = Some(RootInterp::new(body.feet, body.feet, move_time(Some(id))));
+                    d.last_action = "rebound";
+                    continue;
+                }
+            }
+        }
+
         // Move state: advance the root interpolation (StateMove_Update 0xDF5990); the root's pitch turns with it
         if let Some(m) = d.moving.as_mut() {
             d.settle = None;
@@ -1183,6 +1227,15 @@ pub fn update_climb(
             if m.done() {
                 d.moving = None;
                 d.turn = None;
+                d.grid_move = false;
+                if let Some(entry) = d.rebound.take() {
+                    // the rebound done: face away from the wall and jump at the stored target (presentation event 67)
+                    limbs.hands = None;
+                    limbs.feet = None;
+                    body.heading = heading_of(n);
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry.starting_at(body.feet)));
+                    continue;
+                }
                 if let Some(r) = d.reach.as_mut() {
                     if r.stage == 0 {
                         // the start is done (State3_Update 0xDF5A70 → StartReachLoop 0xDEEE60): the loop, the limbs onto
@@ -1241,29 +1294,6 @@ pub fn update_climb(
             *t -= dt;
             if *t <= 0.0 {
                 d.settle = None;
-            }
-        }
-        // the interpreter's climb state (`GoAssassinActionInterpreter__ClimbState` 0xEE5EB0, RE/03 7.12): the
-        // empty-hand buffer releases (event 4 -> `HumanClimb__EnterState7_A`; StartRelease 0xDE96A0 -> InAir,
-        // FallOrigin_Climb) ...
-        if pad.hand_buffered() {
-            pad.consume_hand();
-            limbs.hands = None;
-            limbs.feet = None;
-            let hold = (d.hand_l + d.hand_r) * 0.5;
-            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Climb, speed_param: 0.0 }));
-            data.air.release_hold = Some(hold);
-            continue;
-        }
-        // ... and high profile with the Legs buffer jumps off (event 2, the ledge rule; verified live)
-        if pad.high_profile && pad.jump_buffered() {
-            if let Some(jd) = super::targets::jump_off_wall_dir((pad.speed01 > 0.0).then_some(pad.dir_snap), n) {
-                pad.consume_jump();
-                limbs.hands = None;
-                limbs.feet = None;
-                let entry = super::targets::jump_off_wall_entry(body.feet, jd, &guidance, &collision);
-                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
-                continue;
             }
         }
         if pad.speed01 <= 0.0 {
@@ -1342,6 +1372,7 @@ pub fn update_climb(
             d.tilt_from = d.frame.tilt();
             d.set_frame();
             d.moving = Some(RootInterp::new(body.feet, d.frame.root, move_time(d.move_action)));
+            d.grid_move = true;
             d.last_action = match dir {
                 0 | 1 => "climb up",
                 2 | 3 => "climb down",
