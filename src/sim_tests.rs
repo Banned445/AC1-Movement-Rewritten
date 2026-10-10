@@ -319,6 +319,22 @@ fn climb_tower_to_the_top_and_pull_up() {
     assert!(f.z > 27.0, "should be on the roof, feet {f:?}");
 }
 
+/// RE/24 CLIMB-2: the player always tries the LONG table first (ClimbData+0x30 = 1.0 every frame, 0xEE60E6), so a light
+/// stick push (0.45, under the old 0.5 threshold) still climbs with LONG moves.
+#[test]
+fn a_light_stick_push_still_climbs_with_long_moves() {
+    use crate::player::climb::LONG_ACTIONS;
+    let mut s = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand();
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb), "did not start climbing");
+    s.pad(Vec3::Z, 0.45, true, false);
+    let long: Vec<u32> = LONG_ACTIONS.iter().flatten().copied().filter(|&a| a != 0 && a != u32::MAX).collect();
+    let used_long = s.run_until(6.0, |s| s.data().climb.move_action.is_some_and(|a| long.contains(&a)));
+    assert!(used_long, "no LONG move with a light push: {:?}", s.data().climb.move_action);
+}
+
 #[test]
 fn a_hang_over_climb_holds_climbs_back_down_with_the_transition_clip() {
     // hang from the tower's top edge (9.6 m), then push down: TryTransitionToClimb 0xDD46A0 with the down table

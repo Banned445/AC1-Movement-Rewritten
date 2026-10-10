@@ -956,6 +956,33 @@ fn wrap_angle(a: f32) -> f32 {
 /// `HumanClimb__LeanAngleInFacingPlane` 0xDF2CD0: `a` and `b` projected onto the vertical plane through the root along
 /// the facing, then the signed angle (about the facing's right) from up to lower → higher. Positive = leaning out
 /// (toward the climber's back).
+/// `sub_DF47E0` 0xDF47E0, the lean guard of `ChooseMove` (RE/24 CLIMB-3): true refuses the move. Never when the next pose is
+/// 0 or 3. Up dirs (0, 1, 6, 7): the hands' lean (`LeanAngleInFacingPlane` 0xDF2CD0) may not drop by more than 30° with
+/// the new one clamped to [0, 45°]; down dirs (2, 3, 8, 9): the feet's, with the current one clamped instead. The new
+/// holds are the moving sides' targets, the others stay.
+fn lean_guard(d: &HumanClimbData, sides: &[Option<(Hold, Hold)>; 2], dir: usize, next_pose: usize) -> bool {
+    if next_pose == 0 || next_pose == 3 {
+        return false;
+    }
+    let facing = -Vec3::new(d.normal.x, 0.0, d.normal.z).normalize_or(Vec3::Z);
+    let pick = |i: usize, hand: bool, cur: Vec3| sides[i].map(|(f, h)| if hand { h.pos } else { f.pos }).unwrap_or(cur);
+    let quarter = std::f32::consts::FRAC_PI_4;
+    let limit = -30f32.to_radians();
+    match dir {
+        0 | 1 | 6 | 7 => {
+            let cur = lean_angle(d.hand_l, d.hand_r, facing);
+            let new = lean_angle(pick(0, true, d.hand_l), pick(1, true, d.hand_r), facing).clamp(0.0, quarter);
+            new - cur < limit
+        }
+        2 | 3 | 8 | 9 => {
+            let cur = lean_angle(d.foot_l, d.foot_r, facing).clamp(0.0, quarter);
+            let new = lean_angle(pick(0, false, d.foot_l), pick(1, false, d.foot_r), facing);
+            cur - new < limit
+        }
+        _ => false,
+    }
+}
+
 fn lean_angle(a: Vec3, b: Vec3, facing: Vec3) -> f32 {
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
     let side = right_of(f);
@@ -1269,11 +1296,13 @@ pub fn update_climb(
         let grid = HoldGrid::build(&guidance, d, body.feet, facing);
         // ChooseMove 0xDFDE90: LONG first when the stick is pushed hard, then SHORT
         let mut chosen = None;
-        if pad.magnitude > CLIMB_LONG_STICK {
-            chosen = lookup(&LONG, d.pose, dir).and_then(|m| try_move_clear(&grid, d, &collision, m, true).map(|r| (r, m, LONG_ACTIONS[d.pose][resolve_dir(&LONG, d.pose, dir)])));
-        }
+        // the player's interpreter writes ClimbData+0x30 = 1.0 every frame (0xEE60E6 `fld1` → vt4), so `ChooseMove`
+        // 0xDFE109 always tries the LONG table first (RE/24 CLIMB-2); LONG moves pass the lean guard (0xDFE171, CLIMB-3)
+        chosen = lookup(&LONG, d.pose, dir).and_then(|m| try_move_clear(&grid, d, &collision, m, true).filter(|(next, sides)| !lean_guard(d, sides, dir, *next)).map(|r| (r, m, LONG_ACTIONS[d.pose][resolve_dir(&LONG, d.pose, dir)])));
         if chosen.is_none() {
-            chosen = lookup(&SHORT, d.pose, dir).and_then(|m| try_move_clear(&grid, d, &collision, m, false).map(|r| (r, m, SHORT_ACTIONS[d.pose][resolve_dir(&SHORT, d.pose, dir)])));
+            // SHORT down moves (dirs 2 / 3 / 8 / 9) pass the lean guard too (0xDFE291)
+            chosen = lookup(&SHORT, d.pose, dir)
+                .and_then(|m| try_move_clear(&grid, d, &collision, m, false).filter(|(next, sides)| !(matches!(dir, 2 | 3 | 8 | 9) && lean_guard(d, sides, dir, *next))).map(|r| (r, m, SHORT_ACTIONS[d.pose][resolve_dir(&SHORT, d.pose, dir)])));
             // a valid SHORT move up onto holds that stick out: hang from them instead (TryTransitionToLedgeHang 0xDF4BA0,
             // ChooseMove step 4; 4613 + 2920 → the Ledge context, fill sub_DEEAC0)
             if let Some(((_, sides), _, _)) = chosen {
@@ -1528,5 +1557,33 @@ pub fn update_climb(
         // OnNoMoveFound 0xDF4410: look around toward the stick
         d.last_action = "blocked";
         d.look = Some(look_around(dir));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hold(pos: Vec3) -> Hold {
+        Hold { pos, normal: Vec3::NEG_Z, edge: 0, centred: true, kind: 0 }
+    }
+
+    /// RE/24 CLIMB-3: `sub_DF47E0` refuses an up move whose hands' lean (in the facing plane) drops by more than 30°
+    /// (the new lean clamped to [0, 45°]); a move that keeps it, or a next pose 0 / 3, passes.
+    #[test]
+    fn the_lean_guard_refuses_a_move_that_drops_the_hands_lean() {
+        // facing +Z (wall normal -Z): hands on a 45-degree slope, one 1 m higher and 1 m further out
+        let lean_hands = |s: f32| (Vec3::new(-0.2, 1.0, 0.0), Vec3::new(0.2, 2.0, s));
+        let pos_side = [-1.0f32, 1.0].into_iter().find(|&s| { let (a, b) = lean_hands(s); lean_angle(a, b, Vec3::Z) > 0.7 }).expect("one slope leans +45°");
+        let (hl, hr) = lean_hands(pos_side);
+        let d = HumanClimbData { hand_l: hl, hand_r: hr, normal: Vec3::NEG_Z, ..Default::default() };
+        // both hands onto vertically stacked holds (lean 0): a drop of 45° → refused
+        let flat = [Some((hold(Vec3::new(-0.2, 0.5, 0.0)), hold(Vec3::new(-0.2, 2.2, 0.0)))), Some((hold(Vec3::new(0.2, 0.5, 0.0)), hold(Vec3::new(0.2, 2.6, 0.0))))];
+        assert!(lean_guard(&d, &flat, 0, 1), "a 45-degree drop is refused");
+        assert!(!lean_guard(&d, &flat, 0, 0) && !lean_guard(&d, &flat, 0, 3), "next pose 0 / 3: no guard");
+        assert!(!lean_guard(&d, &flat, 4, 1), "sideways moves are not guarded");
+        // keeping the lean passes
+        let same = [Some((hold(Vec3::new(-0.2, 0.5, 0.0)), hold(hl + Vec3::Y * 0.6))), Some((hold(Vec3::new(0.2, 0.5, 0.0)), hold(hr + Vec3::Y * 0.6)))];
+        assert!(!lean_guard(&d, &same, 0, 1), "the same lean passes");
     }
 }

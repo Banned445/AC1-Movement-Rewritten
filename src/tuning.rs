@@ -192,7 +192,9 @@ pub const CLIMB_PROBE_BACK: f32 = 0.2;
 pub const CLIMB_PROBE_STEP: f32 = 0.1;
 /// PORT (lost-grip check, 0xDFE7F0 → sub_E55A10): a climb hold counts as present while a grab edge lies within this.
 pub const CLIMB_HOLD_TOL: f32 = 0.1;
-/// Stick magnitude above which the LONG move table is tried first. ChooseMove 0xDFDE90
+/// `ChooseMove` 0xDFDE90 tries the LONG table first when ClimbData+0x2C > 0.5. The player's interpreter writes 1.0 there every
+/// frame (0xEE60E6), so the player always tries it (RE/24 CLIMB-2); kept for an AI writer, unused by the player.
+#[allow(dead_code)]
 pub const CLIMB_LONG_STICK: f32 = 0.5;
 /// Climb move duration = the game move clips xx_l_climb_* (0.533 s; StartMove 0xDFA0C0 uses the clip length, 0.5 s without one).
 pub const CLIMB_MOVE_TIME: f32 = 0.533;
