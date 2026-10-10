@@ -36,6 +36,8 @@ pub struct PadInput {
     /// The right stick (camera), after the dead zone: arrows or a gamepad's right stick. The mouse delta goes to the
     /// camera directly (0x90A780: the mouse is the right stick's raw counts when no arrow key is down).
     pub cam_stick: Vec2,
+    /// The movement stick after the dead zone (pad stick 0; the climb camera reads it, 0xC5E370).
+    pub stick: Vec2,
 }
 
 impl PadInput {
@@ -174,6 +176,7 @@ pub fn read_pad(
     pad.hand_held = buttons[3];
     pad.buttons = buttons;
     pad.cam_stick = cam;
+    pad.stick = stick;
     if just[0] {
         pad.legs_pressed_ago = 0.0;
     } else {
