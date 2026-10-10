@@ -55,6 +55,9 @@ pub struct PadInput {
     /// `sub_EE1710` → 0x717B70, `sub_55EAE0` 0x55ED93; RE/24 INPUT-12).
     pub band: u8,
     pub band_prev: u8,
+    /// The camera yaw `dir` was built with (camera manager +0xE0): the live yaw, or the one before a camera cut while
+    /// the input latch holds. `None`: the live `CameraRig` yaw (scripted tests).
+    pub input_yaw: Option<f32>,
 }
 
 impl PadInput {
@@ -110,6 +113,45 @@ fn raw_gamepad_axes(mut pads: Query<&mut GamepadSettings, Added<GamepadSettings>
     }
 }
 
+/// The camera manager's input latch after a camera cut (+0xD4, +0xE0 the input orientation, +0xF0 the stored stick).
+#[derive(Default)]
+pub struct CutLatch {
+    on: bool,
+    yaw: Option<f32>,
+    stick: Vec2,
+}
+
+impl CutLatch {
+    /// The yaw the stick is turned by this frame. A cut latches the yaw of the camera before it (`sub_4BC360`); the
+    /// latch drops when the stick's direction changes by more than acos 0.9 or it is released (`sub_4BFD80`:
+    /// 0x4BFE80), or when the live camera's yaw comes within 0.1 rad of the latched one (`sub_4BF7A0` 0x4BF893;
+    /// `Quat__ToAngles` 0x4BCB10's third angle, 2(wz + xy), is the rotation about the game's up axis).
+    pub fn update(&mut self, cut: bool, live_yaw: f32, stick: Vec2) -> f32 {
+        if cut {
+            self.on = true;
+        }
+        if stick.length_squared() > 0.0005 * 0.0005 {
+            if self.stick.normalize_or_zero().dot(stick.normalize_or_zero()) <= 0.9 {
+                self.on = false;
+            }
+            if !self.on {
+                self.stick = stick;
+            }
+        } else {
+            self.on = false;
+            self.stick = Vec2::ZERO;
+        }
+        let held = self.yaw.unwrap_or(live_yaw);
+        if self.on && crate::camera::wrap(live_yaw - held).abs() < 0.1 {
+            self.on = false;
+        }
+        if !self.on {
+            self.yaw = Some(live_yaw);
+        }
+        self.yaw.unwrap_or(live_yaw)
+    }
+}
+
 /// `sub_93FC80`: the radial dead zone (0.35) and the normalisation above 1.
 pub fn stick_response(s: Vec2) -> Vec2 {
     let l2 = s.length_squared();
@@ -127,11 +169,12 @@ pub fn read_pad(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&Gamepad>,
-    rig: Res<CameraRig>,
     abilities: Option<Res<crate::player::abilities::AbilitySet>>,
     bindings: Option<Res<crate::bindings::Bindings>>,
     mut pad: ResMut<PadInput>,
     mut toggle: Local<(bool, f32)>,
+    mut cut: Local<CutLatch>,
+    mut rig_cut: ResMut<CameraRig>,
     menu: Option<Res<crate::map_menu::MapMenu>>,
 ) {
     use crate::bindings::Slot;
@@ -200,8 +243,10 @@ pub fn read_pad(
     }
 
     let mag = stick.length().min(1.0);
-    // camera-relative: stick up = away from the camera
-    let forward = Vec3::new(-rig.yaw.sin(), 0.0, -rig.yaw.cos());
+    // camera-relative: stick up = away from the camera, in the input frame (held across a camera cut)
+    let yaw = cut.update(std::mem::take(&mut rig_cut.cut), rig_cut.yaw, stick);
+    pad.input_yaw = Some(yaw);
+    let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
     let right = Vec3::new(forward.z * -1.0, 0.0, forward.x);
     let dir = (forward * stick.y + right * stick.x).normalize_or_zero();
     // without the HighProfile ability the flag is forced off (`ReadInput` 0xEEDEC4)
@@ -239,5 +284,24 @@ mod tests {
         assert!(AxisSettings::new(-1.0, 0.0, 0.0, 1.0, 0.0).is_ok());
         assert_eq!(stick_response(Vec2::new(0.3, 0.1)), Vec2::ZERO);
         assert_eq!(stick_response(Vec2::new(0.4, 0.0)), Vec2::new(0.4, 0.0));
+    }
+
+    #[test]
+    fn a_camera_cut_keeps_the_held_stick_in_the_old_frame() {
+        let mut l = CutLatch::default();
+        let up = Vec2::new(0.0, 1.0);
+        assert_eq!(l.update(false, 0.0, up), 0.0);
+        // the cut: the new camera is 90° round; the held stick keeps the old frame
+        assert_eq!(l.update(true, 1.57, up), 0.0);
+        assert_eq!(l.update(false, 1.57, up * 0.9), 0.0);
+        // a turn of the stick beyond acos 0.9 releases it
+        assert_eq!(l.update(false, 1.57, Vec2::new(0.6, 0.8)), 1.57);
+        // a released stick releases it too
+        l.update(true, 3.0, up);
+        assert_eq!(l.update(false, 3.0, Vec2::ZERO), 3.0);
+        // and so does the camera coming back within 0.1 rad
+        l.update(false, 0.0, up);
+        assert_eq!(l.update(true, 1.0, up), 0.0);
+        assert_eq!(l.update(false, 0.05, up), 0.05);
     }
 }

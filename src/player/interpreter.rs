@@ -181,7 +181,8 @@ pub fn update_interpreter(
     // the latched stick (0xEEE3E5–0xEEE483): above the dead zone, latch when unlatched or once the stick has moved
     // more than +0x1324 from the latched value, and store the mirrored copy (`sub_EDB450`) with it; below, follow the
     // stick unlatched
-    let stick = raw_stick(&pad, rig.yaw);
+    let input_yaw = pad.input_yaw.unwrap_or(rig.yaw);
+    let stick = raw_stick(&pad, input_yaw);
     if pad.magnitude >= STICK_DEADZONE {
         if (stick - pad.stick_latched).length() > it.latch_move {
             it.latch_on = false;
@@ -203,7 +204,7 @@ pub fn update_interpreter(
     // the stick tracker (`sub_55EAE0` / `sub_55E7E0`): bands and the two directions
     pad.band_prev = pad.band;
     pad.band = band_of(pad.magnitude);
-    let (snap, moved) = tracker_dirs_of(pad.dir, stick, rig.yaw);
+    let (snap, moved) = tracker_dirs_of(pad.dir, stick, input_yaw);
     pad.dir_snap = snap;
     pad.dir_move = moved;
 

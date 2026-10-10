@@ -29,12 +29,15 @@ pub struct CameraRig {
     /// A landing's camera-shake intensity, consumed by the camera: `min((drop − 3)/7, 1)` (0xE05940 → HumanFXPack+88,
     /// `FX_Camera_Shake_Assassins_Fall`).
     pub shake: f32,
+    /// The switcher handed the view to another camera this frame (`sub_4BC360` 0x4BC3D3 sets the input latch, camera
+    /// manager +0xD4); `read_pad` keeps the stick in the old camera's frame (RE/24 INPUT-8).
+    pub cut: bool,
 }
 
 impl Default for CameraRig {
     fn default() -> Self {
         // yaw = PI: camera behind a player facing +Z (toward the rooftops)
-        Self { yaw: PI, pitch: -0.35, distance: 5.5, shake: 0.0 }
+        Self { yaw: PI, pitch: -0.35, distance: 5.5, shake: 0.0, cut: false }
     }
 }
 
@@ -1377,6 +1380,7 @@ fn follow(
         };
         st.blend = Some(SwitchBlend { from_eye: c.translation, from_rot: c.rotation, t: 0.0, duration: blend_in });
         st.shown = want;
+        rig.cut = true;
     }
     let head = head_point(&rigs, &joints, p.translation);
     let first_person = st.shown == Shown::FirstPerson;

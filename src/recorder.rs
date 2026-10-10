@@ -66,12 +66,15 @@ pub struct InputFrame {
     pub hand_pressed_ago: f32,
     /// Held empty-hand input (13th field); older captures did not record it.
     pub hand_held: bool,
+    /// The camera yaw the stick was turned by (14th field; differs from `cam_yaw` while a camera cut's input latch
+    /// holds). Older captures read as `cam_yaw`.
+    pub input_yaw: f32,
 }
 
 impl InputFrame {
     pub fn to_line(&self) -> String {
         format!(
-            "{} {:?} {:?} {:?} {:?} {:?} {} {} {:?} {:?} {:?} {:?} {}",
+            "{} {:?} {:?} {:?} {:?} {:?} {} {} {:?} {:?} {:?} {:?} {} {:?}",
             self.dt_nanos,
             self.dir.x,
             self.dir.y,
@@ -84,13 +87,14 @@ impl InputFrame {
             self.cam_yaw,
             self.cam_pitch,
             self.hand_pressed_ago,
-            self.hand_held as u8
+            self.hand_held as u8,
+            self.input_yaw
         )
     }
 
     pub fn parse(line: &str) -> Option<Self> {
         let t: Vec<&str> = line.split_whitespace().collect();
-        if !(11..=13).contains(&t.len()) {
+        if !(11..=14).contains(&t.len()) {
             return None;
         }
         let f = |i: usize| t[i].parse::<f32>().ok();
@@ -107,6 +111,7 @@ impl InputFrame {
             hand_pressed_ago: if t.len() >= 12 { f(11)? } else { f32::INFINITY },
             // PORT: legacy captures used Legs for falling grab and have no empty-hand held field.
             hand_held: if t.len() >= 13 { t[12] == "1" } else { t[7] == "1" },
+            input_yaw: if t.len() >= 14 { f(13)? } else { f(9)? },
         })
     }
 
@@ -119,6 +124,7 @@ impl InputFrame {
         pad.legs_pressed_ago = self.legs_pressed_ago;
         pad.hand_pressed_ago = self.hand_pressed_ago;
         pad.hand_held = self.hand_held;
+        pad.input_yaw = Some(self.input_yaw);
         // the pad buttons the recording carries (A legs, B empty hand, RT high profile)
         pad.buttons = [false; 16];
         pad.buttons[0] = self.legs_held;
@@ -373,6 +379,7 @@ fn record_input(time: Res<Time>, pad: Res<PadInput>, rig: Res<CameraRig>, mut re
         cam_pitch: rig.pitch,
         hand_pressed_ago: pad.hand_pressed_ago,
         hand_held: pad.hand_held,
+        input_yaw: pad.input_yaw.unwrap_or(rig.yaw),
     };
     rec.inputs.push(f);
 }
