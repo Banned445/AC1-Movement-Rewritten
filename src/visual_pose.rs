@@ -401,13 +401,16 @@ fn spring_pose(local: &mut [Transform], parents: &[Option<usize>], frame: Mat4, 
     state.anchor = anchor;
 }
 
-/// Native lists run parents before children (0x4E90C0 builds them per bone; the exact native bone order is not
-/// recovered). Hypothesis: order by hierarchy depth, keeping each resource's authored order within a depth.
+/// The native modifier list (`SkeletonComponent` 0x4E90C0): the merged bone list is walked with a parent stack and every
+/// bone's authored modifiers go into the bucket of its hierarchy depth; the buckets are concatenated shallow first.
+/// Within a depth the bones keep the merged list's order (the port's joint order stands in for it) and each bone keeps
+/// its authored modifier order. The LOD lists keep modifiers whose owner's level (bone entry byte 4 >> 5) is at most
+/// the list's; the player runs list 5 (+332 = 0x1D), which holds all 56 (RE/09 §8.16).
 pub fn evaluation_order(parents: &[Option<usize>], authored: &[(Modifier, usize)]) -> Vec<Modifier> {
     let depth = |mut i: usize| { let mut d = 0; while let Some(p) = parents[i] { d += 1; i = p; } d };
-    let mut keyed: Vec<_> = authored.iter().enumerate().map(|(k, &(m, owner))| (depth(owner), k, m)).collect();
-    keyed.sort_by_key(|&(d, k, _)| (d, k));
-    keyed.into_iter().map(|(_, _, m)| m).collect()
+    let mut keyed: Vec<_> = authored.iter().enumerate().map(|(k, &(m, owner))| (depth(owner), owner, k, m)).collect();
+    keyed.sort_by_key(|&(d, owner, k, _)| (d, owner, k));
+    keyed.into_iter().map(|(_, _, _, m)| m).collect()
 }
 
 pub fn update_rotation_copies(time: Res<Time>, wind: Res<crate::wind::WindField>, mut rigs: Query<(Entity, &mut VisualRotationCopies)>, mut transforms: Query<&mut Transform>) {
@@ -655,6 +658,9 @@ mod tests {
         let parents = [None, Some(0), Some(1), Some(0)];
         let order = evaluation_order(&parents, &[(Modifier::Hinge(0), 2), (Modifier::Compress(0), 1), (Modifier::LookAt(0), 1), (Modifier::Roll(0), 3)]);
         assert_eq!(order, vec![Modifier::Compress(0), Modifier::LookAt(0), Modifier::Roll(0), Modifier::Hinge(0)]);
+        // same depth: the bone list's order first, then each bone's own list (0x4E90C0 buckets bones, not records)
+        let order = evaluation_order(&parents, &[(Modifier::Roll(0), 3), (Modifier::Hinge(0), 1), (Modifier::Hinge(1), 3)]);
+        assert_eq!(order, vec![Modifier::Hinge(0), Modifier::Roll(0), Modifier::Hinge(1)]);
     }
     #[test]
     fn chained_copies_use_the_updated_source_pose() {
