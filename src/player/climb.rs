@@ -1249,7 +1249,9 @@ pub fn update_climb(
         if d.settle.is_some_and(|(id, _)| super::anim_gate::item_word(id, 0).is_some_and(|w| w & 0x20 != 0)) {
             continue;
         }
-        let dir = quantize(pad.dir, facing);
+        // the interpreter's latched stick in the character's frame (`ClimbState` 0xEE6036: the actor matrix × +0x1310;
+        // RE/24 INPUT-4)
+        let dir = quantize(pad.actor_dir(facing, false), facing);
         // ChooseMove 0xDFDE90 step 2: a ladder at the side (TryLadder 0xDF10C0) before any grid move
         if let Some(mut e) = side_ladder(&guidance, body.feet, facing, dir) {
             e.from = body.feet;

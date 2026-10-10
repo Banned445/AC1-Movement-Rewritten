@@ -21,6 +21,7 @@ pub mod ground_extras;
 pub mod ground_tree;
 pub mod falls;
 pub mod hay;
+pub mod interpreter;
 pub mod item_flags;
 pub mod jump_blend;
 pub mod jump_candidates;
@@ -257,7 +258,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(Startup, spawn_player)
             .add_systems(
                 Update,
-                (social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
+                (interpreter::update_interpreter, social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
                     .chain()
                     .in_set(PlayerSet),
             );
@@ -310,6 +311,7 @@ pub fn player_components(feet: Vec3, heading: f32) -> impl Bundle {
         Body { feet, heading, grounded: true, ..default() },
         HumanDataBundle::default(),
         LimbTargets::default(),
+        interpreter::Interpreter::default(),
     )
 }
 

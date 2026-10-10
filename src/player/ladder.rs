@@ -565,10 +565,12 @@ pub fn update_ladder(
         // zone, a stick within 60° of the facing axis (|dot(d, right)| ≤ 0.866) asks to climb (IHumanLadder slot 0, ±up:
         // up when it points along the facing, `sub_571960` ≥ 0); within 30° of the right axis it is the side step
         // (event 5, slots 8 / 9, not ported).
+        // The stick is the interpreter's latched one in the character's frame (+0x1310, 0xEEB696; RE/24 INPUT-4).
         let stick = pad.speed01 > 0.0;
         let fwd = -l.n;
-        let vertical = stick && pad.dir.dot(super::right_of(fwd)).abs() <= 0.866;
-        let along = if vertical { if pad.dir.dot(fwd) >= 0.0 { 1.0 } else { -1.0 } } else { 0.0 };
+        let sd = pad.actor_dir(body.forward(), false);
+        let vertical = stick && sd.dot(super::right_of(fwd)).abs() <= 0.866;
+        let along = if vertical { if sd.dot(fwd) >= 0.0 { 1.0 } else { -1.0 } } else { 0.0 };
         let hi = l.high as usize;
         let mut leave: Option<TransitionSetup> = None;
         match phase {
@@ -630,8 +632,8 @@ pub fn update_ladder(
                 }
                 // the revolve (event 5, slots 8 / 9, guard 0xE262B0): the stick within 30° of the side (|dot(d, right)|
                 // > 0.866), in the wait (MvtAnimState ≤ 1), a ladder within 10° of vertical and room beside it
-                if phase == LadderPhase::Wait && stick && pad.dir.dot(super::right_of(fwd)).abs() > 0.866 && l.tilt() < 10f32.to_radians() {
-                    let right = pad.dir.dot(super::right_of(fwd)) > 0.0;
+                if phase == LadderPhase::Wait && stick && sd.dot(super::right_of(fwd)).abs() > 0.866 && l.tilt() < 10f32.to_radians() {
+                    let right = sd.dot(super::right_of(fwd)) > 0.0;
                     if revolve_room(body.feet, fwd, right, &collision) {
                         l.start_revolve(right, body.feet);
                         continue;
@@ -639,8 +641,8 @@ pub fn update_ladder(
                 }
                 // QuickDrop (event 0, slots 6 / 7): the empty-hand button (interp +0x1129), on a ladder within 30° of
                 // vertical (`sub_E1EAC0`) → the release (MvtAnimState 15 / 16), its action as the fall's animation
-                if pad.hand_just_pressed() && (l.top - l.base).normalize_or(Vec3::Y).y > (30f32).to_radians().cos() {
-                    pad.hand_pressed_ago = f32::INFINITY;
+                if pad.hand_buffered() && (l.top - l.base).normalize_or(Vec3::Y).y > (30f32).to_radians().cos() {
+                    pad.consume_hand();
                     let fall = blend(RELEASE[l.high as usize][l.foot], 0, &[]);
                     let from = body.feet;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
@@ -675,8 +677,8 @@ pub fn update_ladder(
                 // the sideways move (event 4, slots 14 / 15): the stick within 20° of the side (|dot(d, facing)| <
                 // 0.342, 0xEEBED9), the Climb ability; posted only while no step runs (PORT: the event queue between
                 // the main state's sub-states is not modelled)
-                if !stepping && stick && pad.dir.dot(fwd).abs() < 0.342 && ab.allows(super::abilities::Ability::Climb) {
-                    let right = pad.dir.dot(super::right_of(fwd)) >= 0.0;
+                if !stepping && stick && sd.dot(fwd).abs() < 0.342 && ab.allows(super::abilities::Ability::Climb) {
+                    let right = sd.dot(super::right_of(fwd)) >= 0.0;
                     if let Some(side) = side_move(right, body.feet, l.n, &guidance, &collision) {
                         match side {
                             LadderSide::Hang(e) | LadderSide::Jump(e) => {

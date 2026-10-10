@@ -582,7 +582,9 @@ pub fn update_ledge(
             data.air.release_hold = Some(hold);
             continue;
         }
-        let dir = if pad.speed01 > 0.0 { Some(quantize(pad.dir, facing)) } else { None };
+        // the interpreter's latched stick in the character's frame (`GoAssassinActionInterpreter__LedgeState` 0xEEC356:
+        // the angle of +0x1310 from stick-up; RB held reads the unmirrored +0x1300, 0xEEC256; RE/24 INPUT-4)
+        let dir = if pad.speed01 > 0.0 { Some(quantize(pad.actor_dir(facing, pad.buttons[13]), facing)) } else { None };
         // the interpreter's ledge state (`GoAssassinActionInterpreter__LedgeState` 0xEEBFD0, RE/03 7.12): the
         // empty-hand buffer lets go (event 4, 0xDDB450 -> LetGoToInAir) ...
         if pad.hand_buffered() {

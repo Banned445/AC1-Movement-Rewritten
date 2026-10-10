@@ -38,6 +38,13 @@ pub struct PadInput {
     pub cam_stick: Vec2,
     /// The movement stick after the dead zone (pad stick 0; the climb camera reads it, 0xC5E370).
     pub stick: Vec2,
+    /// Interp +0x1300: the stick latched by the interpreter (pad axes, x right, y up; `player::interpreter`).
+    pub stick_latched: Vec2,
+    /// Interp +0x1310: the latched stick with x mirrored when the camera faces the character (`sub_EDB450`). The
+    /// ledge, climb and ladder read it in the character's frame (RE/24 INPUT-4).
+    pub stick_actor: Vec2,
+    /// Interp +0x1129: the empty-hand buffer, kept by `player::interpreter` (RE/24 INPUT-2).
+    pub hand_buffer: bool,
 }
 
 impl PadInput {
@@ -51,13 +58,25 @@ impl PadInput {
     pub fn hand_just_pressed(&self) -> bool {
         self.hand_pressed_ago <= 0.0
     }
-    /// The empty-hand buffer (interp +0x1129): set on the press, cleared 0.3 s after it
-    /// (`GoAssassinActionInterpreter__ReadInput` 0xEEE0F8 / 0xEEE125), like the Legs buffer.
+    /// The empty-hand buffer (interp +0x1129, `GoAssassinActionInterpreter__ReadInput` 0xEEE0F8 / 0xEEE125): set on
+    /// the press frame and kept only while Legs was pressed within 0.3 s, so in practice "pressed this frame"; ignored
+    /// for 0.2 s after grabbing (`player::interpreter`).
     pub fn hand_buffered(&self) -> bool {
-        self.hand_pressed_ago <= JUMP_BUFFER
+        self.hand_buffer
     }
     pub fn consume_hand(&mut self) {
         self.hand_pressed_ago = f32::INFINITY;
+        self.hand_buffer = false;
+    }
+    /// The interpreter's stick in the character's frame as a world direction (ledge / climb / ladder:
+    /// `GoAssassinActionInterpreter__LedgeState` 0xEEC356, `ClimbState` 0xEE6036, `LadderState` 0xEEB696): stick up =
+    /// `facing`, right = the character's right. `unmirrored` takes +0x1300 instead of +0x1310 (the ledge with RB held,
+    /// 0xEEC256). Zero below the dead zone.
+    pub fn actor_dir(&self, facing: Vec3, unmirrored: bool) -> Vec3 {
+        let s = if unmirrored { self.stick_latched } else { self.stick_actor };
+        let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
+        let r = Vec3::new(-f.z, 0.0, f.x);
+        (f * s.y + r * s.x).normalize_or_zero()
     }
 }
 

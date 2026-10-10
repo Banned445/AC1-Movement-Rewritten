@@ -19,6 +19,9 @@ struct Sim {
     app: App,
     player: Entity,
     saw_air: bool,
+    /// Scripted tests give world directions; the camera then stays behind the character so the interpreter's
+    /// actor-frame stick (ledge / climb / ladder, RE/24 INPUT-4) means the same direction. Replays set the recorded yaw.
+    cam_follow: bool,
 }
 
 impl Sim {
@@ -36,11 +39,11 @@ impl Sim {
             .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
             .insert_resource(SpawnPoint(SPAWN))
             .init_resource::<CameraRig>()
-            .add_systems(Update, (crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
+            .add_systems(Update, (crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
         let (c, g) = level::geometry();
         app.insert_resource(c).insert_resource(g);
         let player = app.world_mut().spawn(player_components(feet, heading)).id();
-        Sim { app, player, saw_air: false }
+        Sim { app, player, saw_air: false, cam_follow: true }
     }
 
     fn pad(&mut self, dir: Vec3, stick: f32, high: bool, legs: bool) {
@@ -60,6 +63,10 @@ impl Sim {
                 let mut p = self.app.world_mut().resource_mut::<PadInput>();
                 p.legs_pressed_ago += 1.0 / 60.0;
                 p.hand_pressed_ago += 1.0 / 60.0;
+            }
+            if self.cam_follow {
+                let h = self.body().heading;
+                self.app.world_mut().resource_mut::<CameraRig>().yaw = h;
             }
             self.app.update();
             if self.loco().current == ActorContextId::InAir {
@@ -600,6 +607,72 @@ fn let_go_from_a_hang_falls_and_lands() {
     assert_eq!(s.data().air.fall_origin, air::FallOrigin::HangFree);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
     assert_eq!(s.ground().last_landing.map(|l| l.kind), Some(LandingType::Safe));
+}
+
+#[test]
+fn the_empty_hand_buffer_lasts_one_frame() {
+    // +0x1129 is set on the press and cleared the next frame unless Legs was pressed within 0.3 s (0xEEE0F8 / 0xEEE125,
+    // RE/24 INPUT-2): a press a few frames old no longer lets go
+    let mut s = hang_on_balcony();
+    s.app.world_mut().resource_mut::<PadInput>().hand_pressed_ago = 0.05;
+    s.run(0.3);
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "a stale press let go");
+}
+
+#[test]
+fn the_empty_hand_is_ignored_just_after_grabbing() {
+    // entering the Ledge state clears the buffer and blocks it for 0.2 s (`sub_ED8610` 0xED86D6, ReadInput 0xEEE149;
+    // RE/24 INPUT-3)
+    use crate::player::ledge::{LedgeEntry, LedgeSubState};
+    let (mid, n) = (Vec3::new(12.0, 2.6, 41.7), Vec3::NEG_Z);
+    let feet = mid - Vec3::Y * 1.1 + n * 0.5;
+    let mut s = Sim::new(feet, crate::player::heading_of(-n));
+    force(&mut s, crate::player::TransitionSetup::ToLedge(LedgeEntry::at(mid, n, feet, LedgeSubState::Movement)));
+    s.press_hand();
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(!s.app.world().resource::<PadInput>().hand_buffered(), "the press during the block is dropped");
+    s.run(0.15);
+    s.press_hand();
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(!s.app.world().resource::<PadInput>().hand_buffered(), "still blocked at 0.17 s");
+    s.run(1.0);
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    s.press_hand();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "a press after the block lets go");
+}
+
+#[test]
+fn the_ledge_reads_the_stick_in_the_characters_frame() {
+    // GoAssassinActionInterpreter__LedgeState 0xEEC356 reads the latched raw stick (+0x1310) against stick-up, in the
+    // character's frame (RE/24 INPUT-4): with the camera off to the side, pushing the stick away from the camera is
+    // still "up" → the pull-up (camera-relative it would be a shimmy)
+    let mut s = hang_on_jump_up_wall();
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "reception never ended");
+    s.cam_follow = false;
+    let yaw = s.body().heading + std::f32::consts::FRAC_PI_2;
+    s.app.world_mut().resource_mut::<CameraRig>().yaw = yaw;
+    let away_from_camera = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+    s.pad(away_from_camera, 1.0, false, false);
+    let on_top = s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground);
+    assert!(on_top && (s.body().feet.y - 2.6).abs() < 0.05, "no pull-up: {:?} ledge {}", s.body().feet, s.data().ledge.last_action);
+}
+
+#[test]
+fn the_ledge_stick_is_mirrored_when_the_camera_faces_the_character() {
+    // sub_EDB450: with the camera in front (dot < −0.1736) the stick's x is negated, so "stick right" still moves to the
+    // screen's right: toward the camera's right, which is the character's left
+    let mut s = hang_on_jump_up_wall();
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "reception never ended");
+    s.cam_follow = false;
+    let yaw = s.body().heading + std::f32::consts::PI;
+    s.app.world_mut().resource_mut::<CameraRig>().yaw = yaw;
+    let cam_right = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
+    let x0 = s.data().ledge.hand_l.dot(cam_right) + s.data().ledge.hand_r.dot(cam_right);
+    s.pad(cam_right, 1.0, false, false);
+    s.run(2.0);
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    let x1 = s.data().ledge.hand_l.dot(cam_right) + s.data().ledge.hand_r.dot(cam_right);
+    assert!(x1 > x0 + 0.3, "should shimmy toward the camera's right: {x0} → {x1}");
 }
 
 #[test]
@@ -1360,6 +1433,7 @@ fn empty_hand_on_a_pilotis_pulls_down_to_a_hang() {
     let top = Vec3::new(77.0, 3.0, 80.0);
     let mut s = Sim::new(top, -std::f32::consts::FRAC_PI_2);
     // No stick: the native interpreter picks the camera direction, here the +X edge.
+    s.cam_follow = false;
     s.app.world_mut().resource_mut::<CameraRig>().yaw = std::f32::consts::FRAC_PI_2;
     force(&mut s, crate::player::TransitionSetup::ToPilotis(PilotisEntry { top, from: top, facing: Vec3::X, kind: PilotisEntryType::FromInAir, foot: 0 }));
     assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::PilotisWait));
@@ -2810,12 +2884,18 @@ fn replay_bug_recordings() {
         let baseline = std::fs::read_to_string(dir.join("baseline.txt")).ok().map(|t| keys(&t));
         let want = if report { &state } else { baseline.as_ref().unwrap_or(&state) };
         let mut s = Sim::new_raw(rec.start_feet, rec.start_heading);
+        s.cam_follow = false;
         let mut first_diff = None;
         let mut compared = 0;
         let mut replayed = String::new();
         for (i, f) in rec.frames.iter().enumerate() {
             s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(f.dt_nanos)));
             f.apply(&mut s.app.world_mut().resource_mut::<PadInput>());
+            {
+                let mut rig = s.app.world_mut().resource_mut::<CameraRig>();
+                rig.yaw = f.cam_yaw;
+                rig.pitch = f.cam_pitch;
+            }
             s.app.update();
             if state.contains_key(&(i as u64)) {
                 let got = gameplay_key(i as u64, s.loco(), s.body());
