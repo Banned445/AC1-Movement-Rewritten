@@ -425,16 +425,15 @@ pub fn try_corner(
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let hit = corner_rows(inner, right, hand_l, hand_r, n, guidance)[3]?;
     let nn = hit.wall_normal;
-    let new_hang = if super::ledge::feet_supports(hit.point, nn, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
-    // a wall hang needs foot holds on the new wall (sub_B16130)
-    if hang == LedgeHangType::Wall && new_hang != LedgeHangType::Wall {
+    // TryTurnCorner never changes the hang type (+104 is not written): a free hang turns as a free hang (pose
+    // `sub_B15AD0`); a wall hang needs foot holds on the new wall (`Human__FindWallHangFeetSupports` 0xB16130, pose
+    // `sub_B157B0`). Both hand targets are the corner row point (0xDD3C17..0xDD3CE1). PORT: the body boxes and
+    // `LateralPathFree` (2.4 / 1.1 m) are the capsule test at the target (RE/24 LEDGE-11).
+    if hang == LedgeHangType::Wall && !super::ledge::feet_supports(hit.point, nn, collision) {
         return None;
     }
-    // hands: both on the corner point during the turn; SecondHandGrab (state 17, ±0.25 m) re-spreads them
-    // (hypothesis: to the normal hand spacing around the point)
-    let r = right_of(-nn);
-    let (hl, hr) = (hit.point - r * HAND_SPACING * 0.5, hit.point + r * HAND_SPACING * 0.5);
-    let to = hang_root_at(hl, hr, nn, new_hang, collision);
+    let (hl, hr) = (hit.point, hit.point);
+    let to = hang_root_at(hl, hr, nn, hang, collision);
     if !collision.capsule_fits(to + Vec3::Y * 0.05) {
         return None;
     }
@@ -454,8 +453,8 @@ pub fn try_corner(
         facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
         follow_disp: false,
         lead: 0.0,
-        end_free: false,
-        end_wall: false,
+        end_free: hang == LedgeHangType::Free,
+        end_wall: hang == LedgeHangType::Wall,
         end_stand: false,
         hand_l: hl,
         hand_r: hr,

@@ -633,6 +633,8 @@ fn free_hang_shimmy_ends_with_the_outer_corner() {
     assert!(min_x >= -1.01 && min_x < 0.2, "hands should stop at the slab end: {min_x}");
     // at the end the free hang turns the outer corner onto the slab's -X side (0xDD3BB0, `corner_090_out`)
     assert!(s.data().ledge.normal.dot(Vec3::NEG_X) > 0.99, "no outer corner: normal {:?}", s.data().ledge.normal);
+    // the corner keeps the hang type (0xDD3BB0 never writes +104, RE/24 LEDGE-11)
+    assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Free);
 }
 
 #[test]
@@ -798,6 +800,8 @@ fn inner_corner_turns_onto_the_perpendicular_wall() {
     assert!(turned, "no corner: {} hands {:?}", s.data().ledge.last_action, s.data().ledge.hand_l);
     let l = &s.data().ledge;
     assert!((l.hand_l.x - 35.92).abs() < 0.05 && (l.hand_l.y - 2.6).abs() < 0.05, "hands on B's stone ledge: {:?}", l.hand_l);
+    // both hand targets are the corner point (0xDD3C17..0xDD3CE1, RE/24 LEDGE-11)
+    assert!((l.hand_l - l.hand_r).length() < 0.01, "both hands on the corner point: {:?} {:?}", l.hand_l, l.hand_r);
     assert_eq!(s.loco().current, ActorContextId::Ledge);
 }
 
