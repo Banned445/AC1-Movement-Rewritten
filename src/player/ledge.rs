@@ -51,13 +51,29 @@ pub enum LedgeSubState {
 }
 
 /// The ledge sub-states whose update runs the limb IK (`sub_DCD910` 0xDCD910: SubState 0, 1, 3, 4, 6, 8, 11, 13; RE/24
-/// ANIM-10). Entry (0) only while the swing back / its `_b` hop / `step1_to_hangwall` plays, and Pullup (4) only while
-/// `xx_h_hangfree_tr_hangwall` (0x01B702FD) plays. PORT: the port plays those three in its own moves (which release the
-/// hands) and the free → wall hang switch as a move (LEDGE-9), so both read as off here. The swing (8) runs in
-/// `LedgeData::swing`.
-pub fn ledge_ik_runs(s: LedgeSubState) -> bool {
-    matches!(s, LedgeSubState::Movement | LedgeSubState::HandPlacement | LedgeSubState::HangWallReception | LedgeSubState::PullDown | LedgeSubState::Grasp)
+/// ANIM-10), by the playing `action`:
+/// - Entry (0) only while the climb's swing back (0x1EB21811), the hop's `_b` (`HOP_UP_B`) or `step1_to_hangwall`
+///   (0x0106CFC5) plays;
+/// - Pullup (4) only while `xx_h_hangfree_tr_hangwall` (0x01B702FD) plays;
+/// - never while one of `IK_NEVER` plays (the wall run's swing into the wall-free hang, `air_all_to_swing_tr_hangfree_b`,
+///   and ids that are not in Game Fix).
+/// The swing (8) runs in `LedgeData::swing`.
+pub fn ledge_ik_runs(s: LedgeSubState, action: Option<u32>) -> bool {
+    if action.is_some_and(|a| IK_NEVER.contains(&a)) {
+        return false;
+    }
+    match s {
+        LedgeSubState::Entry => action.is_some_and(|a| IK_ENTRY.contains(&a)),
+        LedgeSubState::Pullup => action == Some(0x01B7_02FD),
+        LedgeSubState::Movement | LedgeSubState::HandPlacement | LedgeSubState::HangWallReception | LedgeSubState::PullDown | LedgeSubState::Grasp => true,
+        _ => false,
+    }
 }
+
+/// `sub_DCD910`'s Entry actions with the IK on: the climb's swing back, `HOP_UP_B`, `step1_to_hangwall`.
+const IK_ENTRY: [u32; 3] = [0x1EB2_1811, 0x4CD6_8F50, 0x0106_CFC5];
+/// `sub_DCD910`'s actions that never run the IK.
+const IK_NEVER: [u32; 10] = [0x0106_F36F, 0x0121_A15E, 0x035F_27A1, 0x035F_27A2, 0x035F_27AD, 0x035F_27AF, 0x0292_6C68, 0x0292_6C69, 0x0292_40CA, 0x0292_40CB];
 
 /// `HumanLedgeData::LedgeHangType` (desc 0x1994E68). WallFree is treated as Free by the game.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -495,7 +511,8 @@ pub fn update_ledge(
         }
         // the limb IK runs only in some sub-states (`sub_DCD910` from `HumanLedge__Update` 0xDE3EC8): elsewhere the
         // animation alone shows, released at once (RE/24 ANIM-10)
-        let ik_runs = ledge_ik_runs(d.sub_state);
+        let playing = d.mv.and_then(|m| m.current()).map(|(b, _)| b.id).or(d.catch_action);
+        let ik_runs = ledge_ik_runs(d.sub_state, playing);
         limbs.suspended = !ik_runs;
         limbs.hands = ik_runs.then_some((d.hand_l, d.hand_r));
         limbs.normal = n;
@@ -837,7 +854,7 @@ pub fn update_ledge(
                         start_move(d, mv, if one_hand { "pull-up (one hand)" } else { "pull-up" });
                         d.queue = rest.into_iter().collect();
                         d.sub_state = LedgeSubState::Pullup;
-                        limbs.suspended = !ledge_ik_runs(d.sub_state);
+                        limbs.suspended = !ledge_ik_runs(d.sub_state, d.mv.and_then(|m| m.current()).map(|(b, _)| b.id));
                         limbs.hands = None;
                         continue;
                     }

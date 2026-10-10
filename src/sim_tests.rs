@@ -2665,8 +2665,13 @@ fn the_ledge_suspends_the_limb_ik_through_the_pull_up() {
     // sub_DCD910: the limb IK runs in SubStates 0, 1, 3, 4, 6, 8, 11, 13 only (RE/24 ANIM-10)
     for (st, runs) in [(S::Movement, true), (S::HandPlacement, true), (S::HangWallReception, true), (S::PullDown, true), (S::Grasp, true),
                        (S::Pullup, false), (S::HangFreeReception, false), (S::TurnCorner, false), (S::TransitionInFromClimb, false), (S::ParallelJump, false)] {
-        assert_eq!(ledge_ik_runs(st), runs, "{st:?}");
+        assert_eq!(ledge_ik_runs(st, None), runs, "{st:?}");
     }
+    // the action exceptions: Entry only for the swing back / hop `_b` / step1_to_hangwall, the pull-up only for
+    // hangfree_tr_hangwall, never for the wall run's swing into the wall-free hang
+    assert!(ledge_ik_runs(S::Entry, Some(crate::player::ledge_moves::HOP_UP_B)) && !ledge_ik_runs(S::Entry, None));
+    assert!(ledge_ik_runs(S::Pullup, Some(0x01B7_02FD)));
+    assert!(!ledge_ik_runs(S::HandPlacement, Some(0x0106_F36F)));
     let mut s = hang_at(Vec3::new(12.0, 2.6, 41.7), Vec3::NEG_Z);
     let limbs = |s: &Sim| *s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap();
     assert!(!limbs(&s).suspended && limbs(&s).hands.is_some(), "the hang pins the hands");
