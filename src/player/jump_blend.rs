@@ -421,11 +421,38 @@ pub struct ActionBlend {
     pub n: usize,
 }
 
+/// The item evaluator's weight setup (`AnimItem__NormalizeWeights` 0x777AE0), run whenever an item's weights are set
+/// (`AnimGraph__SetItemBlendWeights` 0x503040 → 0x777380 dirty byte): over the weights above 0.0005, if Σ(i ≥ 1) ≤ 1
+/// and the remainder is above 0.0005, clip 0 gets the remainder 1 − Σ(i ≥ 1) (whatever it held); otherwise every such
+/// weight is divided by Σ(i ≥ 1) + w0. The duration, pose and root displacement use the result (RE/24 ANIM-1). Weights
+/// at or below 0.0005 are left out of the evaluator's list (`dword_1A13528`), i.e. they count as 0.
+pub fn normalize_item_weights(w: &mut [f32]) {
+    const ACTIVE: f32 = 0.000_5;
+    if w.is_empty() {
+        return;
+    }
+    for x in w.iter_mut().filter(|x| **x <= ACTIVE) {
+        *x = 0.0;
+    }
+    let rest: f32 = w[1..].iter().sum();
+    if rest <= 1.0 {
+        if 1.0 - rest > ACTIVE {
+            w[0] = 1.0 - rest;
+        }
+    } else {
+        let total = rest + w[0];
+        for x in w.iter_mut().filter(|x| **x > ACTIVE) {
+            *x /= total;
+        }
+    }
+}
+
 impl ActionBlend {
     pub fn new(id: u32, item: usize, weights: &[f32]) -> Self {
         let mut w = [0.0; 40];
         let n = weights.len().min(40);
         w[..n].copy_from_slice(&weights[..n]);
+        normalize_item_weights(&mut w[..n]);
         ActionBlend { id, item, w, n }
     }
     pub fn clips(&self) -> &'static [&'static str] {
@@ -562,4 +589,32 @@ mod tests {
         assert_eq!(landing(0.0,12.5,true,0.0,true).1,vec![0.0,1.0]);
     }
 
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize_item_weights;
+    fn n(w: &[f32]) -> Vec<f32> {
+        let mut v = w.to_vec();
+        normalize_item_weights(&mut v);
+        v
+    }
+    fn eq(a: Vec<f32>, b: &[f32]) {
+        assert!(a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6), "{a:?} vs {b:?}");
+    }
+    #[test]
+    fn clip_0_takes_the_remainder_or_all_are_divided() {
+        // 0x777AE0: Σ(i ≥ 1) ≤ 1 → w0 = 1 − Σ(i ≥ 1), whatever w0 held
+        eq(n(&[0.0, 0.3, 0.3]), &[0.4, 0.3, 0.3]);
+        eq(n(&[0.7, 0.7]), &[0.3, 0.7]);
+        eq(n(&[1.0]), &[1.0]);
+        eq(n(&[0.0]), &[1.0]);
+        // a remainder of 0.0005 or less leaves w0 alone
+        eq(n(&[0.0, 0.9998]), &[0.0, 0.9998]);
+        // Σ(i ≥ 1) > 1 → all divided by Σ(i ≥ 1) + w0
+        let v = n(&[0.5, 0.8, 0.6]);
+        assert!((v[0] - 0.5 / 1.9).abs() < 1e-6 && (v[1] - 0.8 / 1.9).abs() < 1e-6 && (v[2] - 0.6 / 1.9).abs() < 1e-6);
+        // weights of 0.0005 or less are dropped
+        eq(n(&[0.0, 0.0004, 0.5]), &[0.5, 0.0, 0.5]);
+    }
 }

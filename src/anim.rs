@@ -140,8 +140,11 @@ impl AnimLibrary {
             .iter()
             .map(|it| {
                 let mut layers = Vec::new();
+                // the authored weights through the evaluator's setup (0x777AE0, RE/24 ANIM-1)
+                let mut ws: Vec<f32> = (0..it.animations.len()).map(|k| it.weights.get(k).copied().unwrap_or(if k == 0 { 1.0 } else { 0.0 })).collect();
+                crate::player::jump_blend::normalize_item_weights(&mut ws);
                 for (k, anim) in it.animations.iter().enumerate() {
-                    let w = it.weights.get(k).copied().unwrap_or(if k == 0 { 1.0 } else { 0.0 });
+                    let w = ws[k];
                     if let Some(n) = self.anim_names.get(anim).filter(|n| self.clips.contains_key(*n)) {
                         layers.push((n.clone(), w));
                     }
@@ -356,9 +359,11 @@ impl AnimPlayer {
 
     /// Set the layer weights of the overlay's current item (a blended action such as the fall-grasp blend).
     pub fn set_overlay_weights(&mut self, w: &[f32]) {
+        let mut w = w.to_vec();
+        crate::player::jump_blend::normalize_item_weights(&mut w);
         if let Some(it) = self.overlay.as_mut().and_then(|o| o.items.get_mut(o.item)) {
             if it.layers.len() == w.len() {
-                for (l, w) in it.layers.iter_mut().zip(w) {
+                for (l, w) in it.layers.iter_mut().zip(&w) {
                     l.1 = *w;
                 }
             }

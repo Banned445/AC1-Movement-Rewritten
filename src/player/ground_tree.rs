@@ -194,6 +194,7 @@ impl MoveTransition {
             for (k, v) in nw.iter_mut().enumerate().take(n) {
                 *v = w.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0);
             }
+            super::jump_blend::normalize_item_weights(&mut nw[..n]);
             self.action.w = nw;
             self.action.n = n;
         }
