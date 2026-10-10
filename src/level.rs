@@ -54,8 +54,8 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     (36.3, 47.15, 0.6, 6.3, 4.0),  // … part B rises above it at x 36, with a stone ledge at 2.6 m (WALL_LEDGES)
     (20.0, 50.0, 6.0, 0.6, 2.6),   // side-jump wall C (x 17..23) …
     (25.5, 50.0, 3.0, 0.6, 2.6),   // … and D (x 24..27): a 1 m gap in the same edge line
-    (42.0, 50.0, 4.0, 0.6, 2.6),   // hop-up wall E (x 40..44): hang at 2.6 m …
-    (42.0, 50.15, 4.0, 0.3, 4.2),  // … with a ledge 1.6 m higher, set back 0.3 m (E2)
+    (42.0, 50.0, 4.0, 0.6, 2.6),   // swing-back wall E (x 40..44): hang at 2.6 m, a beam behind it (BEAMS) …
+    (42.0, 50.15, 4.0, 0.3, 4.2),  // … and a wall rising above it, set back 0.3 m (E2): no room to pull up
     // --- standing straight jump bands (0xB21DA0) ---
     (50.0, 50.3, 3.0, 1.0, 1.6),   // knee height: jump, hangknee, stand on top
     (56.0, 50.3, 3.0, 1.0, 2.2),   // 2.0–2.5 m with a wall below: jump into a wall hang
@@ -173,6 +173,9 @@ pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
 pub const BEAMS: &[(Vec3, Vec3)] = &[
+    // behind wall E, 0.8 m out from its -Z face and 0.6 m above its top: the swing back from a wall hang
+    // (`HumanLedge__TryWallJumpUp` 0xDD62A0) catches its far side edge
+    (Vec3::new(40.0, 3.2, 48.9), Vec3::new(44.0, 3.2, 48.9)),
     (Vec3::new(72.0, 4.0, 70.0), Vec3::new(78.0, 4.0, 70.0)),
     // a free beam 2.5 m past platform B (x 82): reached by a running jump, a ledge 2.3 m above its far part
     (Vec3::new(84.5, 4.0, 70.0), Vec3::new(90.5, 4.0, 70.0)),

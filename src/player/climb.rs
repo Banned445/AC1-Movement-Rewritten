@@ -240,9 +240,8 @@ pub fn move_time(action: Option<u32>) -> f32 {
 /// TryBackEject 0xDF2F50: the search point sits 2.25 m above the root, 0.8 m out from the hands (away from the wall).
 const CLIMB_JUMP_UP: f32 = 2.25;
 const CLIMB_JUMP_OUT: f32 = 0.8;
-/// PORT: the probe standing in for the game's box query around that point.
-const CLIMB_JUMP_PROBE_R: f32 = 0.5;
-const CLIMB_JUMP_PROBE_VTOL: f32 = 0.75;
+/// The box's half extents there (sub_1171050 arguments: right, forward, up).
+const CLIMB_JUMP_HALF: Vec3 = Vec3::new(0.375, 0.5, 0.75);
 
 /// StartMove 0xDFA0C0: a move without an action is interpolated over 0.5 s (blend 0.5).
 pub const MOVE_TIME_NO_ACTION: f32 = 0.5;
@@ -1386,31 +1385,14 @@ pub fn update_climb(
                 8 | 9 => 2,
                 _ => 0,
             };
-            let target = super::ledge_moves::try_climb_reach(right, diag, d.foot_l, d.foot_r, n, body.feet, &guidance, &collision);
+            // the first pass: climb holds only (ChooseMove 0xDFDE90 → TryReachOtherSurface(dir, 1, 0))
+            let target = super::ledge_moves::try_climb_reach(right, diag, d.foot_l, d.foot_r, n, body.feet, true, false, &guidance, &collision);
             if let Some(super::ledge_moves::ClimbReachTarget::Climb(r)) = target {
                 start_reach(d, body.feet, r, "reach to climb holds");
                 continue;
             }
-            if let Some(super::ledge_moves::ClimbReachTarget::Hang(mv)) = target {
-                let (mv, tail) = super::ledge_moves::second_hand_grab(mv, &guidance, &collision);
-                let e = LedgeEntry {
-                    hand_l: mv.hand_l,
-                    hand_r: mv.hand_r,
-                    normal: mv.normal,
-                    from_feet: body.feet,
-                    sub_state: LedgeSubState::ParallelJump,
-                    entry_move: Some(mv),
-                    entry_rest: [tail, None],
-                    catch: None,
-                };
-                d.look = None;
-                d.last_action = "reach to a hang";
-                switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
-                continue;
-            }
         }
-        // TryLedgeGrab 0xDF0980: the hold the failed move reached for becomes a hang. (ChooseMove tries it between its two
-        // TryReachOtherSurface passes, before the outside corner; the port's reaches are one pass, above.)
+        // TryLedgeGrab 0xDF0980: the hold the failed move reached for becomes a hang (between the reach's two passes)
         if let Some((h, actions)) = ledge_grab(&grid, d.pose, dir) {
             let hn = h.normal;
             let hf = -Vec3::new(hn.x, 0.0, hn.z).normalize_or(facing);
@@ -1428,6 +1410,33 @@ pub fn update_climb(
                 let e = LedgeEntry { entry_move: Some(mv), ..e0 };
                 d.look = None;
                 d.last_action = "ledge grab";
+                switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
+                continue;
+            }
+        }
+        if dir >= 4 {
+            let right = matches!(dir, 5 | 7 | 9);
+            let diag = match dir {
+                6 | 7 => 1,
+                8 | 9 => 2,
+                _ => 0,
+            };
+            // the second pass: hangs only (TryReachOtherSurface(dir, 0, 1))
+            let target = super::ledge_moves::try_climb_reach(right, diag, d.foot_l, d.foot_r, n, body.feet, false, true, &guidance, &collision);
+            if let Some(super::ledge_moves::ClimbReachTarget::Hang(mv)) = target {
+                let (mv, tail) = super::ledge_moves::second_hand_grab(mv, &guidance, &collision);
+                let e = LedgeEntry {
+                    hand_l: mv.hand_l,
+                    hand_r: mv.hand_r,
+                    normal: mv.normal,
+                    from_feet: body.feet,
+                    sub_state: LedgeSubState::ParallelJump,
+                    entry_move: Some(mv),
+                    entry_rest: [tail, None],
+                    catch: None,
+                };
+                d.look = None;
+                d.last_action = "reach to a hang";
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                 continue;
             }
@@ -1488,17 +1497,19 @@ pub fn update_climb(
         }
         // TryBackEject 0xDF2F50 (up directions, last in ChooseMove): an edge around the hands' midpoint at the root +
         // 2.25 m, 0.8 m out from the wall → the impulse (StartRelease 0xDE96A0) and the jump up into a free hang
-        // (0xDF9650). PORT: the game's box query (sub_1171050, extents ±0.2 / 0.5 / 0.75) and its body clearance
-        // test (sub_B2DD50) are approximated by a 0.5 m guidance probe with 0.75 m vertical tolerance.
+        // (0xDF9650). The search (sub_1171050, mask 50, 45°): a box at that centre, half extents 0.375 / 0.5 / 0.75,
+        // whose edges face the way the wall does (an overhang's front), and the nearest edge to each hand reference
+        // (∓0.2, −0.5, −0.75) in the box frame; both hands must find one. PORT: the body clearance test (sub_B2DD50)
+        // is not run; the hang is entered at the hands' midpoint.
         if matches!(dir, 0 | 1 | 6 | 7) {
             let hands = (d.hand_l + d.hand_r) * 0.5;
             let at = Vec3::new(hands.x, body.feet.y + CLIMB_JUMP_UP, hands.z) - facing * CLIMB_JUMP_OUT;
-            let hit = guidance
-                .probe(at, CLIMB_JUMP_PROBE_R, CLIMB_JUMP_PROBE_VTOL, Some(facing), 0.785)
-                .filter(|h| h.point.y > hands.y + 0.5 && Vec2::new(h.point.x - hands.x, h.point.z - hands.z).length() > 0.3);
-            if let Some(h) = hit {
-                let n = h.wall_normal;
-                let point = guidance.fit_hands(h.point, n);
+            let right = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero().cross(Vec3::Y);
+            let local = |x: f32| at + right * x - facing * 0.5 - Vec3::Y * 0.75;
+            let hit = guidance.probe_facing_pair(at, facing, CLIMB_JUMP_HALF, [local(-0.2), local(0.2)], 0.785_398_2, crate::guidance::PROBE_STEP, crate::guidance::MASK_CLIMB_HOLDS);
+            if let Some([a, b]) = hit {
+                let n = a.wall_normal;
+                let point = (a.point + b.point) * 0.5;
                 let mut e = LedgeEntry::at(point, n, body.feet, LedgeSubState::HangWallReception);
                 e.entry_move = Some(super::ledge_moves::climb_jump_move(body.feet, hands, e.hand_l, e.hand_r, n, &collision));
                 d.look = None;

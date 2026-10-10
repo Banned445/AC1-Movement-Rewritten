@@ -443,18 +443,14 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
     let fwd = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let s = if right { super::right_of(fwd) } else { -super::right_of(fwd) };
     // 1. a ledge beside the ladder
+    // `sub_1171050` (mask 50, 45°): a box there with half extents 0.4 / 0.5 / 0.5, the nearest edge to each hand
+    // reference (∓0.3, 0, 0) in the box frame; both hands must find one. Any LedgeGrab edge counts (the game has no
+    // ledge filter here)
     let p = root + Vec3::Y * 1.5 + s * 0.8 + fwd * 0.65;
-    // PORT: the port's guidance has one edge type; the ledge filter of `sub_1171050` is a hold with room above it (a
-    // ray 0.3 m above it from 0.5 m out back to the wall runs past the edge, as 0xE165D0's top test)
-    let ledge = |mid: Vec3, wn: Vec3| {
-        let wn = Vec3::new(wn.x, 0.0, wn.z).normalize_or_zero();
-        collision.ray_distance(mid + wn * 0.5 + Vec3::Y * 0.3, -wn, 1.0, crate::layers::MAIN_CHARACTER) > 0.53
-    };
+    let r = fwd.cross(Vec3::Y);
     let hold = guidance
-        .probe(p, 0.35, 0.3, Some(fwd), 45f32.to_radians())
-        .filter(|h| h.wall_normal.dot(n) > 0.7)
-        .map(|h| (guidance.fit_hands(h.point, h.wall_normal), h.wall_normal))
-        .filter(|&(mid, wn)| ledge(mid, wn));
+        .probe_facing_pair(p, fwd, Vec3::new(0.4, 0.5, 0.5), [p - r * 0.3, p + r * 0.3], 0.785_398_2, crate::guidance::PROBE_STEP, crate::guidance::MASK_CLIMB_HOLDS)
+        .map(|[a, b]| ((a.point + b.point) * 0.5, a.wall_normal));
     if let Some((mid, wn)) = hold {
         let hang = hang_type_at(mid, wn, collision);
         let wall = hang == LedgeHangType::Wall;
@@ -470,7 +466,7 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
     // 2. the side jump
     let base = root + fwd * 0.5;
     for diag in 0..3 {
-        let Some(target) = super::ledge_moves::try_climb_reach(right, diag, base, base, n, root, guidance, collision) else { continue };
+        let Some(target) = super::ledge_moves::try_climb_reach(right, diag, base, base, n, root, true, true, guidance, collision) else { continue };
         return Some(match target {
             super::ledge_moves::ClimbReachTarget::Climb(r) => {
                 let long = r.ids == super::ledge_moves::CLIMB_REACH_TABLE[0][1][right as usize];

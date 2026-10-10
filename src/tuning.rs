@@ -141,11 +141,10 @@ pub const JUMP_UP_TIME: f32 = 0.6;
 /// PORT: corner / side-jump duration only when the clip table lacks the action (jump_clips.rs).
 pub const CORNER_FALLBACK_TIME: f32 = 0.8;
 pub const SIDE_JUMP_FALLBACK_TIME: f32 = 1.0;
-/// `HumanLedge__TryJumpUpToClimb` 0xDD5E10: hold rows 1.2 m above the hands and 1.2 m below that, sub_11713A0 radius
-/// 0.4 with 0.5 (PORT: used as the vertical tolerance).
+/// `HumanLedge__TryJumpUpToClimb` 0xDD5E10: hold rows 1.2 m above the hands and 1.2 m below that, sub_11713A0 box
+/// half extents 0.4 (right) / 0.5 (forward) / 0.3 (up).
 pub const JUMP_TO_CLIMB_UP: f32 = 1.2;
-pub const JUMP_TO_CLIMB_R: f32 = 0.4;
-pub const JUMP_TO_CLIMB_VTOL: f32 = 0.5;
+pub const JUMP_TO_CLIMB_HALF: bevy::math::Vec3 = bevy::math::Vec3::new(0.4, 0.5, 0.3);
 /// Pull-up = the game's clip chains (RE/11 §5): wall hang → hangknee → stand = 0.333+0.4+0.467+0.4 s;
 /// free hang → hangwaist → hangknee → stand = 0.8+0.2+0.733+0.467+0.4 s.
 pub const PULLUP_WALL_TIME: f32 = 1.6;

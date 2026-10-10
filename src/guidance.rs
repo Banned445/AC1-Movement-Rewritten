@@ -177,11 +177,106 @@ impl GuidanceWorld {
             .min_by(|a, b| (a.2 - p).length().total_cmp(&(b.2 - p).length()))
             .map(|(i, e, q)| GuidanceHit { point: q, edge: i, wall_normal: e.n1, dir: (e.p1 - e.p0).normalize_or_zero() })
     }
+
+    /// `Guidance__ProbeBox` 0x11713A0 as the Human searches call it: a box zone at `centre` facing `forward` (right =
+    /// forward × up, up = world up) with half extents `half` (right, forward, up), the reference point `back` m behind
+    /// the centre (their local reference (0, −back, 0)), the edge pieces shortened by 0.1 m (`PROBE_STEP`).
+    pub fn probe_facing(&self, centre: Vec3, forward: Vec3, half: Vec3, back: f32, max_angle: f32, type_mask: u32) -> Option<GuidanceHit> {
+        let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+        self.probe_box(centre, forward.cross(Vec3::Y), forward, Vec3::Y, half, centre - forward * back, max_angle, PROBE_STEP, type_mask)
+    }
+
+    /// `sub_1171050`: one box zone (as `probe_facing`, no reference offset) and the nearest edge to each of two
+    /// reference points (`sub_116FF40` per hand, the same type, facing and shortening rules as the box probe). Both
+    /// must find an edge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn probe_facing_pair(
+        &self,
+        centre: Vec3,
+        forward: Vec3,
+        half: Vec3,
+        refs: [Vec3; 2],
+        max_angle: f32,
+        step: f32,
+        type_mask: u32,
+    ) -> Option<[GuidanceHit; 2]> {
+        let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+        let right = forward.cross(Vec3::Y);
+        let a = self.probe_box(centre, right, forward, Vec3::Y, half, refs[0], max_angle, step, type_mask)?;
+        let b = self.probe_box(centre, right, forward, Vec3::Y, half, refs[1], max_angle, step, type_mask)?;
+        Some([a, b])
+    }
 }
 
-/// Guidance subtype masks (bit `1 << GuidanceObjectSubType`): the climb grid's cell probe takes LedgeGrab, Pole and
-/// Rope edges (mask 50, BuildHoldGrid 0xDF6A40 → sub_11713A0).
+/// What `GuidanceWorld::step_search` found: the step distance `t` along the move, the hand hit, and for climb holds the
+/// feet hit (`None` = a hang: the caller looks for wall supports under the hands).
+#[derive(Clone, Copy, Debug)]
+pub struct StepFound {
+    pub t: f32,
+    pub hands: GuidanceHit,
+    pub feet: Option<GuidanceHit>,
+    /// The hand box's centre (the hang case's wall-support search starts 1.0 m below it, `sub_11718B0`).
+    pub hand_centre: Vec3,
+}
+
+impl GuidanceWorld {
+    /// `sub_B153C0`: steps t = step/2, 3·step/2, … while t − step/2 < `range` along `dir`. Each step tiles a box zone facing
+    /// `forward` with half extents (step/2, half_yz) and the reference at its centre (45°, mask 50, pieces shortened
+    /// 0.1 m):
+    /// 1. `climb`: a feet box at `feet_start` + t·dir, then a hand box 1.2 m above that box → climb holds;
+    /// 2. `hang`: a hand box at `hands_start` + t·dir → a hang.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_search(
+        &self,
+        hands_start: Vec3,
+        feet_start: Vec3,
+        dir: Vec3,
+        forward: Vec3,
+        range: f32,
+        step: f32,
+        half_yz: Vec2,
+        climb: bool,
+        hang: bool,
+    ) -> Option<StepFound> {
+        let half = Vec3::new(step * 0.5, half_yz.x, half_yz.y);
+        let mut t = step * 0.5;
+        loop {
+            if climb {
+                let fc = feet_start + dir * t;
+                if let Some(feet) = self.probe_facing(fc, forward, half, 0.0, 0.785_398_2, MASK_CLIMB_HOLDS) {
+                    let hc = fc + Vec3::Y * 1.2;
+                    if let Some(hands) = self.probe_facing(hc, forward, half, 0.0, 0.785_398_2, MASK_CLIMB_HOLDS) {
+                        return Some(StepFound { t, hands, feet: Some(feet), hand_centre: hc });
+                    }
+                }
+            }
+            if hang {
+                let hc = hands_start + dir * t;
+                if let Some(hands) = self.probe_facing(hc, forward, half, 0.0, 0.785_398_2, MASK_CLIMB_HOLDS) {
+                    return Some(StepFound { t, hands, feet: None, hand_centre: hc });
+                }
+            }
+            // the counter runs 0, step, 2·step … and stops at `range` (t = counter + step/2)
+            t += step;
+            if range <= t - step * 0.5 {
+                return None;
+            }
+        }
+    }
+}
+
+/// The edge-piece shortening (`sub_116D3C0`) every Human box probe passes (0.1 m).
+pub const PROBE_STEP: f32 = 0.1;
+
+/// Guidance subtype masks (bit `1 << GuidanceObjectSubType`). Every ledge and climb search of the Human contexts
+/// passes LedgeGrab, Pole and Rope (mask 50 = 0x32) to the box probe 0x11713A0: the climb grid (BuildHoldGrid
+/// 0xDF6A40), the ledge jumps (0xDD5E10, 0xDDD490 via 0xB153C0, 0xDDF390), the air catches (0xDFFE30, 0xE0AC70), the
+/// ground climb start (0xB2E860) and the hand-pair search 0xB153C0. The game has no other filter between ledges and
+/// climb holds: both are LedgeGrab edges, told apart only by where each search looks (the `dword_1934100` …
+/// arguments are debug-draw colours, RE/01 §6). The probe reports a kind: 0 ledge, 1 surface, 2 rope, 3 pole.
 pub const MASK_CLIMB_HOLDS: u32 = 50;
+/// Ladder edges only (mask 8): the ladder searches (0xDD4CD0, 0xDD55F0, 0xDF10C0, 0xE04100).
+pub const MASK_LADDER: u32 = 8;
 
 pub(crate) fn closest_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
     let d = b - a;

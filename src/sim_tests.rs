@@ -701,8 +701,10 @@ fn outer_corner_wraps_around_the_wall_end() {
 }
 
 #[test]
-fn hop_up_reaches_the_ledge_above_and_swings_into_a_free_hang() {
+fn swing_back_catches_the_beam_behind_into_a_free_hang() {
     use crate::player::ledge_moves::{MoveKind, HOP_UP};
+    // `HumanLedge__TryWallJumpUp` 0xDD62A0: hanging on wall E's -Z face, stick up → the box 0.75 m out from the wall
+    // (root + 2.25 m) finds the far side edge of the beam behind (z 48.8, top 3.2 m), facing the way the wall does
     let mut s = hang_at(Vec3::new(42.0, 2.6, 49.7), Vec3::NEG_Z);
     s.pad(Vec3::Z, 1.0, false, false); // up
     let hopped = s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::HopUp));
@@ -712,9 +714,10 @@ fn hop_up_reaches_the_ledge_above_and_swings_into_a_free_hang() {
     s.pad(Vec3::Z, 0.0, false, false);
     assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
     let l = &s.data().ledge;
-    assert!((l.hand_l.y - 4.2).abs() < 0.05, "hands on E2: {:?}", l.hand_l);
+    assert!((l.hand_l.y - 3.2).abs() < 0.05 && (l.hand_l.z - 48.8).abs() < 0.05, "hands on the beam's far edge: {:?}", l.hand_l);
+    assert!(l.normal.dot(Vec3::NEG_Z) > 0.99, "hanging facing the wall again: {:?}", l.normal);
     assert_eq!(l.hang_type, ledge::LedgeHangType::Free);
-    assert!((s.body().feet.y - (4.2 - 2.4)).abs() < 0.05, "free-hang root: {:?}", s.body().feet);
+    assert!((s.body().feet.y - (3.2 - 2.4)).abs() < 0.05, "free-hang root: {:?}", s.body().feet);
 }
 
 /// Walk into a wall (facing +Z) with high profile + Legs from `feet`; return once the straight jump started.
