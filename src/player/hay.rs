@@ -225,7 +225,9 @@ pub fn update_hay(
         }
         if loco.just_switched {
             loco.just_switched = false;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         let h = &mut data.hay;
         h.t += dt;

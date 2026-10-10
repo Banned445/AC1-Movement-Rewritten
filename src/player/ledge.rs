@@ -360,7 +360,9 @@ pub fn update_ledge(
         if loco.just_switched {
             loco.just_switched = false;
             limbs.feet = None;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         // ---------------------------------------------------------------- SwingReception (SubState 8)
         if let Some(mut s) = data.ledge.swing {

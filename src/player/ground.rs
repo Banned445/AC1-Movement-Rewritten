@@ -530,7 +530,7 @@ pub fn update_ground(
             continue;
         }
         if loco.just_switched {
-            // AIActor::Update skips a context's first update after it was switched in.
+            // the entry work of the first run; the update itself is skipped only for the rest of the switching frame
             loco.just_switched = false;
             if let Some(l) = g.pending_landing.take() {
                 // drop > 3 m: camera shake (drop − 3) / 7 (0xE05940)
@@ -543,10 +543,12 @@ pub fn update_ground(
                     body.velocity = Vec3::ZERO;
                 }
             }
-            // the controller keeps integrating the velocity the switch left (no one-frame freeze)
             body.grounded = true;
-            super::coast(&mut body, &collision, dt);
-            continue;
+            if loco.switched_this_frame {
+                // the controller keeps integrating the velocity the switch left (no one-frame freeze)
+                super::coast(&mut body, &collision, dt);
+                continue;
+            }
         }
 
         if GAME_GROUND_EXTRAS {

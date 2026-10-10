@@ -527,7 +527,9 @@ pub fn update_ladder(
         }
         if loco.just_switched {
             loco.just_switched = false;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         let l = &mut data.ladder;
         l.t += dt * if l.rate > 0.0 { l.rate } else { 1.0 };

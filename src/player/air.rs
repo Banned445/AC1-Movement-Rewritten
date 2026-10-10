@@ -503,17 +503,19 @@ pub fn update_air(
         if loco.just_switched {
             if let Some(v) = data.air.entry_velocity.take() { body.velocity = v; }
             loco.just_switched = false;
-            // the controller keeps integrating the take-off velocity; the jump's path shifts with it so the
-            // linear correction (0xE0DEF0) still ends on the target
             data.air.begin_turn(body.heading);
-            let before = body.feet;
-            super::coast(&mut body, &collision, dt);
-            let d = body.feet - before;
-            if let AirMode::Jump { from, clip_end, .. } = &mut data.air.mode {
-                *from += d;
-                *clip_end += d;
+            if loco.switched_this_frame {
+                // the controller keeps integrating the take-off velocity; the jump's path shifts with it so the
+                // linear correction (0xE0DEF0) still ends on the target
+                let before = body.feet;
+                super::coast(&mut body, &collision, dt);
+                let d = body.feet - before;
+                if let AirMode::Jump { from, clip_end, .. } = &mut data.air.mode {
+                    *from += d;
+                    *clip_end += d;
+                }
+                continue;
             }
-            continue;
         }
         let air = &mut data.air;
         air.time_in_air += dt;

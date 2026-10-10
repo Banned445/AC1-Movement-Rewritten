@@ -130,6 +130,18 @@ fn high_profile_runs_and_legs_sprints() {
 }
 
 #[test]
+fn a_context_switched_in_last_frame_runs_its_update_at_once() {
+    // AIActor__UpdateContexts 0x55F6A9 clears justSwitched right after the update that switched, so the new context's
+    // next update is the next frame's; the port used to skip one more frame (RE/24 INPUT-1). The ground's update grows
+    // the turn band's k (UpdateHeading 0xD95290) from the 0 its entry sets.
+    let mut s = hang_at(Vec3::new(12.0, 2.6, 41.7), Vec3::NEG_Z);
+    force(&mut s, crate::player::TransitionSetup::ToMovement { landing: None });
+    assert_eq!(s.ground().turn_k, 0.0);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(s.ground().turn_k > 0.0, "the ground skipped its first frame");
+}
+
+#[test]
 fn a_flick_back_raises_the_quick_reversal_for_0_3_s() {
     // ProcessGroundMovement 0xEE68C3: the stick entering a band more than 120° from the facing sets +0x112C → HG+1780
     // for 0.3 s (RE/24 INPUT-7); a stick that only swings round within its band does not

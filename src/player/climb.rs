@@ -1110,7 +1110,9 @@ pub fn update_climb(
         }
         if loco.just_switched {
             loco.just_switched = false;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         let d = &mut data.climb;
         let n = d.normal;

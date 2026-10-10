@@ -438,7 +438,9 @@ pub fn update_walling(
         }
         if loco.just_switched {
             loco.just_switched = false;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         let w = &mut data.walling;
         w.t = (w.t + dt).min(w.duration());

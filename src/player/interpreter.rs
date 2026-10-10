@@ -132,10 +132,13 @@ pub fn update_interpreter(
     time: Res<Time>,
     rig: Res<CameraRig>,
     mut pad: ResMut<PadInput>,
-    mut q: Query<(&Locomotion, &Body, &mut HumanDataBundle, &mut Interpreter), With<Player>>,
+    mut q: Query<(&mut Locomotion, &Body, &mut HumanDataBundle, &mut Interpreter), With<Player>>,
 ) {
     let dt = time.delta_secs();
-    let Ok((loco, body, mut data, mut it)) = q.single_mut() else { return };
+    let Ok((mut loco, body, mut data, mut it)) = q.single_mut() else { return };
+    // a new frame: a switch made last frame no longer skips anything (`AIActor__UpdateContexts` 0x55F6A9 cleared the
+    // byte right after the update that switched; RE/24 INPUT-1)
+    loco.switched_this_frame = false;
 
     // the state machine follows the locomotion context; the enter functions' input side effects (RE/24 INPUT-3)
     if it.ctx != Some(loco.current) {

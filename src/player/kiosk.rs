@@ -142,7 +142,9 @@ pub fn update_kiosk(
         }
         if loco.just_switched {
             loco.just_switched = false;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         let k = &mut data.kiosk;
         body.velocity = Vec3::ZERO;

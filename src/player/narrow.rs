@@ -1016,7 +1016,9 @@ pub fn update_narrow(
         }
         if loco.just_switched {
             loco.just_switched = false;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         let n = &mut data.narrow;
         n.t += dt;
