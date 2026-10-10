@@ -236,9 +236,25 @@ impl HumanGroundData {
 
     /// RunStop (state 18, `HumanGround__RunStop_Enter` 0xD98E30): the stop action of the leading foot (table 0x1A2C074 =
     /// legacy 86 / 87), weighted by the speed it stopped from. MoveBlend does not run while it plays.
+    /// `HumanGround__RunStop_Enter` 0xD98E30: the stop of the foot `PickLocomotionFoot` 0xD86760 reads off the playing
+    /// item's word (the locomotion's, or the transition in front of it; RE/24 GROUND-7). Weights: with the locomotion
+    /// (or the skid-turn exits, legacy 96 / 97) playing [0, 1 − f, f] by the speed; with another action
+    /// [1 − v, v, 0], v = clamp((t − 0.33) / 0.67) of its normalised time (GROUND-8). PORT: the stop table
+    /// dword_1A2C074 is filled at runtime; parallel feet (2) take the right-foot stop.
     pub fn start_run_stop(&mut self) {
-        let foot = (self.blend.foot != 0) as usize;
-        if let Some(b) = jump_blend::action_items(jump_blend::RUN_STOP[foot]).map(|_| ActionBlend::new(jump_blend::RUN_STOP[foot], 0, &jump_blend::run_stop_weights(self.speed_param))) {
+        let word = match self.tr {
+            Some(t) => super::anim_gate::word(&t.action),
+            None => super::anim_gate::item_word(super::move_blend::ACT_GROUND_LOCOMOTION, self.blend.foot),
+        };
+        let foot = super::ground_tree::pick_locomotion_foot(word, self.blend.foot).min(1);
+        let weights = match self.tr.filter(|t| !super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id)) {
+            Some(t) => {
+                let v = ((t.phase - 0.33).max(0.0) / 0.67).clamp(0.0, 1.0);
+                [1.0 - v, v, 0.0]
+            }
+            None => jump_blend::run_stop_weights(self.speed_param),
+        };
+        if let Some(b) = jump_blend::action_items(jump_blend::RUN_STOP[foot]).map(|_| ActionBlend::new(jump_blend::RUN_STOP[foot], 0, &weights)) {
             self.play_oneshot(b);
             self.oneshot_next = None;
             self.tr = None;
@@ -674,17 +690,19 @@ pub fn update_ground(
         let stick_turn = if mv_speed > 0.0 { angle_diff(heading_of(mv_dir), body.heading) } else { 0.0 };
         // A transition into the locomotion (the Move state's transition path) keeps steering and the other requests
         // live. A released stick leaves it like any Move: `HumanGround__Move_CanRunStop` 0xD7EC90 (high profile, the
-        // run stop allowed, and the playing action is the locomotion, the skid-turn exits legacy 96 / 97, or past 0.33 s)
+        // run stop allowed, and the playing action is the locomotion, the skid-turn exits legacy 96 / 97, or past 0.33 of its
+        // normalised time, `sub_501DF0`)
         // or else `HumanGround__Move_CanStop` 0xD7ED30 (the playing action is not the locomotion): the wait at once.
         if GAME_GROUND_TREE && mv_speed <= 0.0 {
             if let Some(t) = g.tr.filter(|t| !t.to_wait) {
-                let elapsed = t.phase * t.action.duration();
                 let can_run_stop = g.high_profile && g.speed_param > BAND_WALK && !super::anim_gate::locked(&t.action)
-                    && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || elapsed > 0.33);
-                g.tr = None;
+                    && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || t.phase > 0.33);
                 if can_run_stop {
+                    // RunStop_Enter reads the transition still playing (its word, its normalised time)
                     g.start_run_stop();
+                    g.tr = None;
                 } else {
+                    g.tr = None;
                     g.set_wait_foot(super::ground_tree::pick_locomotion_foot(super::anim_gate::word(&t.action), g.blend.foot));
                     g.speed_param = 0.0;
                     g.blend.speed_param = 0.0;
@@ -782,15 +800,18 @@ pub fn update_ground(
         // pulling the stick back at a run skids (run stop), and the Idle that follows pivots (state 25): the skid turn.
         let reversed = pad.speed01 > 0.0 && pad.dir_move.dot(body.forward()) < -std::f32::consts::FRAC_1_SQRT_2;
         // in front of the locomotion the guard also accepts the skid-turn exits (legacy 96 / 97) and any transition
-        // past 0.33 s that is not locked (0xD7EC90)
+        // past 0.33 of its normalised time that is not locked (0xD7EC90)
         let tr_allows_stop = g.tr.is_none_or(|t| !t.to_wait && !super::anim_gate::locked(&t.action)
-            && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || t.phase * t.action.duration() > 0.33));
+            && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || t.phase > 0.33));
         if reversed && g.high_profile && g.speed_param > 0.25 && g.oneshot.is_none() && tr_allows_stop {
             g.start_run_stop();
         }
         if mv_speed <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_none() && g.tr.is_none() {
-            if GAME_GROUND_TREE {
-                // Idle from Move (0xD8B220): the wait of the locomotion item's exit foot (its word, 0xD86760)
+            // the Move guards try the run stop first (0xD7EC90), Idle only otherwise: the run stop reads the playing
+            // locomotion item (RE/24 GROUND-7)
+            if GAME_GROUND_TREE && g.speed_param <= 0.25 {
+                // Idle from Move (0xD8B220): the wait of the locomotion item's exit foot (its word, 0xD86760). PORT: the
+                // game picks it by the bone leading foot (`Human__GetLeadingFoot` 0xD8B279, RE/24 GROUND-24)
                 let word = super::anim_gate::item_word(super::move_blend::ACT_GROUND_LOCOMOTION, g.blend.foot);
                 g.set_wait_foot(super::ground_tree::pick_locomotion_foot(word, g.blend.foot));
             }

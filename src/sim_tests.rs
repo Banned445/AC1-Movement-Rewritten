@@ -3514,6 +3514,25 @@ fn a_pivot_hands_over_through_the_turn_start() {
 }
 
 #[test]
+fn the_run_stop_plays_the_foot_of_the_locomotion_items_word() {
+    // RunStop_Enter 0xD98E30: PickLocomotionFoot over item words [0x0FC9, 0x0FC6] → item 0 plays legacy 87
+    // (RUN_STOP[1]), item 1 legacy 86 (RUN_STOP[0]) (RE/24 GROUND-7)
+    use crate::player::jump_blend::RUN_STOP;
+    for want_item in [0usize, 1] {
+        let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+        s.pad(Vec3::NEG_Z, 1.0, true, false);
+        s.run(1.5);
+        // early in the item, so the foot does not flip on the release frame
+        assert!(s.run_until(2.0, |s| s.ground().tr.is_none() && s.ground().blend.foot == want_item && s.ground().blend.phase < 0.5), "never on item {want_item}");
+        s.pad(Vec3::ZERO, 0.0, true, false);
+        s.run(1.0 / 60.0 + 1e-4);
+        assert_eq!(s.ground().owner, crate::player::ground::TreeState::RunStop);
+        let id = s.ground().oneshot.map(|o| o.blend.id);
+        assert_eq!(id, Some(RUN_STOP[1 - want_item]), "item {want_item}");
+    }
+}
+
+#[test]
 fn moving_again_after_a_run_stop_plays_its_exit() {
     use crate::player::ground_tree::RUN_STOP_EXIT;
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
