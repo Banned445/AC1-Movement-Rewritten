@@ -955,6 +955,9 @@ fn shimmy_onto_an_overhang_switches_to_a_free_hang() {
     let switched = s.run_until(6.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::SwitchHang { to_wall: false }));
     assert!(switched, "no switch: {} hands {:?}", s.data().ledge.last_action, s.data().ledge.hand_l);
     assert_eq!(s.data().ledge.mv.unwrap().seq[0].map(|a| a.id), Some(TO_FREE[0]), "hangwall_tr_hangfree_left");
+    // both hand targets are the lead hand's target (0xDE1892 / 0xDE18B8, RE/24 LEDGE-9)
+    let mv = s.data().ledge.mv.unwrap();
+    assert!((mv.hand_l - mv.hand_r).length() < 1e-4, "both hands on one point: {:?} {:?}", mv.hand_l, mv.hand_r);
     s.pad(Vec3::X, 0.0, false, false);
     assert!(s.run_until(2.0, |s| s.data().ledge.mv.is_none()));
     assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Free);

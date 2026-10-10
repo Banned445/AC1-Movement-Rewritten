@@ -299,8 +299,8 @@ pub fn hang_type_at(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> LedgeHang
     }
 }
 
-/// The hang type a step to `mid` needs, if it differs from `cur` (0xDE1060): free → wall when a foot finds
-/// support, wall → free unless both feet do.
+/// The hang type a step to the target `mid` needs, if it differs from `cur` (0xDE1060): free → wall when a foot finds
+/// support, wall → free unless both feet do. The rays start at the target point (RE/24 LEDGE-9).
 fn needs_switch(cur: LedgeHangType, mid: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<LedgeHangType> {
     let (a, b) = feet_on_wall(mid, n, collision);
     match cur {
@@ -717,9 +717,12 @@ pub fn update_ledge(
                     let tl = h.point + along(d.hand_l);
                     let tr = h.point + along(d.hand_r);
                     // the destination needs the other hang type: the switch replaces the hand step (0xDE29E0 order:
-                    // TrySwitchHangType before StartHandStep)
-                    if let Some(nt) = needs_switch(d.hang_type, (tl + tr) * 0.5, n, &collision) {
-                        let mv = ledge_moves::switch_move(if sign > 0.0 { 0 } else { 1 }, nt == LedgeHangType::Wall, body.feet, tl, tr, n, &collision);
+                    // TrySwitchHangType before StartHandStep). `TrySwitchHangType` 0xDE1060 (vertical): both hand targets
+                    // are the step row point, the foot rays start there (RE/24 LEDGE-9). PORT: the game decides with the
+                    // step clip's end-frame moving foot (+ a ±0.15 m jitter, `QuickWallTestForStep` 0xDD1DC0); the port
+                    // uses the switch's own rays.
+                    if let Some(nt) = needs_switch(d.hang_type, h.point, n, &collision) {
+                        let mv = ledge_moves::switch_move(if sign > 0.0 { 0 } else { 1 }, nt == LedgeHangType::Wall, body.feet, h.point, h.point, n, &collision);
                         start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
                         continue;
                     }
@@ -827,11 +830,12 @@ pub fn update_ledge(
                 }
                 // StartHandStep 0xDDE0C0: the shimmy step onto row 3's target
                 if let Some(t) = target {
-                    let (nl, nr) = if move_right_hand { (d.hand_l, t) } else { (t, d.hand_r) };
-                    if let Some(nt) = needs_switch(d.hang_type, (nl + nr) * 0.5, n, &collision) {
-                        let mv = ledge_moves::switch_move(if right_dir { 3 } else { 2 }, nt == LedgeHangType::Wall, body.feet, nl, nr, n, &collision);
-                        // the switch carries this shimmy step's hand move: the alternation advances as for the step
-                        d.alt_flag = !d.alt_flag;
+                    // `TrySwitchHangType` 0xDE1060 (lateral): the lead hand's ProbeLateral target, refused on a closing step;
+                    // both hands go onto it and the foot rays start there; +133 is not touched (RE/24 LEDGE-9). PORT: the
+                    // decision uses the switch's rays, not the step clip's end-frame foot (0xDD1DC0).
+                    let switch = if d.alt_flag { None } else { needs_switch(d.hang_type, t, n, &collision) };
+                    if let Some(nt) = switch {
+                        let mv = ledge_moves::switch_move(if right_dir { 3 } else { 2 }, nt == LedgeHangType::Wall, body.feet, t, t, n, &collision);
                         start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
                         continue;
                     }
