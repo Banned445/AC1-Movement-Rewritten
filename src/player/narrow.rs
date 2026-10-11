@@ -356,6 +356,12 @@ pub fn beam_bands() -> [f32; 5] {
     })
 }
 
+/// The speed a walk item's [walk, jog] weights stand for (the inverse of `speed_weights`).
+fn speed_from_weights(a: &ActionBlend) -> f32 {
+    let b = beam_bands();
+    b[0] + (b[4] - b[0]) * a.weights().get(1).copied().unwrap_or(0.0)
+}
+
 /// The walk / start items' [walk, jog] weights from the speed (0xF7D890): jog = clamp((speed − band0) / (band4 − band0)).
 fn speed_weights(speed: f32) -> [f32; 2] {
     let b = beam_bands();
@@ -393,8 +399,14 @@ impl HumanNarrowObjectData {
         self.warp_heading = (super::heading_of(e.facing), super::heading_of(self.facing()));
         match e.mode {
             BeamEntryMode::Ground => self.play(BeamState::Entry, if BEAM_COMPLETION { e.action.or_else(|| item(BEAM_WALK, e.foot, &[1.0, 0.0])) } else { item(BEAM_WAIT[0], 0, &[]) }),
-            // 0xF7AAA0 mode 2: standing → the wait by foot (table 0x1A353C0), moving → Main (the walk)
-            BeamEntryMode::Straight => self.play(BeamState::Wait, item(BEAM_WAIT[e.foot], 0, &[])),
+            // 0xF7AAA0 mode 2: standing → the wait by foot (table 0x1A353C0), moving → Main (the walk, RE/24 NARROW-6)
+            BeamEntryMode::Straight => match e.action.filter(|a| a.id == BEAM_WALK) {
+                Some(walk) => {
+                    self.speed = beam_bands()[0].max(speed_from_weights(&walk));
+                    self.play(BeamState::Walk, Some(walk));
+                }
+                None => self.play(BeamState::Wait, item(BEAM_WAIT[e.foot], 0, &[])),
+            },
             BeamEntryMode::Side | BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack => {
                 self.warp = e.action.map(|a| a.duration()).unwrap_or(0.3);
                 self.play(BeamState::Reception, e.action);
@@ -736,6 +748,12 @@ pub fn free_step_beam_entry(
             };
             let w = if jog { [0.0, 0.0, 1.0 - w90, w90] } else { [1.0 - w90, w90, 0.0, 0.0] };
             (toward, item(BEAM_SIDE_ENTRY[k], 0, &w))
+        }
+        // mode 2 with the stick: Main / Walk at once, band 4 when running else band 0, no action of its own (EnterByMode
+        // 0xF7AC92–0xF7ACC4, RE/24 NARROW-6); the port carries the walk item to enter with
+        BeamEntryMode::Straight if stick.is_some() => {
+            let speed = if jog { beam_bands()[4] } else { beam_bands()[0] };
+            (axis.dot(f) >= 0.0, item(BEAM_WALK, foot, &speed_weights(speed)))
         }
         // the beam direction nearest the facing
         _ => (axis.dot(f) >= 0.0, if mode == BeamEntryMode::Side { reception } else { None }),

@@ -1569,6 +1569,8 @@ fn running_jump_onto_a_beam_targets_it_and_mounts_on_arrival() {
     assert_eq!(s.data().air.target_flags, 0x10000);
     assert_eq!(n.entry_mode, BeamEntryMode::Straight);
     assert!(n.toward_p1);
+    // with the stick held, mode 2 goes straight into the walk (RE/24 NARROW-6)
+    assert_eq!(n.state, BeamState::Walk, "a moving straight arrival walks on");
     s.run(0.25); // 0xE0BB70: reception starts before the 0.2 s RootInterp finishes.
     let f = s.body().feet;
     assert!((f.z - 70.0).abs() < 0.01 && (f.y - 4.0).abs() < 0.01 && f.x > 84.5, "on the beam line: {f:?}");
