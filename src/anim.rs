@@ -865,7 +865,9 @@ fn choose_clip(
                         let gd = p.grasp_dir;
                         p.grasp_dir = if crate::tuning::GAME_FALLS && want == Vec3::ZERO { Vec3::ZERO } else { gd + (want - gd) * k };
                         let w = fall_grasp_weights(p.grasp_dir, facing);
-                        let r = action(&lib, &[ACT_FALL], true, 0, Some(if after_flight { 0.5 } else { 0.15 }), Some("fall"));
+                        // the free-step abort's fall blends in over 0.3 s (`sub_E009F0`, RE/24 AIR-10)
+                        let fade = if data.air.free_step_abort { 0.3 } else if after_flight { 0.5 } else { 0.15 };
+                        let r = action(&lib, &[ACT_FALL], true, 0, Some(fade), Some("fall"));
                         if let Some(mut r) = r {
                             if let Some(it) = r.items.first_mut() {
                                 if it.layers.len() == 6 {

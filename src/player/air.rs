@@ -262,6 +262,8 @@ pub struct HumanInAirData {
     /// The jump is at the free-jump target (no target found): the ground contact ends it, as it does in the game
     /// (0xE05200 on the controller contact) long before the target 3 m down is reached.
     pub free_target: bool,
+    /// A free-step arrival cancelled by a ceiling contact (`sub_E009F0`): the fall plays with a 0.3 s blend (RE/24 AIR-10).
+    pub free_step_abort: bool,
     /// Ground loss: the drop sub-state's (type, side) (InAirData+944 +64 / +68) and the edge's outward normal.
     pub drop: Option<(usize, usize, Option<Vec3>)>,
     /// First steep contact and rag-fall requirement (0xE038A0 / 0xE05200).
@@ -299,6 +301,7 @@ impl HumanInAirData {
         self.fall_action = None;
         self.fall_t = 0.0;
         self.free_target = false;
+        self.free_step_abort = false;
         self.drop = None;
         self.slope_slide = default();
         self.anti_stuck.reset(self.seq.wrapping_mul(2_654_435_761));
@@ -923,6 +926,16 @@ pub fn update_air(
                             let frac = (1.0 - (duration - t) / dt.max(1e-4)).clamp(0.0, 1.0);
                             air.tail_v = (step + step * frac) * 0.5;
                             air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
+                        }
+                        // a free-step arrival (case 1 / 0x10000) with a ceiling contact (a controller contact of class 8,
+                        // `sub_4F8C40`(8), 0xE07F47–0xE07F59; the classes are `sub_71B840`'s) is cancelled into a fall
+                        // (`sub_E009F0`: request 33, blend 0.3, vz ≤ 0, the target cleared) (RE/24 AIR-10)
+                        None if air.target.is_some() && matches!(air.target_flags, 1 | 0x10000) && crate::proxy::has_contact(&body.proxy.manifold, 8) => {
+                            air.target = None;
+                            air.target_flags = 0;
+                            body.velocity.y = body.velocity.y.min(0.0);
+                            air.free_step_abort = true;
+                            air.mode = AirMode::Fall { steer_to: None };
                         }
                         // a free-step arrival (case 1 / 0x10000) interpolates the root onto the target first
                         None if air.target.is_some() && matches!(air.target_flags, 1 | 0x10000) => {

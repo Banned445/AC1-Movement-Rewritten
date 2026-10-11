@@ -47,7 +47,8 @@ const EPS: f32 = 1.192_092_9e-7;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Contact {
     pub pos: Vec3,
-    /// From the body toward the shape.
+    /// From the shape toward the body (a floor's points up; the game's contact classes, `sub_71B840`: z > 0.707 ground 1,
+    /// z < −0.707 ceiling 8, else wall 4).
     pub normal: Vec3,
     /// Shape surface to body surface (negative: penetrating). For a cast hit: the distance along the normal at the
     /// hit fraction (the collector's conversion, 0x579870).
@@ -610,9 +611,43 @@ pub fn stick_to_ground_height(world:&CollisionWorld,feet:Vec3,lift:f32,reach:f32
     Some((rest.y, h.normal.y))
 }
 
+/// The controller's contact class (`sub_71B840`, contact +40): 1 ground (normal up > 0.707), 8 ceiling (< −0.707), else 4
+/// wall.
+pub fn contact_class(c: &Contact) -> u32 {
+    if c.normal.y > 0.707 {
+        1
+    } else if c.normal.y < -0.707 {
+        8
+    } else {
+        4
+    }
+}
+
+/// `sub_4F8C40`(mask): does the manifold hold a contact of one of these classes?
+pub fn has_contact(manifold: &[Contact], mask: u32) -> bool {
+    manifold.iter().any(|c| contact_class(c) & mask != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RE/24 AIR-10: the contact classes behind `sub_4F8C40`(8) (the free-step abort): a surface overhead is class 8.
+    #[test]
+    fn contact_classes_follow_the_normal() {
+        let c = |y: f32| Contact { pos: Vec3::ZERO, normal: Vec3::new((1.0 - y * y).max(0.0).sqrt(), y, 0.0), dist: 0.0, fraction: 0.0, body: 0 };
+        assert_eq!(contact_class(&c(1.0)), 1);
+        assert_eq!(contact_class(&c(0.71)), 1);
+        assert_eq!(contact_class(&c(0.7)), 4);
+        assert_eq!(contact_class(&c(-0.7)), 4);
+        assert_eq!(contact_class(&c(-0.71)), 8);
+        assert!(has_contact(&[c(1.0), c(-1.0)], 8));
+        assert!(!has_contact(&[c(1.0), c(0.0)], 8));
+        // a ceiling box overhead: the proxy's contact normal points down at the body (shape → body)
+        let world = boxes(&[(Vec3::new(-1.0, 1.9, -1.0), Vec3::new(1.0, 2.5, 1.0))]);
+        let top = closest(&world, 0, Vec3::ZERO, 0.0, CAPSULE_HEIGHT);
+        assert_eq!(contact_class(&top), 8, "{top:?}");
+    }
 
     fn boxes(b: &[(Vec3, Vec3)]) -> CollisionWorld {
         CollisionWorld { boxes: b.iter().map(|&(min, max)| Aabb3 { min, max }).collect(), ..Default::default() }
