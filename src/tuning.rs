@@ -90,7 +90,7 @@ pub const FREEFALL_MAX_HORIZONTAL: f32 = 15.0;
 /// Non-target drift: decays at 4 m/s², capped at 5 m/s. 0x19BA434 / 0x19BA438
 pub const DRIFT_DECEL: f32 = 4.0;
 pub const DRIFT_MAX: f32 = 5.0;
-/// Jump arrives when the clip ends within 0.01 m of the target. CheckJumpTargetArrival 0xE07D00
+/// Jump arrives when the requested root is within 0.01 m of the target. CheckJumpTargetArrival 0xE07D00 (0xE07F2A)
 pub const ARRIVAL_TOLERANCE: f32 = 0.01;
 /// Over-drop rule: if the target is > 5 m below (3 m for Leap of Faith) aim 5 m down, then free-fall. 0xB1B8C0
 pub const OVERDROP: f32 = 5.0;

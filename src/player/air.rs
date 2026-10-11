@@ -798,10 +798,12 @@ pub fn update_air(
                     body.velocity.z *= 0.3;
                     body.velocity.y = body.velocity.y.min(0.0);
                 } else if t1 >= duration {
-                    // arrival (0xE07D00, within 0.01 m): the rest of a contact's lag is absorbed here
-                    if (body.feet - aim).length() > ARRIVAL_TOLERANCE && collision.capsule_fits(aim) {
-                        body.feet = aim;
-                    }
+                    // arrival (0xE07D00, within 0.01 m, 0xE07F2A): while Data+505 is set the tested point is the root
+                    // requested from the controller (`CharacterController__RequestMoveTo` 0xE0F149, var_80), the path
+                    // that ends on the target, not the body; the body is not moved onto it, the reception starts from
+                    // where the controller left it (RE/24 AIR-33). The path's last step is the linear correction's full
+                    // offset, so it ends on the aim and the test passes at the flight's end
+                    debug_assert!((path(t1) - aim).length() < ARRIVAL_TOLERANCE, "{} {}", path(t1), aim);
                     // hand-off by target type (ledge targets → Ledge context)
                     let mut no_arrival = false;
                     if let Some((mid, normal)) = air.target.and_then(|t| t.hang) {
