@@ -2231,6 +2231,19 @@ fn a_vertical_hand_step_waits_for_the_stick_for_the_second_hand() {
     assert!((l.hand_l - l.hand_r).length() < 0.15 && l.last_hand == 0, "hands nearly together: {:?} {:?}", l.hand_l, l.hand_r);
 }
 
+/// RE/24 LEDGE-26: the empty hand lets go in the middle of a shimmy step (event 4's guard 0xDCCDD0 refuses only a locked
+/// item, and the step items are not locked); the port used to wait for the step's end.
+#[test]
+fn letting_go_works_in_the_middle_of_a_shimmy() {
+    let mut s = hang_at(Vec3::new(35.92, 2.6, 45.5), Vec3::NEG_X);
+    s.pad(Vec3::Z, 1.0, false, false); // sideways along the ledge
+    assert!(s.run_until(2.0, |s| s.data().ledge.last_action.starts_with("shimmy ") && s.data().ledge.moving()), "no shimmy: {}", s.data().ledge.last_action);
+    s.run(0.15);
+    assert!(s.data().ledge.moving(), "still mid-step");
+    s.press_hand();
+    assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir), "let go mid-step: {:?}", s.loco().current);
+}
+
 /// bug-1791711547: a free hang's vertical hand step lifts the body the whole step with the first hand (the root hangs
 /// from the higher hand target, `ComputeRootFromHandTargets` 0xDD6730: max − 2.4), so the reaching hand gets to its
 /// hold; the halfway root left it 0.4 m short. Wall K's bars (0.6 m apart from 3.6 m) under the bay.

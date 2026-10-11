@@ -691,7 +691,26 @@ pub fn update_ledge(
             continue;
         }
 
+        // ---------------------------------------------------------------- lost ledge
+        // `HasLostLedge` 0xDD20D0, every frame before the state dispatch (`HumanLedge__Update` 0xDE3E86), steps included:
+        // per hand a `Guidance__ProbeBox` at the hand, half 0.1 m, facing the wall, the wall within 90°, mask 50
+        // (`sub_DCE0D0`, on the sphere report r 0.25 + half the hand spacing, which holds that box) (RE/24 LEDGE-19).
+        // PORT: not during the `mv` moves (corners, ledge jumps, receptions; the game skips only the ledge jumps,
+        // 1861 & 4): their hand records move at the move's end in the port
+        let lost = |p: Vec3| guidance.probe_facing(p, facing, Vec3::splat(0.1), 0.0, std::f32::consts::FRAC_PI_2, crate::guidance::MASK_CLIMB_HOLDS).is_none();
+        if lost(d.hand_l) || lost(d.hand_r) {
+            let origin = if d.hang_type == LedgeHangType::Wall { FallOrigin::HangWall } else { FallOrigin::HangFree };
+            let hold = hand_mid(d);
+            limbs.hands = None;
+            limbs.feet = None;
+            d.moves.clear();
+            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 }));
+            data.air.release_hold = Some(hold);
+            continue;
+        }
+
         // ---------------------------------------------------------------- running move
+        let mut move_done = false;
         if let Some(m) = d.moves.first_mut() {
             if m.to.is_nan() {
                 // deferred target (entry): the hang root for the current hands
@@ -702,9 +721,18 @@ pub fn update_ledge(
             if m.done() {
                 d.moves.remove(0);
             }
+            // event 4 (let go) is accepted mid-step: its guard `sub_DCCDD0` 0xDCCDD0 refuses only a locked playing item, and
+            // the shimmy / vertical step items are not locked (word 0x0FC0); the catches' are (RE/24 LEDGE-26)
+            let hand_step = d.last_action.starts_with("shimmy ") || d.last_action.starts_with("hand step ");
             if !d.moves.is_empty() {
-                continue;
+                if !(hand_step && pad.hand_buffered()) {
+                    continue;
+                }
+            } else {
+                move_done = true;
             }
+        }
+        if move_done {
             match d.after.take() {
                 Some(After::StandOnTop) => {
                     limbs.hands = None;
@@ -725,17 +753,6 @@ pub fn update_ledge(
         }
 
         // ---------------------------------------------------------------- checks (Movement state)
-        let spacing = (d.hand_l - d.hand_r).length();
-        let tol = LOST_LEDGE_R + spacing * 0.5;
-        if guidance.on_edge(d.hand_l, n, tol).is_none() || guidance.on_edge(d.hand_r, n, tol).is_none() {
-            let origin = if d.hang_type == LedgeHangType::Wall { FallOrigin::HangWall } else { FallOrigin::HangFree };
-            let hold = hand_mid(d);
-            limbs.hands = None;
-            limbs.feet = None;
-            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 }));
-            data.air.release_hold = Some(hold);
-            continue;
-        }
         // the interpreter's latched stick in the character's frame (`GoAssassinActionInterpreter__LedgeState` 0xEEC356:
         // the angle of +0x1310 from stick-up; RB held reads the unmirrored +0x1300, 0xEEC256; RE/24 INPUT-4)
         let dir = if pad.speed01 > 0.0 { Some(quantize(pad.actor_dir(facing, pad.buttons[13]), facing)) } else { None };
