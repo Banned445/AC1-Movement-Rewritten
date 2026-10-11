@@ -306,6 +306,20 @@ mod tests {
         let mut e = ExtraAction::free_run(0, 0);
         assert_eq!(e.advance(0.2, true, false, 0).0, ExtraResult::Inactive);
     }
+    /// RE/24 ANIM-5: the impulsion wait (Action +28 = 0, +32 = 1) plays its items a, b, then loops on b.
+    #[test]
+    fn the_impulsion_wait_loops_from_its_action_loop_item() {
+        assert_eq!(super::super::jump_blend::loop_item(FREERUN_WAIT[0]), 1);
+        let mut e = ExtraAction::free_run(0, 0);
+        let step = |e: &mut ExtraAction| {
+            let d = e.action.duration() - e.time + 0.001;
+            e.advance(d, false, false, 0);
+        };
+        step(&mut e);
+        assert_eq!(e.action.item, 1);
+        step(&mut e);
+        assert_eq!(e.action.item, 1, "the loop starts again at item b");
+    }
     #[test]
     fn static_prepare_completes_only_after_positive_leftover_time() {
         let mut e = ExtraAction::free_run(0, 0);
@@ -370,7 +384,7 @@ mod tests {
     }
 }
 
-/// Simulation clock for discrete Ground actions; loops only the last item of the impulsion wait.
+/// Simulation clock for discrete Ground actions; the impulsion wait loops from its Action +32 item (RE/24 ANIM-5).
 #[derive(Clone, Copy, Debug)]
 pub struct ExtraAction {
     pub action: super::jump_blend::ActionBlend,
@@ -450,7 +464,8 @@ impl ExtraAction {
             }
             let count =
                 super::jump_blend::action_items(self.action.id).map_or(1, |items| items.len());
-            self.action.item = (self.action.item + 1).min(count - 1);
+            // past its last item the looping action starts again at its Action +32 item (0x730F3F; RE/24 ANIM-5)
+            self.action.item = if self.action.item + 1 < count { self.action.item + 1 } else { super::jump_blend::loop_item(self.action.id).min(count - 1) };
             self.time = 0.0;
             // The extra fraction is consumed on the next item without a seam blend (0x72FC30).
             if remaining <= 0.000001 {

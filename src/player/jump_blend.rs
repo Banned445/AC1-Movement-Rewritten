@@ -7,7 +7,7 @@
 //! root follows their blended DISPLACEMENT plus a linear correction to the target over both items
 //! (0xE0DEF0). An item's duration is Σ wᵢ·Tᵢ (0x507650 → 0x5B9480).
 
-use super::jump_clips::{ClipRoot, ACTIONS, CLIPS, ITEM_BLENDS};
+use super::jump_clips::{ClipRoot, ACTIONS, CLIPS, ITEM_BLENDS, LOOP_ITEMS};
 
 // ---------------------------------------------------------------- action ids (verified in the graph dump)
 /// Ground running takeoff (jump kind 0), [footl, footr] (0xB1EC40: 172788750 + (foot != 1)).
@@ -561,6 +561,12 @@ impl ActionBlend {
 
 pub fn action_items(id: u32) -> Option<&'static [&'static [&'static str]]> {
     ACTIONS.iter().find(|a| a.0 == id).map(|a| a.1)
+}
+
+/// Action +32: the item a looping action starts again at after its last (`ActionEvaluator__Advance` 0x730E50 at
+/// 0x730F3F; RE/24 ANIM-5); 0 for the others.
+pub fn loop_item(id: u32) -> usize {
+    LOOP_ITEMS.iter().find(|l| l.0 == id).map_or(0, |l| l.1 as usize)
 }
 
 pub fn clip(name: &str) -> Option<&'static ClipRoot> {

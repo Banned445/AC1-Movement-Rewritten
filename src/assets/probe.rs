@@ -339,6 +339,11 @@ fn probe_dump_jump_clips() {
         let bs: Vec<String> = a.items.iter().map(|it| format!("({}, {}, {:?}, {:?})", it.blend.kind, it.blend.clamp, it.blend.time, it.blend.overlap)).collect();
         out += &format!("    ({id:#010x}, &[{}]),\n", bs.join(", "));
     }
+    // Action +32, the item a looping action starts again at (`ActionEvaluator__Advance` 0x730E50; RE/24 ANIM-5)
+    out += "];\n\n/// Actions whose loop starts again at a later item: (action, Action +32).\npub const LOOP_ITEMS: &[(u32, u32)] = &[\n";
+    for id in ids.iter().filter(|id| graph.actions[*id].loop_item != 0) {
+        out += &format!("    ({id:#010x}, {}),\n", graph.actions[id].loop_item);
+    }
     out += "];\n\npub const CLIPS: &[ClipRoot] = &[\n";
     clips.sort();
     clips.dedup();

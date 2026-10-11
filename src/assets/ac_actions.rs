@@ -98,6 +98,9 @@ pub struct ActItem {
     pub flags: u16,
     /// +20, a float (meaning not decoded).
     pub f20: f32,
+    /// +24: how many times the item plays in a row; its runtime length and displacement scale by it
+    /// (`ItemEvaluator__Advance` 0x778010 at 0x7780D2, `sub_7778A0` 0x777A3D, `sub_5BC660` 0x5BC6A7; RE/24 ANIM-6).
+    pub repeat: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,6 +117,9 @@ pub struct Action {
     pub flags: u8,
     /// +28: how many times the action plays; 0 = it loops (0x72FC30).
     pub repeat: u32,
+    /// +32: the item a repeating action starts again at after its last item (`ActionEvaluator__Advance` 0x730E50,
+    /// 0x730F3F; RE/24 ANIM-5).
+    pub loop_item: u32,
     /// +12: the `BodyPartChannel` (object id in `BodyPartTemplate_Human`; `crate::assets::body_parts`).
     pub channel: u32,
 }
@@ -216,7 +222,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
             }
             r.u32()?; // ACTTorsoConstraintMode
             let repeat = r.u32()?;
-            r.u32()?;
+            let loop_item = r.u32()?;
             read_obj(r, c, false)?; // AssociatedActionGroup
             let n = r.u32()?;
             let mut items = Vec::new();
@@ -231,7 +237,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                     _ => {}
                 }
             }
-            let a = Action { id, request_id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, channel };
+            let a = Action { id, request_id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, loop_item, channel };
             c.actions.push(a.clone());
             Ok(Obj::Action(a))
         }
@@ -256,7 +262,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                 flags |= ((r.u8()? & 1) as u16) << (4 + b);
             }
             let f20 = r.f32()?;
-            r.u32()?;
+            let repeat = r.u32()?;
             r.u8()?;
             let n = r.u32()?;
             let weights = (0..n).map(|_| r.f32()).collect::<Result<Vec<_>, _>>()?;
@@ -273,6 +279,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                 transitions,
                 flags,
                 f20,
+                repeat,
             };
             c.items.insert(id, it.clone());
             Ok(Obj::Item(it))

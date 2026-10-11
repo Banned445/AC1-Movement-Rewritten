@@ -129,6 +129,21 @@ pub struct ItemPlay {
     pub transitions: Vec<crate::assets::ac_actions::ActTransition>,
     /// The item word (+60, RE/13 §7.6): 0x20 = locked.
     pub word: u16,
+    /// ActionItem +24: the item plays this many times in a row (0 is read as 1; RE/24 ANIM-6).
+    pub repeat: u32,
+}
+
+impl ItemPlay {
+    /// The clips' own phase at the item's phase: a repeated item runs its clips `repeat` times (`ItemEvaluator__Advance`
+    /// 0x778010 restarts them while rep + 1 < item +24, 0x7780D2).
+    pub fn clip_phase(&self, phase: f32) -> f32 {
+        let r = self.repeat.max(1) as f32;
+        if r <= 1.0 || phase >= 1.0 {
+            phase
+        } else {
+            (phase * r).fract()
+        }
+    }
 }
 
 impl AnimLibrary {
@@ -155,7 +170,7 @@ impl AnimLibrary {
                         l.1 = 1.0;
                     }
                 }
-                ItemPlay { layers, blend: it.blend, root_motion: it.displacement == DisplacementMode::FromAnim, action: id, transitions: it.transitions.clone(), word: it.flags }
+                ItemPlay { layers, blend: it.blend, root_motion: it.displacement == DisplacementMode::FromAnim, action: id, transitions: it.transitions.clone(), word: it.flags, repeat: it.repeat }
             })
             .filter(|i| !i.layers.is_empty())
             .collect();
@@ -181,7 +196,8 @@ impl AnimLibrary {
                 w += wt;
             }
         }
-        if w > 0.0 { d / w } else { 0.0 }
+        // a repeated item's runtime length (`sub_7778A0` 0x777A3D: duration × item +24; RE/24 ANIM-6)
+        if w > 0.0 { d / w * item.repeat.max(1) as f32 } else { 0.0 }
     }
 
     /// The item's dominant clip: the first of equal maxima (`sub_777AE0` keeps it with a strict `w > max`, 0x777BF9;
@@ -287,6 +303,8 @@ pub struct AnimPlayer {
     prev_contacts: ContactState,
     /// The action sequence loops back to this item (the items before it are a transition action).
     loop_from: usize,
+    /// Action +32 of the requested action: the item its loop starts again at, after `loop_from` (RE/24 ANIM-5).
+    loop_item: usize,
     /// The simulation's phase applies from this item on (the items before it are a transition action playing on its
     /// own clock).
     sim_from: usize,
@@ -341,6 +359,8 @@ pub struct Overlay {
     pub weight: f32,
     ending: bool,
     looping: bool,
+    /// Action +32: the item a looping action starts again at (RE/24 ANIM-5).
+    loop_item: usize,
     /// The channel's bones, and per joint whether the overlay animates it (resolved against the rig on first use).
     bones: std::collections::HashSet<u32>,
     mask: Vec<bool>,
@@ -378,7 +398,8 @@ impl AnimPlayer {
         let Some(items) = lib.action_items(action) else { return false };
         let bones = lib.body.bones(ch.mask);
         let weight = self.overlay.as_ref().map_or(0.0, |o| o.weight);
-        self.overlay = Some(Overlay { action, items, item: 0, phase: 0.0, weight, ending: false, looping: a.repeat == 0, bones, mask: Vec::new() });
+        let loop_item = (a.loop_item as usize).min(items.len() - 1);
+        self.overlay = Some(Overlay { action, items, item: 0, phase: 0.0, weight, ending: false, looping: a.repeat == 0, loop_item, bones, mask: Vec::new() });
         true
     }
 
@@ -416,7 +437,7 @@ fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, rig: &Rig, pose: &mut [(Qua
             o.item += 1;
             o.phase = 0.0;
         } else if o.looping {
-            o.item = 0;
+            o.item = o.loop_item;
             o.phase = o.phase.fract();
         } else {
             o.phase = 1.0;
@@ -425,7 +446,7 @@ fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, rig: &Rig, pose: &mut [(Qua
     }
     o.weight = if o.ending { (o.weight - dt / OVERLAY_FADE).max(0.0) } else { (o.weight + dt / OVERLAY_FADE).min(1.0) };
     let mut ov = Vec::new();
-    sample_layers(lib, rig, &o.items[o.item].layers, o.phase, &mut ov);
+    sample_layers(lib, rig, &o.items[o.item].layers, o.items[o.item].clip_phase(o.phase), &mut ov);
     blend_masked(pose, &ov, &o.mask, o.weight);
 }
 
@@ -474,7 +495,7 @@ pub fn uses_root_motion(name: &str) -> bool {
 }
 
 fn single(name: &str) -> Vec<ItemPlay> {
-    vec![ItemPlay { layers: vec![(name.to_string(), 1.0)], blend: named_blend(CROSSFADE), root_motion: uses_root_motion(name), action: 0, transitions: Vec::new(), word: 0 }]
+    vec![ItemPlay { layers: vec![(name.to_string(), 1.0)], blend: named_blend(CROSSFADE), root_motion: uses_root_motion(name), action: 0, transitions: Vec::new(), word: 0, repeat: 1 }]
 }
 
 fn looped(clip: &str, fade: f32) -> Request {
@@ -1140,6 +1161,7 @@ fn choose_clip(
         p.items = items;
         p.item = 0;
         p.loop_from = loop_from;
+        p.loop_item = lib.graph.actions.get(&new_action).map_or(0, |a| a.loop_item as usize);
         p.sim_from = sim_from;
         p.looping = req.looping;
         p.fit = req.fit;
@@ -1291,7 +1313,9 @@ pub fn apply_clip(
             let a_state = (p.items.clone(), p.item, 1.0, false);
             let cur = p.items[p.item].clone();
             let from = p.item;
-            p.item = if p.item + 1 < p.items.len() { p.item + 1 } else { p.loop_from.min(p.items.len() - 1) };
+            // a looping action starts again at its Action +32 item (`ActionEvaluator__Advance` 0x730E50 at 0x730F3F; RE/24
+            // ANIM-5), counted from the requested action's first item
+            p.item = if p.item + 1 < p.items.len() { p.item + 1 } else { (p.loop_from + p.loop_item).min(p.items.len() - 1) };
             let nxt = &p.items[p.item];
             let nxt_switch = nxt.action != cur.action && nxt.action != 0;
             // the requested action queued behind a transition action enters with the transition's blend B, stored on
@@ -1368,7 +1392,7 @@ pub fn apply_clip(
             if let Some((items, ai, aph, _)) = p.a_roll.as_ref() {
                 if let Some(it) = items.get(*ai) {
                     let mut a_pose = Vec::new();
-                    sample_layers(&lib, rig, &it.layers, *aph, &mut a_pose);
+                    sample_layers(&lib, rig, &it.layers, it.clip_phase(*aph), &mut a_pose);
                     p.prev = Some(a_pose);
                 }
             }
@@ -1380,7 +1404,7 @@ pub fn apply_clip(
                 let mut wsum = 0.0;
                 for (n, w) in &item.layers {
                     if let Some(c) = lib.clips.get(n) {
-                        off += root_motion_offset(c, p.phase) * *w;
+                        off += root_motion_offset(c, item.clip_phase(p.phase)) * *w;
                         wsum += *w;
                     }
                 }
@@ -1398,7 +1422,7 @@ pub fn apply_clip(
             }
             p.last_root = root.translation;
         }
-        sample_layers(&lib, rig, &item.layers, p.phase, &mut cur);
+        sample_layers(&lib, rig, &item.layers, item.clip_phase(p.phase), &mut cur);
         let prev = if fading { p.prev.take() } else { None };
         let empty = Vec::new();
         let prev_pose = prev.as_ref().filter(|v| v.len() == cur.len()).unwrap_or(&empty);
@@ -1482,6 +1506,19 @@ mod tests {
     /// plays FAF / 79BE (`1m_d_1ru`), right first FAE / 79BD; the second hand after a left-first step FB1 / 79C0, after a
     /// right-first step FB0 / 79BF. Up: left first FAA, right first FAB; the second hand after a left-first step FAC
     /// (`1lu_u_1m`), after a right-first step FAD.
+    #[test]
+    fn a_repeated_item_runs_its_clips_that_many_times() {
+        // RE/24 ANIM-6: a repeated item lasts its clips' length times its repeat count and runs its clips that many times
+        let mut lib = AnimLibrary::default();
+        lib.clips.insert("c".into(), AnimClip { name: "c".into(), duration: 0.5, ..Default::default() });
+        let it = ItemPlay { layers: vec![("c".into(), 1.0)], repeat: 4, ..Default::default() };
+        assert!((lib.item_duration(&it) - 2.0).abs() < 1e-6);
+        assert!((it.clip_phase(0.3) - 0.2).abs() < 1e-5, "the second run, 0.2 in");
+        assert_eq!(it.clip_phase(1.0), 1.0);
+        let once = ItemPlay { repeat: 0, ..it.clone() };
+        assert!((lib.item_duration(&once) - 0.5).abs() < 1e-6 && once.clip_phase(0.3) == 0.3);
+    }
+
     #[test]
     fn vertical_hand_steps_pick_the_games_clips() {
         let free = |down, second, first_left| ACT_VSTEP[1][vstep_index(down, second, first_left)];
@@ -1568,7 +1605,7 @@ mod tests {
         let lib = AnimLibrary { graph, ..Default::default() };
         let item = |action: u32| {
             let it = &lib.graph.actions[&action].items[0];
-            ItemPlay { layers: Vec::new(), blend: it.blend, root_motion: false, action, transitions: it.transitions.clone(), word: it.flags }
+            ItemPlay { layers: Vec::new(), blend: it.blend, root_motion: false, action, transitions: it.transitions.clone(), word: it.flags, repeat: it.repeat }
         };
         // 1. the playing item's transition to the requested action: high wait (0x00D8258E) → fight wait (0x00FD645B)
         //    goes through `xx_h_wait_hipm_footr_tr_xx_h_light_wait_footr` (0x1D504306)
@@ -1584,6 +1621,13 @@ mod tests {
         // the repeat count: idles loop, the pull-up plays once
         assert_eq!(lib.graph.actions[&0x0106_F2E8].repeat, 0);
         assert_eq!(lib.graph.actions[&0x0106_D2C5].repeat, 1);
+        // Action +32 (RE/24 ANIM-5): the impulsion wait loops from its item b; ActionItem +24 (ANIM-6): the debug flight's
+        // Ghost items repeat 4 and 3 times, every other item once
+        assert_eq!((lib.graph.actions[&0x0DF0_3385].repeat, lib.graph.actions[&0x0DF0_3385].loop_item), (0, 1));
+        assert_eq!(lib.graph.actions[&0x0106_F2E8].loop_item, 0);
+        let ghost: Vec<u32> = lib.graph.actions[&0x0006_F88B].items.iter().map(|it| it.repeat).collect();
+        assert_eq!(ghost, [4, 3]);
+        assert!(lib.graph.actions.values().filter(|a| a.id != 0x0006_F88B).flat_map(|a| &a.items).all(|it| it.repeat == 1));
         // the wall hang's blocked actions (0xDD3A10, RE/24 LEDGE-20) are in the graph
         for id in ACT_LEDGE_BLOCKED {
             assert!(lib.graph.actions.contains_key(&id), "blocked action {id:#x}");
