@@ -516,7 +516,7 @@ pub(crate) fn build_level(
 }
 
 /// Four LedgeGrab edges around a roof: n0 = up (roof), n1 = outward wall normal.
-fn add_roof_edges(g: &mut GuidanceWorld, min: Vec3, max: Vec3) {
+pub(crate) fn add_roof_edges(g: &mut GuidanceWorld, min: Vec3, max: Vec3) {
     let y = max.y;
     let c = [
         Vec3::new(min.x, y, min.z),

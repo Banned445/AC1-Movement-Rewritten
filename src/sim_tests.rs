@@ -1187,6 +1187,33 @@ fn leap_of_faith_into_the_haystack_then_hop_out() {
 }
 
 #[test]
+fn from_the_haystack_the_stick_vaults_a_railing_beside_it() {
+    use crate::player::hay::{HayPhase, HAYSTACK_TO_PASSOVER};
+    // RE/24 NARROW-19: event 2 (`sub_EDD5E0`): a pass-over candidate along the stick → `xx_l_haystack_wait_to_passover_handl`
+    // with the root onto it (0xE42B20), then Ledge HandPassOver (0xE41610 → 0xE40EE0). A 1 m railing beside the
+    // haystack at (37.5, 26), 2 m to its +Z side.
+    let mut s = Sim::new(Vec3::new(30.5, 9.5, 26.0), -std::f32::consts::FRAC_PI_2);
+    {
+        let (min, max) = (Vec3::new(36.0, 0.0, 28.0), Vec3::new(39.0, 1.0, 28.3));
+        s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3 { min, max });
+        let mut g = s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>();
+        crate::level::add_roof_edges(&mut g, min, max);
+    }
+    s.pad(Vec3::X, 1.0, true, true);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "never jumped");
+    s.pad(Vec3::X, 0.0, false, false);
+    assert!(s.run_until(5.0, |s| s.data().hay.phase == HayPhase::Waiting), "never waited in the haystack: {:?}", s.loco().current);
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(0.2, |s| s.data().hay.phase == HayPhase::PassOver), "no pass-over: {:?}", s.loco().current);
+    assert_eq!(s.data().hay.action.map(|a| a.id), Some(HAYSTACK_TO_PASSOVER));
+    let (edge, _) = s.data().hay.pass.unwrap();
+    assert!((edge.z - 28.0).abs() < 0.05 && (edge.y - 1.0).abs() < 0.05, "the railing's near edge: {edge:?}");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge && s.data().ledge.pass_over.is_some()), "never vaulted: {:?}", s.loco().current);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.z > 28.3), "not over the railing: {:?} {:?}", s.loco().current, s.body().feet);
+}
+
+#[test]
 fn releasing_the_stick_stops_quickly_like_the_game() {
     use crate::player::jump_blend::{RUN_STOP, RUN_STOP_TO_WAIT};
     // run (high profile), release: RunStop action + its settle into the wait (~0.7 s), short slide

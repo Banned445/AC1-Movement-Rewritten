@@ -896,7 +896,7 @@ pub fn update_air(
                                 fw[k] = *x;
                             }
                         }
-                        pass_on = Some(super::passover::PassOverEntry { edge, normal, from: body.feet, flight_foot_left: air.foot_left, flight_w: fw });
+                        pass_on = Some(super::passover::PassOverEntry { edge, normal, from: body.feet, flight_foot_left: air.foot_left, flight_w: fw, reception: None });
                     }
                     if air.target_flags == jump_blend::TARGET_HAYSTACK && then_fall_to.is_none() {
                         // PORT: the game requests the haystack on every arrival at the target (its owner entity); the

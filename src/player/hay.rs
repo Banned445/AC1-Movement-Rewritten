@@ -27,6 +27,7 @@ use bevy::prelude::*;
 use super::jump_blend::ActionBlend;
 use super::{switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, TransitionSetup};
 use crate::collision::{Aabb3, CollisionWorld};
+use crate::guidance::GuidanceWorld;
 use crate::input::PadInput;
 
 pub const HAYSTACK_FAITH_LANDING: u32 = 0x23A9_666C;
@@ -35,6 +36,9 @@ pub const HAYSTACK_WAIT: u32 = 0x23A9_666D;
 pub const HAYSTACK_LOW_WAIT: u32 = 0x23A9_6674;
 pub const HAYSTACK_FROM_AIR: u32 = 0x7750_D212;
 pub const HAYSTACK_HOP_OUT: u32 = 0x2C4C_2431;
+/// The pass-over from the wait (event 2 → `sub_E43090` → `HumanHayStack__ToPassOverJump` 0xE42B20:
+/// `xx_l_haystack_wait_to_passover_handl`; RE/24 NARROW-19).
+pub const HAYSTACK_TO_PASSOVER: u32 = 0x23A9_6673;
 
 pub const HAYSTACK_DIVE: [u32; 2] = [0x244C_D280, 0x244C_FACB];
 
@@ -68,6 +72,10 @@ pub enum HayPhase {
     #[default]
     Entering,
     Waiting,
+    /// Event 2: `xx_l_haystack_wait_to_passover_handl` with the root moved linearly onto the pass-over candidate over
+    /// the playing item (0xE42CDA); then Ledge HandPassOver (0xE41610 → fill 0xE40EE0: SubState 12, +144 = the
+    /// candidate).
+    PassOver,
 }
 
 #[derive(Debug, Default)]
@@ -88,6 +96,8 @@ pub struct HumanHayStackData {
     rng: u32,
     /// In the low wait (+126, event 1).
     pub low: bool,
+    /// The pass-over candidate (the wall top's near edge and its outward normal).
+    pub pass: Option<(Vec3, Vec3)>,
 }
 
 impl HumanHayStackData {
@@ -269,6 +279,7 @@ pub fn update_hay(
     time: Res<Time>,
     pad: Res<PadInput>,
     collision: Res<CollisionWorld>,
+    guidance: Res<GuidanceWorld>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
@@ -308,8 +319,7 @@ pub fn update_hay(
                 body.feet = h.to;
                 // the interpreter's haystack state (`sub_EE08E0` from 0xEEE4E0, RE/24 NARROW-19): the stick released in
                 // the high wait → event 1, the low wait (0xE44020 / 0xE44080); the stick past 0.35 → the pass-over to a
-                // kind-2 jump candidate (event 2) if there is one, else the hop out (event 3, `Guard_HopOut`). PORT:
-                // event 2's pass-over (0x23A96673 with the root interpolated onto the candidate) is not modelled; the
+                // pass-over candidate (event 2) if there is one, else the hop out (event 3, `Guard_HopOut`). PORT: the
                 // event 0 back to the high wait has no sender found
                 if pad.magnitude <= 0.35 && !h.low {
                     h.low = true;
@@ -319,6 +329,20 @@ pub fn update_hay(
                 }
                 if pad.magnitude > 0.35 {
                     let Some(stack) = h.stack else { continue };
+                    // event 2 (`sub_EDD5E0`): IHuman vt56 along the stick with request type 4 (the free run's, beams on)
+                    // and the scorer in mode 2 (the nearest ledge-like candidate in front, jumped as a pass-over, type 2)
+                    if let Some((edge, normal)) = pass_over_candidate(h.to, pad.dir, &guidance, &collision) {
+                        h.phase = HayPhase::PassOver;
+                        h.pass = Some((edge, normal));
+                        h.action = single(HAYSTACK_TO_PASSOVER);
+                        h.from = body.feet;
+                        h.interp = h.action.map(|a| a.duration()).unwrap_or(0.5).max(0.05);
+                        h.t = 0.0;
+                        h.seq = h.seq.wrapping_add(1);
+                        let f = Vec3::new(edge.x - body.feet.x, 0.0, edge.z - body.feet.z).normalize_or_zero();
+                        h.face = (f != Vec3::ZERO).then_some(f);
+                        continue;
+                    }
                     if hop_out_exit(&stack, h.to, pad.dir, &collision).is_some() {
                         body.heading = super::heading_of(pad.dir);
                         let hop = single(HAYSTACK_HOP_OUT);
@@ -329,8 +353,34 @@ pub fn update_hay(
                     }
                 }
             }
+            HayPhase::PassOver => {
+                // 0xE42CDA: the root linear onto the candidate over the playing item, facing it; done → Ledge
+                // HandPassOver (0xE41610 → 0xE40EE0) with the vault of the planted left hand
+                let Some((edge, normal)) = h.pass else { continue };
+                body.feet = h.from.lerp(edge, (h.t / h.interp).min(1.0));
+                if let Some(f) = h.face {
+                    body.heading = super::heading_of(f);
+                }
+                if h.t >= h.interp {
+                    let reception = h.action;
+                    let e = super::passover::PassOverEntry { edge, normal, from: edge, flight_foot_left: false, flight_w: [0.0; 5], reception };
+                    body.feet = edge;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToPassOver(e));
+                }
+            }
         }
     }
+}
+
+/// `sub_EDD5E0` (the haystack's event 2): IHuman vt56 `Human__FindJumpCandidates` along `dir` with request type 4 and
+/// beams (vt56 a5 → `Human__QueryJumpCandidates` a8), then `Human__SelectJumpCandidate` in mode 2 (the nearest
+/// ledge-like candidate in front, jumped as type 2). Returns the pass-over edge and its outward normal.
+pub fn pass_over_candidate(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
+    use super::jump_candidates::{query, select, Query};
+    let q = Query { kind: 4, mode: 0, long: false, beams: true, exclude: 0 };
+    let cands = query(feet, dir, &q, guidance, collision);
+    let (i, ty) = select(&cands, feet, dir, dir, 2, false)?;
+    super::targets::to_target(&cands[i], ty, feet, guidance, collision)?.pass
 }
 
 #[cfg(test)]
