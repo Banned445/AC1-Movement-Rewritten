@@ -579,6 +579,11 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
                     }
                 }
                 mv.durations = super::ledge_moves::seq_durations(&mv.seq);
+                // PORT: the ladder's side jump keeps the clips' displacement plus a linear correction; its root path
+                // (the ladder side of 0xE228E0's jump) is undecoded, the climb reach's (CLIMB-11) is not assumed
+                mv.follow_disp = mv.durations.iter().sum::<f32>() > 0.0;
+                mv.lead = 0.0;
+                mv.root_time = None;
                 LadderSide::Jump(LedgeEntry {
                     hand_l: mv.hand_l,
                     hand_r: mv.hand_r,

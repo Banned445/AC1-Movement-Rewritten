@@ -222,7 +222,8 @@ pub struct LedgeMove {
     /// (the end action is the hang idle's entry, `sub_DCF280`). None: `follow_disp` / the interpolator as usual.
     pub table: Option<(usize, usize)>,
     /// The receptions' root (`HumanInAir__PlayLedgeReception` 0xE02BA0, `sub_711130` mode 0): linear onto `to` over this
-    /// long, then held while the actions play on (overrides `follow_disp` and the interpolator). None: as above.
+    /// long, starting after `lead`, then held while the actions play on (overrides `follow_disp` and the interpolator).
+    /// None: as above.
     pub root_time: Option<f32>,
     /// The move ends in a free hang whatever the wall below (the hop, 0xDDAB00 sets LedgeHangType 1).
     pub end_free: bool,
@@ -278,7 +279,7 @@ impl LedgeMove {
         self.t = (self.t + dt).min(total);
         let s = self.t / total;
         let p = if let Some(rt) = self.root_time {
-            self.from.lerp(self.to, (self.t / rt.max(1e-3)).min(1.0))
+            self.from.lerp(self.to, ((self.t - self.lead) / rt.max(1e-3)).clamp(0.0, 1.0))
         } else if let Some((k, m)) = self.table {
             let to_world = |d: [f32; 3]| right_of(self.facing_from) * d[0] + self.facing_from * d[1] + Vec3::Y * d[2];
             let t_start: f32 = self.durations.iter().take(k).sum();
@@ -702,8 +703,11 @@ pub fn try_side_jump(
 /// 0xDEEE60), then the end in the Wait state (0xDE9B50), `climb::ClimbReach`.
 ///
 /// PORT: a hang's wall or free comes from the collision foot rays (`hang_type_at`), standing in for the wall-support
-/// search `sub_11718B0` 1.0 m below the hand box. For the hangs the root follows the clips' displacement plus a linear
-/// correction (hypothesis, as for the ledge jumps) instead of holding still through the start.
+/// search `sub_11718B0` 1.0 m below the hand box.
+///
+/// The hangs' root (RE/24 CLIMB-11): still through the start (`StartReachMove` 0xDF6810 starts no interpolation), then
+/// linear onto the hang over the loop's blended length (`FillLedge_FromReach` 0xDEF0C0 → `sub_711130(…, 0, 0, 0, 0, 0)`
+/// 0xDEF2F9), held through the end. PORT: the start plays in the Ledge move here, not in the climb's state 3.
 #[allow(clippy::too_many_arguments)]
 pub fn try_climb_reach(
     right: bool,
@@ -770,10 +774,10 @@ pub fn try_climb_reach(
         to,
         facing_from: facing,
         facing_to: fc,
-        follow_disp: found,
-        lead: 0.0,
+        follow_disp: false,
+        lead: if found { durations[0] } else { 0.0 },
         table: None,
-        root_time: None,
+        root_time: found.then_some(durations[1]),
         end_free: ty == 2,
         end_wall: ty == 1,
         end_stand: false,
@@ -1464,6 +1468,7 @@ pub fn use_free_jump_wall_reception(m: &mut LedgeMove, w: [f32; 6]) {
         m.seq = seq;
         m.durations = durations;
     }
+    m.lead = 0.0;
     m.root_time = Some(0.1666);
 }
 

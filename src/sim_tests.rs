@@ -3774,6 +3774,24 @@ fn a_long_reach_from_the_climb_into_a_free_hang_catches_one_handed() {
     let ids = CLIMB_REACH_TABLE[2][1][0];
     assert_eq!(mv.seq.map(|a| a.map(|a| a.id)), [Some(ids[0]), Some(ids[1]), Some(ids[2]), None], "climb1m_tr_hangfree_left_3 a / b / c");
     assert_eq!(mv.hand_l, mv.hand_r, "caught with one hand");
+    // CLIMB-11: the root holds still through the start (0xDF6810), goes linearly onto the hang over the loop
+    // (0xDEF2F9), and holds there through the end
+    let mut m = mv;
+    m.t = 0.0;
+    let (d0, d1) = (m.durations[0], m.durations[1]);
+    assert!(d0 > 0.0 && d1 > 0.0);
+    while m.t < m.duration() {
+        let (p, _) = m.advance(1.0 / 60.0);
+        let t = m.t;
+        if t <= d0 {
+            assert!(p.distance(m.from) < 1e-4, "still through the start at {t}: {p:?}");
+        } else if t < d0 + d1 {
+            let want = m.from.lerp(m.to, (t - d0) / d1);
+            assert!(p.distance(want) < 1e-3, "linear over the loop at {t}: {p:?} vs {want:?}");
+        } else {
+            assert!(p.distance(m.to) < 1e-4, "held on the hang through the end at {t}: {p:?}");
+        }
+    }
     let tail = s.data().ledge.queue.first().copied().expect("the second hand's reach");
     assert_eq!(tail.seq[0].map(|a| a.id), Some(ids[1] + 2), "`_3_d`");
     s.pad(Vec3::X, 0.0, false, false);
