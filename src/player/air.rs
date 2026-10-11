@@ -237,6 +237,8 @@ pub struct HumanInAirData {
     pub prev_y: f32,
     /// PORT adapter: entry velocity is applied by the body-owning system before the skipped update.
     pub entry_velocity: Option<Vec3>,
+    /// HumanInAir +0x50: the over-drop tail's velocity in m / frame (0xE0F12A, 0xE0FA4B; RE/24 AIR-4).
+    pub tail_v: Vec3,
     /// HumanInAir+0x16C: live air-control speed ratio (0xEDBAF0 -> 0xE102B0).
     pub speed_ratio: f32,
     /// Takeoff and flight items of the current jump (+0x1A4 / +0x1A8 and the weight arrays +0x1BC..).
@@ -847,6 +849,11 @@ pub fn update_air(
                         // 0xE07D00 returns 0: the jump ends with no reception and the fall's air catch takes over
                         _ if no_arrival => air.mode = AirMode::Fall { steer_to: None },
                         Some(p) if collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_none() => {
+                            // the tail's start velocity (0xE0F038–0xE0F12A): half of this frame's root step plus the
+                            // part of the frame after the item ended times the last step, m / frame
+                            let step = next - path(t);
+                            let frac = (1.0 - (duration - t) / dt.max(1e-4)).clamp(0.0, 1.0);
+                            air.tail_v = (step + step * frac) * 0.5;
                             air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
                         }
                         // a free-step arrival (case 1 / 0x10000) interpolates the root onto the target first
@@ -867,6 +874,28 @@ pub fn update_air(
                 body.velocity.y -= GRAVITY * dt;
                 let mut h = Vec3::new(body.velocity.x, 0.0, body.velocity.z);
                 match steer_to {
+                    // the over-drop tail (Data+506, `UpdateJumpMotion` 0xE0F92D–0xE0FB43, RE/24 AIR-4), in m / frame:
+                    // vz' = vz − 0.326·dt; t = `TimeToReachHeight`(z, min(target z, z + vz'), vz') with the m / frame
+                    // vz'; the horizontal velocity is replaced by `SolveCorrectionAccel`'s c, or by
+                    // normalize(c − v)·15·dt when it changes by more than that; the position becomes (x, z + vz', y) + v
+                    // (the vertical step counted twice, 0xE0F9A5 / 0xE0FB21). At or below the target's height the game
+                    // integrates nothing (the contact ends it). PORT: the step goes through the capsule move, and below
+                    // the target's height the plain fall carries on (the port's contacts may not end it there).
+                    Some(p) if GAME_FALLS && body.feet.y > p.y => {
+                        let v = air.tail_v;
+                        let vz = v.y - dt * 0.326;
+                        let new_y = body.feet.y + vz;
+                        let t_left = super::falls::time_to_height(body.feet.y, p.y.min(new_y), vz);
+                        let flat = |q: Vec3| Vec3::new(q.x, 0.0, q.z);
+                        let v_old = flat(v);
+                        let c = if t_left > 1e-6 { super::falls::correction(flat(body.feet), flat(p), v_old, t_left, dt) } else { v_old };
+                        let change = c - v_old;
+                        let hv = if change.length() > 15.0 * dt { change.normalize_or_zero() * (15.0 * dt) } else { c };
+                        air.tail_v = Vec3::new(hv.x, vz, hv.z);
+                        let to = Vec3::new(body.feet.x, new_y, body.feet.z) + air.tail_v;
+                        body.velocity = (to - body.feet) / dt.max(1e-4);
+                        h = Vec3::new(body.velocity.x, 0.0, body.velocity.z);
+                    }
                     Some(p) => {
                         // steer horizontally onto the real target, ≤ 15 m/s (0xE0DEF0 / 0xE00730)
                         if GAME_FALLS {

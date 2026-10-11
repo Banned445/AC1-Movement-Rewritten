@@ -1412,6 +1412,23 @@ fn force(s: &mut Sim, setup: crate::player::TransitionSetup) {
     e.insert((loco, data));
 }
 
+/// RE/24 AIR-4: a jump at a target 9.5 m below goes through the over-drop: the flight aims 5 m down, then the tail
+/// steers onto the true target (the game's m / frame integration) and the landing ends it there.
+#[test]
+fn the_over_drop_tail_steers_onto_the_true_target() {
+    use crate::player::air::InAirEntry;
+    use crate::player::targets::JumpTarget;
+    let mut s = Sim::new(Vec3::new(30.0, 9.5, 23.5), 0.0);
+    s.run(0.2);
+    let target = JumpTarget { position: Vec3::new(30.0, 0.0, 17.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None };
+    let from = s.body().feet;
+    force(&mut s, crate::player::TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
+    assert!(s.run_until(1.5, |s| matches!(s.data().air.mode, crate::player::air::AirMode::Fall { steer_to: Some(_) })), "no tail: {:?}", s.data().air.mode);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.body().feet);
+    let f = s.body().feet;
+    assert!(f.y.abs() < 0.05 && Vec2::new(f.x - 30.0, f.z - 17.0).length() < 0.6, "landed on the target: {f:?}");
+}
+
 #[test]
 fn free_run_onto_a_pilotis_and_hop_along_the_posts() {
     use crate::player::narrow::{BeamState, NarrowKind};
