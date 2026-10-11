@@ -168,7 +168,8 @@ struct Piece {
     a: Vec3,
     b: Vec3,
     subtype: GuidanceSubType,
-    sector: u8,
+    /// The chain sets the piece belongs to (bit k = set k).
+    sets: u8,
 }
 
 /// The query. `pos` = feet, `dir` = the wanted direction.
@@ -241,17 +242,29 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
         if w == Vec3::ZERO {
             continue;
         }
-        // the three sectors of 0x116CD50: facing the jumper (within 45 degrees of -dir) and the two sides
-        // (the sets' ranges: the facing one within 45° of -dir, the side ones turned 0–45° from ±right)
-        let ang = w.angle_between(-dir);
-        let sector = if ang <= std::f32::consts::FRAC_PI_4 + 1e-4 {
-            0
-        } else if ang <= 3.0 * std::f32::consts::FRAC_PI_4 + 1e-4 {
-            if w.dot(right) > 0.0 { 1 } else { 2 }
-        } else {
-            3
-        };
-        pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sector });
+        // the three chain sets (`GuidanceChain__Build` 0x116CD50 at 0xE19AD6 / 0xE19B13 / 0xE19B70, RE/24 AIR-27):
+        // (reference, axis, turn range), right = dir × up (var_EAC, 0xE198F0). An edge belongs to a set when its
+        // direction runs within 45° of the axis and its outward perpendicular is turned from the reference by a signed
+        // angle in the range (`GuidanceWorld::chains`' convention, RE/24 GUIDE-8): set 0 the walls within 45° of facing
+        // the jumper, sets 1 / 2 a single 45° wedge from ±right toward the jumper. A wall facing away is in none.
+        let q4 = std::f32::consts::FRAC_PI_4;
+        let d = (b - a).normalize();
+        let low = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
+        let mut perp = d.cross(up).normalize_or_zero();
+        if perp.dot(low) < 0.0 {
+            perp = -perp;
+        }
+        let mut sets = 0u8;
+        for (k, (r, axis, lo, hi)) in [(-dir, right, -q4, q4), (right, dir, 0.0, q4), (-right, dir, -q4, 0.0)].into_iter().enumerate() {
+            if d.dot(axis).abs() < q4.cos() - 1e-6 {
+                continue;
+            }
+            let turn = perp.cross(r).dot(up).atan2(perp.dot(r));
+            if turn >= lo - 1e-4 && turn <= hi + 1e-4 {
+                sets |= 1 << k;
+            }
+        }
+        pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sets });
     }
 
     // ---------------------------------------------------------------- chains (sub_116CD50 × 3 → sub_678670)
@@ -260,7 +273,7 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
     // end (sub_678010 / sub_677E40); the game does not compare the subtypes.
     let mut chains: Vec<Vec<(usize, Vec3, Vec3)>> = Vec::new(); // (piece, start, end) in chain order
     for sector in 0..3u8 {
-        let mut cands: Vec<usize> = (0..pieces.len()).filter(|&i| pieces[i].sector == sector).collect();
+        let mut cands: Vec<usize> = (0..pieces.len()).filter(|&i| pieces[i].sets & (1 << sector) != 0).collect();
         while let Some(seed) = cands.pop() {
             let mut chain = std::collections::VecDeque::from([(seed, pieces[seed].a, pieces[seed].b)]);
             loop {
@@ -787,6 +800,26 @@ mod tests {
         let (c, g) = crate_world(1.0, 1.0);
         // Legs released: the box only reaches 1.3 m ahead
         assert!(query(Vec3::new(0.0, 0.0, 0.2), Vec3::NEG_Z, &Query::free_run(false), &g, &c).is_empty());
+    }
+
+    /// RE/24 AIR-27: a side set is a single 45° wedge from ±right toward the jumper. An oblique edge across the jump
+    /// line whose wall faces 30° toward the jumper from the side is a candidate; the same edge facing 30° away is not.
+    #[test]
+    fn the_side_chain_sets_take_walls_turned_toward_the_jumper() {
+        let found = |n: Vec3| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min: Vec3::new(-20.0, -1.0, -20.0), max: Vec3::new(20.0, 0.0, 20.0) });
+            let d = Vec3::new(-n.z, 0.0, n.x);
+            let mid = Vec3::new(0.0, 1.0, -2.0);
+            let mut g = GuidanceWorld::default();
+            g.edges.push(GuidanceEdge { p0: mid - d * 1.5, p1: mid + d * 1.5, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::LedgeGrab });
+            !query(Vec3::ZERO, Vec3::NEG_Z, &Query::TAP, &g, &c).is_empty()
+        };
+        let (s, co) = (30f32.to_radians().sin(), 30f32.to_radians().cos());
+        assert!(found(Vec3::new(co, 0.0, s)), "facing right, turned toward the jumper");
+        assert!(found(Vec3::new(-co, 0.0, s)), "facing left, turned toward the jumper");
+        assert!(!found(Vec3::new(co, 0.0, -s)), "facing right, turned away");
+        assert!(!found(Vec3::new(-co, 0.0, -s)), "facing left, turned away");
     }
 
     #[test]
