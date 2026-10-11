@@ -4768,6 +4768,10 @@ fn landing_on_a_roofs_lip_steps_off_the_edge() {
     s.pad(Vec3::ZERO, 0.0, false, false);
     assert!(s.run_until(1.5, |s| s.data().air.edge_landed), "no edge landing: {:?} {:?}", s.loco().current, s.body().feet);
     assert_eq!(s.data().air.flight.map(|a| a.id), Some(STEP_OFF[1]), "step_off_back");
+    // RE/24 AIR-17: the edge landing keeps the jump origin (Data+16) and clears the release record (Data+500)
+    assert_eq!(s.data().air.start, from, "the jump origin stays");
+    assert_eq!(s.data().air.start_y, from.y);
+    assert!(s.data().air.release_hold.is_none());
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "never reached the street: {:?}", s.body().feet);
     // facing into the roof (+Z): `step_off_front` steps 0.48 m backward off the lip; falling in front of the face with
     // its top at the feet, the knee catch (type 0) takes the edge again and stands up

@@ -1220,10 +1220,14 @@ pub fn update_air(
             let blend = super::ledge_moves::single_item(action, 0);
             let fall = super::ledge_moves::single_item(action, 1);
             if let Some(a) = blend {
-                let release = air.release_hold;
+                // LABEL_140 stays in InAir (sub-state 3): the apex point becomes the feet (Data+208, `sub_DFF500`), the
+                // jump origin (Data+16) stays and the release record is cleared (Data+500 = 0, 0xE0D8CF) (RE/24 AIR-17)
+                let (start, start_y) = (air.start, air.start_y);
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::OnPlace { from: body.feet, fwd: facing, action: a, fall }));
                 data.air.edge_landed = true;
-                data.air.release_hold = release;
+                data.air.start = start;
+                data.air.start_y = start_y;
+                data.air.release_hold = None;
             }
         } else if let Some(e) = ladder_on {
             air.mode = AirMode::Idle;
