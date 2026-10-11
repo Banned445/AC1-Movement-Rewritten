@@ -1418,7 +1418,8 @@ fn free_run_onto_a_pilotis_and_hop_along_the_posts() {
     s.press_legs();
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed on Q: {:?}", s.loco().current);
     let f = s.body().feet;
-    assert!(f.x > 82.0 && (f.y - 3.0).abs() < 0.05, "on platform Q: {f:?}");
+    // on its edge: the free-step arrival ends on the candidate (RE/24 AIR-2)
+    assert!(f.x > 81.95 && (f.y - 3.0).abs() < 0.05, "on platform Q: {f:?}");
 }
 
 #[test]
@@ -2164,7 +2165,8 @@ fn swing_from_bar_to_bar() {
     s.press_legs();
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir));
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?} {:?}", s.loco().current, s.body().feet);
-    assert!(s.body().feet.z > 100.0 && (s.body().feet.y - 1.2).abs() < 0.05, "on the far platform: {:?}", s.body().feet);
+    // on its edge: the free-step arrival ends on the candidate (RE/24 AIR-2)
+    assert!(s.body().feet.z > 99.95 && (s.body().feet.y - 1.2).abs() < 0.05, "on the far platform: {:?}", s.body().feet);
 }
 
 #[test]
@@ -2611,6 +2613,7 @@ fn trace_frames(s: &mut Sim, label: &str, seconds: f32, mut each: impl FnMut(&mu
         let mode = match s.data().air.mode {
             air::AirMode::Jump { t, .. } => format!("jump t={t:.2}"),
             air::AirMode::Fall { .. } => "fall".into(),
+            air::AirMode::Arrive { .. } => "arrive".into(),
             air::AirMode::Idle => "idle".into(),
         };
         let os = s.ground().oneshot.map(|o| format!("os {:08x} {:.2}/{:.2}", o.blend.id, o.t, o.duration)).unwrap_or_default();
@@ -2806,7 +2809,8 @@ fn a_jump_that_clips_a_higher_roof_lip_steps_onto_it() {
         }
     }
     assert_eq!(s.loco().current, ActorContextId::Ground);
-    assert!((s.body().feet.y - 4.4).abs() < 0.05 && s.body().feet.x > 11.5, "on the upper roof: {:?}", s.body().feet);
+    // the free-step arrival puts the feet on the candidate, the roof edge (RE/24 AIR-2)
+    assert!((s.body().feet.y - 4.4).abs() < 0.05 && s.body().feet.x > 11.45, "on the upper roof: {:?}", s.body().feet);
 }
 
 #[test]
@@ -4596,4 +4600,5 @@ fn a_ladder_leaning_over_the_climber_swings_him_onto_its_top_side() {
     assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ground), "never reached the top: {:?} {:?}", s.data().ladder.phase, s.body().feet);
     assert!((s.body().feet.y - 4.5).abs() < 0.1 && s.body().feet.z < -122.6, "on the block: {:?}", s.body().feet);
 }
+
 

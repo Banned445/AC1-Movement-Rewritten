@@ -118,10 +118,6 @@ pub const TARGET_MIN_DZ: f32 = -3.0;
 /// Ground-type target bands (max up, near, mid, far). Human__ComputeJumpAnimBlend 0xB1EC40
 pub const GROUND_MAX_UP: f32 = 1.3;
 pub const GROUND_FAR: f32 = 7.0;
-/// Landing point is placed this far inside a roof edge. PLACEHOLDER (game uses the guidance contact).
-/// Ground loss → fall type 0–6 (0xD8C380): height < 1 (or < 2 with probe type 1) → 0/1, 2..8 with probe
-/// type 1 → 2/3, else 4/6; the faster type at a horizontal speed ≥ 2.5 m/s.
-pub const LAND_INSET: f32 = 0.45;
 
 // ---------------------------------------------------------------- ledge (RE/03 §7)
 /// Wall hang: root (feet) 1.1 m below the hands and 0.5 m out from the wall. 0xDD6730 / 0xDE1060

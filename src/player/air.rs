@@ -45,6 +45,9 @@ pub struct Landing {
     /// The action the Ground context plays on entry (landing 0xE05940 or free-step reception 0xE07D00);
     /// its root motion moves the character until it ends.
     pub action: Option<ActionBlend>,
+    /// Seconds of `action` already played on entry: the free-step reception starts at the arrival, under the root
+    /// interpolation (`AirMode::Arrive`), so the Ground picks it up that far in (RE/24 AIR-2).
+    pub skip: f32,
 }
 
 /// PORT: the capsule's radius against a greybox haystack's side (the native contact is the controller's).
@@ -165,6 +168,40 @@ pub enum AirMode {
     },
     /// Ballistic fall (optionally steered toward `steer_to`).
     Fall { steer_to: Option<Vec3> },
+    /// The free-step arrival's root interpolation (`CheckJumpTargetArrival` 0xE07D00 case 1 / 0x10000, 0xE09A13 →
+    /// `sub_711130` 0xE09B26): from the arrival point to the stored (pulled-back) target + 0.5·forward over
+    /// `FREESTEP_ARRIVE` s while the reception plays; then the landing (RE/24 AIR-2).
+    Arrive { from: Vec3, to: Vec3, t: f32 },
+}
+
+/// The free-step arrival's root interpolation time (0xE09A13: 0.0667 s).
+pub const FREESTEP_ARRIVE: f32 = 0.066_666_67;
+
+/// `Human__ComputeJumpAnimBlend` 0xB1EC40, branch a15 == 0 (0xB1F0A0–0xB1F0E4): the jump target is pulled back
+/// 0.5·k (k = entity +0x7C, 1 for the player) along the flat direction from the start, before the distance class, the
+/// correction and the stored target (Data+560) read it (RE/24 AIR-2). The hang, ladder and surface types (0x40, 0x80,
+/// 0x1000, 0x2000, 0x4000, swing) replace it with their own aim (0xB1F60E, AIR-3); the port's aim for those is already
+/// the hang root. PORT: the setup byte a15 (+212 / HG+996, AIR-19) is taken as 0: its producer is untraced.
+pub fn pull_back(from: Vec3, aim: Vec3, target_type: u32) -> Vec3 {
+    if !matches!(target_type, 1 | 0x10000 | 0x100 | 2 | 0x200 | 0x400 | 0x8000 | 0x800) {
+        return aim;
+    }
+    let dir = Vec3::new(aim.x - from.x, 0.0, aim.z - from.z).normalize_or_zero();
+    aim - dir * 0.5
+}
+
+/// The over-drop rule `sub_B1B8C0` (0xB1B9A8 / 0xB1BA76–0xB1BB42): a target more than `thr` below the start is aimed at
+/// `thr` down, pulled back horizontally by min(dist, 1.5)·k with k = clamp((dz − thr) / −30, 0, 2) (RE/24 AIR-20); the
+/// free fall then steers to the true target. Returns (aim, the fall's target).
+fn over_drop(from: Vec3, target: Vec3, thr: f32) -> (Vec3, Option<Vec3>) {
+    let dz = target.y - from.y;
+    if dz >= -thr {
+        return (target, None);
+    }
+    let flat = Vec3::new(target.x - from.x, 0.0, target.z - from.z);
+    let k = ((dz + thr) / -30.0).clamp(0.0, 2.0);
+    let aim = target - flat.normalize_or_zero() * (flat.length().min(1.5) * k);
+    (Vec3::new(aim.x, from.y - thr, aim.z), Some(target))
 }
 
 /// Runtime data of the InAir context (subset of reflected HumanInAirData, RE/07).
@@ -261,7 +298,9 @@ impl HumanInAirData {
                 } else {
                     OVERDROP
                 };
-                if target.position.y < from.y - thr {
+                if target.straight.is_none() {
+                    (aim, then_fall_to) = over_drop(from, target.position, thr);
+                } else if target.position.y < from.y - thr {
                     aim.y = from.y - thr;
                     then_fall_to = Some(target.position);
                 }
@@ -279,12 +318,7 @@ impl HumanInAirData {
                 self.prev_y = from.y;
                 self.target_flags = target.type_flags;
                 self.target = Some(target);
-                let mut aim = target.position;
-                let mut then_fall_to = None;
-                if target.position.y < from.y - OVERDROP {
-                    aim.y = from.y - OVERDROP;
-                    then_fall_to = Some(target.position);
-                }
+                let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
                 self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 1);
             }
             InAirEntry::SwingJump { from, target } => {
@@ -296,12 +330,7 @@ impl HumanInAirData {
                 self.prev_y = from.y;
                 self.target_flags = target.type_flags;
                 self.target = Some(target);
-                let mut aim = target.position;
-                let mut then_fall_to = None;
-                if target.position.y < from.y - OVERDROP {
-                    aim.y = from.y - OVERDROP;
-                    then_fall_to = Some(target.position);
-                }
+                let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
                 self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 3);
             }
             InAirEntry::OnPlace { from, fwd, action, fall } => {
@@ -353,6 +382,7 @@ impl HumanInAirData {
     /// Human__SetupJumpToTarget 0xB20200 for a ground running jump (kind 0): pick and weight the takeoff and
     /// flight items (0xB1EC40), T₁/T₂ = their Σw·T durations, anim end = their summed displacement.
     fn real_jump(&mut self, from: Vec3, aim: Vec3, target_type: u32, then_fall_to: Option<Vec3>, kind: u8) -> AirMode {
+        let aim = pull_back(from, aim, target_type);
         let flat = Vec3::new(aim.x - from.x, 0.0, aim.z - from.z);
         let fwd = flat.normalize_or(Vec3::NEG_Z);
         let b = jump_blend::compute_kind(aim.y - from.y, flat.length(), target_type, self.foot_left, 1.0, kind);
@@ -500,7 +530,7 @@ fn classify_landing(apex_y: f32, apex_reached: bool, start_y: f32, land_y: f32) 
     // PORT: the native CanSurviveDamage/protection overrides (0xE00FE0) require the missing
     // synchronization/damage component. This returns the verified base table, not final health outcomes.
     let (kind, damage) = if GAME_FALLS { super::falls::landing_damage(fall_height) } else { (kind, if kind == LandingType::Fatal { 200 } else if kind == LandingType::HeavyDamage { 10 } else { 0 }) };
-    Landing { kind, damage, fall_height, total_drop, roll: total_drop > ROLL_DROP && kind != LandingType::Fatal, action: None }
+    Landing { kind, damage, fall_height, total_drop, roll: total_drop > ROLL_DROP && kind != LandingType::Fatal, action: None, skip: 0.0 }
 }
 
 /// CheckAirCatch 0xE0BB70 / FindLedgeCatch 0xE0A990: look for an edge in the hand box at the reach
@@ -727,6 +757,10 @@ pub fn update_air(
                         Some(p) if collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_none() => {
                             air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
                         }
+                        // a free-step arrival (case 1 / 0x10000) interpolates the root onto the target first
+                        None if real && air.target.is_some() && matches!(air.target_flags, 1 | 0x10000) => {
+                            air.mode = AirMode::Arrive { from: body.feet, to: aim + body.forward() * 0.5, t: 0.0 };
+                        }
                         None => {
                             landed_at = Some(body.feet.y);
                             on_target = real;
@@ -875,12 +909,28 @@ pub fn update_air(
                     }
                 }
             }
+            AirMode::Arrive { from, to, t } => {
+                let t1 = (t + dt).min(FREESTEP_ARRIVE);
+                let next = from.lerp(to, t1 / FREESTEP_ARRIVE);
+                let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, next - b.feet, false, dt) };
+                body.feet = r.position;
+                body.velocity = Vec3::ZERO;
+                if t1 >= FREESTEP_ARRIVE {
+                    landed_at = Some(body.feet.y);
+                    on_target = true;
+                } else {
+                    air.mode = AirMode::Arrive { from, to, t: t1 };
+                }
+            }
             AirMode::Idle => {
                 air.mode = AirMode::Fall { steer_to: None };
             }
         }
 
-        if AIR_CATCHES && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
+        // no catch during the free-step arrival: the game has already arrived (it switched context with the root
+        // interpolation running, 0xE07D00)
+        let arriving = matches!(air.mode, AirMode::Arrive { .. });
+        if AIR_CATCHES && !arriving && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
             let fall_height = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
             let manual = grasp && super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
             let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), air.target.map(|t| t.type_flags), body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
@@ -1005,6 +1055,7 @@ pub fn update_air(
                 // PORT: the game continues in NarrowObject (on the edge); the port stays in Ground.
                 let fw = air.flight.map(|f| f.weights().to_vec()).unwrap_or_default();
                 let id = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
+                landing.skip = FREESTEP_ARRIVE;
                 ActionBlend::new(id, 0, &jump_blend::reception_weights(&fw, air.speed_ratio))
             } else {
                 // ground landing (0xE05940): drop and horizontal distance from the jump/fall start; the
@@ -1041,6 +1092,21 @@ pub fn update_air(
 #[cfg(test)]
 mod fall_tests {
     use super::*;
+
+    /// RE/24 AIR-2 / AIR-20: the aim is pulled 0.5 m back toward the jumper for the free-step types, not for hangs;
+    /// a target past the over-drop is aimed `thr` down and pulled back by min(dist, 1.5)·k.
+    #[test]
+    fn the_aim_is_pulled_back_toward_the_jumper() {
+        let from = Vec3::ZERO;
+        let roof = Vec3::new(0.0, 1.0, -4.0);
+        assert!((pull_back(from, roof, 1) - Vec3::new(0.0, 1.0, -3.5)).length() < 1e-5);
+        assert_eq!(pull_back(from, roof, 0x40), roof, "hang targets keep their own aim");
+        let (aim, fall) = over_drop(from, Vec3::new(0.0, -20.0, -6.0), OVERDROP);
+        let k = (-20.0f32 + OVERDROP) / -30.0;
+        assert!((aim - Vec3::new(0.0, -OVERDROP, -6.0 + 1.5 * k)).length() < 1e-5, "{aim}");
+        assert_eq!(fall, Some(Vec3::new(0.0, -20.0, -6.0)));
+        assert_eq!(over_drop(from, roof, OVERDROP), (roof, None));
+    }
 
     /// RE/24 AIR-1: the free jump's target lies 3 m down. On solid ground ahead the sweep hits and the jump flies the
     /// down variants (the live no-target jump); off the edge of a roof over open air it keeps the free-step flight.

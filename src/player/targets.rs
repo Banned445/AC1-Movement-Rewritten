@@ -1,5 +1,5 @@
 //! Jump targets: the game's candidate query 0xE18970 and scorer 0xE96BF0 (`jump_candidates`, RE/18 §1), turned into
-//! the port's `JumpTarget`s. Ground targets land `LAND_INSET` onto the roof; ledge targets hang from the edge (aim =
+//! the port's `JumpTarget`s. Ground targets are the candidate on the roof edge (the flight is pulled back, `air::pull_back`); ledge targets hang from the edge (aim =
 //! hang root).
 
 use bevy::prelude::*;
@@ -88,15 +88,18 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             if c.ty == 4 || (c.ty == 2 && c.sub == 1) {
                 return Some(base);
             }
-            // PORT: a roof edge's landing is `LAND_INSET` onto its top (the game aims at the edge and 0xB1EC40 pulls
-            // the target back); a narrower top (posts) takes a shallower inset
-            // a top narrower than two insets (a post) is landed on in its middle
-            let narrow = super::passover::far_edge(c.pos, -c.wall, guidance).map(|(_, t)| t).filter(|t| *t < 2.0 * LAND_INSET);
-            let insets: &[f32] = match narrow { Some(t) => &[t * 0.5][..], None => &[LAND_INSET, 0.25, 0.1][..] };
+            // the target is the candidate on the edge: 0xB1EC40 pulls the flight's aim 0.5 m back toward the jumper and
+            // the free-step arrival interpolates the root 0.5 m forward, onto the edge (`air::pull_back`, RE/24 AIR-2);
+            // the roof is checked just inside it.
+            // PORT: a top narrower than 0.9 m (a post) is landed on in its middle: the game's candidate point there
+            // (the pilotis search 0xE50190 from the arrival) is not decoded
+            let narrow = super::passover::far_edge(c.pos, -c.wall, guidance).map(|(_, t)| t).filter(|t| *t < 0.9);
+            let insets: &[f32] = match narrow { Some(t) => &[t * 0.5][..], None => &[0.1, 0.25, 0.45][..] };
             for &inset in insets {
-                let landing = c.pos - c.wall * inset;
-                if let Some(h) = collision.ground_height(landing + Vec3::Y * 0.05, 0.2) {
-                    let target = JumpTarget { position: Vec3::new(landing.x, h, landing.z), ..base };
+                let probe = c.pos - c.wall * inset;
+                if let Some(h) = collision.ground_height(probe + Vec3::Y * 0.05, 0.2) {
+                    let on = if narrow.is_some() { probe } else { c.pos };
+                    let target = JumpTarget { position: Vec3::new(on.x, h, on.z), ..base };
                     // PORT: a thin wall top is a pass-over (type 2). The query gives a railing type 1 | 2 like a
                     // roof; which of the two the game jumps at there is not established (LIVE:, RE/18 §9 item 2)
                     // PORT (live 2026-10-09, RE/18 §9): a haystack cart's rim is landed on, not vaulted, so no pass-over
@@ -108,7 +111,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
                     if c.flags & 2 != 0 && c.sub == 4 && !hay_beyond {
                         if let Some((_, t)) = super::passover::far_edge(c.pos, -c.wall, guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS) {
                             let _ = t;
-                            return Some(JumpTarget { position: c.pos + c.wall * 0.5, type_flags: 2, pass: Some((c.pos, c.wall)), ..base });
+                            return Some(JumpTarget { position: c.pos, type_flags: 2, pass: Some((c.pos, c.wall)), ..base });
                         }
                     }
                     return Some(target);
@@ -116,7 +119,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             }
             None
         }
-        2 => Some(JumpTarget { position: c.pos + c.wall * 0.5, pass: Some((c.pos, c.wall)), ..base }),
+        2 => Some(JumpTarget { position: c.pos, pass: Some((c.pos, c.wall)), ..base }),
         TARGET_LEDGE | TARGET_LEDGE_FREE => {
             // a Pole edge (type 32: the horizontal swing bars, subtype 4) is a free-hang target (the scorer's pole case
             // 0xE96BF0 → 0x80, the swing flight); the cut content of RE/05 §3.5 is the vertical pole climb, not the bars

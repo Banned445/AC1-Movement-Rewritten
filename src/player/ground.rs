@@ -549,7 +549,13 @@ impl HumanGroundData {
         }
         if let Some(l) = landing {
             self.landing_seq = self.landing_seq.wrapping_add(1);
-            self.oneshot = l.action.map(|b| GroundOneShot { blend: b, t: 0.0, duration: b.duration(), applied: [0.0; 3], h0: None });
+            // a reception that started under InAir's root interpolation picks up where it is (its root motion so far
+            // was replaced by the interpolation, RE/24 AIR-2)
+            self.oneshot = l.action.map(|b| {
+                let d = b.duration();
+                let t = l.skip.min(d);
+                GroundOneShot { blend: b, t, duration: d, applied: b.disp(t / d.max(1e-4)), h0: None }
+            });
             self.last_landing = Some(l);
         }
     }
@@ -1286,7 +1292,9 @@ pub fn update_ground(
                 }
             }
         }
-        if moving && !busy {
+        // not during the free-step reception: the game is in NarrowObject then (PORT: the reception plays in Ground)
+        let free_step = g.oneshot.is_some_and(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id));
+        if moving && !busy && !free_step {
             if let Some(e) = super::hay::ground_entry(body.feet, body.forward(), pad.dir, &guidance.haystacks) {
                 switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
                 continue;

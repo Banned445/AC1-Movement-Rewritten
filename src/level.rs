@@ -83,7 +83,9 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     //     1.2 m rim 1.1 m wide (too wide to pair into a runtime beam): the free run hops onto the rim and the free-step
     //     arrival's support search drops it in (NarrowObject FreeStep, 0xE51190)
     (-104.0, -117.95, 5.2, 1.1, 1.2),
-    (-104.0, -122.05, 5.2, 1.1, 1.2),
+    // the near rim, run at by the tests, is 0.95 m wide: the arrival lands on its edge (RE/24 AIR-2) and the support
+    // search reaches the haystack's centre only within 2.5 m along the run
+    (-104.0, -121.975, 5.2, 0.95, 1.2),
     (-106.05, -120.0, 1.1, 3.0, 1.2),
     (-101.95, -120.0, 1.1, 3.0, 1.2),
     // the pass-over pull-down (type 4, 0xDE0220): a 4 m roof (x -122..-118, z -118..-113) with a 1 m parapet 0.3 m
