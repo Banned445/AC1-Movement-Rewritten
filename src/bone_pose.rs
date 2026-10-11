@@ -110,6 +110,15 @@ impl BonePose {
         self.model.get(skel.index(bone)?).map(|m| m.1)
     }
 
+    /// `Human__GetLeadingFoot` 0xB18850: the LeftFoot and RightFoot bones (+0x2A0 / +0x2A8) compared along the
+    /// character's forward; 0 (the game's 1) when the left one is strictly further forward, else 1 (2: the right one,
+    /// ties included). None before the first pose.
+    pub fn leading_foot(&self, skel: &PoseSkeleton) -> Option<usize> {
+        // the player's space faces −Z
+        let (l, r) = (self.model_pos(skel, LEFT_FOOT)?, self.model_pos(skel, RIGHT_FOOT)?);
+        Some(if -l.z > -r.z { 0 } else { 1 })
+    }
+
     /// A bone's world position with the body where it stands now (the game's `Bone__GetWorldPosition`).
     pub fn world_pos(&self, skel: &PoseSkeleton, bone: u32, body: &Body) -> Option<Vec3> {
         Some(body.feet + body.tilt * Quat::from_rotation_y(body.heading) * self.model_pos(skel, bone)?)

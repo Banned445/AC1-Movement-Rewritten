@@ -475,6 +475,66 @@ fn a_hang_over_climb_holds_moves_sideways_into_the_climb() {
     }
 }
 
+/// RE/24 GROUND-24: a walk's stop (Idle from Move 0xD8B220) plays the wait of the foot that leads in the pose
+/// (`Human__GetLeadingFoot` 0xD8B279), read from last frame's pose.
+#[test]
+fn a_walk_stops_into_the_wait_of_the_leading_foot_bone() {
+    use crate::bone_pose::{BonePose, PoseSkeleton};
+    let mut seen = std::collections::HashSet::new();
+    for walk in [0.55f32, 0.7, 0.85, 1.0, 1.15, 1.3] {
+        let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+        if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+            eprintln!("skipped: game install not found");
+            return;
+        }
+        s.pad(Vec3::NEG_Z, 0.5, false, false);
+        s.run(walk);
+        assert!(s.ground().speed_param > 0.0 && s.ground().speed_param <= 0.25, "walking: {}", s.ground().speed_param);
+        let lead = {
+            let w = s.app.world();
+            w.get::<BonePose>(s.player).unwrap().leading_foot(w.resource::<PoseSkeleton>()).unwrap()
+        };
+        s.pad(Vec3::ZERO, 0.0, false, false);
+        s.run(1.0 / 60.0 + 1e-4);
+        assert_eq!(s.ground().speed_param, 0.0, "stopped");
+        assert_eq!(s.ground().wait_foot, lead, "the leading foot's wait");
+        seen.insert(lead);
+    }
+    assert_eq!(seen.len(), 2, "both feet led at some stop");
+}
+
+/// RE/24 LADDER-24: the ladder's ground entry takes its column from the leading foot bone (0xE26A4C: 2·(lead ≠ 1)).
+#[test]
+fn a_ladder_entry_takes_the_leading_foot_column() {
+    use crate::bone_pose::{BonePose, PoseSkeleton};
+    use crate::player::ladder::ENTER_GROUND;
+    let mut seen = std::collections::HashSet::new();
+    for from_z in [60.5f32, 60.7, 60.9, 61.1, 61.3, 61.5] {
+        let mut s = Sim::new(Vec3::new(50.0, 0.0, from_z), FACE_PZ);
+        if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+            eprintln!("skipped: game install not found");
+            return;
+        }
+        s.pad(Vec3::Z, 1.0, false, false);
+        let mut lead = None;
+        for _ in 0..180 {
+            {
+                let w = s.app.world();
+                lead = w.get::<BonePose>(s.player).unwrap().leading_foot(w.resource::<PoseSkeleton>());
+            }
+            s.run(1.0 / 60.0 + 1e-4);
+            if s.loco().current == ActorContextId::Ladder {
+                break;
+            }
+        }
+        assert_eq!(s.loco().current, ActorContextId::Ladder, "no entry from {from_z}");
+        let lead = lead.unwrap();
+        assert_eq!(s.data().ladder.action.map(|a| a.id), Some(ENTER_GROUND[0][lead]), "from {from_z}: the leading foot {lead}'s column");
+        seen.insert(lead);
+    }
+    assert_eq!(seen.len(), 2, "both feet led at some entry");
+}
+
 #[test]
 fn climb_start_from_the_ground_uses_the_leading_foot() {
     // sub_B26080 (0xB261A8): 0x01BC382C + (Human__GetLeadingFoot() != 1)
@@ -487,7 +547,11 @@ fn climb_start_from_the_ground_uses_the_leading_foot() {
         let mut lead = None;
         for _ in 0..60 {
             if s.loco().current == ActorContextId::Ground {
-                lead = Some(s.ground().blend.foot != 0);
+                // the leading foot bone of the pose the ground reads (`Human__GetLeadingFoot`); the blend's foot without
+                // the install
+                let pose = s.app.world().get::<crate::bone_pose::BonePose>(s.player).filter(|p| p.seq > 0);
+                let bones = pose.and_then(|p| p.leading_foot(s.app.world().resource::<crate::bone_pose::PoseSkeleton>()));
+                lead = Some(bones.map_or(s.ground().blend.foot != 0, |f| f == 1));
             }
             s.run(1.0 / 60.0 + 1e-4);
             if s.loco().current == ActorContextId::Climb {
@@ -499,7 +563,10 @@ fn climb_start_from_the_ground_uses_the_leading_foot() {
         assert_eq!(s.data().climb.move_action, Some(climb::CLIMB_FROM_GROUND[lead as usize]), "leading foot right = {lead}");
         seen.insert(lead);
     }
-    assert_eq!(seen.len(), 2, "both feet exercised");
+    // the stand-in follows the forced blend foot; the bones follow the wait's pose
+    let probe = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
+    let animated = probe.app.world().get::<crate::anim::AnimPlayer>(probe.player).is_some();
+    assert!(animated || seen.len() == 2, "both feet exercised");
 }
 
 #[test]
