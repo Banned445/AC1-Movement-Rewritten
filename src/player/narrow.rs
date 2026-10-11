@@ -150,6 +150,20 @@ mod completion_tests {
         }
     }
 
+    /// RE/24 NARROW-25: the pull-down guard's position cone: an edge facing along the search but lying behind the feet
+    /// is not taken; the same edge ahead is.
+    #[test]
+    fn the_pull_down_edge_lies_within_45_degrees_of_the_search() {
+        use crate::guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld};
+        let found = |z: f32| {
+            let mut g = GuidanceWorld::default();
+            g.edges.push(GuidanceEdge { p0: Vec3::new(-1.0, 0.0, z), p1: Vec3::new(1.0, 0.0, z), n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::LedgeGrab });
+            pull_down_edge(Vec3::ZERO, Vec3::Z, &g, &CollisionWorld::default()).is_some_and(|(_, _, side)| side == 0)
+        };
+        assert!(found(0.3), "ahead");
+        assert!(!found(-0.3), "behind the feet");
+    }
+
     #[test]
     fn lateral_root_motion_cannot_increase_error_and_correction_is_bounded() {
         let old = Vec3::Z * 0.2;
@@ -857,8 +871,9 @@ fn can_step_off(n: &HumanNarrowObjectData, collision: &CollisionWorld) -> bool {
 }
 
 /// `HumanNarrowObject__CanPullDownToHang` 0xE504D0 (event 9's guard on a beam and a pilotis): guidance in the box
-/// ±0.6 m × ±0.6 m × ±0.5 m around the feet facing `dir`; a LedgeGrab edge whose outward normal lies within 45° of
-/// `dir`, within 0.6 m (sub_B1C550); more than 2.5 m above the floor below it; then the hang clearance (sub_B2E4F0,
+/// ±0.6 m × ±0.6 m × ±0.5 m around the feet facing `dir`; a LedgeGrab edge whose outward normal and whose point (seen
+/// flat from the feet) both lie within 45° of `dir`, within 0.6 m (`sub_B1C550`(…, 45°, 45°, 0.6, 0.5), RE/24
+/// NARROW-25); more than 2.5 m above the floor below it; then the hang clearance (sub_B2E4F0,
 /// using oriented boxes). The search runs along `dir`, then along −`dir`. Returns the edge point, its outward normal and
 /// the side for the pull-down table (`FillLedgePullDown` 0xE4EF70: the normal vs `dir`, 0 front < 45°, 1 back
 /// > 135°; 2 / 3 left / right are only reached at exactly 45°).
@@ -885,6 +900,10 @@ pub fn pull_down_edge(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
             }
             let dist = Vec2::new(rel.x, rel.z).length();
             if dist > 0.6 {
+                continue;
+            }
+            // the position cone: the flat direction from the feet to the point within 45° of `dir`
+            if dist > 0.0005 && Vec3::new(rel.x, 0.0, rel.z).dot(d) / dist < 45f32.to_radians().cos() {
                 continue;
             }
             let below = collision.ground_height(q + n * 0.6 - Vec3::Y * 0.05, 50.0).unwrap_or(q.y - 100.0);
