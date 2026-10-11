@@ -416,9 +416,11 @@ pub fn update_ledge(
     mut pad: ResMut<PadInput>,
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
+    abilities: Option<Res<super::abilities::AbilitySet>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, &mut LimbTargets), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
+    let ab = super::abilities::of(abilities.as_deref());
     for (mut loco, mut body, mut data, mut limbs) in &mut q {
         if loco.current != ActorContextId::Ledge {
             continue;
@@ -685,7 +687,20 @@ pub fn update_ledge(
             limbs.feet = None;
             let origin = if d.hang_type == LedgeHangType::Wall { FallOrigin::HangWall } else { FallOrigin::HangFree };
             let hold = hand_mid(d);
-            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 }));
+            // with the Leap of Faith ability, a haystack below (IHuman vt84, `hay::LET_GO`, along the facing away from
+            // the wall) turns the let-go into the dive (0xEEC580–0xEEC63B, RE/24 CENSUS-2)
+            let away = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+            let dive = ab.allows(super::abilities::Ability::LeapOfFaith)
+                .then(|| super::hay::search(body.feet, away, away, &super::hay::LET_GO, &guidance.haystacks, &collision))
+                .flatten();
+            let entry = match dive {
+                Some(s) => {
+                    let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None };
+                    InAirEntry::LetGoDive { from: body.feet, target, origin }
+                }
+                None => InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 },
+            };
+            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             data.air.release_hold = Some(hold);
             continue;
         }

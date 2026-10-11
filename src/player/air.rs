@@ -132,6 +132,10 @@ pub enum InAirEntry {
     /// ground contact like the free jump (RE/24 AIR-5).
     ReboundJump { from: Vec3, target: Option<JumpTarget>, dir: Vec3, foot_left: bool },
     Fall { from: Vec3, velocity: Vec3, origin: FallOrigin, speed_param: f32 },
+    /// The ledge let-go above a haystack (the interpreter's ledge state 0xEEC558: the vt84 search hit → ActorState 41,
+    /// the HollywoodMode layer 28, IHumanLedge vt44(target, 2048) → event 4 → `sub_DD7810`: the let-go record, Data+506):
+    /// the let-go plays, then the faith dive and the tail steers into the haystack (RE/24 CENSUS-2 / AIR-23).
+    LetGoDive { from: Vec3, target: JumpTarget, origin: FallOrigin },
 }
 
 impl InAirEntry {
@@ -145,6 +149,7 @@ impl InAirEntry {
             InAirEntry::SwingJump { target, .. } => InAirEntry::SwingJump { from: p, target },
             InAirEntry::ReboundJump { target, dir, foot_left, .. } => InAirEntry::ReboundJump { from: p, target, dir, foot_left },
             InAirEntry::Fall { velocity, origin, speed_param, .. } => InAirEntry::Fall { from: p, velocity, origin, speed_param },
+            InAirEntry::LetGoDive { target, origin, .. } => InAirEntry::LetGoDive { from: p, target, origin },
         }
     }
 }
@@ -179,6 +184,9 @@ pub enum AirMode {
     /// `FREESTEP_ARRIVE` s while the reception plays; then the landing (RE/24 AIR-2).
     Arrive { from: Vec3, to: Vec3, t: f32 },
 }
+
+/// The let-go from a free hang (`sub_DD7810`; 0x1120E17B from a wall hang is `climb::LOST_GRIP`).
+pub const LET_GO_FREE: u32 = 0x1120_E179;
 
 /// The free-step arrival's root interpolation time (0xE09A13: 0.0667 s).
 pub const FREESTEP_ARRIVE: f32 = 0.066_666_67;
@@ -239,6 +247,11 @@ pub struct HumanInAirData {
     pub entry_velocity: Option<Vec3>,
     /// HumanInAir +0x50: the over-drop tail's velocity in m / frame (0xE0F12A, 0xE0FA4B; RE/24 AIR-4).
     pub tail_v: Vec3,
+    /// The let-go dive: the let-go's first item still playing (s left); the tail waits for it (0xE0F772).
+    pub dive_wait: Option<f32>,
+    /// The HollywoodMode layer (28) of the let-go dive: it collides with almost nothing (0xEEC622). PORT: the dive's
+    /// step is set directly, without the capsule.
+    pub hollywood: bool,
     /// HumanInAir+0x16C: live air-control speed ratio (0xEDBAF0 -> 0xE102B0).
     pub speed_ratio: f32,
     /// Takeoff and flight items of the current jump (+0x1A4 / +0x1A8 and the weight arrays +0x1BC..).
@@ -280,6 +293,8 @@ impl HumanInAirData {
         self.down_check = None;
         self.arrival_w = None;
         self.side_setup = None;
+        self.dive_wait = None;
+        self.hollywood = false;
         self.apex_reached = false;
         self.fall_origin = FallOrigin::Ground;
         self.target_flags = 0;
@@ -399,6 +414,26 @@ impl HumanInAirData {
                 let aim = from + flat * ahead - Vec3::Y * FREE_JUMP_DOWN;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
                 self.free_target = true;
+            }
+            InAirEntry::LetGoDive { from, target, origin } => {
+                self.entry_velocity = Some(Vec3::ZERO);
+                self.takeoff = None;
+                self.flight = None;
+                self.speed_ratio = 0.0;
+                self.start_y = from.y;
+                self.start = from;
+                self.apex_y = from.y;
+                self.prev_y = from.y;
+                self.fall_origin = origin;
+                self.target_flags = target.type_flags;
+                self.target = Some(target);
+                self.tail_v = Vec3::ZERO;
+                // the let-go (0x1120E17B wall / 0x1120E179 free) plays its first item before the dive
+                let id = if origin == FallOrigin::HangFree { LET_GO_FREE } else { super::climb::LOST_GRIP };
+                let d = [id, super::climb::LOST_GRIP].into_iter().map(|a| ActionBlend::new(a, 0, &[1.0]).duration()).find(|d| *d > 0.0).unwrap_or(0.3);
+                self.dive_wait = Some(d);
+                self.hollywood = true;
+                self.mode = AirMode::Fall { steer_to: Some(target.position) };
             }
             InAirEntry::Fall { from, velocity, origin, speed_param } => {
                 self.entry_velocity = Some(velocity);
@@ -881,6 +916,17 @@ pub fn update_air(
                     // (the vertical step counted twice, 0xE0F9A5 / 0xE0FB21). At or below the target's height the game
                     // integrates nothing (the contact ends it). PORT: the step goes through the capsule move, and below
                     // the target's height the plain fall carries on (the port's contacts may not end it there).
+                    // the let-go's first item plays (no tail, 0xE0F772); when it ends the faith dive starts (0x23A949B5,
+                    // blend 0.6·t) and the tail steers to the haystack
+                    Some(_) if air.dive_wait.is_some() => {
+                        let w = air.dive_wait.unwrap_or(0.0) - dt;
+                        if w > 0.0 {
+                            air.dive_wait = Some(w);
+                        } else {
+                            air.dive_wait = None;
+                            air.flight = Some(ActionBlend::new(jump_blend::FLIGHT_FAITH, 0, &[1.0]));
+                        }
+                    }
                     Some(p) if GAME_FALLS && body.feet.y > p.y => {
                         let v = air.tail_v;
                         let vz = v.y - dt * 0.326;
@@ -946,7 +992,13 @@ pub fn update_air(
                 }
                 let before = body.feet;
                 air.anti_stuck.tick(dt);
-                let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, b.velocity * dt, false, dt) };
+                let r = if air.hollywood {
+                    // the HollywoodMode layer: the dive passes through (`CollisionFilterInfo__SetLayer(28)` 0xEEC622)
+                    crate::collision::MoveResult { position: body.feet + body.velocity * dt, velocity: body.velocity, hit_wall: false, hit_ceiling: false, landed: false }
+                } else {
+                    let b = &mut *body;
+                    collision.move_capsule(&mut b.proxy, b.feet, b.velocity * dt, false, dt)
+                };
                 body.feet = r.position;
                 // PORT: static proxy contacts have no character bodies. While the anti-stuck nudge's gate runs,
                 // contacts within 0.3 m below the start do not count (0xE038A0, Data+528)

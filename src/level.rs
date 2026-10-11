@@ -197,6 +197,8 @@ pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[
     (-104.0, -120.0, 3.0, 3.0, 1.5),
     // the narrow-rimmed cart
     (-112.0, -125.0, 3.0, 3.0, 1.5),
+    // below the high block's +X face near its -Z corner: the ledge let-go's dive (RE/24 CENSUS-2)
+    (35.5, 23.5, 2.2, 2.2, 1.5),
 ];
 
 /// Kiosk frames (p0, p1 of the top bar, the side facing the roofs): guidance subtype Kiosk (8), not solid.

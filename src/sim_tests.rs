@@ -874,6 +874,18 @@ fn hang_at(mid: Vec3, n: Vec3) -> Sim {
     s
 }
 
+/// RE/24 CENSUS-2 / AIR-23: letting go of the high block's edge above a haystack (IHuman vt84) dives: the let-go plays,
+/// then the faith dive steers into the haystack, through the HollywoodMode layer.
+#[test]
+fn letting_go_above_a_haystack_dives_into_it() {
+    let mut s = hang_at(Vec3::new(33.0, 9.5, 23.6), Vec3::X);
+    s.press_hand();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "no let-go");
+    assert_eq!(s.data().air.target.map(|t| t.type_flags), Some(crate::player::jump_blend::TARGET_HAYSTACK), "the let-go record's haystack");
+    assert!(s.data().air.dive_wait.is_some());
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::HayStack), "never dove in: {:?} {:?}", s.loco().current, s.body().feet);
+}
+
 #[test]
 fn inner_corner_turns_onto_the_perpendicular_wall() {
     // L-wall: A's -Z face (z 49.7), B sticks out toward -Z at x 36 (its -X face is the inner corner)
