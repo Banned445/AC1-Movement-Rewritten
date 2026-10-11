@@ -109,7 +109,10 @@ pub fn ledge_search(
         let feet_dir = -Vec3::new(a.wall_normal.x + b.wall_normal.x, 0.0, a.wall_normal.z + b.wall_normal.z).normalize_or(-into);
         if let Some([fl, fr]) = pair_along(Vec3::new(feet.x, hl.y.max(hr.y) - 1.2, feet.z), feet_dir, 0.3) {
             let entry = super::climb::ClimbEntry {
-                entry_type: super::climb::ClimbEntryType::Default,
+                // the catch's Ledge fill (SubState 13) enters with type 1 and ClimbData+40 = the hands 0.3 m or more
+                // apart (0xE0CCC7; RE/24 AIR-15 / CLIMB-24). PORT: the Ledge step is skipped
+                entry_type: super::climb::ClimbEntryType::FromLedge,
+                pose_2m: Some((hl - hr).length() >= 0.3),
                 hand_l: hl,
                 hand_r: hr,
                 foot_l: fl.point,

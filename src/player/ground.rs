@@ -1611,6 +1611,7 @@ fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &Gui
             let Some(hand) = report.probe_facing(foot.point + Vec3::Y * 1.2, facing, Vec3::new(0.25, 0.3, 0.3), 0.2, 0.785_398_2, mask) else { continue };
             return Some(ClimbEntry {
                 entry_type: ClimbEntryType::FromGround,
+                pose_2m: None,
                 hand_l: hand.point,
                 hand_r: hand.point,
                 foot_l: foot.point,

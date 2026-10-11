@@ -443,6 +443,7 @@ pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang:
     let (foot, hand) = (rows[fi]?, rows[hi]?);
     Some(super::climb::ClimbEntry {
         entry_type: super::climb::ClimbEntryType::FromLedge,
+        pose_2m: None,
         hand_l: hand.point,
         hand_r: hand.point,
         foot_l: foot.point,
@@ -630,6 +631,7 @@ pub fn try_side_jump(
             let _ = target;
             let climb = super::climb::ClimbEntry {
                 entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
+                pose_2m: None,
                 hand_l: hl,
                 hand_r: hr,
                 foot_l: fl,
@@ -988,6 +990,7 @@ pub fn try_jump_up_to_climb(
     mv.to = mv.natural_end();
     let climb = super::climb::ClimbEntry {
         entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
+        pose_2m: None,
         hand_l: upper.point,
         hand_r: upper.point,
         foot_l: lower.point,
@@ -1042,6 +1045,7 @@ pub fn try_free_hang_drop(
         let to = super::climb::climb_root_at(upper.point, upper.point, lower.point, lower.point, nn);
         let e = ClimbEntry {
             entry_type: ClimbEntryType::FromLedge,
+            pose_2m: None,
             hand_l: upper.point,
             hand_r: upper.point,
             foot_l: lower.point,

@@ -44,6 +44,9 @@ pub struct ClimbEntry {
     pub foot_right: bool,
     /// The transition action played while the root moves into the climb (from a ledge: `LEDGE_TO_CLIMB`).
     pub action: Option<u32>,
+    /// ClimbData+40, the filler's pose flag (EntryPoseType): entry types 1 / 3 take pose 3 when set, else 0 (EnterCommon
+    /// 0xDE97B0). `None`: the filler is not decoded; PORT: the feet more than 0.45 m apart stand in for it.
+    pub pose_2m: Option<bool>,
 }
 
 /// `HumanLedge__TryTransitionToClimb` 0xDD46A0: the hang → climb transition, by direction (table 0x1A2C520 up,
@@ -370,17 +373,20 @@ impl HumanClimbData {
             return;
         }
         self.set_entry_holds(&e);
-        // the climb catch (`CheckAirCatch` 0xE0CC8A–0xE0CCF4): the hands 0.3 m or more apart → the 2 m pose
-        // 0x012DA3A2 (pose 3, ClimbData+40 = 1), else the 1 m pose 0x012DA39F (pose 0), the catch its entry; the root
-        // reaches the pose over the catch's item 0 + 0.2 s (0xE0DB5C) while the catch plays on (RE/24 AIR-15)
-        let catch = e.action.filter(|a| super::air_catches::CLIMB_CATCH.contains(a));
-        // EnterCommon 0xDE97B0: pose 3 for a "2M" entry (sides one column apart), else pose 0.
-        self.pose = match catch {
-            Some(_) => if (e.hand_l - e.hand_r).length() >= 0.3 { 3 } else { 0 },
-            None => if (e.foot_r - e.foot_l).length() > CLIMB_COL * 0.6 { 3 } else { 0 },
-        };
+        self.pose = entry_pose(&e);
         self.last_action = "enter";
         self.look = None;
+        if e.entry_type == ClimbEntryType::Default {
+            // EnterCommon 0xDE97B0, EntryType 0: the Wait state with the pose-0 wait (`dword_1A2CC08`), the limb IK released
+            // (+84 = 0), no root interpolation. PORT: the root is put on the pose at once (the game's callers place it)
+            self.move_action = None;
+            self.move_seq += 1;
+            self.moving = Some(RootInterp::new(e.from_feet, self.frame.root, 1e-3));
+            return;
+        }
+        // the climb catch (`CheckAirCatch` 0xE0CC8A–0xE0CCF4, through the Ledge's SubState 13): the catch is the 1 m / 2 m
+        // pose's entry; the root reaches the pose over the catch's item 0 + 0.2 s (0xE0DB5C) while it plays on (AIR-15)
+        let catch = e.action.filter(|a| super::air_catches::CLIMB_CATCH.contains(a));
         self.move_action = e.action;
         self.move_seq += 1;
         let mut m = RootInterp::new(e.from_feet, self.frame.root, move_time(e.action));
@@ -399,10 +405,22 @@ impl HumanClimbData {
 /// 0x01BC382D, FROMAI: the root is interpolated over the clip to the climb root).
 pub const CLIMB_FROM_GROUND: [u32; 2] = [0x01BC_382C, 0x01BC_382D];
 
+/// The entry pose (`HumanClimb__EnterCommon` 0xDE97B0, RE/24 CLIMB-24): EntryType 1 / 3 → pose 3 when the filler's
+/// ClimbData+40 is set, else 0 (the flag is cleared); EntryType 0 and 2 (FromLedgeParallelJump) → pose 0.
+fn entry_pose(e: &ClimbEntry) -> usize {
+    match e.entry_type {
+        ClimbEntryType::Default | ClimbEntryType::FromLedgeParallelJump => 0,
+        ClimbEntryType::FromLedge | ClimbEntryType::FromGround => {
+            let two = e.pose_2m.unwrap_or_else(|| (e.foot_r - e.foot_l).length() > CLIMB_COL * 0.6);
+            if two { 3 } else { 0 }
+        }
+    }
+}
+
 impl HumanClimbData {
     fn enter_from_ground(&mut self, e: ClimbEntry) {
         self.set_entry_holds(&e);
-        self.pose = if (e.foot_r - e.foot_l).length() > CLIMB_COL * 0.6 { 3 } else { 0 };
+        self.pose = entry_pose(&e);
         self.last_action = "enter";
         // sub_B26080 (0xB261A8): 0x01BC382C + (Human__GetLeadingFoot() != 1), i.e. footr with the right foot ahead
         let id = CLIMB_FROM_GROUND[e.foot_right as usize];
@@ -1762,6 +1780,32 @@ mod tests {
 
     fn hold(pos: Vec3) -> Hold {
         Hold { pos, normal: Vec3::NEG_Z, edge: 0, centred: true, kind: 0 }
+    }
+
+    /// RE/24 CLIMB-24: EnterCommon's entry rules: types 1 / 3 take pose 3 from the filler's flag, types 0 / 2 pose 0; the
+    /// Default entry starts no move action.
+    #[test]
+    fn the_entry_type_decides_the_pose() {
+        let e = |entry_type, pose_2m| ClimbEntry {
+            entry_type,
+            hand_l: Vec3::new(-0.4, 1.2, 0.0),
+            hand_r: Vec3::new(0.4, 1.2, 0.0),
+            foot_l: Vec3::new(-0.4, 0.0, 0.0),
+            foot_r: Vec3::new(0.4, 0.0, 0.0),
+            normal: Vec3::Z,
+            from_feet: Vec3::new(0.0, -0.1, 0.4),
+            foot_right: false,
+            action: None,
+            pose_2m,
+        };
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromLedge, Some(true))), 3);
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromLedge, Some(false))), 0, "the flag, not the spacing");
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromGround, None)), 3, "PORT: the feet's spacing without the flag");
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromLedgeParallelJump, Some(true))), 0);
+        assert_eq!(entry_pose(&e(ClimbEntryType::Default, Some(true))), 0);
+        let mut d = HumanClimbData::default();
+        d.enter(e(ClimbEntryType::Default, None));
+        assert!(d.move_action.is_none() && d.moving.is_some_and(|m| m.duration < 0.01), "the Default entry waits: {:?}", d.moving);
     }
 
     /// RE/24 CLIMB-15: a grid move's target root takes the non-moving side's holds from its grid cells, not from where

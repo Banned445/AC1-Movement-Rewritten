@@ -594,7 +594,7 @@ fn climb_at(x: f32, feet_y: f32, face_z: f32) -> Sim {
         let mut q = w.query::<(&mut Locomotion, &mut HumanDataBundle)>();
         let (mut loco, mut data) = q.get_mut(w, player).unwrap();
         let (hands, feet) = (Vec3::new(x, feet_y + 1.2, face_z), Vec3::new(x, feet_y, face_z));
-        let e = ClimbEntry { entry_type: ClimbEntryType::Default, hand_l: hands, hand_r: hands, foot_l: feet, foot_r: feet, normal: Vec3::NEG_Z, from_feet: from, foot_right: false, action: None };
+        let e = ClimbEntry { entry_type: ClimbEntryType::Default, pose_2m: None, hand_l: hands, hand_r: hands, foot_l: feet, foot_r: feet, normal: Vec3::NEG_Z, from_feet: from, foot_right: false, action: None };
         switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
     }
     s.run(0.5);
@@ -4583,6 +4583,7 @@ fn climbing_down_past_the_lowest_holds_grabs_a_hang() {
         let foot = Vec3::new(hands.x, feet_y, hands.z);
         let e = ClimbEntry {
             entry_type: ClimbEntryType::Default,
+            pose_2m: None,
             hand_l: hands,
             hand_r: hands,
             foot_l: foot,

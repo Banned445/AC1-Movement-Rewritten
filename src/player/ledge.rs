@@ -861,6 +861,7 @@ pub fn update_ledge(
                 if let (Some(feet_row), Some(hands_row)) = (rows.feet, rows.hands) {
                     let entry = ClimbEntry {
                         entry_type: ClimbEntryType::FromLedge,
+                        pose_2m: None,
                         hand_l: hands_row.point,
                         hand_r: hands_row.point,
                         foot_l: feet_row.point,
