@@ -992,9 +992,11 @@ pub fn update_air(
                     }
                     None => {
                         // Non-target drift 0xE0F643–0xE0F707, constants 0x19BA434/438. PORT: the game drifts only while
-                        // `sub_503800`(0) == 1 (the low 3 bits of +36 of the main slot's ActionPlayer state, not the
-                        // item's displacement mode, which sits at item +56) and no BounceOffHuman deadline runs
-                        // (`sub_DFEEE0`, HumanInAir+0x1A8); what sets that field is not decoded (RE/24 AIR-21).
+                        // `AnimComponent__GetSlotMotionMode`(0) == 1 and no BounceOffHuman deadline runs (`sub_DFEEE0`,
+                        // HumanInAir+0x1A8). Mode 1 is written only by the physics blend at Human+0x830 in its states 2 / 3
+                        // (`HumanPhysicsBlend__SetPhysicsDriven` 0xB31530; drowning requests state 2), its init writes 0
+                        // (RE/24 AIR-21). Hypothesis: a normal fall runs in mode 0 and skips this decay; LIVE #14 decides,
+                        // until then the port decays.
                         // 0x4F8C40: decay only without controller contacts. PORT: use the proxy manifold
                         // as the native contact-list adapter.
                         // PORT: a fall entered faster than the cap (a free jump at sprint speed, 6.3 m/s) decays onto it
@@ -1170,9 +1172,9 @@ pub fn update_air(
             }
             if ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
                 let ahead = super::air_catches::target_ahead(body.feet, air.target, &collision);
-                // PORT: the beam too only with no jump target ahead (`FindBeamCatch` 0xE0D41D is outside the game's
-                // `IsJumpTargetAhead` block; with a beam target the catch would take the jump before its arrival, which
-                // needs the gate timer InAir+104 decoded, RE/24 AIR-16 note)
+                // the beam too only with no jump target ahead: its call (0xE0D41D) sits outside the pilotis'
+                // `IsJumpTargetAhead` block, but `HumanInAir__FindBeamCatch` 0xE0B890 runs the same test itself. The
+                // gate's InAir+104 is a deadline armed once at the InAir entry (0.4 s, 0xE01D4A) (RE/24 AIR-16)
                 if !ahead { narrow_on = narrow_catch(body.feet, body.forward(), foot, &guidance, &collision); }
                 // the knee catch (type 0, 0xE0D58B): an edge at the feet with a drop in front of it and room on top
                 if narrow_on.is_none() && !ahead {
