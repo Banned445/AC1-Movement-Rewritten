@@ -13,7 +13,9 @@ use crate::assets::ac_formats::SkelBone;
 use crate::player::Body;
 
 /// Bone ids (CRC32 of the bone name, RE/data/altair_bone_names.json).
+#[cfg_attr(not(test), allow(dead_code))]
 pub const HEAD: u32 = 0x07C1_59A2;
+#[cfg_attr(not(test), allow(dead_code))]
 pub const SPINE: u32 = 0x530E_C1CB;
 pub const HIPS: u32 = 0xDED1_0611;
 pub const LEFT_HAND: u32 = 0xB675_F36C;
@@ -53,6 +55,7 @@ impl PoseSkeleton {
 
 /// Loads the skeleton alone from the install, for runs without the renderer (the game fills it from the model it
 /// loads, `model::attach_altair`, so the Rig and the pose share the same bones).
+#[cfg_attr(not(test), allow(dead_code))] // the headless runs (tests, replays) only, so far
 pub fn load_pose_skeleton(mut skel: ResMut<PoseSkeleton>) {
     if std::env::var_os("AC_NO_MODEL").is_some() {
         return;
@@ -64,6 +67,7 @@ pub fn load_pose_skeleton(mut skel: ResMut<PoseSkeleton>) {
 }
 
 /// One skeleton per process for the runs without the renderer (tests, replays). None without the install.
+#[cfg_attr(not(test), allow(dead_code))] // the headless runs (tests, replays) only, so far
 pub fn shared_pose_skeleton() -> Option<PoseSkeleton> {
     static SKEL: std::sync::OnceLock<Option<PoseSkeleton>> = std::sync::OnceLock::new();
     SKEL.get_or_init(|| crate::assets::altair::load_skeleton(&crate::assets::game_dir()).ok().map(|b| PoseSkeleton::from_bones(&b))).clone()
@@ -73,6 +77,7 @@ pub fn shared_pose_skeleton() -> Option<PoseSkeleton> {
 /// shared library and skeleton (empty ones without the install). The harness chains `anim::headless_animation_systems`
 /// after its contexts, so the player's `BonePose` follows its actions as in the game. Returns whether the install was
 /// found: give the player an `AnimPlayer` only then. `AC_SIM_NO_ANIM=1` keeps the runs without animation (to compare).
+#[cfg_attr(not(test), allow(dead_code))] // the headless runs (tests, replays) only, so far
 pub fn add_headless_animation(app: &mut App) -> bool {
     let shared = if std::env::var_os("AC_SIM_NO_ANIM").is_some() { None } else { crate::anim::shared_library().zip(shared_pose_skeleton()) };
     let on = shared.is_some();

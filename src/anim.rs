@@ -1554,6 +1554,7 @@ fn library_from_install() -> Result<AnimLibrary, String> {
 
 /// One library per process for the runs without the renderer (tests, replays): loaded on first use, then cloned
 /// (its tables are shared). None without the install.
+#[cfg_attr(not(test), allow(dead_code))] // the headless runs (tests, replays) only, so far
 pub fn shared_library() -> Option<AnimLibrary> {
     static LIB: std::sync::OnceLock<Option<AnimLibrary>> = std::sync::OnceLock::new();
     LIB.get_or_init(|| library_from_install().ok()).clone()
@@ -1561,6 +1562,7 @@ pub fn shared_library() -> Option<AnimLibrary> {
 
 /// The clip choice and the animation step, for a schedule without the renderer: the player's `BonePose` follows its
 /// actions as in the game (the rig writer `apply_clip` and IK are the renderer's).
+#[cfg_attr(not(test), allow(dead_code))] // the headless runs (tests, replays) only, so far
 pub fn headless_animation_systems() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
     (choose_clip, animate_pose).chain().into_configs()
 }
