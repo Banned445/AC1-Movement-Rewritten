@@ -57,7 +57,9 @@ pub fn revolve_room(root: Vec3, fwd: Vec3, right: bool, collision: &CollisionWor
     let f = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
     let r = super::right_of(f);
     let c = root + f * 0.85 + Vec3::Y * 1.2 + r * if right { 0.5 } else { -0.5 };
-    collision.obb_free(c, [r, Vec3::Y, f], Vec3::new(0.6, 0.55, 0.65))
+    // half extents (x 0.6, y 0.55, z 0.65) in the character's frame: 0.55 along the forward, 0.65 up (0xE24E4D, RE/24
+    // LADDER-16)
+    collision.obb_free(c, [r, Vec3::Y, f], Vec3::new(0.6, 0.65, 0.55))
 }
 
 pub const DUMPED_ACTIONS: &[u32] = &[
@@ -347,12 +349,14 @@ pub fn find_ladder_catch(feet: Vec3, dir: Vec3, grab: bool, guidance: &GuidanceW
     let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
     let h = catch_height(hit.point.y - base.y, top.y - base.y)?;
     let point = base + Vec3::Y * h;
-    let to = Vec3::new(point.x - feet.x, 0.0, point.z - feet.z).normalize_or(-n);
-    let out = if to.dot(n) >= 0.0 { to } else { -to };
+    // the out direction is the ladder's Y signed toward the root (0xE043AF–0xE04425: −Y when (rung − root)·Y > 0), the
+    // climber's side of a two-sided ladder (RE/24 LADDER-14 / LADDER-3)
+    let away = Vec3::new(feet.x - point.x, 0.0, feet.z - point.z);
+    let out = if away.dot(n) >= 0.0 { n } else { -n };
     if !collision.obb_free(point + out * 0.6 + Vec3::Y, [super::right_of(-out), -out, Vec3::Y], Vec3::new(0.4, 0.4, 1.0)) {
         return None;
     }
-    Some(LadderEntry { base, top, n, from: feet, facing: -out, catch_out: Some(out), from_ledge: true, height: Some(h), action: Some(CATCH_AIR), chain: true, ..Default::default() })
+    Some(LadderEntry { base, top, n: out, from: feet, facing: -out, catch_out: Some(out), from_ledge: true, height: Some(h), action: Some(CATCH_AIR), chain: true, ..Default::default() })
 }
 
 /// The wall run's ladder (`GoAssassinActionInterpreter__WallingState` 0xEE05E0 with the Ladder ability `sub_D32600`):

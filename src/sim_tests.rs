@@ -3794,7 +3794,9 @@ fn air_catch_ladder_uses_raw_reach_and_clearance_before_ledge_priority() {
     let from=Vec3::new(50.15,2.7,62.9);
     let reach=Vec3::new(-0.15,0.0,0.6).normalize();
     let e=find_ladder_catch(from,reach,true,&guidance,&collision).expect("diagonal ladder catch");
-    assert!(e.catch_out.unwrap().x>0.1,"approach-side root normal is retained");
+    // the out direction is the ladder's normal on the climber's side, not the diagonal to the root (RE/24 LADDER-14)
+    let out=e.catch_out.unwrap();
+    assert!(out.x.abs()<1e-3 && out.z< -0.99,"the ladder's normal toward the root: {out:?}");
     let to=e.base+Vec3::Y*e.height.unwrap()+e.catch_out.unwrap()*0.6+Vec3::Y;
     collision.boxes.push(crate::collision::Aabb3{min:to-Vec3::splat(0.1),max:to+Vec3::splat(0.1)});
     assert!(find_ladder_catch(from,reach,true,&guidance,&collision).is_none());
