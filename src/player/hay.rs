@@ -107,6 +107,11 @@ impl HumanHayStackData {
                 self.action = single(if e.kind == HayEntry::Top { HAYSTACK_FAITH_LANDING } else { HAYSTACK_FROM_AIR });
                 let d = (self.to - e.from).length();
                 self.interp = if e.speed > 5e-4 { (d / e.speed).clamp(0.1, 0.4) } else { 0.1 };
+                // `EnterTop_FaithLanding` 0xE41D50: the target facing is the flat direction to the stack (RE/24 NARROW-20)
+                if e.kind == HayEntry::Top {
+                    let f = Vec3::new(self.to.x - e.from.x, 0.0, self.to.z - e.from.z).normalize_or_zero();
+                    self.face = (f != Vec3::ZERO).then_some(f);
+                }
             }
             HayEntry::Ground | HayEntry::FreeStep => {
                 let id = HAYSTACK_DIVE[dive_pick(&mut self.rng)];
@@ -242,7 +247,10 @@ fn single(id: u32) -> Option<ActionBlend> {
     super::jump_blend::action_items(id).filter(|i| !i.is_empty()).map(|_| ActionBlend::new(id, 0, &[1.0]))
 }
 
-/// `Guard_HopOut` 0xE434E0 (reduced): where a hop out along `dir` leaves the stack, if there is room.
+/// `Guard_HopOut` 0xE434E0: the ray along `dir` from the root leaves the stack's footprint; the room is
+/// `Human__BoxQueryEmpty` at the exit + 0.5·dir, 1.25 m above the root, half extents (0.35, 0.5, 0.75) across / along /
+/// up, the stack itself ignored (the port's haystacks are not solid), filter 8; no ground needed (RE/24 NARROW-20).
+/// Returns where the hop leaves (at the root's height). PORT: the footprint is the stack's box.
 pub fn hop_out_exit(stack: &Aabb3, centre: Vec3, dir: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
     let dir = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     if dir == Vec3::ZERO {
@@ -252,12 +260,9 @@ pub fn hop_out_exit(stack: &Aabb3, centre: Vec3, dir: Vec3, collision: &Collisio
     let tx = if dir.x.abs() > 1e-5 { ((if dir.x > 0.0 { stack.max.x } else { stack.min.x }) - centre.x) / dir.x } else { f32::INFINITY };
     let tz = if dir.z.abs() > 1e-5 { ((if dir.z > 0.0 { stack.max.z } else { stack.min.z }) - centre.z) / dir.z } else { f32::INFINITY };
     let edge = centre + dir * tx.min(tz);
-    let probe = edge + dir * 0.5 + Vec3::Y * 1.25;
-    if collision.point_inside(probe) || collision.point_inside(probe - Vec3::Y * 0.75) {
-        return None;
-    }
-    let h = collision.ground_height(probe, 3.0)?;
-    Some(Vec3::new(probe.x, h, probe.z))
+    let probe = Vec3::new(edge.x, centre.y, edge.z) + dir * 0.5;
+    let room = collision.obb_free(probe + Vec3::Y * 1.25, [super::right_of(dir), dir, Vec3::Y], Vec3::new(0.35, 0.5, 0.75));
+    room.then_some(probe)
 }
 
 pub fn update_hay(
@@ -287,7 +292,9 @@ pub fn update_hay(
                 if let Some(f) = h.face {
                     body.heading = super::heading_of(f);
                 }
-                let dur = h.action.map(|a| a.duration()).unwrap_or(0.5);
+                // the Top landing's timer runs the action + 0.2 s (0xE41D50, RE/24 NARROW-20)
+                let extra = if h.kind == HayEntry::Top { 0.2 } else { 0.0 };
+                let dur = h.action.map(|a| a.duration()).unwrap_or(0.5) + extra;
                 if h.t >= dur.max(h.interp) {
                     h.phase = HayPhase::Waiting;
                     h.action = single(HAYSTACK_WAIT);
@@ -296,6 +303,8 @@ pub fn update_hay(
                 }
             }
             HayPhase::Waiting => {
+                // PORT: `ChooseWait` 0xE416B0 faces the stack's axis (data +871) or IHumanHayStack vt144's direction; the
+                // port's haystack boxes carry no axis, so the wait keeps the entry's heading (RE/24 NARROW-20)
                 body.feet = h.to;
                 // the interpreter's haystack state (`sub_EE08E0` from 0xEEE4E0, RE/24 NARROW-19): the stick released in
                 // the high wait → event 1, the low wait (0xE44020 / 0xE44080); the stick past 0.35 → the pass-over to a
@@ -327,6 +336,19 @@ pub fn update_hay(
 #[cfg(test)]
 mod search_tests {
     use super::*;
+
+    /// RE/24 NARROW-20: the hop out needs only the room box past the stack's side, no ground: an open drop is fine, a
+    /// wall right beside the stack is not.
+    #[test]
+    fn the_hop_out_needs_the_room_box_not_ground() {
+        let stack = Aabb3 { min: Vec3::new(-1.0, 0.0, -1.0), max: Vec3::new(1.0, 1.5, 1.0) };
+        let centre = Vec3::ZERO;
+        assert!(hop_out_exit(&stack, centre, Vec3::X, &CollisionWorld::default()).is_some(), "nothing beyond: room");
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(1.3, 0.0, -2.0), max: Vec3::new(2.0, 3.0, 2.0) });
+        assert!(hop_out_exit(&stack, centre, Vec3::X, &c).is_none(), "a wall 0.3 m past the side");
+        assert!(hop_out_exit(&stack, centre, Vec3::NEG_X, &c).is_some(), "the other side is open");
+    }
 
     /// RE/24 AIR-26 / CENSUS-1: the Leap of Faith search finds a haystack 10 m below and 6 m ahead, not one 2 m above
     /// (dz < 1.2), not one behind; a wall in the 3 m forward ray refuses everything.
