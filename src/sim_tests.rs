@@ -4200,6 +4200,23 @@ fn a_jump_at_a_kiosk_swings_through_its_frame_and_drops() {
     assert!(s.body().feet.y.abs() < 0.05, "on the street: {:?}", s.body().feet);
 }
 
+/// RE/24 NARROW-18: arriving at a kiosk along its axis is a lateral side: the side entry plays and, with no ground under
+/// it, ends in a plain fall (no free-step jump; that function belongs to HumanRiding).
+#[test]
+fn a_lateral_kiosk_side_plays_its_entry_then_falls() {
+    use crate::player::kiosk::{KioskEntry, KIOSK_ACTIONS};
+    let target = Vec3::new(120.0, 3.0, 25.0);
+    let mut s = Sim::new(target, -std::f32::consts::FRAC_PI_2);
+    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::X, dir: Vec3::X, facing: Vec3::X }));
+    s.run(1.0 / 60.0 + 1e-4);
+    let side = s.data().kiosk.side;
+    assert!(side.lateral(), "{side:?}");
+    assert_eq!(s.data().kiosk.action.map(|a| a.id), Some(KIOSK_ACTIONS[0][side as usize]));
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "never left the kiosk");
+    assert!(s.data().air.target.is_none() && matches!(s.data().air.mode, crate::player::air::AirMode::Fall { .. }), "a plain fall, not a jump");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed");
+}
+
 #[test]
 fn the_ability_stack_gates_the_jump() {
     use crate::player::abilities::{Ability, AbilitySet};

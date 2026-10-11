@@ -27,6 +27,10 @@ pub const KIOSK_ACTIONS: [[u32; 4]; 3] = [
     [0x1E5E_6288, 0x2084_B613, 0, 0],
     [0x1E5E_6289, 0x2084_B614, 0, 0],
 ];
+/// The lateral exit's roll onto the ground (`sub_E3DA00`: `side_freestep_to_roll` 0x2288984C).
+pub const SIDE_ROLL: u32 = 0x2288_984C;
+/// The lateral exit's phase after which a ground contact rolls (`sub_E3D9A0` 0xE3D9BD, flt_17020DC).
+pub const SIDE_ROLL_PHASE: f32 = 0.73;
 /// Root interpolation to the kiosk target at arrival (`flt_1700FC4`).
 pub const ARRIVAL_INTERP: f32 = 0.067;
 /// cos 10 degrees (0x16FEBC0 / 0x16D90A0).
@@ -131,7 +135,6 @@ impl HumanKioskData {
 
 pub fn update_kiosk(
     time: Res<Time>,
-    guidance: Res<GuidanceWorld>,
     collision: Res<CollisionWorld>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
 ) {
@@ -159,26 +162,40 @@ pub fn update_kiosk(
             None => (0.0, [0.0; 3]),
         };
         body.feet = start + super::right_of(fwd) * disp[0] + fwd * disp[1] + Vec3::Y * disp[2];
+        // the lateral side (state +113, `sub_E3E3F0`; RE/24 NARROW-18): past 73 % of the side entry with a controller
+        // contact underfoot it rolls onto the ground (`sub_E3E0E0` → Ground with `sub_E3DA00`: `side_freestep_to_roll`);
+        // at its end without one, it falls (`sub_E3DE20`). The "jump out" 0xE3BF90 belongs to HumanRiding.
+        if k.side.lateral() && k.interp.done() {
+            let phase = if dur > 1e-4 { k.t / dur } else { 1.0 };
+            let ground = collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1);
+            if phase > SIDE_ROLL_PHASE {
+                if let Some(y) = ground {
+                    body.feet.y = y;
+                    body.grounded = true;
+                    let landing = super::air::Landing {
+                        kind: super::air::LandingType::Safe,
+                        damage: 0,
+                        fall_height: 0.0,
+                        total_drop: 0.0,
+                        roll: true,
+                        action: Some(ActionBlend::new(SIDE_ROLL, 0, &[1.0])).filter(|a| a.duration() > 0.0),
+                        skip: 0.0,
+                    };
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: Some(landing) });
+                    continue;
+                }
+            }
+            if k.t >= dur {
+                // PORT: the InAir set-up's fields 9 / 3 (`sub_E3DE20`) are not decoded: a plain fall
+                let here = body.feet;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: here, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
+            }
+            continue;
+        }
         if k.t < dur || !k.interp.done() {
             continue;
         }
         let here = body.feet;
-        if k.side.lateral() {
-            // the free-step jump out along the kiosk's direction (0xE3BF90): the candidate query and the scorer,
-            // else the free-jump target; jump kind 1
-            let dir = k.dir;
-            let target = super::targets::find_target(here, dir, dir, &super::jump_candidates::Query::TAP, false, &guidance, &collision)
-                .unwrap_or(super::targets::JumpTarget {
-                    position: here + dir * crate::tuning::FREE_JUMP_AHEAD - Vec3::Y * crate::tuning::FREE_JUMP_DOWN,
-                    type_flags: 1,
-                    hang: None,
-                    straight: None,
-                    pass: None,
-                    ladder: None,
-                });
-            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::FreeStepJump { from: here, target, foot_left: true }));
-            continue;
-        }
         if k.stage == 0 {
             // the entry ended: one monkey-bar cycle (0xE3E320 → 0xE3DD40)
             k.stage = 1;
