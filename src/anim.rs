@@ -129,6 +129,21 @@ pub struct ItemPlay {
     pub transitions: Vec<crate::assets::ac_actions::ActTransition>,
     /// The item word (+60, RE/13 §7.6): 0x20 = locked.
     pub word: u16,
+    /// ActionItem +24: the item plays this many times in a row (0 is read as 1; RE/24 ANIM-6).
+    pub repeat: u32,
+}
+
+impl ItemPlay {
+    /// The clips' own phase at the item's phase: a repeated item runs its clips `repeat` times (`ItemEvaluator__Advance`
+    /// 0x778010 restarts them while rep + 1 < item +24, 0x7780D2).
+    pub fn clip_phase(&self, phase: f32) -> f32 {
+        let r = self.repeat.max(1) as f32;
+        if r <= 1.0 || phase >= 1.0 {
+            phase
+        } else {
+            (phase * r).fract()
+        }
+    }
 }
 
 impl AnimLibrary {
@@ -155,7 +170,7 @@ impl AnimLibrary {
                         l.1 = 1.0;
                     }
                 }
-                ItemPlay { layers, blend: it.blend, root_motion: it.displacement == DisplacementMode::FromAnim, action: id, transitions: it.transitions.clone(), word: it.flags }
+                ItemPlay { layers, blend: it.blend, root_motion: it.displacement == DisplacementMode::FromAnim, action: id, transitions: it.transitions.clone(), word: it.flags, repeat: it.repeat }
             })
             .filter(|i| !i.layers.is_empty())
             .collect();
@@ -181,11 +196,14 @@ impl AnimLibrary {
                 w += wt;
             }
         }
-        if w > 0.0 { d / w } else { 0.0 }
+        // a repeated item's runtime length (`sub_7778A0` 0x777A3D: duration × item +24; RE/24 ANIM-6)
+        if w > 0.0 { d / w * item.repeat.max(1) as f32 } else { 0.0 }
     }
 
+    /// The item's dominant clip: the first of equal maxima (`sub_777AE0` keeps it with a strict `w > max`, 0x777BF9;
+    /// RE/24 ANIM-9).
     fn dominant<'a>(&'a self, item: &ItemPlay) -> Option<&'a AnimClip> {
-        item.layers.iter().max_by(|a, b| a.1.total_cmp(&b.1)).and_then(|(n, _)| self.clips.get(n))
+        item.layers.iter().fold(None::<&(String, f32)>, |best, l| if best.is_none_or(|b| l.1 > b.1) { Some(l) } else { best }).and_then(|(n, _)| self.clips.get(n))
     }
 }
 
@@ -285,6 +303,8 @@ pub struct AnimPlayer {
     prev_contacts: ContactState,
     /// The action sequence loops back to this item (the items before it are a transition action).
     loop_from: usize,
+    /// Action +32 of the requested action: the item its loop starts again at, after `loop_from` (RE/24 ANIM-5).
+    loop_item: usize,
     /// The simulation's phase applies from this item on (the items before it are a transition action playing on its
     /// own clock).
     sim_from: usize,
@@ -339,6 +359,8 @@ pub struct Overlay {
     pub weight: f32,
     ending: bool,
     looping: bool,
+    /// Action +32: the item a looping action starts again at (RE/24 ANIM-5).
+    loop_item: usize,
     /// The channel's bones, and per joint whether the overlay animates it (resolved against the rig on first use).
     bones: std::collections::HashSet<u32>,
     mask: Vec<bool>,
@@ -376,7 +398,8 @@ impl AnimPlayer {
         let Some(items) = lib.action_items(action) else { return false };
         let bones = lib.body.bones(ch.mask);
         let weight = self.overlay.as_ref().map_or(0.0, |o| o.weight);
-        self.overlay = Some(Overlay { action, items, item: 0, phase: 0.0, weight, ending: false, looping: a.repeat == 0, bones, mask: Vec::new() });
+        let loop_item = (a.loop_item as usize).min(items.len() - 1);
+        self.overlay = Some(Overlay { action, items, item: 0, phase: 0.0, weight, ending: false, looping: a.repeat == 0, loop_item, bones, mask: Vec::new() });
         true
     }
 
@@ -414,7 +437,7 @@ fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, rig: &Rig, pose: &mut [(Qua
             o.item += 1;
             o.phase = 0.0;
         } else if o.looping {
-            o.item = 0;
+            o.item = o.loop_item;
             o.phase = o.phase.fract();
         } else {
             o.phase = 1.0;
@@ -423,7 +446,7 @@ fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, rig: &Rig, pose: &mut [(Qua
     }
     o.weight = if o.ending { (o.weight - dt / OVERLAY_FADE).max(0.0) } else { (o.weight + dt / OVERLAY_FADE).min(1.0) };
     let mut ov = Vec::new();
-    sample_layers(lib, rig, &o.items[o.item].layers, o.phase, &mut ov);
+    sample_layers(lib, rig, &o.items[o.item].layers, o.items[o.item].clip_phase(o.phase), &mut ov);
     blend_masked(pose, &ov, &o.mask, o.weight);
 }
 
@@ -472,7 +495,7 @@ pub fn uses_root_motion(name: &str) -> bool {
 }
 
 fn single(name: &str) -> Vec<ItemPlay> {
-    vec![ItemPlay { layers: vec![(name.to_string(), 1.0)], blend: named_blend(CROSSFADE), root_motion: uses_root_motion(name), action: 0, transitions: Vec::new(), word: 0 }]
+    vec![ItemPlay { layers: vec![(name.to_string(), 1.0)], blend: named_blend(CROSSFADE), root_motion: uses_root_motion(name), action: 0, transitions: Vec::new(), word: 0, repeat: 1 }]
 }
 
 fn looped(clip: &str, fade: f32) -> Request {
@@ -509,9 +532,11 @@ fn named_blend(fade: f32) -> ActBlend {
 /// 2. the playing action's out-transition (Action +20);
 /// 3. `new`'s in-transition (Action +16) (the exe first checks the body-part channel priorities; the port's actions
 ///    share one channel);
-/// 4. the default transition (ASTOPBROLL 0.2 s, `sub_46A460`), unless `new` has flag bit 2 (hypothesis: the exe's
-///    last test, two node lookups compared, is taken as true).
-/// `None` means a cut.
+/// 4. the default transition (ASTOPBROLL 0.2 s, `sub_46A460`), unless `new` has flag bit 2, and only when the playing
+///    item and `new`'s item 0 differ in the player's animation remap (0x725A3E: `AnimItem__DominantAnimEntry` 0x5BC790
+///    of each, the remap entry of its heaviest remapped clip above 0.0005, or none; RE/24 ANIM-3). Altaïr's one set
+///    remaps only the twelve `xx_turn_on_spot_*` clips, so for him the default applies only into or out of those.
+/// `None` means a cut (SetAction 0x727F70 pushes the action with a default-constructed ActionBlend: type NONE).
 pub fn game_transition(lib: &AnimLibrary, cur: Option<&ItemPlay>, new: u32) -> Option<crate::assets::ac_actions::ActTransition> {
     use crate::assets::ac_actions::ActTransition;
     let new_action = lib.graph.actions.get(&new)?;
@@ -526,7 +551,13 @@ pub fn game_transition(lib: &AnimLibrary, cur: Option<&ItemPlay>, new: u32) -> O
     if let Some(t) = new_action.in_transition {
         return Some(t);
     }
-    (new_action.flags & 4 == 0).then_some(ActTransition { blend_a: ActBlend::DEFAULT, ..Default::default() })
+    let remapped = |it: &ItemPlay| it.layers.iter().any(|(n, w)| *w > 0.0005 && lib.graph.remap.iter().any(|r| r.2 == *n));
+    // the new action's item 0 with its authored weights (`sub_507CE0`)
+    let new_remapped = new_action.items.first().is_some_and(|it| {
+        it.animations.iter().enumerate().any(|(k, a)| it.weights.get(k).copied().unwrap_or(if k == 0 { 1.0 } else { 0.0 }) > 0.0005 && lib.graph.remap.iter().any(|r| r.0 == *a))
+    });
+    (new_action.flags & 4 == 0 && cur.is_some_and(|it| remapped(it)) != new_remapped)
+        .then_some(ActTransition { blend_a: ActBlend::DEFAULT, ..Default::default() })
 }
 
 /// The blend weight at linear progress `t` (`sub_773C30`): linear, or eased in (2t² − t³), out (t + t² − t³) or
@@ -591,25 +622,7 @@ const ACT_PULLUP_WALL: u32 = 0x0106_D2C5;
 const ACT_PULLUP_FREE: u32 = 0x0127_19F2;
 /// Pull-up outcome "stand": hangknee → free-step entry (0xDE2EE0 → 0xDD2A50).
 const ACT_HANGKNEE_TO_WAIT: u32 = crate::player::ledge_moves::ACT_KNEE_TO_FREESTEP[0];
-/// [wall, free] × [left open, left close, right open, right close].
-const ACT_SHIMMY: [[u32; 4]; 2] = [[0x01B7_0B35, 0x01B7_0B36, 0x01B7_0B37, 0x01B7_0B38], [0x01A2_490A, 0x01A2_490B, 0x01A2_490C, 0x01A2_490D]];
-/// The `ACT_VSTEP` column for a vertical hand step (`PickVerticalHandAndAnim` 0xDCB3E0, tables `StaticInitTables`
-/// 0xDCC3E5..0xDCC403): up, left first → `1m_u_1lu`; down, left first → `1m_d_1ru` (the clips are named by the hand left
-/// up), and the second halves likewise (RE/24 LEDGE-6). Played the other way round, the clip's raised hand was the one
-/// the IK held low and the lowered one could not reach its hold (bug-1791714114).
-fn vstep_index(down: bool, second: bool, first_left: bool) -> usize {
-    if down {
-        4 + (second as usize) * 2 + first_left as usize
-    } else {
-        (second as usize) * 2 + (!first_left) as usize
-    }
-}
-
-/// [wall, free] × [up: 1m_u_1lu, 1m_u_1ru, 1lu_u_1m, 1ru_u_1m, down: 1m_d_1lu, 1m_d_1ru, 1lu_d_1m, 1ru_d_1m].
-const ACT_VSTEP: [[u32; 8]; 2] = [
-    [0x01B7_0FAA, 0x01B7_0FAB, 0x01B7_0FAC, 0x01B7_0FAD, 0x01B7_0FAE, 0x01B7_0FAF, 0x01B7_0FB0, 0x01B7_0FB1],
-    [0x01A2_79B9, 0x01A2_79BA, 0x01A2_79BB, 0x01A2_79BC, 0x01A2_79BD, 0x01A2_79BE, 0x01A2_79BF, 0x01A2_79C0],
-];
+use crate::player::ledge::{shimmy_index, vstep_index, ACT_SHIMMY, ACT_VSTEP};
 /// Catches (CheckAirCatch): ledge with wall below (3-way angle blend), free hang; [< 3 m, ≥ 3 m].
 const ACT_CATCH_WALL: [u32; 2] = crate::player::ledge::ACT_CATCH_WALL;
 const ACT_CATCH_FREE: [u32; 2] = crate::player::ledge::ACT_CATCH_FREE;
@@ -812,11 +825,12 @@ fn choose_clip(
                 }
                 // a jump whose actions are not loaded, or the free-step arrival's few frames: the pose carries on
                 AirMode::Jump { .. } | AirMode::Arrive { .. } => continue,
-                // Leap of Faith free-fall tail: `faith_jump_fall` (0xB1EC40 third action)
+                // Leap of Faith free-fall tail: `faith_jump_fall` (0xB1EC40 third action), played when the flight ends with
+                // a 0.5 s blend (0xE0F3D4, RE/24 AIR-22); the let-go's dive keeps its own blend
                 AirMode::Fall { .. } if data.air.flight.is_some_and(|f| f.id == crate::player::jump_blend::FLIGHT_FAITH) => {
                     let b = crate::player::jump_blend::ActionBlend::new(crate::player::jump_blend::FALL_FAITH, 0, &[1.0]);
                     p.sim_phase = Some(0.5);
-                    sim_request(&mut p, &lib, &b, 2_500_000 + data.air.seq as u64, 0.2)
+                    sim_request(&mut p, &lib, &b, 2_500_000 + data.air.seq as u64, if data.air.hollywood { 0.2 } else { 0.5 })
                 }
                 // the jump's own fall action (InAir +416, e.g. `beam_jumpstraight_clear_tr_fall`)
                 AirMode::Fall { .. } if data.air.fall_action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
@@ -836,6 +850,11 @@ fn choose_clip(
                     action(&lib, &[crate::player::air::DROP_ENTRY[ty][side], crate::player::air::DROP_LOOP[side]], false, 4_200_000 + data.air.seq as u64, Some(0.2), None)
                 }
                 _ => {
+                    // a jump set up by 0xB20200 whose flight ended without an arrival: the JumpFallAction (+432, request
+                    // 33 = `xx_h_jump_falling01` 0x00D81513) plays at once with a 0.5 s blend (0xE0F3D4–0xE0F45B, RE/24
+                    // AIR-22). PORT: the falling blend 0x1F0C22C2 stands in for it (its layer 0 is falling01; the grasp
+                    // layers carry the empty-hand grasp the game plays on the upper body)
+                    let after_flight = data.air.takeoff.is_some() && data.air.flight.is_some();
                     if p.seen_fall != Some(data.air.seq) {
                         p.seen_fall = Some(data.air.seq);
                         p.grasp_dir = Vec3::ZERO;
@@ -845,7 +864,7 @@ fn choose_clip(
                         // the locomotion and hang waits author none) and the sub-state lasts its remaining length
                         // (sub_502570); then the main fall plays the falling blend. The port lets the full-body item
                         // run to its end and hold its last frame.
-                        p.fall_entry = p.clip.is_some() && !p.items.is_empty();
+                        p.fall_entry = !after_flight && p.clip.is_some() && !p.items.is_empty();
                         if p.fall_entry {
                             p.looping = false;
                             continue;
@@ -875,7 +894,9 @@ fn choose_clip(
                         let gd = p.grasp_dir;
                         p.grasp_dir = if crate::tuning::GAME_FALLS && want == Vec3::ZERO { Vec3::ZERO } else { gd + (want - gd) * k };
                         let w = fall_grasp_weights(p.grasp_dir, facing);
-                        let r = action(&lib, &[ACT_FALL], true, 0, Some(0.15), Some("fall"));
+                        // the free-step abort's fall blends in over 0.3 s (`sub_E009F0`, RE/24 AIR-10)
+                        let fade = if data.air.free_step_abort { 0.3 } else if after_flight { 0.5 } else { 0.15 };
+                        let r = action(&lib, &[ACT_FALL], true, 0, Some(fade), Some("fall"));
                         if let Some(mut r) = r {
                             if let Some(it) = r.items.first_mut() {
                                 if it.layers.len() == 6 {
@@ -973,12 +994,7 @@ fn choose_clip(
                     }
                     a if moving && a.starts_with("shimmy ") => {
                         // alt flag set after the step = the lead hand reached out (open)
-                        let k = match (a.ends_with("left"), l.alt_flag) {
-                            (true, true) => 0,
-                            (true, false) => 1,
-                            (false, true) => 2,
-                            (false, false) => 3,
-                        };
+                        let k = shimmy_index(!a.ends_with("left"), l.alt_flag);
                         action(&lib, &[ACT_SHIMMY[wi][k]], false, token, Some(0.08), None)
                     }
                     "hand step up" | "hand step down" if moving || l.pending_vstep.is_some() => {
@@ -997,6 +1013,22 @@ fn choose_clip(
                             [Some(ACT_PULLUP_FREE), waist, Some(ACT_HANGKNEE_TO_WAIT)].into_iter().flatten().collect()
                         };
                         action(&lib, &ids, false, token, Some(0.1), None)
+                    }
+                    // the free idle after the swing back or a walling free hang (Entry end 0xDE1FE0, HangFreeReceptionType
+                    // 3), until the next move: its two clips `xx_h_hangfree_wait` / `xx_h_hangwallfree_wait` at
+                    // [1 − SwingStrength, SwingStrength] (`sub_502E30`, RE/24 LEDGE-24). PORT: the second set (0x503040 →
+                    // 0x726280, [1, 0]) goes to the running transition's blend node (hypothesis) and is not played.
+                    _ if !wall && l.swing_idle().is_some() => {
+                        let s = l.swing_idle().unwrap_or(0.0).clamp(0.0, 1.0);
+                        action(&lib, &[ACT_HANG_FREE], true, 0, Some(0.15), Some("hang_free")).map(|mut r| {
+                            if let Some(it) = r.items.first_mut().filter(|it| it.layers.len() == 2) {
+                                let mut w = [1.0 - s, s];
+                                crate::player::jump_blend::normalize_item_weights(&mut w);
+                                it.layers[0].1 = w[0];
+                                it.layers[1].1 = w[1];
+                            }
+                            r
+                        })
                     }
                     // free hang with a wall under it = LedgeHangType WallFree: `xx_h_hangwallfree_wait` (0x0106F2E9,
                     // played after the straight jump's wall-free reception, 0xE07D00 → 0xE09055; the wait update
@@ -1137,6 +1169,7 @@ fn choose_clip(
         p.items = items;
         p.item = 0;
         p.loop_from = loop_from;
+        p.loop_item = lib.graph.actions.get(&new_action).map_or(0, |a| a.loop_item as usize);
         p.sim_from = sim_from;
         p.looping = req.looping;
         p.fit = req.fit;
@@ -1177,8 +1210,11 @@ fn start_blend(p: &mut AnimPlayer, b: ActBlend, had: bool, a_state: Option<(Vec<
     let mut time = b.time;
     if let Some((items, item, phase, _)) = a_state.as_ref() {
         if b.clamp {
+            // what is left of the whole action A, its later items included (an ActionEvaluator's vfunc 14 `sub_7723D0`:
+            // the action's duration less its time, 0x774032 / 0x774054; RE/24 ANIM-9)
             if let Some(it) = items.get(*item) {
-                time = time.min((1.0 - phase) * lib.item_duration(it));
+                let rest: f32 = items.iter().skip(*item + 1).map(|it| lib.item_duration(it)).sum();
+                time = time.min((1.0 - phase) * lib.item_duration(it) + rest);
             }
         }
     }
@@ -1218,35 +1254,30 @@ pub fn root_motion_offset(clip: &AnimClip, phase: f32) -> Vec3 {
     (sample_vec(keys, phase * clip.duration) - start) - end * phase
 }
 
-/// Weighted pose of a layer set at normalised phase `phase`: per bone (rotation, translation).
+/// Weighted pose of a layer set at normalised phase `phase`: per bone (rotation, translation). The item evaluator
+/// (`sub_777AE0` 0x777DD3–0x777EF8) blends the active clips pairwise in index order, clip i in with the factor
+/// wᵢ / Σⱼ≤ᵢ wⱼ (rotations by `qinterp`); clips of weight ≤ 0.0005 are skipped (0x777B5C) (RE/24 ANIM-15 / ANIM-9).
 fn sample_layers(lib: &AnimLibrary, rig: &Rig, layers: &[(String, f32)], phase: f32, out: &mut Vec<(Quat, Vec3)>) {
     out.clear();
-    out.extend(rig.rest.iter().map(|_| (Quat::from_xyzw(0.0, 0.0, 0.0, 0.0), Vec3::ZERO)));
-    let mut total = vec![0.0f32; rig.bone_ids.len()];
-    let mut first: Vec<Option<Quat>> = vec![None; rig.bone_ids.len()];
+    out.extend(rig.rest.iter().map(|r| (r.rotation, r.translation)));
+    let mut total = 0.0f32;
     for (name, w) in layers {
-        if *w <= 0.0 {
+        if *w <= 0.0005 {
             continue;
         }
         let Some(c) = lib.clips.get(name) else { continue };
         let t = phase * c.duration;
+        total += *w;
+        let f = *w / total;
         for (i, bone) in rig.bone_ids.iter().enumerate() {
             let r = c.rotations.get(bone).map(|k| sample_rot(k, t)).unwrap_or(rig.rest[i].rotation);
             let p = c.translations.get(bone).map(|k| sample_vec(k, t)).unwrap_or(rig.rest[i].translation);
-            let r0 = *first[i].get_or_insert(r);
-            let r = if r0.dot(r) < 0.0 { -r } else { r };
             let acc = &mut out[i];
-            acc.0 = Quat::from_vec4(Vec4::from(acc.0) + Vec4::from(r) * *w);
-            acc.1 += p * *w;
-            total[i] += *w;
-        }
-    }
-    for (i, acc) in out.iter_mut().enumerate() {
-        if total[i] > 0.0 {
-            acc.0 = acc.0.normalize();
-            acc.1 /= total[i];
-        } else {
-            *acc = (rig.rest[i].rotation, rig.rest[i].translation);
+            if f >= 1.0 {
+                *acc = (r, p);
+            } else {
+                *acc = (qinterp(acc.0, r, f), acc.1.lerp(p, f));
+            }
         }
     }
 }
@@ -1290,7 +1321,9 @@ pub fn apply_clip(
             let a_state = (p.items.clone(), p.item, 1.0, false);
             let cur = p.items[p.item].clone();
             let from = p.item;
-            p.item = if p.item + 1 < p.items.len() { p.item + 1 } else { p.loop_from.min(p.items.len() - 1) };
+            // a looping action starts again at its Action +32 item (`ActionEvaluator__Advance` 0x730E50 at 0x730F3F; RE/24
+            // ANIM-5), counted from the requested action's first item
+            p.item = if p.item + 1 < p.items.len() { p.item + 1 } else { (p.loop_from + p.loop_item).min(p.items.len() - 1) };
             let nxt = &p.items[p.item];
             let nxt_switch = nxt.action != cur.action && nxt.action != 0;
             // the requested action queued behind a transition action enters with the transition's blend B, stored on
@@ -1367,7 +1400,7 @@ pub fn apply_clip(
             if let Some((items, ai, aph, _)) = p.a_roll.as_ref() {
                 if let Some(it) = items.get(*ai) {
                     let mut a_pose = Vec::new();
-                    sample_layers(&lib, rig, &it.layers, *aph, &mut a_pose);
+                    sample_layers(&lib, rig, &it.layers, it.clip_phase(*aph), &mut a_pose);
                     p.prev = Some(a_pose);
                 }
             }
@@ -1379,7 +1412,7 @@ pub fn apply_clip(
                 let mut wsum = 0.0;
                 for (n, w) in &item.layers {
                     if let Some(c) = lib.clips.get(n) {
-                        off += root_motion_offset(c, p.phase) * *w;
+                        off += root_motion_offset(c, item.clip_phase(p.phase)) * *w;
                         wsum += *w;
                     }
                 }
@@ -1397,7 +1430,7 @@ pub fn apply_clip(
             }
             p.last_root = root.translation;
         }
-        sample_layers(&lib, rig, &item.layers, p.phase, &mut cur);
+        sample_layers(&lib, rig, &item.layers, item.clip_phase(p.phase), &mut cur);
         let prev = if fading { p.prev.take() } else { None };
         let empty = Vec::new();
         let prev_pose = prev.as_ref().filter(|v| v.len() == cur.len()).unwrap_or(&empty);
@@ -1481,6 +1514,19 @@ mod tests {
     /// plays FAF / 79BE (`1m_d_1ru`), right first FAE / 79BD; the second hand after a left-first step FB1 / 79C0, after a
     /// right-first step FB0 / 79BF. Up: left first FAA, right first FAB; the second hand after a left-first step FAC
     /// (`1lu_u_1m`), after a right-first step FAD.
+    #[test]
+    fn a_repeated_item_runs_its_clips_that_many_times() {
+        // RE/24 ANIM-6: a repeated item lasts its clips' length times its repeat count and runs its clips that many times
+        let mut lib = AnimLibrary::default();
+        lib.clips.insert("c".into(), AnimClip { name: "c".into(), duration: 0.5, ..Default::default() });
+        let it = ItemPlay { layers: vec![("c".into(), 1.0)], repeat: 4, ..Default::default() };
+        assert!((lib.item_duration(&it) - 2.0).abs() < 1e-6);
+        assert!((it.clip_phase(0.3) - 0.2).abs() < 1e-5, "the second run, 0.2 in");
+        assert_eq!(it.clip_phase(1.0), 1.0);
+        let once = ItemPlay { repeat: 0, ..it.clone() };
+        assert!((lib.item_duration(&once) - 0.5).abs() < 1e-6 && once.clip_phase(0.3) == 0.3);
+    }
+
     #[test]
     fn vertical_hand_steps_pick_the_games_clips() {
         let free = |down, second, first_left| ACT_VSTEP[1][vstep_index(down, second, first_left)];
@@ -1567,7 +1613,7 @@ mod tests {
         let lib = AnimLibrary { graph, ..Default::default() };
         let item = |action: u32| {
             let it = &lib.graph.actions[&action].items[0];
-            ItemPlay { layers: Vec::new(), blend: it.blend, root_motion: false, action, transitions: it.transitions.clone(), word: it.flags }
+            ItemPlay { layers: Vec::new(), blend: it.blend, root_motion: false, action, transitions: it.transitions.clone(), word: it.flags, repeat: it.repeat }
         };
         // 1. the playing item's transition to the requested action: high wait (0x00D8258E) → fight wait (0x00FD645B)
         //    goes through `xx_h_wait_hipm_footr_tr_xx_h_light_wait_footr` (0x1D504306)
@@ -1577,12 +1623,24 @@ mod tests {
         let t = game_transition(&lib, Some(&item(0x00D8_258E)), 0x00D8_37AE).expect("in-transition");
         assert_eq!((t.action_a, t.blend_a.kind, t.blend_a.disp_src), (0, 1, 2));
         assert!((t.blend_a.time - 0.2).abs() < 1e-6);
-        // 4. nothing authored: the default transition (A frozen, B playing, 0.2 s)
-        let t = game_transition(&lib, Some(&item(0x00D8_258E)), 0x00D8_243F).expect("default");
+        // 4. nothing authored: a cut, unless one side plays a clip of Altaïr's remap set (RE/24 ANIM-3): the twelve
+        //    `xx_turn_on_spot_*` clips, swapped for his `amaa_` ones
+        assert_eq!(lib.graph.remap.len(), 12);
+        assert!(lib.graph.remap.iter().all(|r| r.2.starts_with("xx_turn_on_spot_")));
+        assert!(game_transition(&lib, Some(&item(0x00D8_258E)), 0x00D8_243F).is_none(), "a cut");
+        let turning = ItemPlay { layers: vec![(lib.graph.remap[0].2.clone(), 1.0)], action: 0x00D8_258E, ..Default::default() };
+        let t = game_transition(&lib, Some(&turning), 0x00D8_243F).expect("default");
         assert_eq!(t.blend_a, ActBlend::DEFAULT);
         // the repeat count: idles loop, the pull-up plays once
         assert_eq!(lib.graph.actions[&0x0106_F2E8].repeat, 0);
         assert_eq!(lib.graph.actions[&0x0106_D2C5].repeat, 1);
+        // Action +32 (RE/24 ANIM-5): the impulsion wait loops from its item b; ActionItem +24 (ANIM-6): the debug flight's
+        // Ghost items repeat 4 and 3 times, every other item once
+        assert_eq!((lib.graph.actions[&0x0DF0_3385].repeat, lib.graph.actions[&0x0DF0_3385].loop_item), (0, 1));
+        assert_eq!(lib.graph.actions[&0x0106_F2E8].loop_item, 0);
+        let ghost: Vec<u32> = lib.graph.actions[&0x0006_F88B].items.iter().map(|it| it.repeat).collect();
+        assert_eq!(ghost, [4, 3]);
+        assert!(lib.graph.actions.values().filter(|a| a.id != 0x0006_F88B).flat_map(|a| &a.items).all(|it| it.repeat == 1));
         // the wall hang's blocked actions (0xDD3A10, RE/24 LEDGE-20) are in the graph
         for id in ACT_LEDGE_BLOCKED {
             assert!(lib.graph.actions.contains_key(&id), "blocked action {id:#x}");

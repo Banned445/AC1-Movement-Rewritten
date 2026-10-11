@@ -27,6 +27,7 @@ use bevy::prelude::*;
 use super::jump_blend::ActionBlend;
 use super::{switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, TransitionSetup};
 use crate::collision::{Aabb3, CollisionWorld};
+use crate::guidance::GuidanceWorld;
 use crate::input::PadInput;
 
 pub const HAYSTACK_FAITH_LANDING: u32 = 0x23A9_666C;
@@ -35,6 +36,9 @@ pub const HAYSTACK_WAIT: u32 = 0x23A9_666D;
 pub const HAYSTACK_LOW_WAIT: u32 = 0x23A9_6674;
 pub const HAYSTACK_FROM_AIR: u32 = 0x7750_D212;
 pub const HAYSTACK_HOP_OUT: u32 = 0x2C4C_2431;
+/// The pass-over from the wait (event 2 → `sub_E43090` → `HumanHayStack__ToPassOverJump` 0xE42B20:
+/// `xx_l_haystack_wait_to_passover_handl`; RE/24 NARROW-19).
+pub const HAYSTACK_TO_PASSOVER: u32 = 0x23A9_6673;
 
 pub const HAYSTACK_DIVE: [u32; 2] = [0x244C_D280, 0x244C_FACB];
 
@@ -68,6 +72,10 @@ pub enum HayPhase {
     #[default]
     Entering,
     Waiting,
+    /// Event 2: `xx_l_haystack_wait_to_passover_handl` with the root moved linearly onto the pass-over candidate over
+    /// the playing item (0xE42CDA); then Ledge HandPassOver (0xE41610 → fill 0xE40EE0: SubState 12, +144 = the
+    /// candidate).
+    PassOver,
 }
 
 #[derive(Debug, Default)]
@@ -88,6 +96,8 @@ pub struct HumanHayStackData {
     rng: u32,
     /// In the low wait (+126, event 1).
     pub low: bool,
+    /// The pass-over candidate (the wall top's near edge and its outward normal).
+    pub pass: Option<(Vec3, Vec3)>,
 }
 
 impl HumanHayStackData {
@@ -107,6 +117,11 @@ impl HumanHayStackData {
                 self.action = single(if e.kind == HayEntry::Top { HAYSTACK_FAITH_LANDING } else { HAYSTACK_FROM_AIR });
                 let d = (self.to - e.from).length();
                 self.interp = if e.speed > 5e-4 { (d / e.speed).clamp(0.1, 0.4) } else { 0.1 };
+                // `EnterTop_FaithLanding` 0xE41D50: the target facing is the flat direction to the stack (RE/24 NARROW-20)
+                if e.kind == HayEntry::Top {
+                    let f = Vec3::new(self.to.x - e.from.x, 0.0, self.to.z - e.from.z).normalize_or_zero();
+                    self.face = (f != Vec3::ZERO).then_some(f);
+                }
             }
             HayEntry::Ground | HayEntry::FreeStep => {
                 let id = HAYSTACK_DIVE[dive_pick(&mut self.rng)];
@@ -242,7 +257,10 @@ fn single(id: u32) -> Option<ActionBlend> {
     super::jump_blend::action_items(id).filter(|i| !i.is_empty()).map(|_| ActionBlend::new(id, 0, &[1.0]))
 }
 
-/// `Guard_HopOut` 0xE434E0 (reduced): where a hop out along `dir` leaves the stack, if there is room.
+/// `Guard_HopOut` 0xE434E0: the ray along `dir` from the root leaves the stack's footprint; the room is
+/// `Human__BoxQueryEmpty` at the exit + 0.5·dir, 1.25 m above the root, half extents (0.35, 0.5, 0.75) across / along /
+/// up, the stack itself ignored (the port's haystacks are not solid), filter 8; no ground needed (RE/24 NARROW-20).
+/// Returns where the hop leaves (at the root's height). PORT: the footprint is the stack's box.
 pub fn hop_out_exit(stack: &Aabb3, centre: Vec3, dir: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
     let dir = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     if dir == Vec3::ZERO {
@@ -252,18 +270,16 @@ pub fn hop_out_exit(stack: &Aabb3, centre: Vec3, dir: Vec3, collision: &Collisio
     let tx = if dir.x.abs() > 1e-5 { ((if dir.x > 0.0 { stack.max.x } else { stack.min.x }) - centre.x) / dir.x } else { f32::INFINITY };
     let tz = if dir.z.abs() > 1e-5 { ((if dir.z > 0.0 { stack.max.z } else { stack.min.z }) - centre.z) / dir.z } else { f32::INFINITY };
     let edge = centre + dir * tx.min(tz);
-    let probe = edge + dir * 0.5 + Vec3::Y * 1.25;
-    if collision.point_inside(probe) || collision.point_inside(probe - Vec3::Y * 0.75) {
-        return None;
-    }
-    let h = collision.ground_height(probe, 3.0)?;
-    Some(Vec3::new(probe.x, h, probe.z))
+    let probe = Vec3::new(edge.x, centre.y, edge.z) + dir * 0.5;
+    let room = collision.obb_free(probe + Vec3::Y * 1.25, [super::right_of(dir), dir, Vec3::Y], Vec3::new(0.35, 0.5, 0.75));
+    room.then_some(probe)
 }
 
 pub fn update_hay(
     time: Res<Time>,
     pad: Res<PadInput>,
     collision: Res<CollisionWorld>,
+    guidance: Res<GuidanceWorld>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
@@ -287,7 +303,9 @@ pub fn update_hay(
                 if let Some(f) = h.face {
                     body.heading = super::heading_of(f);
                 }
-                let dur = h.action.map(|a| a.duration()).unwrap_or(0.5);
+                // the Top landing's timer runs the action + 0.2 s (0xE41D50, RE/24 NARROW-20)
+                let extra = if h.kind == HayEntry::Top { 0.2 } else { 0.0 };
+                let dur = h.action.map(|a| a.duration()).unwrap_or(0.5) + extra;
                 if h.t >= dur.max(h.interp) {
                     h.phase = HayPhase::Waiting;
                     h.action = single(HAYSTACK_WAIT);
@@ -296,11 +314,12 @@ pub fn update_hay(
                 }
             }
             HayPhase::Waiting => {
+                // PORT: `ChooseWait` 0xE416B0 faces the stack's axis (data +871) or IHumanHayStack vt144's direction; the
+                // port's haystack boxes carry no axis, so the wait keeps the entry's heading (RE/24 NARROW-20)
                 body.feet = h.to;
                 // the interpreter's haystack state (`sub_EE08E0` from 0xEEE4E0, RE/24 NARROW-19): the stick released in
                 // the high wait → event 1, the low wait (0xE44020 / 0xE44080); the stick past 0.35 → the pass-over to a
-                // kind-2 jump candidate (event 2) if there is one, else the hop out (event 3, `Guard_HopOut`). PORT:
-                // event 2's pass-over (0x23A96673 with the root interpolated onto the candidate) is not modelled; the
+                // pass-over candidate (event 2) if there is one, else the hop out (event 3, `Guard_HopOut`). PORT: the
                 // event 0 back to the high wait has no sender found
                 if pad.magnitude <= 0.35 && !h.low {
                     h.low = true;
@@ -310,6 +329,20 @@ pub fn update_hay(
                 }
                 if pad.magnitude > 0.35 {
                     let Some(stack) = h.stack else { continue };
+                    // event 2 (`sub_EDD5E0`): IHuman vt56 along the stick with request type 4 (the free run's, beams on)
+                    // and the scorer in mode 2 (the nearest ledge-like candidate in front, jumped as a pass-over, type 2)
+                    if let Some((edge, normal)) = pass_over_candidate(h.to, pad.dir, &guidance, &collision) {
+                        h.phase = HayPhase::PassOver;
+                        h.pass = Some((edge, normal));
+                        h.action = single(HAYSTACK_TO_PASSOVER);
+                        h.from = body.feet;
+                        h.interp = h.action.map(|a| a.duration()).unwrap_or(0.5).max(0.05);
+                        h.t = 0.0;
+                        h.seq = h.seq.wrapping_add(1);
+                        let f = Vec3::new(edge.x - body.feet.x, 0.0, edge.z - body.feet.z).normalize_or_zero();
+                        h.face = (f != Vec3::ZERO).then_some(f);
+                        continue;
+                    }
                     if hop_out_exit(&stack, h.to, pad.dir, &collision).is_some() {
                         body.heading = super::heading_of(pad.dir);
                         let hop = single(HAYSTACK_HOP_OUT);
@@ -320,13 +353,52 @@ pub fn update_hay(
                     }
                 }
             }
+            HayPhase::PassOver => {
+                // 0xE42CDA: the root linear onto the candidate over the playing item, facing it; done → Ledge
+                // HandPassOver (0xE41610 → 0xE40EE0) with the vault of the planted left hand
+                let Some((edge, normal)) = h.pass else { continue };
+                body.feet = h.from.lerp(edge, (h.t / h.interp).min(1.0));
+                if let Some(f) = h.face {
+                    body.heading = super::heading_of(f);
+                }
+                if h.t >= h.interp {
+                    let reception = h.action;
+                    let e = super::passover::PassOverEntry { edge, normal, from: edge, flight_foot_left: false, flight_w: [0.0; 5], reception };
+                    body.feet = edge;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToPassOver(e));
+                }
+            }
         }
     }
+}
+
+/// `sub_EDD5E0` (the haystack's event 2): IHuman vt56 `Human__FindJumpCandidates` along `dir` with request type 4 and
+/// beams (vt56 a5 → `Human__QueryJumpCandidates` a8), then `Human__SelectJumpCandidate` in mode 2 (the nearest
+/// ledge-like candidate in front, jumped as type 2). Returns the pass-over edge and its outward normal.
+pub fn pass_over_candidate(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
+    use super::jump_candidates::{query, select, Query};
+    let q = Query { kind: 4, mode: 0, long: false, beams: true, exclude: 0 };
+    let cands = query(feet, dir, &q, guidance, collision);
+    let (i, ty) = select(&cands, feet, dir, dir, 2, false)?;
+    super::targets::to_target(&cands[i], ty, feet, guidance, collision)?.pass
 }
 
 #[cfg(test)]
 mod search_tests {
     use super::*;
+
+    /// RE/24 NARROW-20: the hop out needs only the room box past the stack's side, no ground: an open drop is fine, a
+    /// wall right beside the stack is not.
+    #[test]
+    fn the_hop_out_needs_the_room_box_not_ground() {
+        let stack = Aabb3 { min: Vec3::new(-1.0, 0.0, -1.0), max: Vec3::new(1.0, 1.5, 1.0) };
+        let centre = Vec3::ZERO;
+        assert!(hop_out_exit(&stack, centre, Vec3::X, &CollisionWorld::default()).is_some(), "nothing beyond: room");
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(1.3, 0.0, -2.0), max: Vec3::new(2.0, 3.0, 2.0) });
+        assert!(hop_out_exit(&stack, centre, Vec3::X, &c).is_none(), "a wall 0.3 m past the side");
+        assert!(hop_out_exit(&stack, centre, Vec3::NEG_X, &c).is_some(), "the other side is open");
+    }
 
     /// RE/24 AIR-26 / CENSUS-1: the Leap of Faith search finds a haystack 10 m below and 6 m ahead, not one 2 m above
     /// (dz < 1.2), not one behind; a wall in the 3 m forward ray refuses everything.

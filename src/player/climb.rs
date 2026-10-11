@@ -44,6 +44,14 @@ pub struct ClimbEntry {
     pub foot_right: bool,
     /// The transition action played while the root moves into the climb (from a ledge: `LEDGE_TO_CLIMB`).
     pub action: Option<u32>,
+    /// ClimbData+40, the filler's pose flag (EntryPoseType): entry types 1 / 3 take pose 3 when set, else 0; `EnterCommon`
+    /// 0xDE97B0 clears it after reading. Only the climb catch writes it (`CheckAirCatch` 0xE0CCEF); the other fillers
+    /// (0xDD46A0, 0xDD48B0, 0xDDA3D0, 0xDCB670, the ground start 0xB26080) leave it clear: pose 0 (RE/24 CLIMB-24).
+    pub pose_2m: Option<bool>,
+    /// ClimbData+108, an EntryType 2 entry's end action: `EnterCommon` sets +2916 for type 2, so when the entry's Move ends
+    /// `PlayReachEnd` 0xDE9B50 plays it in the Wait state (the ledge jumps' fill `FillClimb_AfterLedgeJump` 0xDD8290 copies
+    /// LedgeData+312..+327 to ClimbData+96..+111: +108 = the table entry's end; RE/24 CLIMB-24).
+    pub end_action: Option<u32>,
 }
 
 /// `HumanLedge__TryTransitionToClimb` 0xDD46A0: the hang → climb transition, by direction (table 0x1A2C520 up,
@@ -220,7 +228,8 @@ pub const CLIMB_IMPULSE: u32 = 0x1E38_0CEB;
 /// `xx_h_climbing_1m_impultion_to_swingback_{min,max}_{200,300}cm` (0xDF9650), then the free hang.
 pub const CLIMB_JUMP_SWINGBACK: u32 = 0x1EB2_1811;
 
-/// A grid move's length: its action's blended duration (StartMove 0xDFA0C0 → `sub_507650`), 0.5 s with no action.
+/// A grid move's length: its action's blended duration (StartMove 0xDFA0C0 → `sub_507650`: the items' lengths and the
+/// item blends at the seams, `jump_blend::item_blend_adjust`), 0.5 s with no action.
 pub fn move_time(action: Option<u32>) -> f32 {
     action
         .and_then(|id| {
@@ -231,7 +240,8 @@ pub fn move_time(action: Option<u32>) -> f32 {
                     w[0] = 1.0;
                     super::jump_blend::ActionBlend::new(id, i, &w).duration()
                 })
-                .sum();
+                .sum::<f32>()
+                + super::jump_blend::item_blend_adjust(id);
             (d > 0.0).then_some(d)
         })
         .unwrap_or(MOVE_TIME_NO_ACTION)
@@ -288,6 +298,26 @@ pub fn quantize(stick: Vec3, facing: Vec3) -> usize {
     }
 }
 
+/// The edge behind a climb hold: its slot in `GuidanceWorld::edges` and the end points it had. Streaming parks or reuses a
+/// slot when its object unloads, so a changed slot is the port's dead object.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HoldEdge {
+    pub slot: usize,
+    pub p0: Vec3,
+    pub p1: Vec3,
+}
+
+impl HoldEdge {
+    fn of(guidance: &GuidanceWorld, slot: usize) -> Option<Self> {
+        guidance.edges.get(slot).filter(|e| e.subtype != crate::guidance::GuidanceSubType::None).map(|e| Self { slot, p0: e.p0, p1: e.p1 })
+    }
+
+    /// Does the object behind the hold still exist (`LimbIK__AllHoldsAlive` 0xE55A10)?
+    pub fn alive(&self, guidance: &GuidanceWorld) -> bool {
+        Self::of(guidance, self.slot) == Some(*self)
+    }
+}
+
 /// Runtime data of the Climb context (subset of reflected HumanClimbData, RE/03 §2.2).
 #[derive(Debug, Default)]
 pub struct HumanClimbData {
@@ -302,6 +332,9 @@ pub struct HumanClimbData {
     pub normal: Vec3,
     /// The holds' own flattened wall normals [L hand, R hand, L foot, R foot] (grid +1360 frames).
     pub hold_n: [Vec3; 4],
+    /// The guidance edge each hold was taken on and the point it was bound at (the game's hold handle: `LimbIK__AllHoldsAlive`
+    /// 0xE55A10 checks the object behind it). None: no edge found where the hold was put.
+    pub hold_edge: [Option<(HoldEdge, Vec3)>; 4],
     /// The root frame of the current (or target) pose (sub_B1CC20).
     pub frame: ClimbPose,
     /// The root's pitch at the start of the running move (it turns to `pose.tilt()` with the root interpolation).
@@ -333,6 +366,8 @@ pub struct HumanClimbData {
     pub reach: Option<ClimbReach>,
     /// The reach's end action, playing in the Wait state (`HumanClimb__PlayReachEnd` 0xDE9B50), and its time left.
     pub settle: Option<(u32, f32)>,
+    /// +2916 with ClimbData+108 from an EntryType 2 entry: the end action played when the entry's Move ends.
+    pub entry_end: Option<u32>,
 }
 
 /// A reach from the climb onto other climb holds (type 0) or a ladder (type 3): the reach table entry's start plays in
@@ -368,13 +403,28 @@ impl HumanClimbData {
             return;
         }
         self.set_entry_holds(&e);
-        // EnterCommon 0xDE97B0: pose 3 for a "2M" entry (sides one column apart), else pose 0.
-        self.pose = if (e.foot_r - e.foot_l).length() > CLIMB_COL * 0.6 { 3 } else { 0 };
+        self.pose = entry_pose(&e);
         self.last_action = "enter";
         self.look = None;
+        self.entry_end = e.end_action.filter(|_| e.entry_type == ClimbEntryType::FromLedgeParallelJump);
+        if e.entry_type == ClimbEntryType::Default {
+            // EnterCommon 0xDE97B0, EntryType 0: the Wait state with the pose-0 wait (`dword_1A2CC08`), the limb IK released
+            // (+84 = 0), no root interpolation. PORT: the root is put on the pose at once (the game's callers place it)
+            self.move_action = None;
+            self.move_seq += 1;
+            self.moving = Some(RootInterp::new(e.from_feet, self.frame.root, 1e-3));
+            return;
+        }
+        // the climb catch (`CheckAirCatch` 0xE0CC8A–0xE0CCF4, through the Ledge's SubState 13): the catch is the 1 m / 2 m
+        // pose's entry; the root reaches the pose over the catch's item 0 + 0.2 s (0xE0DB5C) while it plays on (AIR-15)
+        let catch = e.action.filter(|a| super::air_catches::CLIMB_CATCH.contains(a));
         self.move_action = e.action;
         self.move_seq += 1;
-        self.moving = Some(RootInterp::new(e.from_feet, self.frame.root, move_time(e.action)));
+        let mut m = RootInterp::new(e.from_feet, self.frame.root, move_time(e.action));
+        if let Some(id) = catch {
+            m.reach = super::ledge::catch_root_time(id).min(m.duration);
+        }
+        self.moving = Some(m);
         if e.action.is_none() && e.from_feet.distance(self.frame.root) < 1e-3 {
             // the Ledge context already brought the root onto the pose (free-hang drop, 0xDE0870 → 0xDDFBF0)
             self.moving = None;
@@ -386,10 +436,21 @@ impl HumanClimbData {
 /// 0x01BC382D, FROMAI: the root is interpolated over the clip to the climb root).
 pub const CLIMB_FROM_GROUND: [u32; 2] = [0x01BC_382C, 0x01BC_382D];
 
+/// The entry pose (`HumanClimb__EnterCommon` 0xDE97B0, RE/24 CLIMB-24): EntryType 1 / 3 → pose 3 when the filler's
+/// ClimbData+40 is set, else 0 (the flag is cleared); EntryType 0 and 2 (FromLedgeParallelJump) → pose 0.
+fn entry_pose(e: &ClimbEntry) -> usize {
+    match e.entry_type {
+        ClimbEntryType::Default | ClimbEntryType::FromLedgeParallelJump => 0,
+        ClimbEntryType::FromLedge | ClimbEntryType::FromGround => {
+            if e.pose_2m == Some(true) { 3 } else { 0 }
+        }
+    }
+}
+
 impl HumanClimbData {
     fn enter_from_ground(&mut self, e: ClimbEntry) {
         self.set_entry_holds(&e);
-        self.pose = if (e.foot_r - e.foot_l).length() > CLIMB_COL * 0.6 { 3 } else { 0 };
+        self.pose = entry_pose(&e);
         self.last_action = "enter";
         // sub_B26080 (0xB261A8): 0x01BC382C + (Human__GetLeadingFoot() != 1), i.e. footr with the right foot ahead
         let id = CLIMB_FROM_GROUND[e.foot_right as usize];
@@ -410,6 +471,8 @@ impl HumanClimbData {
         self.hand_l = e.hand_l;
         self.hand_r = e.hand_r;
         self.hold_n = [e.normal; 4];
+        self.hold_edge = [None; 4];
+        self.entry_end = None;
         self.tilt_from = Quat::IDENTITY;
         self.turn = None;
         self.ground_follow = None;
@@ -735,13 +798,13 @@ fn side_column_holds(g: &GuidanceWorld, d: &HumanClimbData, facing: Vec3, dir: u
 
 /// `HumanClimb__TrySideLedgeGrab` 0xDF22C0 (dirs 4–9, ChooseMove: near after the corner moves onto the ground, far after
 /// the outside corner; flags 4610 / 4611 + 2920): the side columns' hand row alone (record 4 up, 3 level, 2 down: the
-/// corner climb's hand row) becomes a hang on that wall. Both hands on the hold, +2940 = the dir. Two foot probes 1 m
-/// below it, 0.2 m to either side and 0.125 m into the wall (`sub_11718B0`, box 0.25 / 0.625 / 0.15, RE/24 CLIMB-25)
-/// → both found: a wall hang
+/// corner climb's hand row) becomes a hang on that wall. Both hands on the hold, +2940 = the dir. Two foot supports
+/// (`Guidance__FindWallSupport` 0x11718B0, from each hand record: 1 m below, ∓0.2 m along S, 0.125 m into the wall, box
+/// 0.25 / 0.625 / 0.15, step 0.07; 0xDF24D3 / 0xDF25E2, RE/24 CLIMB-25) → both found (0xDF265E): a wall hang
 /// (`sub_B157B0`, `Human__WallHangBodyBoxFree`, lateral path 1.8 × 1.1 m), else a free hang (`sub_B15AD0`,
 /// `Human__FreeHangBodyBoxesFree`, 1.8 × 2.4 m). The Ledge fill (`HumanClimb__FillLedge_FromClimb` 0xDEEAC0, SubState 9)
 /// plays `CLIMB_TO_HANG[wall / free][+2940]` while the root goes to the hang.
-/// PORT: the foot probes are the collision foot rays (`hang_type_at`); the lateral path is `lateral_path_free`.
+/// A wall hang whose box fails is not tried as a free hang (0xDF26E6). PORT: the lateral path is `lateral_path_free`.
 fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize, near: bool) -> Option<LedgeEntry> {
     let (side, row) = corner_side(dir)?;
     let base = feet_base(d);
@@ -752,14 +815,24 @@ fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWor
     let n = h.wall_normal;
     let hf = -Vec3::new(n.x, 0.0, n.z).normalize_or(v);
     let e = LedgeEntry::at(g.fit_hands(h.point, n), n, root, LedgeSubState::TransitionInFromClimb);
-    let hang = super::ledge::hang_type_at((e.hand_l + e.hand_r) * 0.5, n, collision);
-    let wall = hang == super::ledge::LedgeHangType::Wall;
+    let wall = side_grab_feet(h.point, n, collision);
+    let hang = if wall { super::ledge::LedgeHangType::Wall } else { super::ledge::LedgeHangType::Free };
     let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, n, hang, collision);
     if !hang_boxes_free(collision, to, hf, wall) || !lateral_path_free(collision, root, facing, to, hf) {
         return None;
     }
     let mv = super::ledge_moves::climb_to_hang_move(root, e.hand_l, e.hand_r, n, CLIMB_TO_HANG[!wall as usize][dir], hang, collision);
     Some(LedgeEntry { entry_move: Some(mv), ..e })
+}
+
+/// `TrySideLedgeGrab`'s feet (0xDF24D3 / 0xDF25E2): the wall under both foot supports, 1 m below the hold, ∓0.2 m along
+/// S and 0.125 m into the wall (RE/24 CLIMB-25).
+fn side_grab_feet(hold: Vec3, n: Vec3, collision: &crate::collision::CollisionWorld) -> bool {
+    let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let s = right_of(into);
+    let c = hold - Vec3::Y + into * 0.125;
+    let foot = |p: Vec3| super::ledge::support_ray(p, n, 0.625, 0.0, collision);
+    foot(c - s * 0.2) && foot(c + s * 0.2)
 }
 
 /// The Ledge fill's actions by +2940 (`dword_1A2CC90` wall hang / `dword_1A2CCB8` free hang, written by 0xDE4F80):
@@ -816,8 +889,10 @@ fn corner_climb(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld,
 
 /// `HumanClimb__SideReachToLadder` 0xDEF3A0 (from `HumanClimb__TrySideReach` 0xDF2EC0, dirs 4–9): a ladder edge in a box
 /// 0.35 m into the wall and 1.7 m along the move from the root (half extents 0.8 along the move, 0.5 deep, 0.5 up; any
-/// angle; mask 8), facing the way of the climb within 45°. The ladder's forward is its object Y turned along the facing;
-/// the root goes 0.5 m out from the hit, both feet on the hit, the hands 1.0 m up and 0.15 m either side. Clearance: a
+/// angle; mask 8), facing the way of the climb within 45°. The ladder's forward is its object Y turned along the facing
+/// (0xDEF68F; every Damascus ladder's wall normal is ± its object Y, so the hit's normal is it); the root goes 0.5 m out
+/// from the hit, both feet on the hit, the hands in the object frame {Y × Z, Y, Z}: 1.0 m up the ladder and 0.15 m either
+/// side (Z = the ladder's own up, the edge, which leans; RE/24 CLIMB-26). Clearance: a
 /// capsule (r 0.35, 1.8 m) from the root + 0.15 m out swept to the new root (0xB136E0). Type 3: the climb → climb reach's
 /// start and loop, then the Ladder context with the end `…_tr_ladder_wait_{r,l}`.
 fn ladder_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize) -> Option<ClimbReach> {
@@ -834,13 +909,14 @@ fn ladder_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld,
     if !collision.capsule_cast_free(root - facing * 0.15, 1.8, 0.35, to - root) {
         return None;
     }
-    let r = right_of(lf);
-    let (hl, hr) = (hit.point + Vec3::Y - r * 0.15, hit.point + Vec3::Y + r * 0.15);
+    let e = &g.edges[hit.edge];
+    let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
+    let up = (top - base).normalize_or(Vec3::Y);
+    let r = lf.cross(up).normalize_or(right_of(lf));
+    let (hl, hr) = (hit.point + up - r * 0.15, hit.point + up + r * 0.15);
     let start = feet_base(d) + v * 0.9;
     let long = (Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length() / 1.6).clamp(0.0, 1.0) >= 0.5;
     let ids = CLIMB_REACH_TABLE[3][long as usize][right as usize];
-    let e = &g.edges[hit.edge];
-    let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
     let entry = super::ladder::LadderEntry {
         base,
         top,
@@ -874,6 +950,8 @@ fn side_ladder(g: &GuidanceWorld, root: Vec3, facing: Vec3, dir: usize) -> Optio
     if hit.wall_normal.dot(facing).abs() <= std::f32::consts::FRAC_1_SQRT_2 {
         return None;
     }
+    // the ladder's forward: its object Y turned toward the character (TryLadder 0xDF12F9; the wall normal is ± the object Y
+    // on every Damascus ladder, RE/24 CLIMB-26)
     let lf = if hit.wall_normal.dot(facing) >= 0.0 { hit.wall_normal } else { -hit.wall_normal };
     let to = hit.point - lf * 0.5;
     let e = &g.edges[hit.edge];
@@ -896,10 +974,11 @@ fn side_ladder(g: &GuidanceWorld, root: Vec3, facing: Vec3, dir: usize) -> Optio
 /// 0xDE8400: from the feet midpoint at the lower foot (then once more 0.6 m further along the move), foot candidates
 /// 1.2 m up or down, then 0.4 m to the leading hand's side and to the other (box 0.2 across, 0.5 deep, 0.4 up and down —
 /// 0.3 after the first foot hit; 45°; nearest a point 0.2 m out), each with a hand hold 1.2 m above it (0.375 across,
-/// 0.5 deep, 0.3). Both feet on the foot hold, both hands on the hand hold; clearance: a capsule (r 0.35, 1.8 m) from the
-/// root + 0.15 m out swept to the new root. Long when (|dz| − 0.8) / 1.3 ≥ 0.5; the entry's dir: up 0 / 1, down 2 / 3 by
-/// the side of the foot hold (right when it is right of the grid origin).
-/// PORT: the grid origin is the feet base; the capsule's start (sub_B18140) is simplified.
+/// 0.5 deep, 0.3). Both feet on the foot hold, both hands on the hand hold; clearance: a capsule (r 0.35, 1.8 m) from
+/// `sub_B18140`(root) + 0.15 m out, swept to `sub_B18140`(new root): it ends at the target (0xDF0509; `sub_B18140` 0xB18140
+/// adds the horizontal part of the pose's 1.8 m up axis, nothing on an upright root). Long when (|dz| − 0.8) / 1.3 ≥ 0.5;
+/// the entry's dir: up 0 / 1, down 2 / 3 by the side of the foot hold, right when right of the line through the root along
+/// the facing (the inverted ChooseMove grid matrix, 0xDF05F6) (RE/24 CLIMB-13).
 fn vertical_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize) -> Option<ClimbReach> {
     let mv = if dir < 2 { Vec3::Y } else { Vec3::NEG_Y };
     let sign = if dir == 0 || dir == 2 { -1.0 } else { 1.0 };
@@ -922,11 +1001,13 @@ fn vertical_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorl
     let (f, h) = find(base).or_else(|| find(base + mv * 0.6))?;
     let (fn_, hn) = (f.wall_normal, h.wall_normal);
     let pose = climb_pose([h.point, h.point, f.point, f.point], [hn, hn, fn_, fn_], facing);
-    if !collision.capsule_cast_free(root - facing * 0.15, 1.8, 0.35, pose.root - root) {
+    let b18140 = |root: Vec3, up: Vec3| root + Vec3::new(up.x, 0.0, up.z) * 1.8;
+    let start = b18140(root, d.frame.up) - facing * 0.15;
+    if !collision.capsule_cast_free(start, 1.8, 0.35, b18140(pose.root, pose.up) - start) {
         return None;
     }
     let long = (((base.y - f.point.y).abs() - 0.8) / 1.3).clamp(0.0, 1.0) >= 0.5;
-    let on_right = (f.point - base).dot(right) >= 0.0;
+    let on_right = (f.point - root).dot(right) >= 0.0;
     let entry = if dir < 2 { on_right as usize } else { 2 + on_right as usize };
     let ids = reach_ids(CLIMB_REACH_VERTICAL[entry][long as usize]);
     Some(ClimbReach::new(ids, [h.point, h.point, f.point, f.point], [hn, hn, fn_, fn_], None))
@@ -949,15 +1030,34 @@ fn start_corner_climb(d: &mut HumanClimbData, heading: f32, feet: Vec3, (f, h, _
     d.last_action = label;
 }
 
-/// `HumanClimb__StartReachMove` 0xDF6810: the start action plays in place (state 3); the root and limbs follow with the
-/// loop (`update_climb`'s Move state).
+/// `HumanClimb__StartReachMove` 0xDF6810: the start action plays in place (state 3), the limbs take the target holds
+/// right away (`HumanClimb__SetLimbIKHoldsFromSlots` 0xDE86C0 at 0xDF68BA) and the pose is 0; the root follows with the
+/// loop (`update_climb`'s Move state) (RE/24 CLIMB-12).
 fn start_reach(d: &mut HumanClimbData, feet: Vec3, r: ClimbReach, label: &'static str) {
+    [d.hand_l, d.hand_r, d.foot_l, d.foot_r] = r.holds;
+    d.hold_n = r.normals;
+    d.pose = 0;
     d.move_action = Some(r.ids[0]);
     d.move_seq += 1;
     d.look = None;
     d.moving = Some(RootInterp::new(feet, feet, move_time(Some(r.ids[0]))));
     d.reach = Some(r);
     d.last_action = label;
+}
+
+impl HumanClimbData {
+    /// The game advances a root interpolation once in the frame it starts (`RootInterp__Advance`(…, g_FrameDt) right
+    /// after `sub_711130`: StartMove 0xDFA7A2, TryDropToLedgeBelow 0xDF2097, StartReachLoop 0xDEF087; RE/24 CLIMB-17). A
+    /// move that ends in this step finishes in the next frame's Move state.
+    fn advance_new_move(&mut self, body: &mut Body, dt: f32) {
+        let Some(m) = self.moving.as_mut() else { return };
+        let (p, s) = m.advance(dt);
+        body.feet = p;
+        body.tilt = self.tilt_from.slerp(self.frame.tilt(), s);
+        if let Some((from, to)) = self.turn {
+            body.heading = from + wrap_angle(to - from) * s;
+        }
+    }
 }
 
 fn wrap_angle(a: f32) -> f32 {
@@ -1145,17 +1245,35 @@ pub fn hang_boxes_free(collision: &crate::collision::CollisionWorld, root: Vec3,
 /// passes its side, −1 if a moving side goes left, +1 if right).
 fn try_move_clear(grid: &HoldGrid, d: &HumanClimbData, collision: &crate::collision::CollisionWorld, m: (usize, Side, i32, i32), long: bool) -> Option<(usize, [Option<(Hold, Hold)>; 2])> {
     let (next, sides) = try_move(grid, d.pose, m)?;
-    let mut holds = [d.hand_l, d.hand_r, d.foot_l, d.foot_r];
+    let side = if long { m.2.signum() } else { 0 };
+    body_boxes_free(collision, &move_pose(grid, d, m), side).then_some((next, sides))
+}
+
+/// `HumanClimb__ComputeRootFromMove` 0xDEC6E0: the target pose from the grid cells of all four limbs, the non-moving side's
+/// too (its pose cell; the moving sides' cell + the entry's offset; hands two rows up); an empty cell takes the other
+/// side's cell (0xDEC80A / 0xDEC94F / 0xDECA7A / 0xDECBA2). The limbs' IK targets are not changed by it (StartMove
+/// 0xDFA3B2..0xDFA610) (RE/24 CLIMB-15). PORT: a limb with no cell on either side keeps its current hold.
+fn move_pose(grid: &HoldGrid, d: &HumanClimbData, m: (usize, Side, i32, i32)) -> ClimbPose {
+    let (_, side, dx, dy) = m;
+    let (pl, pr) = POSES[d.pose];
+    let cell = |i: usize, (c, r): (i32, i32)| {
+        let moves = matches!((side, i), (Side::Both, _) | (Side::L, 0) | (Side::R, 1));
+        if moves { (c + dx, r + dy) } else { (c, r) }
+    };
+    let cells = [cell(0, pl), cell(1, pr)];
+    let current = [d.hand_l, d.hand_r, d.foot_l, d.foot_r];
+    let mut holds = current;
     let mut normals = d.hold_n;
-    for (i, s) in sides.iter().enumerate() {
-        if let Some((f, h)) = s {
-            (holds[i], normals[i]) = (h.pos, h.normal);
-            (holds[2 + i], normals[2 + i]) = (f.pos, f.normal);
+    for i in 0..2 {
+        for (limb, rows) in [(i, CLIMB_HAND_ROWS), (2 + i, 0)] {
+            let at = |(c, r): (i32, i32)| grid.hold(c, r + rows);
+            if let Some(h) = at(cells[i]).or_else(|| at(cells[1 - i])) {
+                (holds[limb], normals[limb]) = (h.pos, h.normal);
+            }
         }
     }
     let fallback = -Vec3::new(d.normal.x, 0.0, d.normal.z).normalize_or(Vec3::Z);
-    let side = if long { m.2.signum() } else { 0 };
-    body_boxes_free(collision, &climb_pose(holds, normals, fallback), side).then_some((next, sides))
+    climb_pose(holds, normals, fallback)
 }
 
 /// The holds of a grid move (the first half of IsGridMoveValid 0xDECD70).
@@ -1186,8 +1304,8 @@ pub fn update_climb(
     let dt = time.delta_secs().min(1.0 / 20.0);
     for (mut loco, mut body, mut data, mut limbs) in &mut q {
         if loco.current != ActorContextId::Climb {
-            // the root frame's pitch belongs to the climb
-            if body.tilt != Quat::IDENTITY {
+            // the root frame's pitch belongs to the climb (and the ladder's, which sets its own)
+            if loco.current != ActorContextId::Ladder && body.tilt != Quat::IDENTITY {
                 body.tilt = Quat::IDENTITY;
             }
             continue;
@@ -1202,11 +1320,21 @@ pub fn update_climb(
         let n = d.normal;
         // Update 0xDFE7F0, every state: `sub_E55A10(human+1328)` checks that the objects behind the four limbs' holds
         // still exist (handle flag 0x10000000 and a live pointer, or no hold). A destroyed or unloaded hold drops the
-        // character (fill HumanClimb__FillInAirData_LostGrip 0xDF3300). PORT: the hold must still lie on a grab edge (the game
-        // loses a hold only when its object dies, RE/24 CLIMB-18).
+        // character (fill HumanClimb__FillInAirData_LostGrip 0xDF3300). Only the object matters, not where on it the
+        // hold lies (RE/24 CLIMB-18): each hold binds to the grab edge it was put on, and is lost when that edge's slot
+        // is parked or reused (streaming). PORT: the binding is found geometrically when a hold moves (the game's hold
+        // records carry the object); a hold put where no grab edge is found has no object and is never lost. The game
+        // also rewrites the records from the limbs' IK contacts every Wait frame (`sub_DED5A0`), which needs the
+        // animated bones (RE/24 Step 3).
+        let holds = [d.hand_l, d.hand_r, d.foot_l, d.foot_r];
+        for i in 0..4 {
+            if d.hold_edge[i].is_none_or(|(_, at)| at != holds[i]) {
+                let bound = guidance.on_edge(holds[i], d.hold_n[i], CLIMB_HOLD_TOL).and_then(|h| HoldEdge::of(&guidance, h.edge));
+                d.hold_edge[i] = bound.map(|e| (e, holds[i]));
+            }
+        }
         // (a reach to a ladder holds rungs, not grab edges)
-        let lost = d.reach.is_none_or(|r| r.ladder.is_none())
-            && [d.hand_l, d.hand_r, d.foot_l, d.foot_r].iter().zip(d.hold_n).any(|(p, hn)| guidance.on_edge(*p, hn, CLIMB_HOLD_TOL).is_none());
+        let lost = d.reach.is_none_or(|r| r.ladder.is_none()) && d.hold_edge.iter().flatten().any(|(e, _)| !e.alive(&guidance));
         if lost {
             limbs.hands = None;
             limbs.feet = None;
@@ -1226,7 +1354,8 @@ pub fn update_climb(
         limbs.feet = Some((d.foot_l, d.foot_r));
         limbs.normal = n;
         limbs.adjust = crate::ik::ADJUST_SLOPE | crate::ik::ADJUST_HEAD;
-        // a moving limb lands on its new hold a little before the root settles
+        // the limbs travel inside the playing clip's contact-tag window (`LimbIK__SolveEffectors` 0xE57570, ik.rs
+        // `update_tagged`). PORT: a clip without contact tags travels over 0.8 of the move (no game source, RE/24 CLIMB-27)
         limbs.transit = d.moving.map(|m| m.duration).unwrap_or(CLIMB_MOVE_TIME) * 0.8;
 
         // the interpreter's climb state (`GoAssassinActionInterpreter__ClimbState` 0xEE5EB0): in Wait, and mid-move during a
@@ -1286,15 +1415,18 @@ pub fn update_climb(
                     switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry.starting_at(body.feet)));
                     continue;
                 }
+                if let Some(end) = d.entry_end.take() {
+                    // EntryType 2 (+2916): PlayReachEnd 0xDE9B50 plays ClimbData+108 in the Wait state
+                    d.move_seq += 1;
+                    d.settle = Some((end, move_time(Some(end))));
+                    continue;
+                }
                 if let Some(r) = d.reach.as_mut() {
                     if r.stage == 0 {
-                        // the start is done (State3_Update 0xDF5A70 → StartReachLoop 0xDEEE60): the loop, the limbs onto
-                        // the target holds and the root to their climb pose over the loop's blended length (sub_711130)
+                        // the start is done (State3_Update 0xDF5A70 → StartReachLoop 0xDEEE60): the loop and the root to
+                        // the target holds' climb pose over the loop's blended length (sub_711130)
                         r.stage = 1;
                         let r = *r;
-                        [d.hand_l, d.hand_r, d.foot_l, d.foot_r] = r.holds;
-                        d.hold_n = r.normals;
-                        d.pose = 0;
                         d.tilt_from = d.frame.tilt();
                         let from_heading = body.heading;
                         d.set_frame();
@@ -1302,6 +1434,7 @@ pub fn update_climb(
                         d.move_action = Some(r.ids[1]);
                         d.move_seq += 1;
                         d.moving = Some(RootInterp::new(body.feet, d.frame.root, move_time(Some(r.ids[1]))));
+                        d.advance_new_move(&mut body, dt);
                         continue;
                     }
                     let r = d.reach.take().unwrap();
@@ -1419,7 +1552,9 @@ pub fn update_climb(
                 }
             }
         }
-        if let Some(((next, sides), _, action)) = chosen {
+        if let Some(((next, sides), m, action)) = chosen {
+            // the target root from the grid cells of all four limbs (RE/24 CLIMB-15), before the moving sides' holds change
+            let target = move_pose(&grid, d, m);
             d.move_action = (action != 0 && action != u32::MAX).then_some(action);
             d.move_seq += 1;
             if let Some((f, h)) = sides[0] {
@@ -1434,8 +1569,10 @@ pub fn update_climb(
             d.look = None;
             // StartMove 0xDFA0C0: the root frame of the new holds (0xDEC6E0), interpolated over the move action's length
             d.tilt_from = d.frame.tilt();
-            d.set_frame();
+            d.frame = target;
+            d.normal = target.normal();
             d.moving = Some(RootInterp::new(body.feet, d.frame.root, move_time(d.move_action)));
+            d.advance_new_move(&mut body, dt);
             d.grid_move = true;
             d.last_action = match dir {
                 0 | 1 => "climb up",
@@ -1454,6 +1591,7 @@ pub fn update_climb(
             if from_grid.is_none() {
                 if let Some(c) = corner_climb(&guidance, &collision, d, body.feet, facing, dir, true) {
                     start_corner_climb(d, body.heading, body.feet, c, "corner climb in");
+                    d.advance_new_move(&mut body, dt);
                     continue;
                 }
             }
@@ -1489,6 +1627,7 @@ pub fn update_climb(
                 d.ground_follow = Some(CORNER_TO_GROUND_B[i][j]);
                 // the root is interpolated onto the corner hold, facing into its wall, over the action (sub_711130)
                 d.moving = Some(RootInterp::new(body.feet, h.pos, move_time(Some(id))));
+                d.advance_new_move(&mut body, dt);
                 d.to_ground = true;
                 d.last_action = "corner to ground";
                 continue;
@@ -1585,6 +1724,7 @@ pub fn update_climb(
         if dir >= 4 {
             if let Some(c) = corner_climb(&guidance, &collision, d, body.feet, facing, dir, false) {
                 start_corner_climb(d, body.heading, body.feet, c, "corner climb out");
+                d.advance_new_move(&mut body, dt);
                 continue;
             }
             // TrySideLedgeGrab 0xDF22C0 far (flag 4611): a hang round the outside corner
@@ -1633,6 +1773,7 @@ pub fn update_climb(
                 d.move_seq += 1;
                 d.moving = Some(RootInterp::new(body.feet, target, move_time(Some(id))));
                 d.turn = (face.dot(facing) < 0.999).then(|| (body.heading, heading_of(face)));
+                d.advance_new_move(&mut body, dt);
                 d.to_ground = true;
                 d.to_narrow = (ty == 2).then_some(face);
                 d.look = None;
@@ -1645,6 +1786,7 @@ pub fn update_climb(
                 d.move_action = Some(id);
                 d.move_seq += 1;
                 d.moving = Some(RootInterp::new(body.feet, Vec3::new(body.feet.x, h, body.feet.z), move_time(Some(id))));
+                d.advance_new_move(&mut body, dt);
                 d.to_ground = true;
                 d.look = None;
                 d.last_action = "climb down to the ground";
@@ -1692,6 +1834,76 @@ mod tests {
 
     fn hold(pos: Vec3) -> Hold {
         Hold { pos, normal: Vec3::NEG_Z, edge: 0, centred: true, kind: 0 }
+    }
+
+    /// RE/24 CLIMB-24: EnterCommon's entry rules: types 1 / 3 take pose 3 from the filler's flag, types 0 / 2 pose 0; the
+    /// Default entry starts no move action.
+    #[test]
+    fn the_entry_type_decides_the_pose() {
+        let e = |entry_type, pose_2m| ClimbEntry {
+            entry_type,
+            hand_l: Vec3::new(-0.4, 1.2, 0.0),
+            hand_r: Vec3::new(0.4, 1.2, 0.0),
+            foot_l: Vec3::new(-0.4, 0.0, 0.0),
+            foot_r: Vec3::new(0.4, 0.0, 0.0),
+            normal: Vec3::Z,
+            from_feet: Vec3::new(0.0, -0.1, 0.4),
+            foot_right: false,
+            action: None,
+            pose_2m,
+            end_action: None,
+        };
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromLedge, Some(true))), 3);
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromLedge, Some(false))), 0, "the flag, not the spacing");
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromGround, None)), 0, "no filler but the climb catch sets +40, whatever the feet's spacing");
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromLedgeParallelJump, Some(true))), 0);
+        assert_eq!(entry_pose(&e(ClimbEntryType::Default, Some(true))), 0);
+        let mut d = HumanClimbData::default();
+        d.enter(e(ClimbEntryType::Default, None));
+        assert!(d.move_action.is_none() && d.moving.is_some_and(|m| m.duration < 0.01), "the Default entry waits: {:?}", d.moving);
+    }
+
+    /// RE/24 CLIMB-15: a grid move's target root takes the non-moving side's holds from its grid cells, not from where
+    /// its limbs hold now; an empty cell takes the other side's.
+    #[test]
+    fn the_move_root_reads_every_limbs_grid_cell() {
+        let (cols, rows, x0) = (8, 8, -3.0);
+        let centre = |c: i32, r: i32| Vec3::new(x0 + CLIMB_COL * (c as f32 + 0.5), -1.2 + CLIMB_ROW * r as f32, 0.0);
+        let mut holds = vec![None; (cols * rows) as usize];
+        for r in 0..rows {
+            for c in 0..cols {
+                holds[(r * cols + c) as usize] = Some(Hold { pos: centre(c, r), normal: Vec3::Z, edge: 0, centred: true, kind: 0 });
+            }
+        }
+        let grid = HoldGrid { origin: Vec3::ZERO, right: Vec3::X, forward: Vec3::NEG_Z, x0, cols, rows, holds };
+        // pose 3: left in column 3, right in column 4, feet on row 2; the right limbs hold 0.2 m off their cells' holds
+        let mut d = HumanClimbData { pose: 3, normal: Vec3::Z, hold_n: [Vec3::Z; 4], ..Default::default() };
+        (d.hand_l, d.foot_l) = (centre(3, 4), centre(3, 2));
+        (d.hand_r, d.foot_r) = (centre(4, 4) + Vec3::X * 0.2, centre(4, 2) + Vec3::X * 0.2);
+        let m = (4, Side::L, 0, 1); // the left side one row up
+        let cells = climb_pose([centre(3, 5), centre(4, 4), centre(3, 3), centre(4, 2)], [Vec3::Z; 4], Vec3::NEG_Z);
+        assert!((move_pose(&grid, &d, m).root - cells.root).length() < 1e-5, "the non-moving side from its cells");
+        // the right side's cells empty: they take the left side's
+        let mut sparse = grid;
+        for r in [2, 4] {
+            sparse.holds[(r * cols + 4) as usize] = None;
+        }
+        let fallback = climb_pose([centre(3, 5), centre(3, 5), centre(3, 3), centre(3, 3)], [Vec3::Z; 4], Vec3::NEG_Z);
+        assert!((move_pose(&sparse, &d, m).root - fallback.root).length() < 1e-5, "an empty cell takes the other side's");
+    }
+
+    /// RE/24 CLIMB-25: the side ledge grab is a wall hang only with the wall under both foot supports (±0.2 m).
+    #[test]
+    fn the_side_ledge_grab_needs_both_feet_on_the_wall() {
+        use crate::collision::{Aabb3, CollisionWorld};
+        let feet = |min: Vec3, max: Vec3| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min, max });
+            side_grab_feet(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c)
+        };
+        assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 3.0, 0.0)), "a wall under the hold");
+        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.1, 3.0, 0.0)), "the wall under one foot only");
+        assert!(!feet(Vec3::new(-2.0, 2.5, -2.0), Vec3::new(2.0, 3.0, 0.0)), "an overhang");
     }
 
     /// RE/24 CLIMB-4: `sub_DECEA0` finds a landing beside the wall from edges running out from it. Facing the wall (+Z),

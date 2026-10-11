@@ -160,17 +160,21 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
 ];
 
 /// Ladders (bottom, top on the wall face; outward normal): guidance edges of sub-type Ladder.
+/// Like the native ladders, each one against a roof stands 0.5 m above it: Damascus's ladder tops are 0.37–0.73 m above
+/// their roofs, their lengths whole LadderHeights (4.5, 5, 8.5 m), so the top exit's clip (1 m up, the low profile's
+/// ReachedTop at H − 1.63 m) lands on the roof (RE/24 LADDER-10).
 pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
-    (Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.0, 63.5), Vec3::NEG_Z),
-    (Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.0, -10.5), Vec3::NEG_Z),
-    (Vec3::new(-129.4, 0.0, -10.5), Vec3::new(-129.4, 7.0, -10.5), Vec3::NEG_Z),
-    (Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.0, 9.7), Vec3::NEG_Z),
+    (Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.5, 63.5), Vec3::NEG_Z),
+    (Vec3::new(-100.0, 0.0, -10.5), Vec3::new(-100.0, 7.5, -10.5), Vec3::NEG_Z),
+    (Vec3::new(-129.4, 0.0, -10.5), Vec3::new(-129.4, 7.5, -10.5), Vec3::NEG_Z),
+    (Vec3::new(144.4, 0.0, 9.7), Vec3::new(144.4, 6.5, 9.7), Vec3::NEG_Z),
     // A2 yard: beside the 3 m wall (the side move onto a ledge)
-    (Vec3::new(-131.2, 0.0, -116.6), Vec3::new(-131.2, 6.0, -116.6), Vec3::NEG_Z),
+    (Vec3::new(-131.2, 0.0, -116.6), Vec3::new(-131.2, 6.5, -116.6), Vec3::NEG_Z),
     // A2 yard: a free-standing ladder (nothing behind it: the revolve, event 5)
     (Vec3::new(-125.0, 0.0, -121.0), Vec3::new(-125.0, 5.0, -121.0), Vec3::NEG_Z),
-    // A2 yard: a ladder leaning 18° on the block's +Z face, its front underneath (`HumanLadder__TryTurn` 0xE26440)
-    (Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 4.5, -122.5), Vec3::NEG_Z),
+    // A2 yard: a ladder leaning 18° on the block's +Z face, its front underneath (`HumanLadder__TryTurn` 0xE26440), its
+    // top 0.5 m above the block's
+    (Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 5.0, -122.6), Vec3::NEG_Z),
 ];
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
@@ -516,7 +520,7 @@ pub(crate) fn build_level(
 }
 
 /// Four LedgeGrab edges around a roof: n0 = up (roof), n1 = outward wall normal.
-fn add_roof_edges(g: &mut GuidanceWorld, min: Vec3, max: Vec3) {
+pub(crate) fn add_roof_edges(g: &mut GuidanceWorld, min: Vec3, max: Vec3) {
     let y = max.y;
     let c = [
         Vec3::new(min.x, y, min.z),

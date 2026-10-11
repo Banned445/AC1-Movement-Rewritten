@@ -1104,6 +1104,10 @@ pub fn update_ground(
             if let Some((base, top, mut n, from_top)) = super::ladder::find_ladder(body.feet, pad.dir, body.forward(), &guidance) {
                 // the approach side's attach box blocked → the back-approach turn onto the far side (RE/24 LADDER-4)
                 let mut back_turn = None;
+                if from_top {
+                    // the far side's box blocked → the near side (RE/24 LADDER-23)
+                    n = super::ladder::top_entry_side(base, top, n, &collision);
+                }
                 if !from_top && super::ladder::attach_blocked(base + n * super::ladder::ATTACH_OUT, -n, &collision) {
                     let to_char = Vec3::new(body.feet.x - base.x, 0.0, body.feet.z - base.z);
                     back_turn = Some(to_char.dot(super::right_of(-n)) > 0.0);
@@ -1301,7 +1305,10 @@ pub fn update_ground(
                 // the step off the edge. PORT: HG+609 bit 0 (set by some state enters) is taken to be clear outside
                 // one-shot actions.
                 if r.drop >= 0.53 && r.dist < -0.01 && super::jump_candidates::room_past_edge(&r, &collision) {
-                    if let Some(entry) = step_off_entry(body.feet, flat_fwd, &r, g.high_profile, g.speed_param, g.blend.foot == 0) {
+                    // the takeoff foot is the one opposite the leading foot: `sub_B27180`(…, 2 − (GetLeadingFoot() != 1))
+                    // 0xD9D4B9, so a left foot ahead takes off on `footr` (RE/24 AIR-28). PORT: the leading foot is the
+                    // locomotion's (MoveBlend foot 0 = left ahead), not the bone test of 0xB18850
+                    if let Some(entry) = step_off_entry(body.feet, flat_fwd, &r, g.high_profile, g.speed_param, g.blend.foot != 0) {
                         jump_log("step off (event 68)", body.feet, None);
                         switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
@@ -1316,7 +1323,9 @@ pub fn update_ground(
         // degrees into it) → vt1596 → HumanHayStack, entry Ground (0xD84F80).
         // `HumanNarrowObject__CheckSupportAndFall` 0xE51190's haystack branch: the free-step arrival (a NarrowObject
         // Movement stay in the game; PORT: its reception plays in Ground) past 0.6 of its action with a haystack found
-        // by the support search → HumanHayStack, entry FreeStep (0xE5146A). Live: the way into a rimmed haystack.
+        // by the support search → HumanHayStack, entry FreeStep (0xE5146A). Live: the way into a rimmed haystack. The
+        // search runs along −the support normal (0xE51308; PORT: the arrival's forward) and only here, not in the beam /
+        // pilotis catch receptions (RE/24 NARROW-21).
         if let Some(os) = g.oneshot.filter(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id)) {
             if os.t / os.duration.max(1e-4) > 0.6 {
                 if let Some(stack) = super::hay::find_support(body.feet, body.forward(), body.forward(), &guidance.haystacks, &collision) {
@@ -1608,6 +1617,7 @@ fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &Gui
             let Some(hand) = report.probe_facing(foot.point + Vec3::Y * 1.2, facing, Vec3::new(0.25, 0.3, 0.3), 0.2, 0.785_398_2, mask) else { continue };
             return Some(ClimbEntry {
                 entry_type: ClimbEntryType::FromGround,
+                pose_2m: None, end_action: None,
                 hand_l: hand.point,
                 hand_r: hand.point,
                 foot_l: foot.point,
@@ -1646,7 +1656,7 @@ pub fn beam_obstacle_target(stand: Vec3, dir: Vec3, guidance: &GuidanceWorld, co
         }
         let d = e.p1 - e.p0;
         let len = d.length();
-        if len < 1e-6 || (d / len).y.abs() > 0.643 {
+        if crate::guidance::steep(d) {
             continue;
         }
         let u = d / len;
@@ -1692,7 +1702,7 @@ pub fn static_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, c
     let keep: Vec<usize> = (0..report.world.edges.len())
         .filter(|&i| {
             let e = &report.world.edges[i];
-            (1u32 << e.subtype as u32) & MASK_CATCH != 0 && (e.p1 - e.p0).normalize_or_zero().y.abs() <= 0.643
+            (1u32 << e.subtype as u32) & MASK_CATCH != 0 && !crate::guidance::steep(e.p1 - e.p0)
         })
         .collect();
     let world = GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() };

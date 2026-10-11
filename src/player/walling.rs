@@ -198,6 +198,8 @@ impl HumanWallingData {
 
 /// The walling probes' collision layer (14, `Human__RayClear` / `Human__RayDistance` in 0xE149E0 / 0xE14590).
 const WALL_RAY_LAYER: u8 = crate::layers::RAYCAST_NO_CHARACTERS;
+/// The fuzzy-zone layers a wall hit must not be on (`sub_E1C1F0`).
+const FUZZY_LAYERS: [u8; 5] = [crate::layers::FUZZY_ZONE, crate::layers::FUZZY_ZONE_ALL_CHARACTER, crate::layers::FUZZY_ZONE_NO_CAMERA, crate::layers::FUZZY_ZONE_ALL_CHARACTER_NO_CAMERA, crate::layers::FUZZY_ZONE_NO_CAMERA_ALLOW_ASSASSINATION];
 
 /// `Human__WallingWidthCheck` 0xE149E0 (RE/24 WALL-1): from the hit + 0.001·n, a ray 0.5 m along n turned −45° and then
 /// +45° about up. Both clear → accept the hit. A ray that hits found something jutting out beside the contact (an inner
@@ -252,7 +254,14 @@ fn slope_normal(hit: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> 
 pub fn wall_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
     let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let o = feet + Vec3::Y * (1.3 * H);
-    let (d, normal) = collision.ray_hit(o, f, 1.5 * H, WALL_RAY_LAYER)?;
+    // the wall ray: filter 47 (`sub_4FB6E0`(47) 0xE18404, RaycastFuzzyZone); a hit on a fuzzy zone (layers 24 / 26 / 25 /
+    // 33 / 41, `sub_E1C1F0`) is no wall (`sub_E14410`). PORT: the owner (CharacterComponent) and material rejections
+    // (type 2, class 3 / 8–9: the haystacks) have no counterpart: no characters, the haystacks are not solid (RE/24
+    // WALL-18)
+    let (d, normal, hit_layer) = collision.ray_hit_layer(o, f, 1.5 * H, crate::layers::RAYCAST_FUZZY_ZONE)?;
+    if FUZZY_LAYERS.contains(&hit_layer) {
+        return None;
+    }
     let n = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
     if n == Vec3::ZERO || n.dot(-f) < 45f32.to_radians().cos() {
         return None;
@@ -290,7 +299,7 @@ fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: 
     let keep: Vec<usize> = (0..report.world.edges.len())
         .filter(|&i| {
             let e = &report.world.edges[i];
-            (1u32 << e.subtype as u32) & 0x182 != 0 && (e.p1 - e.p0).normalize_or_zero().y.abs() <= 0.642_787_6
+            (1u32 << e.subtype as u32) & 0x182 != 0 && !crate::guidance::steep(e.p1 - e.p0)
         })
         .collect();
     let world = GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() };
@@ -407,14 +416,34 @@ fn exit(seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, c: &LedgeCandidate,
     e
 }
 
-/// Pull-up from the wall run: `…_tr_hangknee_{low,high}` blended by `b`, then hangknee → free-step entry (the
-/// Ledge pull-up state's stand-up, 0xDE2EE0 lists both walling → hangknee actions), ending on top. The entry ends
-/// on footl, step1 on footr.
+/// Pull-up from the wall run (A 0xE37B25 / D 0xE38EC8): `…_tr_hangknee_{low,high}` blended by `b` while the root follows
+/// the clip, corrected onto the edge + 0.1 m into the wall at the edge's height, over that clip only (`sub_711130` in anim
+/// mode, 0xE37BBD / 0xE38DD6, RE/24 WALL-22); the Ledge then enters Pullup (LedgeData +76 = 4, WALL-21) and stands up:
+/// hangknee → free-step entry (0xDE2EE0) onto the top. The entry ends on footl, step1 on footr.
 fn pullup_exit(id: u32, b: f32, root: Vec3, c: &LedgeCandidate) -> LedgeEntry {
-    let top = c.point - c.normal * PULLUP_IN;
-    let stand = ledge_moves::ACT_KNEE_TO_FREESTEP[(id == STEP1_TO_KNEE) as usize];
-    let seq = [blended(id, 0, &[1.0 - b, b]), single(stand, 0), None, None];
-    exit(seq, root, Vec3::new(top.x, c.point.y, top.z), c, (false, false, true))
+    let into = -Vec3::new(c.normal.x, 0.0, c.normal.z).normalize_or_zero();
+    let knee = c.point + into * 0.1;
+    let mut e = exit([blended(id, 0, &[1.0 - b, b]), None, None, None], root, knee, c, (false, false, false));
+    e.sub_state = LedgeSubState::Pullup;
+    if let Some(mv) = e.entry_move {
+        let stand_id = ledge_moves::ACT_KNEE_TO_FREESTEP[(id == STEP1_TO_KNEE) as usize];
+        let seq = [single(stand_id, 0), None, None, None];
+        let d = seq.map(|a| a.map(|a| a.duration()).unwrap_or(0.0));
+        let top = c.point + into * PULLUP_IN;
+        let stand = LedgeMove {
+            kind: MoveKind::Pullup,
+            seq,
+            durations: if d[0] > 0.0 { d } else { [0.4, 0.0, 0.0, 0.0] },
+            t: 0.0,
+            from: knee,
+            to: Vec3::new(top.x, c.point.y, top.z),
+            follow_disp: false,
+            end_stand: true,
+            ..mv
+        };
+        e.entry_rest = [Some(stand), None];
+    }
+    e
 }
 
 /// Probes after EntryB (UpdateWallingSubState 0xE37590, command 0): A = pull-up, B = free hang.
@@ -437,7 +466,9 @@ fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Collisio
         // clips: 250 min, 350 min, 250 max, 350 max (swing back)
         let w = [(1.0 - hb) * (1.0 - near), hb * (1.0 - near), (1.0 - hb) * near, hb * near];
         let (hl, hr) = hands(&c);
-        // the root goes straight under the edge, 2.4 m down (0xE37F70); hang type Free (0xE3807F)
+        // the root goes straight under the edge, 2.4 m down (0xE37F70); hang type Free (0xE3807F). LedgeData +76 = 0, +108 = 3
+        // (HangFreeReceptionType), +112 = w₂ + w₃ (0xE3807F–0xE380D7): the free idle after it blends by them
+        // (`HumanLedgeData::swing_strength`, RE/24 WALL-21 / LEDGE-24)
         let to = hang_root(hl, hr, c.normal, LedgeHangType::Free);
         return Some(exit([blended(ENTRY_TO_HANGFREE, 0, &w), None, None, None], root, to, &c, (true, false, false)));
     }
@@ -643,6 +674,52 @@ mod wall_entry_tests {
         for t in [[a, b, cc], [a, cc, d]] {
             c.triangles.push(Triangle::new(t, crate::layers::STATIC).unwrap());
         }
+    }
+
+    /// RE/24 WALL-22 / WALL-21: the wall run's pull-up warps over the walling clip only, onto the edge 0.1 m in at the
+    /// edge's height, as Ledge Pullup; the stand-up follows as its own move onto the top.
+    #[test]
+    fn the_wall_run_pull_up_ends_its_clip_at_the_edge() {
+        let c = LedgeCandidate { point: Vec3::new(0.0, 2.0, 0.0), normal: Vec3::Z, edge_dir: Vec3::X, height: 2.0, dist: 0.3 };
+        let e = pullup_exit(ENTRY_TO_KNEE, 0.5, Vec3::new(0.0, 0.0, 0.6), &c);
+        assert_eq!(e.sub_state, LedgeSubState::Pullup);
+        let mv = e.entry_move.expect("the walling clip");
+        assert!((mv.to - Vec3::new(0.0, 2.0, -0.1)).length() < 1e-5, "0.1 m in at the edge: {}", mv.to);
+        assert!(mv.seq[1].is_none() && !mv.end_stand, "the walling clip alone");
+        let stand = e.entry_rest[0].expect("the stand-up");
+        assert!(stand.end_stand && stand.from == mv.to);
+    }
+
+    /// RE/24 WALL-21 / LEDGE-24: walling's free hang B stores +112 = w₂ + w₃ of its 4-way blend; the free idle after it
+    /// blends by it until the next move.
+    #[test]
+    fn a_walling_free_hang_hands_its_swing_strength_to_the_idle() {
+        let c = LedgeCandidate { point: Vec3::new(0.0, 3.0, 0.0), normal: Vec3::Z, edge_dir: Vec3::X, height: 3.0, dist: 0.3 };
+        let w = [0.1, 0.2, 0.3, 0.4];
+        let e = exit([blended(ENTRY_TO_HANGFREE, 0, &w), None, None, None], Vec3::new(0.0, 0.0, 0.6), Vec3::new(0.0, 0.6, 0.3), &c, (true, false, false));
+        let a = e.entry_move.and_then(|m| m.seq[0]).expect("the 4-way blend");
+        let mut l = crate::player::ledge::HumanLedgeData::default();
+        l.enter(e);
+        assert_eq!(l.swing_idle(), Some(a.w[2] + a.w[3]));
+        l.step_seq += 1;
+        assert_eq!(l.swing_idle(), None, "a new move ends it");
+    }
+
+    /// RE/24 WALL-18: the wall ray (filter 47) sees fuzzy zones, and a fuzzy zone in front of a wall is no wall
+    /// (`sub_E14410`); a static body there is.
+    #[test]
+    fn a_fuzzy_zone_is_no_wall_to_run_up() {
+        let feet = Vec3::new(0.0, 0.0, 1.0);
+        let wall = |front: u8| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -0.3), max: Vec3::new(2.0, 4.0, 0.3) });
+            c.layers.push(front);
+            c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -2.0), max: Vec3::new(2.0, 4.0, -0.6) });
+            c.layers.push(crate::layers::STATIC);
+            wall_ahead(feet, Vec3::NEG_Z, &c).is_some()
+        };
+        assert!(wall(crate::layers::STATIC));
+        assert!(!wall(crate::layers::FUZZY_ZONE), "the fuzzy zone in front hides the wall behind it");
     }
 
     /// RE/24 WALL-1: the width check never needs the wall to reach 0.5 m to both sides: a 0.3 m post and the last 0.2 m

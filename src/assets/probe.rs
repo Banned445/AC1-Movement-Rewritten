@@ -331,6 +331,19 @@ fn probe_dump_jump_clips() {
     for (src, i, ta, ua, tb, ub) in &transitions {
         out += &format!("    ({src:#010x}, {i}, {ta:#010x}, {ua}, {tb:#010x}, {ub}),\n");
     }
+    // every item's own ActionBlend (item +36): `AnimItem__GetBlendedDuration` 0x507650 takes it off the action's length
+    // between items (RE/24 CLIMB-16)
+    out += "];\n\n/// Per action, per item: its ActionBlend (item +36) as (ACTBlendType, flag 8 clamp, time +0, overlap +4).\npub const ITEM_BLENDS: &[(u32, &[(u8, bool, f32, f32)])] = &[\n";
+    for id in ids.iter() {
+        let a = &graph.actions[id];
+        let bs: Vec<String> = a.items.iter().map(|it| format!("({}, {}, {:?}, {:?})", it.blend.kind, it.blend.clamp, it.blend.time, it.blend.overlap)).collect();
+        out += &format!("    ({id:#010x}, &[{}]),\n", bs.join(", "));
+    }
+    // Action +32, the item a looping action starts again at (`ActionEvaluator__Advance` 0x730E50; RE/24 ANIM-5)
+    out += "];\n\n/// Actions whose loop starts again at a later item: (action, Action +32).\npub const LOOP_ITEMS: &[(u32, u32)] = &[\n";
+    for id in ids.iter().filter(|id| graph.actions[*id].loop_item != 0) {
+        out += &format!("    ({id:#010x}, {}),\n", graph.actions[id].loop_item);
+    }
     out += "];\n\npub const CLIPS: &[ClipRoot] = &[\n";
     clips.sort();
     clips.dedup();

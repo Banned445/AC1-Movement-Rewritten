@@ -37,6 +37,9 @@ pub struct PassOverEntry {
     pub from: Vec3,
     pub flight_foot_left: bool,
     pub flight_w: [f32; 5],
+    /// The reception already played by the caller (the haystack's `xx_l_haystack_wait_to_passover_handl`, whose root
+    /// ends on the edge, 0xE42B20): the Ledge goes straight on to the vault. None: InAir's arrival reception.
+    pub reception: Option<ActionBlend>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +75,9 @@ pub struct HandPassOver {
 /// root goes to the target + 0.5·forward = the edge (the target sits 0.5 m before it, 0xB1EC40) over 0.067 s.
 pub fn enter(e: PassOverEntry, seq: u32) -> Option<HandPassOver> {
     let fwd = -Vec3::new(e.normal.x, 0.0, e.normal.z).normalize_or_zero();
+    if let Some(action) = e.reception {
+        return Some(HandPassOver { edge: e.edge, fwd, phase: PassOverPhase::Reception, action, t: 0.0, from: e.from, to: e.from, warp: 1e-3, w: 0.0, hand: e.flight_foot_left as usize, flight_foot_left: e.flight_foot_left, seq: seq.wrapping_add(1), far: None });
+    }
     let id = RECEPTION_PASSOVER[(!e.flight_foot_left) as usize];
     jump_blend::action_items(id)?;
     let action = ActionBlend::new(id, 0, &e.flight_w);

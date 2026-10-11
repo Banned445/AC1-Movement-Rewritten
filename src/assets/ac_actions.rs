@@ -98,6 +98,9 @@ pub struct ActItem {
     pub flags: u16,
     /// +20, a float (meaning not decoded).
     pub f20: f32,
+    /// +24: how many times the item plays in a row; its runtime length and displacement scale by it
+    /// (`ItemEvaluator__Advance` 0x778010 at 0x7780D2, `sub_7778A0` 0x777A3D, `sub_5BC660` 0x5BC6A7; RE/24 ANIM-6).
+    pub repeat: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,6 +117,9 @@ pub struct Action {
     pub flags: u8,
     /// +28: how many times the action plays; 0 = it loops (0x72FC30).
     pub repeat: u32,
+    /// +32: the item a repeating action starts again at after its last item (`ActionEvaluator__Advance` 0x730E50,
+    /// 0x730F3F; RE/24 ANIM-5).
+    pub loop_item: u32,
     /// +12: the `BodyPartChannel` (object id in `BodyPartTemplate_Human`; `crate::assets::body_parts`).
     pub channel: u32,
 }
@@ -122,6 +128,37 @@ pub struct Action {
 #[derive(Default, Debug)]
 pub struct ActionGraph {
     pub actions: HashMap<u32, Action>,
+    /// The player's animation remap (the ActionComponent's AnimSet list, +24, of the `UCMA_Altair_Rank_*` entities: the
+    /// one set `uni_altair_anim_set`): (generic clip id, Altaïr's clip id, the generic clip's resource name).
+    /// `AnimItem__DominantAnimEntry` 0x5BC790 / `sub_530B80` look clips up in it (RE/24 ANIM-3).
+    pub remap: Vec<(u32, u32, String)>,
+}
+
+/// The resource id of `uni_altair_anim_set`, the one AnimSet on Altaïr's ActionComponent (+24).
+pub const ALTAIR_ANIM_SET: u32 = 0xC9B5_13C1;
+
+/// `AnimSet` (class 0x31984F55): u32 id, u32 class, typed reference BodyPartTemplate (+8), u32 n, n × inline AnimPair
+/// {u32 id, u32 class 0x9DE9A987, Animation from, Animation to}. Returns the (from, to) animation ids.
+pub fn parse_anim_set(payload: &[u8]) -> Result<Vec<(u32, u32)>, String> {
+    let mut r = R { b: payload, o: 0 };
+    let (_, cls) = (r.u32()?, r.u32()?);
+    if cls != 0x3198_4F55 {
+        return Err(format!("not an AnimSet (class {cls:#x})"));
+    }
+    r.u32()?;
+    let n = r.u32()?;
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let (_, pc) = (r.u32()?, r.u32()?);
+        if pc != 0x9DE9_A987 {
+            return Err(format!("not an AnimPair (class {pc:#x})"));
+        }
+        out.push((r.u32()?, r.u32()?));
+    }
+    if r.o != payload.len() {
+        return Err(format!("AnimSet: {} trailing bytes", payload.len() - r.o));
+    }
+    Ok(out)
 }
 
 struct R<'a> {
@@ -216,7 +253,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
             }
             r.u32()?; // ACTTorsoConstraintMode
             let repeat = r.u32()?;
-            r.u32()?;
+            let loop_item = r.u32()?;
             read_obj(r, c, false)?; // AssociatedActionGroup
             let n = r.u32()?;
             let mut items = Vec::new();
@@ -231,7 +268,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                     _ => {}
                 }
             }
-            let a = Action { id, request_id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, channel };
+            let a = Action { id, request_id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, loop_item, channel };
             c.actions.push(a.clone());
             Ok(Obj::Action(a))
         }
@@ -256,7 +293,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                 flags |= ((r.u8()? & 1) as u16) << (4 + b);
             }
             let f20 = r.f32()?;
-            r.u32()?;
+            let repeat = r.u32()?;
             r.u8()?;
             let n = r.u32()?;
             let weights = (0..n).map(|_| r.f32()).collect::<Result<Vec<_>, _>>()?;
@@ -273,6 +310,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                 transitions,
                 flags,
                 f20,
+                repeat,
             };
             c.items.insert(id, it.clone());
             Ok(Obj::Item(it))

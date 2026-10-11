@@ -70,6 +70,19 @@ pub fn find_jump_target(
     find_target(feet, want_dir, want_dir, &Query::TAP, false, guidance, collision).or_else(|| haystack_target(feet, want_dir, want_dir, guidance, collision))
 }
 
+/// The swing jump's target (the interpreter's ledge state, event 7, 0xEECEC6–0xEED063): the candidate query along the
+/// facing and the scorer; the Leap of Faith search (vt76) only when the query found no candidates at all (with
+/// candidates but none chosen the interpreter goes straight to the free jump). PORT: the query is the tap jump's (the
+/// game picks types 128, then 1), and the Leap of Faith looks along the facing (the game: the camera-relative stick).
+pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+    let cands = jump_candidates::query(feet, fwd, &Query::TAP, guidance, collision);
+    if cands.is_empty() {
+        return haystack_target(feet, fwd, fwd, guidance, collision);
+    }
+    let (i, ty) = jump_candidates::select(&cands, feet, fwd, fwd, 1, false)?;
+    to_target(&cands[i], ty, feet, guidance, collision)
+}
+
 /// Query + scorer + the port's target for the chosen candidate. `facing` = the actor's forward (the scorer's frame),
 /// `want` = the wanted direction.
 pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
@@ -103,6 +116,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
                     // roof; which of the two the game jumps at there is not established (LIVE, RE/20 #7 / #8; RE/18 §9 item 2)
                     // PORT (live 2026-10-09, RE/18 §9): a haystack cart's rim is landed on, not vaulted, so no pass-over
                     // when a haystack lies just beyond the edge
+                    // (0.8 m beyond the edge, the stack's box widened 0.3 m: no game source, RE/24 AIR-36)
                     let hay_beyond = guidance.haystacks.iter().any(|s| {
                         let p = c.pos - c.wall * 0.8;
                         p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3

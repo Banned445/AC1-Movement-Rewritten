@@ -150,11 +150,27 @@ mod completion_tests {
         }
     }
 
+    /// RE/24 NARROW-25: the pull-down guard's position cone: an edge facing along the search but lying behind the feet
+    /// is not taken; the same edge ahead is.
+    #[test]
+    fn the_pull_down_edge_lies_within_45_degrees_of_the_search() {
+        use crate::guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld};
+        let found = |z: f32| {
+            let mut g = GuidanceWorld::default();
+            g.edges.push(GuidanceEdge { p0: Vec3::new(-1.0, 0.0, z), p1: Vec3::new(1.0, 0.0, z), n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::LedgeGrab });
+            pull_down_edge(Vec3::ZERO, Vec3::Z, &g, &CollisionWorld::default()).is_some_and(|(_, _, side)| side == 0)
+        };
+        assert!(found(0.3), "ahead");
+        assert!(!found(-0.3), "behind the feet");
+    }
+
     #[test]
     fn lateral_root_motion_cannot_increase_error_and_correction_is_bounded() {
         let old = Vec3::Z * 0.2;
         assert_eq!(constrain_lateral(old, Vec3::Z * 0.3, false, 0.1), old);
         assert_eq!(constrain_lateral(old, Vec3::Z * 0.1, false, 0.1), Vec3::Z * 0.1);
+        // RE/24 NARROW-14: from the line the proposed sway is kept
+        assert_eq!(constrain_lateral(Vec3::ZERO, Vec3::Z * 0.05, false, 0.1), Vec3::Z * 0.05);
         assert!((constrain_lateral(old, old, true, 1.0/60.0).length() - (0.2 - 2.0/60.0)).abs() < 1e-5);
         assert_eq!(constrain_lateral(old, old, true, 1.0), Vec3::ZERO);
     }
@@ -303,6 +319,9 @@ pub struct PilotisEntry {
 #[derive(Debug, Default)]
 pub struct HumanNarrowObjectData {
     pub kind: NarrowKind,
+    /// The entry turned the facing at once (modes 4 / 5, `sub_52BD40` 0xF7AFFE / 0xF7B185): the next frame sets the
+    /// heading instead of steering toward it.
+    pub turn_at_once: bool,
     pub p0: Vec3,
     pub p1: Vec3,
     /// Distance along the beam from p0.
@@ -399,6 +418,7 @@ impl HumanNarrowObjectData {
         self.entry_from = e.from;
         self.lateral = Vec3::ZERO;
         self.entry_mode = e.mode;
+        self.turn_at_once = false;
         self.foot = e.foot;
         self.hand_target = None;
         // mode 3 faces across the beam (+1040 = 2): the entry vector turned 90° about up, flipped toward the current
@@ -420,6 +440,18 @@ impl HumanNarrowObjectData {
                 }
                 None => self.play(BeamState::Wait, item(BEAM_WAIT[e.foot], 0, &[])),
             },
+            // modes 4 / 5 (EnterByMode 0xF7AAA0, 0xF7AFFE / 0xF7B185): the facing turns at once by ∓(w·60° + 30°) onto the
+            // walk, and Main / Walk starts with the side clip as the walk action's item (+1728 = 3), no reception warp:
+            // the clips carry no root yaw and move the root forward 1.2–1.8 m, which the walk projects onto the beam
+            // (RE/24 NARROW-6). PORT: the facing is the beam direction (the game's turned facing comes within the 30° /
+            // 90° blend of it); the speed is band 0, band 4 with the jog clips
+            BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack if e.action.is_some() => {
+                let jog = e.action.is_some_and(|a| a.weights().iter().skip(2).any(|w| *w > 0.0));
+                self.speed = if jog { beam_bands()[4] } else { beam_bands()[0] };
+                self.warp_heading = (super::heading_of(self.facing()), super::heading_of(self.facing()));
+                self.turn_at_once = true;
+                self.play(BeamState::Walk, e.action);
+            }
             BeamEntryMode::Side | BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack => {
                 self.warp = e.action.map(|a| a.duration()).unwrap_or(0.3);
                 self.play(BeamState::Reception, e.action);
@@ -753,9 +785,11 @@ pub fn free_step_beam_entry(
                 let a = (ang - 30f32.to_radians()).clamp(0.0, 90f32.to_radians());
                 (a / 60f32.to_radians()).clamp(0.0, 1.0)
             };
+            // `foot` is the reception's exit index (0 left ahead, RE/24 NARROW-7): index 0 / 1 are the
+            // `freestep_entry_footl` clips (paired with the crouch's footr)
             let k = match (mode, foot) {
-                (BeamEntryMode::SideWalkBack, 1) => 0,
-                (BeamEntryMode::SideWalk, 1) => 1,
+                (BeamEntryMode::SideWalkBack, 0) => 0,
+                (BeamEntryMode::SideWalk, 0) => 1,
                 (BeamEntryMode::SideWalkBack, _) => 2,
                 _ => 3,
             };
@@ -768,8 +802,8 @@ pub fn free_step_beam_entry(
             let speed = if jog { beam_bands()[4] } else { beam_bands()[0] };
             (axis.dot(f) >= 0.0, item(BEAM_WALK, foot, &speed_weights(speed)))
         }
-        // mode 3: `freestep_entry_foot*_tr_beam_air_90` by the arriving foot (`sub_F76C70`; RE/24 NARROW-5). PORT: the
-        // foot index follows the port's foot (the exit-feet reading of NARROW-7 is not applied)
+        // mode 3: `freestep_entry_foot*_tr_beam_air_90` by the reception's exit feet (`sub_F76C70`; RE/24 NARROW-5 /
+        // NARROW-7)
         BeamEntryMode::Side => (axis.dot(f) >= 0.0, item(BEAM_SIDE_AIR90[foot.min(1)], 0, &[]).or(reception)),
         // the beam direction nearest the facing
         _ => (axis.dot(f) >= 0.0, None),
@@ -855,8 +889,9 @@ fn can_step_off(n: &HumanNarrowObjectData, collision: &CollisionWorld) -> bool {
 }
 
 /// `HumanNarrowObject__CanPullDownToHang` 0xE504D0 (event 9's guard on a beam and a pilotis): guidance in the box
-/// ±0.6 m × ±0.6 m × ±0.5 m around the feet facing `dir`; a LedgeGrab edge whose outward normal lies within 45° of
-/// `dir`, within 0.6 m (sub_B1C550); more than 2.5 m above the floor below it; then the hang clearance (sub_B2E4F0,
+/// ±0.6 m × ±0.6 m × ±0.5 m around the feet facing `dir`; a LedgeGrab edge whose outward normal and whose point (seen
+/// flat from the feet) both lie within 45° of `dir`, within 0.6 m (`sub_B1C550`(…, 45°, 45°, 0.6, 0.5), RE/24
+/// NARROW-25); more than 2.5 m above the floor below it; then the hang clearance (sub_B2E4F0,
 /// using oriented boxes). The search runs along `dir`, then along −`dir`. Returns the edge point, its outward normal and
 /// the side for the pull-down table (`FillLedgePullDown` 0xE4EF70: the normal vs `dir`, 0 front < 45°, 1 back
 /// > 135°; 2 / 3 left / right are only reached at exactly 45°).
@@ -883,6 +918,10 @@ pub fn pull_down_edge(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
             }
             let dist = Vec2::new(rel.x, rel.z).length();
             if dist > 0.6 {
+                continue;
+            }
+            // the position cone: the flat direction from the feet to the point within 45° of `dir`
+            if dist > 0.0005 && Vec3::new(rel.x, 0.0, rel.z).dot(d) / dist < 45f32.to_radians().cos() {
                 continue;
             }
             let below = collision.ground_height(q + n * 0.6 - Vec3::Y * 0.05, 50.0).unwrap_or(q.y - 100.0);
@@ -995,12 +1034,12 @@ fn detect_beam_segments(root:Vec3,forward:Vec3,current:Option<(Vec3,Vec3)>,segme
     None
 }
 
-/// 0xF7C3A0: root motion may reduce lateral error but must not increase it. Its optional
-/// correction approaches the line at 2 m/s; current beam callers pass correction=false (0xF7EED0).
+/// 0xF7C3A0: root motion may reduce lateral error but must not increase it; the rule applies only while the current
+/// offset is over 0.0005 m (0xF7C833), so a sway may start from the line (RE/24 NARROW-14). Its optional correction
+/// approaches the line at 2 m/s; current beam callers pass correction=false (0xF7EED0).
 fn constrain_lateral(old: Vec3, proposed: Vec3, correction: bool, dt: f32) -> Vec3 {
     let old_len = old.length();
-    let mut lateral = if proposed.length() > old_len { old } else { proposed };
-    if old_len <= 0.0005 { lateral = Vec3::ZERO; }
+    let mut lateral = if old_len > 0.0005 && proposed.length() > old_len { old } else { proposed };
     if correction {
         let len = lateral.length();
         lateral *= (1.0 - (2.0 * dt / len.max(1e-6)).min(1.0)).max(0.0);
@@ -1113,7 +1152,7 @@ fn climb_from_beam(feet: Vec3, facing: Vec3, foot_right: bool, guidance: &Guidan
             if !collision.capsule_cast_free(feet + Vec3::Y * 0.02, 1.8, 0.35, root - feet) { continue; }
             return Some(super::climb::ClimbEntry { entry_type: super::climb::ClimbEntryType::FromGround,
                 hand_l: hand.point, hand_r: hand.point, foot_l: foot.point, foot_r: foot.point,
-                normal: hand.wall_normal, from_feet: feet, foot_right, action: None });
+                normal: hand.wall_normal, from_feet: feet, foot_right, action: None, pose_2m: None, end_action: None });
         }
     }
     None
@@ -1212,17 +1251,9 @@ pub fn update_narrow(
         let slot_done = matches!(n.state, BeamState::JumpOnPlace | BeamState::HopStart | BeamState::HopEnd);
         let done = if BEAM_COMPLETION && slot_done { n.t > dur } else { n.t >= dur };
 
-        // `HumanNarrowObject__CheckSupportAndFall` 0xE51190 (the arrival on the narrow support, NarrowObjectData+224
-        // ≤ 1): once the arrival action is past 0.6, a haystack found by the support search (IHuman vt80 0xB10A60 →
-        // `Human__FindHayStackSupport` 0xE17D20) → HumanHayStack, entry FreeStep (0xE5146A, +184 |= 0x10). A haystack
-        // with a rim narrow enough to be a beam is entered this way (live 2026-10-09).
-        if matches!(n.state, BeamState::Reception | BeamState::PilotisIn) && n.t / dur.max(1e-4) > 0.6 {
-            if let Some(stack) = super::hay::find_support(body.feet, facing, facing, &guidance.haystacks, &collision) {
-                let e = super::hay::HayStackEntry { stack, kind: super::hay::HayEntry::FreeStep, from: body.feet, speed: 0.0 };
-                switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
-                continue;
-            }
-        }
+        // (the haystack check of the free-step arrival, `HumanNarrowObject__CheckSupportAndFall` 0xE51190, runs in the
+        // NarrowObject's Movement state only: the port plays that reception in Ground, `ground::narrow_pending`; RE/24
+        // NARROW-21)
 
         // Event 17: walking into an obstacle with stick input searches a hand jump target before
         // pull-down / climb (0xEE9AF0 → 0xF7EF90 / 0xF7DB30 → 0xF70E50 → 0xB21DA0).
@@ -1240,9 +1271,10 @@ pub fn update_narrow(
 
         // ------------------------------------------------ the pull-down to a hang (event 9, the empty hand)
         // Accepted in Idle, Walk and the 90° wait (CanHandle 0xF7A4F0 / 0xF7F150 / 0xF7A650) and in the pilotis wait
-        // (0xE50BF0).
+        // (0xE50BF0). The empty hand held (`Pad__IsPressed`(3) 0xEEB358 / 0xEE91E7: the button's state byte, not a press;
+        // RE/24 NARROW-23).
         let can_pull_down = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::PilotisWait);
-        if can_pull_down && pad.hand_just_pressed() {
+        if can_pull_down && pad.hand_held {
             let camera_dir = Vec3::new(camera.yaw.sin(), 0.0, camera.yaw.cos());
             // the pull-down report (`sub_DDCB20`, RE/24 GUIDE-2)
             if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), camera_dir, &guidance.ledge_report(n.stand(), 2.5, true), &collision) {
@@ -1254,14 +1286,15 @@ pub fn update_narrow(
         }
 
         // ------------------------------------------------ the wall run (event 15, Walk only)
-        // 0xEE9AF0: high profile, Legs pressed, the stick > 0.35 within 60° of the facing; tested before the jumps.
+        // 0xEE9AF0: high profile, Legs held (`Pad__IsPressed`(0) 0xEEA765, RE/24 NARROW-23), the stick > 0.35 within 60°
+        // of the facing; tested before the jumps.
         // Guard `CanWallRun` 0xF77DC0 = the wall test 0xE18390 (1.5·h ahead), fill 0xB263B0 → Walling.
         // 0xB263B0 warps beam entries in 0.13 s; Ground retains its action-length warp.
         // the impulsion accepts it too (`sub_F7A740` case 15 → `sub_F79FE0`, the same wall test; RE/24 NARROW-9)
         if n.kind == NarrowKind::Beam
             && matches!(n.state, BeamState::Start | BeamState::Walk | BeamState::ImpulseIn | BeamState::ImpulseWait)
             && pad.high_profile
-            && pad.jump_buffered()
+            && pad.legs_held
             && stick
             && a < 60f32.to_radians()
         {
@@ -1373,8 +1406,10 @@ pub fn update_narrow(
                 let limit_lo = if n.toward_p1 { 0.0 } else { stop };
                 let limit_hi = if n.toward_p1 { n.len() - stop } else { n.len() };
                 let over = if n.toward_p1 { s - limit_hi } else { limit_lo - s };
-                n.clamped = next.is_none() && over >= 0.0;
-                s = s.clamp(limit_lo.min(limit_hi), limit_hi.max(limit_lo));
+                // the end clamp only while the facing runs along the beam (|f·dir| > cos 80°, 0xF7C664; RE/24 NARROW-14)
+                let along_beam = body.forward().dot(n.dir()).abs() > 0.173_648_18;
+                n.clamped = next.is_none() && over >= 0.0 && along_beam;
+                s = if along_beam { s.clamp(limit_lo.min(limit_hi), limit_hi.max(limit_lo)) } else { s.clamp(0.0, n.len()) };
                 n.s = s;
                 if let (Some((q0, q1)), true) = (next, over >= 0.0) {
                     // `ConstrainRootMotionToBeam` 0xF7C3A0 switches to the next segment; going along it from the
@@ -1475,7 +1510,21 @@ pub fn update_narrow(
                 continue;
             }
             BeamState::Wait => {
-                // Idle (0xF808D0 +91), in order: turn around, turn to the 90° wait, walk / step off
+                // Idle (0xF808D0 +91), in order: turn around, turn to the 90° wait, step off, walk (RE/24 NARROW-13):
+                // - at an end with room beyond (`CanStepOffBeamEnd` 0xF77C00) the step off starts at once (`sub_F708F0`,
+                //   the step-off state +118: the root 0.8 m on);
+                // - `Idle_WantsWalk` 0xF77450: no end-clamp bit (the clamp fires within 0.31 m of the end, 0xF7C3A0) and
+                //   no obstacle contact ahead (0xB25230; PORT: event 17 handles the obstacle);
+                // - `StateIdle_PreUpdate` 0xF7D650 corrects the lateral drift at 2 m/s (`ConstrainRootMotionToBeam`(…, 1, 1)).
+                if BEAM_COMPLETION && n.kind == NarrowKind::Beam {
+                    n.lateral = constrain_lateral(n.lateral, n.lateral, true, dt);
+                }
+                let last = next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance).is_none();
+                let step_off_end = last && can_step_off(n, &collision);
+                let at_end = step_off_end && n.to_end() <= BEAM_STEP_OFF + 1e-3;
+                // the clamp holds the root 0.3 m before an end with no room beyond (an end with room lets it on to the
+                // step off)
+                let clamped = last && !step_off_end && n.to_end() <= BEAM_END_STOP + 0.01;
                 if back {
                     let t = item(BEAM_TURN180[n.foot], 0, &[]);
                     n.play(BeamState::Turn, t);
@@ -1483,7 +1532,10 @@ pub fn update_narrow(
                     n.turn_left = left;
                     let t = item(BEAM_TO_90[!left as usize][n.foot], 0, &[]);
                     n.play(BeamState::TurnTo90, t);
-                } else if forward && (n.to_end() > BEAM_END_STOP + 0.05 || can_step_off(n, &collision)) {
+                } else if BEAM_COMPLETION && forward && n.kind == NarrowKind::Beam && at_end {
+                    n.step_off_to = n.stand() + n.facing() * 0.8;
+                    n.play(BeamState::StepOff, n.ground_step(false));
+                } else if forward && !clamped {
                     // the start seeds the speed at band 0 (0xF724C4)
                     n.speed = beam_bands()[0];
                     let st = item(BEAM_START[n.foot], 0, &speed_weights(n.speed));
@@ -1605,6 +1657,20 @@ pub fn update_narrow(
                     }
                 }
             }
+            // event 3 (BeamState 0xEEB178: the stick past 0.35 and a next beam segment along it, INarrow vt180 →
+            // `DetectBeamSegments` 0xF753A0 with the stick's direction): the impulsion accepts it at any time (`sub_F7A740`
+            // case 3, no timer) and goes back to Main idle, or the 90° wait when it stands across (`sub_F7FDB0`: +1728 =
+            // (+1040 == 2) + 1) (RE/24 NARROW-9)
+            BeamState::ImpulseIn | BeamState::ImpulseWait
+                if n.kind == NarrowKind::Beam && stick && next_segment(n.stand(), pad.dir, (n.p0, n.p1), &guidance).is_some() =>
+            {
+                if n.across.is_some() {
+                    n.speed = 0.0;
+                    n.play(BeamState::Wait90, item(BEAM_WAIT_90, 0, &[]));
+                } else {
+                    n.wait_state();
+                }
+            }
             BeamState::ImpulseIn => {
                 // 0xF80560 can resume Main before the entry clip ends, once the 0.2 s timer expires.
                 if BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward && n.impulse_elapsed >= 0.2 {
@@ -1687,6 +1753,9 @@ pub fn update_narrow(
             body.feet = data.narrow.stand();
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;
+        }
+        if std::mem::take(&mut data.narrow.turn_at_once) {
+            body.heading = super::heading_of(data.narrow.facing());
         }
         let n = &data.narrow;
         body.feet = n.stand();

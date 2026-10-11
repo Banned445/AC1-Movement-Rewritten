@@ -120,7 +120,38 @@ impl LedgeEntry {
 pub const ACT_CATCH_WALL: [u32; 2] = [0x1F0C_0C23, 0x1F0C_0C2D];
 pub const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
 /// Actions the clip generator dumps for the ledge (the catches, for their lengths; the wall-free → wall switch).
-pub const DUMPED_ACTIONS: &[u32] = &[ACT_CATCH_WALL[0], ACT_CATCH_WALL[1], ACT_CATCH_FREE[0], ACT_CATCH_FREE[1], super::ledge_moves::WALLFREE_TO_WALL];
+/// The shimmy actions (`StartHandStep` 0xDDE0C0): [wall, free] × [left open, left close, right open, right close].
+pub const ACT_SHIMMY: [[u32; 4]; 2] = [[0x01B7_0B35, 0x01B7_0B36, 0x01B7_0B37, 0x01B7_0B38], [0x01A2_490A, 0x01A2_490B, 0x01A2_490C, 0x01A2_490D]];
+/// The `ACT_SHIMMY` column: the move's side and whether this step opened the hands (the alternation flag after it).
+pub fn shimmy_index(right: bool, open: bool) -> usize {
+    (right as usize) * 2 + (!open) as usize
+}
+
+/// The vertical hand steps: [wall, free] × [up: 1m_u_1lu, 1m_u_1ru, 1lu_u_1m, 1ru_u_1m, down: 1m_d_1lu, 1m_d_1ru,
+/// 1lu_d_1m, 1ru_d_1m].
+pub const ACT_VSTEP: [[u32; 8]; 2] = [
+    [0x01B7_0FAA, 0x01B7_0FAB, 0x01B7_0FAC, 0x01B7_0FAD, 0x01B7_0FAE, 0x01B7_0FAF, 0x01B7_0FB0, 0x01B7_0FB1],
+    [0x01A2_79B9, 0x01A2_79BA, 0x01A2_79BB, 0x01A2_79BC, 0x01A2_79BD, 0x01A2_79BE, 0x01A2_79BF, 0x01A2_79C0],
+];
+/// The `ACT_VSTEP` column for a vertical hand step (`PickVerticalHandAndAnim` 0xDCB3E0, tables `StaticInitTables`
+/// 0xDCC3E5..0xDCC403): up, left first → `1m_u_1lu`; down, left first → `1m_d_1ru` (the clips are named by the hand left
+/// up), and the second halves likewise (RE/24 LEDGE-6). Played the other way round, the clip's raised hand was the one
+/// the IK held low and the lowered one could not reach its hold (bug-1791714114).
+pub fn vstep_index(down: bool, second: bool, first_left: bool) -> usize {
+    if down {
+        4 + (second as usize) * 2 + first_left as usize
+    } else {
+        (second as usize) * 2 + (!first_left) as usize
+    }
+}
+
+pub const DUMPED_ACTIONS: &[u32] = &[
+    ACT_CATCH_WALL[0], ACT_CATCH_WALL[1], ACT_CATCH_FREE[0], ACT_CATCH_FREE[1], super::ledge_moves::WALLFREE_TO_WALL,
+    // the hand steps, for their lengths (RE/24 LEDGE-21)
+    ACT_SHIMMY[0][0], ACT_SHIMMY[0][1], ACT_SHIMMY[0][2], ACT_SHIMMY[0][3], ACT_SHIMMY[1][0], ACT_SHIMMY[1][1], ACT_SHIMMY[1][2], ACT_SHIMMY[1][3],
+    ACT_VSTEP[0][0], ACT_VSTEP[0][1], ACT_VSTEP[0][2], ACT_VSTEP[0][3], ACT_VSTEP[0][4], ACT_VSTEP[0][5], ACT_VSTEP[0][6], ACT_VSTEP[0][7],
+    ACT_VSTEP[1][0], ACT_VSTEP[1][1], ACT_VSTEP[1][2], ACT_VSTEP[1][3], ACT_VSTEP[1][4], ACT_VSTEP[1][5], ACT_VSTEP[1][6], ACT_VSTEP[1][7],
+];
 
 /// The summed length of an action's items (their first clips).
 pub fn action_time(id: u32) -> f32 {
@@ -132,7 +163,8 @@ pub fn action_time(id: u32) -> f32 {
             let w: Vec<f32> = (0..n).map(|k| if k == 0 { 1.0 } else { 0.0 }).collect();
             ActionBlend::new(id, i, &w).duration()
         })
-        .sum();
+        .sum::<f32>()
+        + super::jump_blend::item_blend_adjust(id);
     if t > 0.0 { t } else { GRAB_TIME }
 }
 
@@ -191,6 +223,9 @@ pub struct HumanLedgeData {
     pub last_action: &'static str,
     /// Incremented whenever a discrete move starts (lets the animator restart one-shot clips).
     pub step_seq: u32,
+    /// +1844: the hand the last step moved (0 left, 1 right; `StartHandStep` 0xDDE0C0). `EnterCommon` 0xDE26D0 sets 0, so
+    /// the first vertical step after an entry moves the right hand (`PickVerticalHandAndAnim` 0xDCB3E0, RE/24 LEDGE-5).
+    pub last_hand: usize,
     /// Running vertical hand step: (first hand was the left one, this is the second half).
     pub vstep: Option<(bool, bool)>,
     /// A vertical step's second hand still to move (+1848, `ContinuePendingVerticalStep` 0xDCF3C0): (that hand's index,
@@ -200,6 +235,12 @@ pub struct HumanLedgeData {
     pub jump_off: Option<super::air::InAirEntry>,
     /// The last lateral move that was blocked went right (picks `PlayIdleOrBlocked`'s blocked action, 0xDD3A10).
     pub blocked_right: bool,
+    /// LedgeData +108 = 3 (HangFreeReceptionType) and +112 (SwingStrength), with the `step_seq` it was stored at: the swing
+    /// back's `_b` (`PlayHopUpSecondPart` 0xDDAB00) and walling's free hangs B / C (0xE3807F–0xE380D7, 0xE3898C–0xE389E8)
+    /// store h = w[2] + w[3]; the free idle that follows (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0) plays its two clips
+    /// (`xx_h_hangfree_wait`, `xx_h_hangwallfree_wait`) at [1 − h, h] (`sub_502E30`) until the next move (RE/24 LEDGE-24,
+    /// WALL-21).
+    pub swing_strength: Option<(f32, u32)>,
     moves: Vec<RootInterp>,
     after: Option<After>,
     /// Running corner turn / ledge jump / swing back (`ledge_moves`).
@@ -223,6 +264,11 @@ pub struct HumanLedgeData {
 }
 
 impl HumanLedgeData {
+    /// The swing strength for the free idle, while no move has started since it was stored.
+    pub fn swing_idle(&self) -> Option<f32> {
+        self.swing_strength.filter(|(_, seq)| *seq == self.step_seq).map(|(s, _)| s)
+    }
+
     pub fn enter(&mut self, e: LedgeEntry) {
         self.hand_l = e.hand_l;
         self.hand_r = e.hand_r;
@@ -231,9 +277,11 @@ impl HumanLedgeData {
         self.pass_over = None;
         self.swing = None;
         self.alt_flag = false; // EnterCommon 0xDE26D0 clears +0x85
+        self.last_hand = 0; // and +1844
         self.blocked_up = false;
         self.pending_vstep = None;
         self.jump_off = None;
+        self.swing_strength = None;
         self.moves.clear();
         self.mv = None;
         self.hang_set = false;
@@ -247,6 +295,11 @@ impl HumanLedgeData {
         self.queue = e.entry_rest.iter().flatten().copied().collect();
         self.then_climb = None;
         self.then_ladder = None;
+        // walling's free hangs B / C: +108 = 3, +112 = w₂ + w₃ of their 4-way blend (WALL-21)
+        let walling_free = |a: &super::jump_blend::ActionBlend| [super::walling::ENTRY_TO_HANGFREE, super::walling::STEP1_TO_HANGFREE].contains(&a.id);
+        if let Some(a) = e.entry_move.and_then(|m| m.seq[0]).filter(walling_free) {
+            self.swing_strength = Some((a.w[2] + a.w[3], self.step_seq));
+        }
         if let Some(m) = e.entry_move {
             // the game's reception for the jump that arrived (0xE07D00), or the pull-down's first stage
             self.mv = Some(m);
@@ -474,7 +527,7 @@ pub fn update_ledge(
             if jump {
                 pad.consume_jump();
             }
-            let out = super::swing::update(&mut s, dt, held, jump, &mut feet, &collision, |p, f| super::targets::find_jump_target(p, f, &guidance, &collision));
+            let out = super::swing::update(&mut s, dt, held, jump, &mut feet, &collision, |p, f| super::targets::swing_jump_target(p, f, &guidance, &collision));
             body.feet = feet;
             match out {
                 super::swing::SwingOut::Stay => data.ledge.swing = Some(s),
@@ -490,7 +543,8 @@ pub fn update_ledge(
                 super::swing::SwingOut::Jump(target) => {
                     data.ledge.swing = None;
                     let from = body.feet;
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(super::air::InAirEntry::SwingJump { from, target }));
+                    let dir = s.fwd;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(super::air::InAirEntry::SwingJump { from, target, dir }));
                 }
             }
             continue;
@@ -562,6 +616,7 @@ pub fn update_ledge(
         limbs.suspended = !ik_runs;
         limbs.hands = ik_runs.then_some((d.hand_l, d.hand_r));
         limbs.normal = n;
+        // PORT: the travel time of a clip without contact tags (tagged clips use their window; RE/24 CLIMB-27)
         limbs.transit = d.moves.first().map(|m| m.duration).unwrap_or(SHIMMY_OPEN_TIME) * 0.8;
         // the feet follow the hang clip (braced against the wall, or dangling); only the hands are pinned
         limbs.feet = None;
@@ -644,6 +699,9 @@ pub fn update_ledge(
                 d.hang_set = true;
                 d.mv = None;
                 d.sub_state = LedgeSubState::Movement;
+                if mv.kind == ledge_moves::MoveKind::SwingBack {
+                    d.swing_strength = Some((mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0), d.step_seq));
+                }
                 if let ledge_moves::MoveKind::SideJump { .. } = mv.kind {
                     // the table jump into a hang: +133 = the hand targets 0.3 m or more apart (`sub_DCBCD0`, RE/24 LEDGE-14)
                     d.alt_flag = (mv.hand_l - mv.hand_r).length() >= 0.3;
@@ -656,7 +714,26 @@ pub fn update_ledge(
             continue;
         }
 
+        // ---------------------------------------------------------------- lost ledge
+        // `HasLostLedge` 0xDD20D0, every frame before the state dispatch (`HumanLedge__Update` 0xDE3E86), steps included:
+        // per hand a `Guidance__ProbeBox` at the hand, half 0.1 m, facing the wall, the wall within 90°, mask 50
+        // (`sub_DCE0D0`, on the sphere report r 0.25 + half the hand spacing, which holds that box) (RE/24 LEDGE-19).
+        // PORT: not during the `mv` moves (corners, ledge jumps, receptions; the game skips only the ledge jumps,
+        // 1861 & 4): their hand records move at the move's end in the port
+        let lost = |p: Vec3| guidance.probe_facing(p, facing, Vec3::splat(0.1), 0.0, std::f32::consts::FRAC_PI_2, crate::guidance::MASK_CLIMB_HOLDS).is_none();
+        if lost(d.hand_l) || lost(d.hand_r) {
+            let origin = if d.hang_type == LedgeHangType::Wall { FallOrigin::HangWall } else { FallOrigin::HangFree };
+            let hold = hand_mid(d);
+            limbs.hands = None;
+            limbs.feet = None;
+            d.moves.clear();
+            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 }));
+            data.air.release_hold = Some(hold);
+            continue;
+        }
+
         // ---------------------------------------------------------------- running move
+        let mut move_done = false;
         if let Some(m) = d.moves.first_mut() {
             if m.to.is_nan() {
                 // deferred target (entry): the hang root for the current hands
@@ -667,9 +744,18 @@ pub fn update_ledge(
             if m.done() {
                 d.moves.remove(0);
             }
+            // event 4 (let go) is accepted mid-step: its guard `sub_DCCDD0` 0xDCCDD0 refuses only a locked playing item, and
+            // the shimmy / vertical step items are not locked (word 0x0FC0); the catches' are (RE/24 LEDGE-26)
+            let hand_step = d.last_action.starts_with("shimmy ") || d.last_action.starts_with("hand step ");
             if !d.moves.is_empty() {
-                continue;
+                if !(hand_step && pad.hand_buffered()) {
+                    continue;
+                }
+            } else {
+                move_done = true;
             }
+        }
+        if move_done {
             match d.after.take() {
                 Some(After::StandOnTop) => {
                     limbs.hands = None;
@@ -690,17 +776,6 @@ pub fn update_ledge(
         }
 
         // ---------------------------------------------------------------- checks (Movement state)
-        let spacing = (d.hand_l - d.hand_r).length();
-        let tol = LOST_LEDGE_R + spacing * 0.5;
-        if guidance.on_edge(d.hand_l, n, tol).is_none() || guidance.on_edge(d.hand_r, n, tol).is_none() {
-            let origin = if d.hang_type == LedgeHangType::Wall { FallOrigin::HangWall } else { FallOrigin::HangFree };
-            let hold = hand_mid(d);
-            limbs.hands = None;
-            limbs.feet = None;
-            switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 }));
-            data.air.release_hold = Some(hold);
-            continue;
-        }
         // the interpreter's latched stick in the character's frame (`GoAssassinActionInterpreter__LedgeState` 0xEEC356:
         // the angle of +0x1310 from stick-up; RB held reads the unmirrored +0x1300, 0xEEC256; RE/24 INPUT-4)
         let dir = if pad.speed01 > 0.0 { Some(quantize(pad.actor_dir(facing, pad.buttons[13]), facing)) } else { None };
@@ -778,18 +853,20 @@ pub fn update_ledge(
                 LedgeDir::Down => false,
             };
             let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, up, &report);
-            let (first_p, second_p) = if second == 0 { (d.hand_r, d.hand_l) } else { (d.hand_l, d.hand_r) };
-            let along = right * (second_p - first_p).dot(right);
-            let target = match rows.step {
-                Some(h) => h.point + right * (second_p - hand_mid(d)).dot(right),
-                None => first_p + along,
-            };
+            let first_p = if second == 0 { d.hand_r } else { d.hand_l };
+            // the step row's point nearest the hands' midpoint line, else the first hand's own point (0xDD94A6): the hands
+            // end together (RE/24 LEDGE-5)
+            let target = rows.step.map_or(first_p, |h| h.point);
             let out = root_out(body.feet, d.hand_l, d.hand_r, n);
             if second == 0 { d.hand_l = target } else { d.hand_r = target }
             d.pending_vstep = None;
+            d.last_hand = second;
+            d.alt_flag = false;
             let to = step_root(d.hand_l, d.hand_r, n, d.hang_type, out, &collision);
             d.vstep = Some((second == 1, true));
-            d.moves.push(RootInterp::new(body.feet, to, VSTEP_SECOND_TIME));
+            // the step lasts its action (`StartHandStep` 0xDDE0C0 interpolates over `sub_501CB0`(0), RE/24 LEDGE-21)
+            let wi = (d.hang_type != LedgeHangType::Wall) as usize;
+            d.moves.push(RootInterp::new(body.feet, to, action_time(ACT_VSTEP[wi][vstep_index(!up, true, second == 1)])));
             d.step_seq += 1;
             d.after = Some(After::Hang);
             d.sub_state = LedgeSubState::HandPlacement;
@@ -806,6 +883,7 @@ pub fn update_ledge(
                 if let (Some(feet_row), Some(hands_row)) = (rows.feet, rows.hands) {
                     let entry = ClimbEntry {
                         entry_type: ClimbEntryType::FromLedge,
+                        pose_2m: None, end_action: None,
                         hand_l: hands_row.point,
                         hand_r: hands_row.point,
                         foot_l: feet_row.point,
@@ -837,20 +915,18 @@ pub fn update_ledge(
                         continue;
                     }
                 }
-                // StartHandStep 0xDDE0C0 (vertical): the hand step onto the step row's edge (0.1–0.8 m along the step)
-                // PORT: each hand keeps its lateral offset from the hands' midpoint on the new edge (the game moves one
-                // hand onto the hit, PickVerticalHandAndAnim 0xDCB3E0, and the other follows with its own search,
-                // ContinuePendingVerticalStep 0xDCF3C0); the target's hang body box is not tested.
+                // StartHandStep 0xDDE0C0 (vertical): the hand step onto the step row's edge (0.1–0.8 m along the step). The
+                // hand not moved last moves first (`PickVerticalHandAndAnim` 0xDCB3E0: +1844 == 1 → left), onto the row's
+                // point nearest the hands' midpoint line (`FindVerticalRows` x_ref 0); the other follows with its own search
+                // (ContinuePendingVerticalStep 0xDCF3C0). A vertical step clears +133 (0xDDE24D) (RE/24 LEDGE-5).
+                // PORT: the target's hang body box is not tested.
                 if let Some(h) = rows.step {
-                    let mid = hand_mid(d);
-                    let along = |p: Vec3| right * (p - mid).dot(right);
-                    let tl = h.point + along(d.hand_l);
-                    let tr = h.point + along(d.hand_r);
                     // first hand moves now, the second one next (pending vertical step)
-                    let first_left = !d.alt_flag;
-                    d.alt_flag = !d.alt_flag;
+                    let first_left = d.last_hand == 1;
+                    d.alt_flag = false;
+                    d.last_hand = (!first_left) as usize;
                     let out = root_out(body.feet, d.hand_l, d.hand_r, n);
-                    if first_left { d.hand_l = tl } else { d.hand_r = tr }
+                    if first_left { d.hand_l = h.point } else { d.hand_r = h.point }
                     // the root from the two hand targets as they stand after the first hand (`ComputeRootFromHandTargets`
                     // 0xDD6730): a free hang hangs from the higher hand (max − 2.4), so a step up lifts the body the
                     // whole step and the reaching hand gets to its hold; a wall hang's vertical step reads the lower hand
@@ -858,11 +934,8 @@ pub fn update_ledge(
                     // (bug-1791711547). The distance from the wall stays (`step_root`, bug-1791714696)
                     let mid_root = step_root(d.hand_l, d.hand_r, n, d.hang_type, out, &collision);
                     d.vstep = Some((first_left, false));
-                    let first_time = match (d.hang_type, sign > 0.0) {
-                        (LedgeHangType::Wall, true) => VSTEP_TIME,
-                        (LedgeHangType::Wall, false) => VSTEP_DOWN_TIME,
-                        _ => VSTEP_SECOND_TIME,
-                    };
+                    let wi = (d.hang_type != LedgeHangType::Wall) as usize;
+                    let first_time = action_time(ACT_VSTEP[wi][vstep_index(sign < 0.0, false, first_left)]);
                     d.moves.push(RootInterp::new(body.feet, mid_root, first_time));
                     d.step_seq += 1;
                     d.after = Some(if first_left { After::SecondHand(1, sign > 0.0) } else { After::SecondHand(0, sign > 0.0) });
@@ -966,10 +1039,13 @@ pub fn update_ledge(
                         continue;
                     }
                     if move_right_hand { d.hand_r = t } else { d.hand_l = t }
+                    d.last_hand = move_right_hand as usize;
                     d.alt_flag = !d.alt_flag;
                     let to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
-                    // after the toggle: alt_flag set = this was the lead hand's reach (open), clear = closing step
-                    d.moves.push(RootInterp::new(body.feet, to, if d.alt_flag { SHIMMY_OPEN_TIME } else { SHIMMY_CLOSE_TIME }));
+                    // after the toggle: alt_flag set = this was the lead hand's reach (open), clear = closing step; the step
+                    // lasts its action (RE/24 LEDGE-21: the free hang's closing step is 0.533 s, not the wall's 0.6 s)
+                    let wi = (d.hang_type != LedgeHangType::Wall) as usize;
+                    d.moves.push(RootInterp::new(body.feet, to, action_time(ACT_SHIMMY[wi][shimmy_index(right_dir, d.alt_flag)])));
                     d.step_seq += 1;
                     d.after = Some(After::Hang);
                     d.sub_state = LedgeSubState::HandPlacement;

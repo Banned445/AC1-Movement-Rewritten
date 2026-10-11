@@ -90,7 +90,7 @@ pub const FREEFALL_MAX_HORIZONTAL: f32 = 15.0;
 /// Non-target drift: decays at 4 m/s², capped at 5 m/s. 0x19BA434 / 0x19BA438
 pub const DRIFT_DECEL: f32 = 4.0;
 pub const DRIFT_MAX: f32 = 5.0;
-/// Jump arrives when the clip ends within 0.01 m of the target. CheckJumpTargetArrival 0xE07D00
+/// Jump arrives when the requested root is within 0.01 m of the target. CheckJumpTargetArrival 0xE07D00 (0xE07F2A)
 pub const ARRIVAL_TOLERANCE: f32 = 0.01;
 /// Over-drop rule: if the target is > 5 m below (3 m for Leap of Faith) aim 5 m down, then free-fall. 0xB1B8C0
 pub const OVERDROP: f32 = 5.0;
@@ -132,20 +132,11 @@ pub const SHIMMY_MIN_STEP: f32 = 0.15;
 /// PLACEHOLDER: the hand spacing of a new hang (entries, jumps, corners): the game puts both hand records on one hold
 /// and derives the pose from it (sub_B15AD0 / sub_B157B0). The shimmy's own spacing comes from ProbeLateral 0xDD9640.
 pub const HAND_SPACING: f32 = 0.4;
-/// Lost-ledge check radius = 0.25 + half the hand spacing. HasLostLedge 0xDD20D0
-pub const LOST_LEDGE_R: f32 = 0.25;
 /// Pull-up: root ends 0.5 m inside the ledge (Pullup_Start 0xDDBE80).
 pub const PULLUP_IN: f32 = 0.5;
-/// Move durations = the game clips' lengths (RE/10): xx_h_hangwall_strafe_*_050cm_open 0.533 s /
-/// _close 0.600 s, xx_h_hangwall_u_climb_1m 0.600 s, _d_climb_1m 0.533 s.
+/// The fallback length of a ledge move when its clip is missing (`xx_h_hangwall_strafe_*_050cm_open`). The hand steps
+/// take their action's own length (`ledge::action_time`, RE/24 LEDGE-21).
 pub const SHIMMY_OPEN_TIME: f32 = 0.533;
-pub const SHIMMY_CLOSE_TIME: f32 = 0.600;
-/// Vertical hand step halves = the game's step clips (ledge tables 0x1A2C4C0 / 0x1A2C4F0, RE/13):
-/// wall first hand up xx_h_hangwall_climb_1m_u_1l?u 0.6 s, down _1m_d_ 0.4 s; every second half and every
-/// free-hang half 0.533 s.
-pub const VSTEP_TIME: f32 = 0.6;
-pub const VSTEP_DOWN_TIME: f32 = 0.4;
-pub const VSTEP_SECOND_TIME: f32 = 0.533;
 pub const JUMP_UP_TIME: f32 = 0.6;
 /// PORT: corner / side-jump duration only when the clip table lacks the action (jump_clips.rs).
 pub const CORNER_FALLBACK_TIME: f32 = 0.8;

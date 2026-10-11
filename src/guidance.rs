@@ -75,7 +75,7 @@ impl GuidanceWorld {
                 continue;
             }
             let d = (e.p1 - e.p0).normalize_or_zero();
-            if d.y.abs() > 0.643 {
+            if steep(e.p1 - e.p0) {
                 continue; // > 40° from horizontal
             }
             if let Some(f) = facing {
@@ -134,6 +134,25 @@ impl GuidanceWorld {
         step: f32,
         type_mask: u32,
     ) -> Option<GuidanceHit> {
+        self.probe_box_angle(centre, right, forward, up, half, reference, max_angle, step, type_mask, false)
+    }
+
+    /// `probe_box` with the facing test as strict as the caller's: `ProbeBoxNearest` keeps a wall at angle ≥ π − max
+    /// (0x1170D8F), `NearestFacingEdge` (the hand-pair search) only at angle > π − max (0x1170091; RE/24 GUIDE-18).
+    #[allow(clippy::too_many_arguments)]
+    fn probe_box_angle(
+        &self,
+        centre: Vec3,
+        right: Vec3,
+        forward: Vec3,
+        up: Vec3,
+        half: Vec3,
+        reference: Vec3,
+        max_angle: f32,
+        step: f32,
+        type_mask: u32,
+        strict: bool,
+    ) -> Option<GuidanceHit> {
         let local = |p: Vec3| {
             let d = p - centre;
             Vec3::new(d.dot(right), d.dot(forward), d.dot(up))
@@ -147,7 +166,9 @@ impl GuidanceWorld {
             // the wall normal: the lower of the two face normals, flattened (0x1170A70)
             let wall = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
             let wall = Vec3::new(wall.x, 0.0, wall.z).normalize_or_zero();
-            if wall == Vec3::ZERO || wall.angle_between(forward) < std::f32::consts::PI - max_angle {
+            let angle = wall.angle_between(forward);
+            let min = std::f32::consts::PI - max_angle;
+            if wall == Vec3::ZERO || angle < min || (strict && angle <= min) {
                 continue;
             }
             let Some((a, b)) = clip_segment(local(e.p0), local(e.p1), half) else { continue };
@@ -205,8 +226,8 @@ impl GuidanceWorld {
     ) -> Option<[GuidanceHit; 2]> {
         let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
         let right = forward.cross(Vec3::Y);
-        let a = self.probe_box(centre, right, forward, Vec3::Y, half, refs[0], max_angle, step, type_mask)?;
-        let b = self.probe_box(centre, right, forward, Vec3::Y, half, refs[1], max_angle, step, type_mask)?;
+        let a = self.probe_box_angle(centre, right, forward, Vec3::Y, half, refs[0], max_angle, step, type_mask, true)?;
+        let b = self.probe_box_angle(centre, right, forward, Vec3::Y, half, refs[1], max_angle, step, type_mask, true)?;
         Some([a, b])
     }
 }
@@ -321,7 +342,7 @@ impl GuidanceWorld {
                 continue;
             }
             let dir = (e.p1 - e.p0).normalize_or_zero();
-            if dir.y.abs() > 0.642_787_6 {
+            if steep(e.p1 - e.p0) {
                 continue; // GuidanceReport__RemoveSteepEdges: more than 40° from horizontal
             }
             let wall = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
@@ -498,7 +519,7 @@ impl GuidanceWorld {
                 out.edges.push(e.clone());
                 continue;
             }
-            if steep && (e.p1 - e.p0).normalize_or_zero().y.abs() > 0.642_787_6 {
+            if steep && self::steep(e.p1 - e.p0) {
                 continue;
             }
             let mut pieces = vec![(e.p0, e.p1)];
@@ -800,6 +821,16 @@ pub struct Report {
 /// 0xE0A810).
 pub const MASK_CATCH: u32 = 306;
 
+/// The steepness limit of an edge's direction, |dir.z| (cos 50°: more than 40° from horizontal is steep;
+/// `GuidanceReport__RemoveSteepEdges` 0x66B6D0, 0xB12480; RE/24 GUIDE-18).
+pub const MAX_EDGE_SLOPE_DIR_Z: f32 = 0.642_787_6;
+
+/// Is an edge running along `d` steep? A zero-length edge counts as steep (0x66B6D0).
+pub fn steep(d: Vec3) -> bool {
+    let len = d.length();
+    len < 1e-6 || (d.y / len).abs() > MAX_EDGE_SLOPE_DIR_Z
+}
+
 /// The edge-piece shortening (`sub_116D3C0`) every Human box probe passes (0.1 m).
 pub const PROBE_STEP: f32 = 0.1;
 
@@ -812,6 +843,8 @@ pub const PROBE_STEP: f32 = 0.1;
 pub const MASK_CLIMB_HOLDS: u32 = 50;
 /// Ladder edges only (mask 8): the ladder searches (0xDD4CD0, 0xDD55F0, 0xDF10C0, 0xE04100).
 pub const MASK_LADDER: u32 = 8;
+/// The knee catch's edges (mask 386 = 0x182: LedgeGrab, Quadruped, Kiosk; `FindKneeCatchEdge` 0xE04630).
+pub const MASK_KNEE: u32 = 386;
 
 pub(crate) fn closest_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
     let d = b - a;
@@ -928,6 +961,15 @@ mod tests {
         assert!((xs[0].1 - 1.7).abs() < 1e-4 && (xs[1].0 - 2.3).abs() < 1e-4, "{xs:?}");
         // the carve-only report (the ladder's side jump) keeps the steep edge
         assert_eq!(g.ledge_report(Vec3::new(2.0, 2.0, 0.0), 10.0, false).edges.len(), 4);
+    }
+
+    /// RE/24 GUIDE-18: one steepness limit, |dir.z| > cos 50° (0.6427876), and a zero-length edge is steep.
+    #[test]
+    fn the_steep_edge_rule_is_shared() {
+        let at = |deg: f32| Vec3::new(deg.to_radians().cos(), deg.to_radians().sin(), 0.0);
+        assert!(!steep(at(39.99)) && steep(at(40.01)));
+        assert!(steep(Vec3::ZERO), "a zero-length edge");
+        assert!((MAX_EDGE_SLOPE_DIR_Z - 40f32.to_radians().sin()).abs() < 1e-6);
     }
 
     #[test]
