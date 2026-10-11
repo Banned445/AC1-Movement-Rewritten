@@ -973,9 +973,13 @@ fn start_corner_climb(d: &mut HumanClimbData, heading: f32, feet: Vec3, (f, h, _
     d.last_action = label;
 }
 
-/// `HumanClimb__StartReachMove` 0xDF6810: the start action plays in place (state 3); the root and limbs follow with the
-/// loop (`update_climb`'s Move state).
+/// `HumanClimb__StartReachMove` 0xDF6810: the start action plays in place (state 3), the limbs take the target holds
+/// right away (`HumanClimb__SetLimbIKHoldsFromSlots` 0xDE86C0 at 0xDF68BA) and the pose is 0; the root follows with the
+/// loop (`update_climb`'s Move state) (RE/24 CLIMB-12).
 fn start_reach(d: &mut HumanClimbData, feet: Vec3, r: ClimbReach, label: &'static str) {
+    [d.hand_l, d.hand_r, d.foot_l, d.foot_r] = r.holds;
+    d.hold_n = r.normals;
+    d.pose = 0;
     d.move_action = Some(r.ids[0]);
     d.move_seq += 1;
     d.look = None;
@@ -1327,13 +1331,10 @@ pub fn update_climb(
                 }
                 if let Some(r) = d.reach.as_mut() {
                     if r.stage == 0 {
-                        // the start is done (State3_Update 0xDF5A70 → StartReachLoop 0xDEEE60): the loop, the limbs onto
-                        // the target holds and the root to their climb pose over the loop's blended length (sub_711130)
+                        // the start is done (State3_Update 0xDF5A70 → StartReachLoop 0xDEEE60): the loop and the root to
+                        // the target holds' climb pose over the loop's blended length (sub_711130)
                         r.stage = 1;
                         let r = *r;
-                        [d.hand_l, d.hand_r, d.foot_l, d.foot_r] = r.holds;
-                        d.hold_n = r.normals;
-                        d.pose = 0;
                         d.tilt_from = d.frame.tilt();
                         let from_heading = body.heading;
                         d.set_frame();

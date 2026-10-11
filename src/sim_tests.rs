@@ -3838,6 +3838,10 @@ fn the_climb_reaches_up_past_missing_holds() {
     assert_eq!(s.data().climb.last_action, "reach up / down");
     assert!(r.ids == reach_ids(CLIMB_REACH_VERTICAL[0][0]) || r.ids == reach_ids(CLIMB_REACH_VERTICAL[1][0]), "a short reach up: {:x?}", r.ids);
     assert!((r.holds[2].y - 2.4).abs() < 0.05 && (r.holds[0].y - 3.6).abs() < 0.05, "feet 2.4 / hands 3.6: {:?}", r.holds);
+    // RE/24 CLIMB-12: the limbs take the target holds as the start begins (0xDE86C0 at 0xDF68BA), the root still in place
+    let c = &s.data().climb;
+    assert_eq!(r.stage, 0);
+    assert_eq!([c.hand_l, c.hand_r, c.foot_l, c.foot_r], r.holds, "the limbs on the target holds during the start");
     s.pad(Vec3::Z, 0.0, false, false);
     assert!(s.run_until(3.0, |s| s.data().climb.reach.is_none() && s.data().climb.moving.is_none()), "never arrived");
     assert!((s.data().climb.foot_l.y - 2.4).abs() < 0.05);
