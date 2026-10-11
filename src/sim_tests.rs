@@ -1145,6 +1145,8 @@ fn leap_of_faith_into_the_haystack_then_hop_out() {
     // no fall damage: the haystack takes the landing
     assert!(s.ground().last_landing.is_none());
     s.run(0.3);
+    // the stick released: the low wait (event 1, RE/24 NARROW-19)
+    assert_eq!(s.data().hay.action.map(|a| a.id), Some(crate::player::hay::HAYSTACK_LOW_WAIT));
     s.pad(Vec3::X, 1.0, false, false);
     assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ground));
     assert_eq!(s.ground().oneshot.map(|o| o.blend.id), Some(HAYSTACK_HOP_OUT));

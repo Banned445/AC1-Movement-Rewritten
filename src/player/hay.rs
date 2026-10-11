@@ -31,6 +31,8 @@ use crate::input::PadInput;
 
 pub const HAYSTACK_FAITH_LANDING: u32 = 0x23A9_666C;
 pub const HAYSTACK_WAIT: u32 = 0x23A9_666D;
+/// The low wait (event 1 → `sub_E41B00` → `sub_E40970`: `xx_l_haystack_wait`, blend 0.1 s; RE/24 NARROW-19).
+pub const HAYSTACK_LOW_WAIT: u32 = 0x23A9_6674;
 pub const HAYSTACK_FROM_AIR: u32 = 0x7750_D212;
 pub const HAYSTACK_HOP_OUT: u32 = 0x2C4C_2431;
 
@@ -84,11 +86,14 @@ pub struct HumanHayStackData {
     pub face: Option<Vec3>,
     pub kind: HayEntry,
     rng: u32,
+    /// In the low wait (+126, event 1).
+    pub low: bool,
 }
 
 impl HumanHayStackData {
     pub fn enter(&mut self, e: HayStackEntry) {
         self.seq = self.seq.wrapping_add(1);
+        self.low = false;
         self.stack = Some(e.stack);
         self.phase = HayPhase::Entering;
         self.kind = e.kind;
@@ -292,9 +297,18 @@ pub fn update_hay(
             }
             HayPhase::Waiting => {
                 body.feet = h.to;
-                // PORT: event 3 (hop out) comes from the untraced decision layer; the port sends it when the
-                // stick is pushed after the wait started
-                if pad.speed01 > 0.0 && h.t > 0.2 {
+                // the interpreter's haystack state (`sub_EE08E0` from 0xEEE4E0, RE/24 NARROW-19): the stick released in
+                // the high wait → event 1, the low wait (0xE44020 / 0xE44080); the stick past 0.35 → the pass-over to a
+                // kind-2 jump candidate (event 2) if there is one, else the hop out (event 3, `Guard_HopOut`). PORT:
+                // event 2's pass-over (0x23A96673 with the root interpolated onto the candidate) is not modelled; the
+                // event 0 back to the high wait has no sender found
+                if pad.magnitude <= 0.35 && !h.low {
+                    h.low = true;
+                    h.action = single(HAYSTACK_LOW_WAIT).or(h.action);
+                    h.t = 0.0;
+                    h.seq = h.seq.wrapping_add(1);
+                }
+                if pad.magnitude > 0.35 {
                     let Some(stack) = h.stack else { continue };
                     if hop_out_exit(&stack, h.to, pad.dir, &collision).is_some() {
                         body.heading = super::heading_of(pad.dir);
