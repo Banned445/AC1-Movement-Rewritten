@@ -1104,6 +1104,10 @@ pub fn update_ground(
             if let Some((base, top, mut n, from_top)) = super::ladder::find_ladder(body.feet, pad.dir, body.forward(), &guidance) {
                 // the approach side's attach box blocked → the back-approach turn onto the far side (RE/24 LADDER-4)
                 let mut back_turn = None;
+                if from_top {
+                    // the far side's box blocked → the near side (RE/24 LADDER-23)
+                    n = super::ladder::top_entry_side(base, top, n, &collision);
+                }
                 if !from_top && super::ladder::attach_blocked(base + n * super::ladder::ATTACH_OUT, -n, &collision) {
                     let to_char = Vec3::new(body.feet.x - base.x, 0.0, body.feet.z - base.z);
                     back_turn = Some(to_char.dot(super::right_of(-n)) > 0.0);

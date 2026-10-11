@@ -5118,7 +5118,7 @@ fn a_ladder_leaning_over_the_climber_swings_him_onto_its_top_side() {
     use crate::player::ladder::{LadderPhase, REVOLVE};
     // `HumanLadder__TryTurn` 0xE26440: on the underside of a ladder leaning 18°, the climb state turns round to the
     // top side at once (room to the left: `turn_l`), then the climb goes up onto the block
-    let mut s = on_ladder(Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 4.5, -122.5), 1.0);
+    let mut s = on_ladder(Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 5.0, -122.6), 1.0);
     let saw = std::cell::Cell::new(false);
     assert!(s.run_until(2.0, |s| {
         if s.data().ladder.action.is_some_and(|a| a.id == REVOLVE[0]) {
@@ -5130,6 +5130,86 @@ fn a_ladder_leaning_over_the_climber_swings_him_onto_its_top_side() {
     s.pad(Vec3::NEG_Z, 1.0, false, false);
     assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ground), "never reached the top: {:?} {:?}", s.data().ladder.phase, s.body().feet);
     assert!((s.body().feet.y - 4.5).abs() < 0.1 && s.body().feet.z < -122.6, "on the block: {:?}", s.body().feet);
+}
+
+/// RE/24 LADDER-17: on a leaning ladder the body takes the ladder's frame: pitched with its axis, the root 0.5 m out
+/// square to it, heights along it; the top exit stands upright again.
+#[test]
+fn a_leaning_ladder_pitches_the_climber_with_it() {
+    use crate::player::ladder::LadderPhase;
+    let (base, top) = (Vec3::new(-137.0, 0.0, -121.0), Vec3::new(-137.0, 5.0, -122.6));
+    let mut s = on_ladder(base, top, 1.0);
+    assert!(s.run_until(3.0, |s| s.data().ladder.n.dot(Vec3::Z) > 0.99 && s.data().ladder.phase == Some(LadderPhase::Wait)), "no turn onto the top side");
+    s.run(1.0);
+    let axis = (top - base).normalize();
+    let (h, b) = (s.data().ladder.height, s.body());
+    assert!((b.tilt * Vec3::Y).distance(axis) < 1e-3, "pitched with the ladder: {:?}", b.tilt * Vec3::Y);
+    let off = b.feet - (base + axis * h);
+    assert!(off.dot(axis).abs() < 1e-3 && (off.length() - 0.5).abs() < 1e-3 && off.z > 0.0, "0.5 m out square to the axis on the top side: {off:?}");
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ladder.phase == Some(LadderPhase::ClimbUp)));
+    s.run(0.2);
+    assert!((s.body().tilt * Vec3::Y).distance(axis) < 1e-3, "the climb keeps the pitch");
+    assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ground), "never reached the top");
+    assert!((s.body().tilt * Vec3::Y).distance(Vec3::Y) < 1e-3, "upright on the block");
+}
+
+/// RE/24 LADDER-10: the top exit is its clip's own motion from where it starts (no pull onto a fixed point) plus a
+/// vertical snap onto the roof under the clip's end.
+#[test]
+fn the_top_exit_follows_its_clip_and_snaps_onto_the_roof() {
+    use crate::player::ladder::LadderPhase;
+    let mut s = Sim::new(Vec3::new(50.0, 0.0, 60.5), std::f32::consts::PI);
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder));
+    assert!(s.run_until(12.0, |s| s.data().ladder.phase == Some(LadderPhase::ExitTop(0))), "no exit: {:?}", s.data().ladder.phase);
+    let (from, a) = (s.body().feet, s.data().ladder.action.unwrap());
+    let d = a.disp(1.0);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground));
+    let f = s.body().feet;
+    assert!((f.z - (from.z + d[1])).abs() < 0.03 && (f.x - from.x).abs() < 0.03, "the clip's own reach in: {from:?} + {d:?} → {f:?}");
+    assert!((f.y - 5.0).abs() < 0.03, "snapped onto the roof: {f:?}");
+}
+
+/// RE/24 LADDER-15: the low profile reverses a step mid-way (`ChooseClimbAnim` 0xE249B9 / 0xE24A88); the high profile
+/// finishes it.
+#[test]
+fn the_low_profile_reverses_a_step_mid_way_and_the_high_profile_finishes_it() {
+    use crate::player::ladder::{LadderPhase, CLIMB_DOWN};
+    for high in [false, true] {
+        let mut s = on_the_ladder();
+        s.pad(Vec3::Z, 1.0, high, false);
+        assert!(s.run_until(1.0, |s| matches!(s.data().ladder.phase, Some(LadderPhase::ClimbUp))));
+        s.run(0.1);
+        let (h, foot) = (s.data().ladder.height, s.data().ladder.foot);
+        let step = if high { 1.0 } else { 0.5 };
+        s.pad(Vec3::NEG_Z, 1.0, high, false);
+        s.run(1.0 / 60.0 + 1e-4);
+        let l = &s.data().ladder;
+        if high {
+            assert_eq!(l.phase, Some(LadderPhase::ClimbUp), "the high step runs on");
+            assert_eq!(l.height, h);
+        } else {
+            assert_eq!(l.phase, Some(LadderPhase::ClimbDown), "reversed at once");
+            assert!((l.height - (h - step)).abs() < 1e-4, "back to the rung it left: {} from {h}", l.height);
+            assert_eq!(l.action.map(|a| (a.id, a.item)), Some((CLIMB_DOWN[0], foot ^ 1)));
+        }
+    }
+}
+
+/// RE/24 LADDER-15: the revolve sub-state takes events 0 and 1 (`HumanLadder__MainB_HandleEvent` 0xE1F760): the empty
+/// hand drops off mid-swing.
+#[test]
+fn the_empty_hand_drops_off_a_ladder_mid_revolve() {
+    use crate::player::ladder::{LadderPhase, RELEASE};
+    let mut s = on_ladder(Vec3::new(-125.0, 0.0, -121.0), Vec3::new(-125.0, 5.0, -121.0), 1.5);
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(0.5, |s| matches!(s.data().ladder.phase, Some(LadderPhase::Revolve(0)))), "no revolve");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(0.1);
+    s.press_hand();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "no release mid-swing: {:?}", s.data().ladder.phase);
+    assert!(s.data().air.fall_action.is_some_and(|a| RELEASE[0].contains(&a.id)));
 }
 
 

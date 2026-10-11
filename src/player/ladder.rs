@@ -154,6 +154,36 @@ pub struct LadderEntry {
     pub back_turn: Option<bool>,
 }
 
+/// The top entry's side (`StateEntry_Enter` 0xE26D7E–0xE26F23; RE/24 LADDER-23): the target is base + (H − 0.7)·Z
+/// − 0.5·F on the side away from the character (`n`, from `find_ladder`), facing the ladder; a static box there (half 0.3
+/// across, 0.4 along the facing, 1.0 up, centred on the target root, frame [up × −F, −F, up]: `IsBoxFreeOfStatic`
+/// 0xE26EDF) blocked → the facing flips back and the target moves 1 m toward the character: the near side, `−n`.
+pub fn top_entry_side(base: Vec3, top: Vec3, n: Vec3, collision: &CollisionWorld) -> Vec3 {
+    let l = HumanLadderData { base, top, n: Vec3::new(n.x, 0.0, n.z).normalize_or_zero(), ..Default::default() };
+    let target = l.root_at(l.len() - TOP_ENTRY_DROP);
+    let (f, u) = (-l.out(), l.axis());
+    if collision.obb_free(target, [f.cross(u).normalize_or(super::right_of(f)), f, u], Vec3::new(0.3, 0.4, 1.0)) {
+        l.n
+    } else {
+        -l.n
+    }
+}
+
+/// +908 & 0x20 (`Human__ProbeWallTopThickness` 0xB18FB0 from `SetupFromEntryType` 0xE22400: from base + (H − 0.75)·Z
+/// + 1.5·Y back along −Y, 3 m, a wall top's near and far edges with a drop below each; RE/24 LADDER-8). PORT: the roof
+/// edge right behind the ladder's top (a LedgeGrab edge facing out, up to 1 m below the top: the native tops stand
+/// 0.4–0.75 m above their roofs) with a far edge within 1.5 m behind it.
+pub fn wall_top_behind(top: Vec3, n: Vec3, guidance: &GuidanceWorld) -> bool {
+    let n = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    guidance
+        .edges
+        .iter()
+        .filter(|e| e.subtype == GuidanceSubType::LedgeGrab && Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero().dot(n) > 0.9)
+        .map(|e| e.closest_point(top))
+        .filter(|q| (-0.1..=1.0).contains(&(top.y - q.y)) && Vec3::new(q.x - top.x, 0.0, q.z - top.z).length() < 0.6)
+        .any(|q| super::passover::far_edge(q, -n, guidance).is_some_and(|(_, t)| t <= 1.5))
+}
+
 /// `sub_E24FD0` 0xE24FD0 (from `StateEntry_Enter` 0xE26AFB): a static-geometry box at the attach point + 0.95 m up, half
 /// 0.45 across / 0.45 along the facing / 0.35 up in the frame [F × up, F, up], F = the facing toward the ladder; blocked
 /// → the back-approach turn (RE/24 LADDER-4).
@@ -189,6 +219,8 @@ pub struct HumanLadderData {
     pub heading: Vec3,
     /// The jump's push-off direction (horizontal), set when the jump starts.
     pub jump_dir: Vec3,
+    /// The back of the character's facing at the press: the takeoff faces it (`sub_52BD40` 0xE1EC34).
+    pub jump_back: Vec3,
     /// The jump off's target, searched at the press (`sub_E22050` copies it to +800; RE/24 LADDER-12).
     pub jump_target: Option<Option<super::targets::JumpTarget>>,
     /// Playback rate of the running action: 0.5 for a low-profile climb with the stick in the walk band (0xE24540).
@@ -198,6 +230,17 @@ pub struct HumanLadderData {
     pub blend_time: f32,
     /// Independent RootInterp timer (0xE23F70), preserved across action items.
     warp: Option<(Vec3, Vec3, f32, f32, f32, f32)>,
+    /// The running exit's path over its whole action (`HumanLadder__PlayExit` 0xE254C0): its summed item duration, the
+    /// time of the items already played, the ground snap (+728) and the body's pitch at the start.
+    exit: Option<ExitPath>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExitPath {
+    total: f32,
+    before: f32,
+    dz: f32,
+    tilt: Quat,
 }
 
 fn blend(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -211,14 +254,33 @@ fn blend(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
 }
 
 impl HumanLadderData {
-    pub fn len(&self) -> f32 {
-        self.top.y - self.base.y
+    /// The ladder's axis (its frame's Z).
+    pub fn axis(&self) -> Vec3 {
+        (self.top - self.base).normalize_or(Vec3::Y)
     }
-    /// The root on the ladder at `h`.
+    /// LadderHeight: heights are 3D distances along the segment (HeightInLadder, `sub_E211D0`: the root's projection
+    /// on base … base + H·Z; RE/24 LADDER-17).
+    pub fn len(&self) -> f32 {
+        (self.top - self.base).length()
+    }
+    /// The climb frame's out direction: the ladder's Y signed toward the climber, square to the axis (`sub_E212F0` /
+    /// `sub_E21600`); the horizontal `n` on a vertical ladder.
+    pub fn out(&self) -> Vec3 {
+        let a = self.axis();
+        (self.n - a * self.n.dot(a)).normalize_or(self.n)
+    }
+    /// The root on the ladder at `h`: the point on the axis − 0.5·F (`sub_E21600`).
     pub fn root_at(&self, h: f32) -> Vec3 {
-        // along the ladder's line (a leaning ladder: PORT, the body stays upright)
-        let axis = (self.top - self.base).normalize_or(Vec3::Y);
-        self.base + self.n * ATTACH_OUT + axis * (h / axis.y.max(0.1))
+        self.base + self.out() * ATTACH_OUT + self.axis() * h
+    }
+    /// HeightInLadder of a root (`sub_E211D0`).
+    pub fn height_of(&self, p: Vec3) -> f32 {
+        (p - self.base).dot(self.axis())
+    }
+    /// The body's pitch in the ladder frame (F × Z, F, Z): the climb's RequestMoveTo matrix (`sub_E21600` 0xE25F35–
+    /// 0xE25FAB) and the wait's (`AlignRootWhileWaiting` 0xE22704) lean with the ladder (RE/24 LADDER-17).
+    pub fn frame_tilt(&self) -> Quat {
+        Quat::from_rotation_arc(Vec3::Y, self.axis())
     }
     /// `HumanLadder__TiltFromVertical` 0xE1EAC0: the ladder's angle from up.
     pub fn tilt(&self) -> f32 {
@@ -268,11 +330,48 @@ impl HumanLadderData {
         self.play(LadderPhase::Wait, blend(WAIT[self.high as usize][self.foot], 0, &[]), p, p, false);
     }
 
+    /// `HumanLadder__PlayExit` 0xE254C0: the exit by the lower foot, ReachedBottom → the ground exit, else the top exit
+    /// (the high one in high profile without a wall top, +908 & 0x20; RE/24 LADDER-8). Its root is the clip's own
+    /// motion from the current root (start matrix +592; correction +720 = 0) plus a vertical snap: a ray from the whole
+    /// action's end + 0.5 m to 0.7 m below it (0xE2577F–0xE257DD) sets only +728 = hit − end, applied linearly over the
+    /// action (`sub_E1F280` → `sub_E1EF50` rates 1.0 / 1.0) until its last item ends; the body turns upright to the
+    /// character's flat facing (0xE256D6–0xE256E4) over the same span (RE/24 LADDER-10).
+    fn play_exit(&mut self, top: bool, from: Vec3, collision: &CollisionWorld) {
+        let (phase, id) = if top {
+            (LadderPhase::ExitTop(0), EXIT_TOP[(self.high && !self.thick_top.unwrap_or(false)) as usize][self.foot])
+        } else {
+            (LadderPhase::ExitGround, EXIT_GROUND[self.high as usize][self.foot])
+        };
+        let items: Vec<ActionBlend> = (0..).map_while(|i| blend(id, i, &[])).collect();
+        let w = self.exit_frame();
+        let end = from + items.iter().map(|a| w(a.disp(1.0))).sum::<Vec3>();
+        let dz = collision.floor_height_below(end + Vec3::Y * 0.5, 1.2).map_or(0.0, |y| y - end.y);
+        let total = items.iter().map(|a| a.duration()).sum::<f32>().max(1e-3);
+        self.exit = Some(ExitPath { total, before: 0.0, dz, tilt: self.frame_tilt() });
+        self.play_exit_item(phase, items.first().copied(), from);
+    }
+
+    /// The exit frame: the root's at the exit's start (the ladder frame).
+    fn exit_frame(&self) -> impl Fn([f32; 3]) -> Vec3 + use<> {
+        let (f, u) = (-self.out(), self.axis());
+        let r = f.cross(u).normalize_or(super::right_of(f));
+        move |d: [f32; 3]| r * d[0] + f * d[1] + u * d[2]
+    }
+
+    /// One item of the exit: its clip motion plus its share of the snap.
+    fn play_exit_item(&mut self, phase: LadderPhase, a: Option<ActionBlend>, from: Vec3) {
+        let Some(x) = self.exit else { return };
+        let w = self.exit_frame();
+        let d = a.map_or(0.0, |a| a.duration());
+        let to = from + a.map_or(Vec3::ZERO, |a| w(a.disp(1.0))) + Vec3::Y * (x.dz * d / x.total);
+        self.play(phase, a, from, to, true);
+    }
+
     /// `sub_E1D730` / `HumanLadder__EnterRevolve` 0xE219D0: the revolve's first item, its root motion in the facing frame
     /// with a correction onto the far side.
     fn start_revolve(&mut self, right: bool, from: Vec3) {
         let a = blend(REVOLVE[right as usize], 0, &[]);
-        let far = self.base + (-self.n) * ATTACH_OUT + (self.root_at(self.height) - self.base - self.n * ATTACH_OUT);
+        let far = self.root_at(self.height) - self.out() * (2.0 * ATTACH_OUT);
         self.fwd = -self.n;
         self.play(LadderPhase::Revolve(0), a, from, far, a.is_some());
     }
@@ -280,6 +379,7 @@ impl HumanLadderData {
     /// `HumanLadder__StateEntry_Enter` 0xE266D0.
     pub fn enter(&mut self, e: LadderEntry) {
         self.warp = None;
+        self.exit = None;
         self.thick_top = None;
         self.reached_top = false;
         self.blend_time = 0.1;
@@ -293,7 +393,7 @@ impl HumanLadderData {
         let hi = e.high as usize;
         if e.from_ledge {
             // the side move's clip ends in the ladder wait (`…_tr_l_ladder_wait_{l,r}`): wait where it left the root
-            self.height = e.height.unwrap_or(e.from.y - e.base.y).clamp(0.0, self.len());
+            self.height = e.height.unwrap_or_else(|| self.height_of(e.from)).clamp(0.0, self.len());
             self.chain = e.chain;
             let w: &[f32] = if e.w.iter().any(|x| *x > 0.0) { &e.w } else { &[] };
             match e.action.and_then(|id| blend(id, e.item, w)) {
@@ -302,7 +402,7 @@ impl HumanLadderData {
                     self.play(LadderPhase::Entry, Some(a), e.from, p, false);
                     if crate::tuning::AIR_CATCHES && matches!(a.id, CATCH_AIR | ARRIVE_TARGET) {
                         let out = e.catch_out.unwrap_or(self.n);
-                        let to = self.base + Vec3::Y * self.height + out * ATTACH_OUT;
+                        let to = self.base + self.axis() * self.height + out * ATTACH_OUT;
                         // 0x724DB0: the shipped catch item's blend kind is NONE, so only this item's
                         // duration is returned (DataPC ActionBlock HumanInAir, 0x156D623E).
                         let duration = if a.id == CATCH_AIR { a.duration() + 0.2 } else { 0.2 };
@@ -329,7 +429,7 @@ impl HumanLadderData {
             // the attach rung (`sub_E1F8E0` 0xE1F95D–0xE1F984): the nearest 0.5 m rung to the root's height, below the
             // ladder's height − 1.95 m; high profile 0.5 m higher (0xE26AB5–0xE26AE2, RE/24 LADDER-5). PORT: the buried
             // base (`sub_E25B20`) is not measured
-            let h_in = (e.from.y - e.base.y).max(0.0);
+            let h_in = self.height_of(e.from).max(0.0);
             let k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
             self.height = 0.5 * k + if e.high { 0.5 } else { 0.0 };
             let to = self.root_at(self.height);
@@ -429,8 +529,8 @@ pub fn find_wall_run_ladder(feet: Vec3, stick: Vec3, guidance: &GuidanceWorld) -
 /// `sub_E240B0` (the top of the ladder is free to climb off): two boxes must be empty — top + 0.65 m up and 0.25 m out
 /// (half 0.3 across, 0.25 along, 0.65 up), and top + 0.9 m up and 0.35 m in over it (0.3 / 0.35 / 0.4). With either one
 /// blocked the climb stops at the top (ReachedTop, `sub_E1D490`, and the input value is zeroed in `sub_E24540`).
-/// PORT: the port's ladder lines lie on the wall face and its tops on the wall top, so each box is 1 cm smaller (a box
-/// touching the wall counts as blocked).
+/// PORT: the port's ladder lines lie on the wall face, so each box is 1 cm smaller (a box touching the wall counts as
+/// blocked).
 pub fn top_exit_free(top: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     let f = -n;
     let axes = [super::right_of(f), f, Vec3::Y];
@@ -447,8 +547,7 @@ pub fn top_exit_free(top: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
 ///   ladder's own height); the character faces the ladder within 90° (−forward against the closest point → root); the
 ///   ladder's side is not tested (LADDER-3: the climb frame is signed toward the climber);
 /// - from the top when the root is within 1.5 m of the top's height.
-/// Returns (base, top, the outward normal on the climber's side, from the top). PORT: the head is the feet + 1.7 m; the
-/// top entry keeps the guidance normal (its far-side target, LADDER-23, is not ported).
+/// Returns (base, top, the outward normal on the climb side, from the top). PORT: the head is the feet + 1.7 m.
 pub fn find_ladder(feet: Vec3, stick: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3, Vec3, bool)> {
     const REACH: f32 = 0.6;
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
@@ -487,8 +586,10 @@ pub fn find_ladder(feet: Vec3, stick: Vec3, forward: Vec3, guidance: &GuidanceWo
             continue;
         }
         let from_top = (feet.y - top.y).abs() <= TOP_ENTRY_BAND;
+        // the climb side: toward the climber from the foot (LADDER-3), away from him from the top (LADDER-23,
+        // 0xE26DDD–0xE26DE7: the side opposite the character's, `top_entry_side` then tests its box)
         let mut n = flat(e.n1).normalize_or_zero();
-        if !from_top && away.dot(n) < 0.0 {
+        if (away.dot(n) < 0.0) != from_top && away.length() > 1e-4 {
             n = -n;
         }
         return Some((base, top, n, from_top));
@@ -632,7 +733,11 @@ pub fn update_ladder(
         let p = if l.follow {
             let d = l.action.map(|a| a.disp(k)).unwrap_or([0.0; 3]);
             let dend = l.action.map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
-            let w = |d: [f32; 3]| super::right_of(l.fwd) * d[0] + l.fwd * d[1] + Vec3::Y * d[2];
+            // the frame: the character's upright start frame for the ground entry (+592, RE/24 LADDER-6) and the revolve,
+            // else the ladder frame (F × Z, F, Z) the root holds on the ladder (`sub_E21600`; RE/24 LADDER-17)
+            let (f, u) = if matches!(phase, LadderPhase::EnterGround | LadderPhase::Revolve(_)) { (l.fwd, Vec3::Y) } else { (-l.out(), l.axis()) };
+            let r = f.cross(u).normalize_or(super::right_of(f));
+            let w = |d: [f32; 3]| r * d[0] + f * d[1] + u * d[2];
             // the ground entry drives the correction by min(2s, 1) (`sub_E1EF50`; RE/24 LADDER-6), the others linearly
             let c = if phase == LadderPhase::EnterGround { (2.0 * k).min(1.0) } else { k };
             l.from + w(d) + (l.to - (l.from + w(dend))) * c
@@ -663,6 +768,18 @@ pub fn update_ladder(
                 body.heading = super::heading_of(l.fwd) + a.yaw(k);
             }
         }
+        // the body's pitch (RE/24 LADDER-17): the ladder frame on the ladder; the ground entry slerps into it by min(2s, 1)
+        // (+656 = the ladder frame, `sub_E1EF50`); the exits slerp out of it to the flat facing over the whole action
+        // (0xE256D6); the revolve stays upright (PORT: its root frame on a leaning ladder is not decoded)
+        body.tilt = match phase {
+            LadderPhase::EnterGround => Quat::IDENTITY.slerp(l.frame_tilt(), (2.0 * k).min(1.0)),
+            LadderPhase::ExitTop(_) | LadderPhase::ExitGround => match l.exit {
+                Some(x) => x.tilt.slerp(Quat::IDENTITY, ((x.before + l.t) / x.total).min(1.0)),
+                None => Quat::IDENTITY,
+            },
+            LadderPhase::Revolve(_) => Quat::IDENTITY,
+            _ => l.frame_tilt(),
+        };
 
         // The interpreter's ladder state (`GoAssassinActionInterpreter__LadderState` 0xEEB570): above the 0.35 dead
         // zone, a stick within 60° of the facing axis (|dot(d, right)| ≤ 0.866) asks to climb (IHumanLadder slot 0, ±up:
@@ -676,6 +793,48 @@ pub fn update_ladder(
         let along = if vertical { if sd.dot(fwd) >= 0.0 { 1.0 } else { -1.0 } } else { 0.0 };
         let hi = l.high as usize;
         let mut leave: Option<TransitionSetup> = None;
+        // events 0 / 1 reach the climb sub-state (6) and the revolve sub-state (7: `HumanLadder__MainB_HandleEvent`
+        // 0xE1F760 / `sub_E23860`, the same release fill and jump; RE/24 LADDER-15)
+        if matches!(phase, LadderPhase::Wait | LadderPhase::ClimbUp | LadderPhase::ClimbDown | LadderPhase::Revolve(_)) {
+            // QuickDrop (event 0, slots 6 / 7): the empty-hand button (interp +0x1129), on a ladder within 30° of
+            // vertical (`sub_E1EAC0`) → the release (MvtAnimState 15 / 16), its action as the fall's animation
+            if pad.hand_buffered() && l.tilt() < 30f32.to_radians() {
+                pad.consume_hand();
+                // always the low-profile release (+908 0x10 → `sub_E1D670`: 158 + incl + 2·lowerFoot, 0xE1D6AF; RE/24
+                // LADDER-11)
+                let fall = blend(RELEASE[0][l.foot], 0, &[]);
+                let from = body.feet;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
+                data.air.fall_action = fall;
+                continue;
+            }
+            // Jump off (event 1, slots 4 / 5): high profile, the Legs buffer (+0x1126) and a push-off direction: the
+            // stick, or straight back with no stick (the back of the character's facing); more than 135° from straight
+            // back (into the ladder) → none, 90°–135° → turned to ±89°. The target is searched at the press (IHuman vt56
+            // + the scorer, else the Leap of Faith vt76, else the free target vt68) and stored for the clip's end
+            // (`sub_E22050` / `sub_E220F0`; RE/24 LADDER-12).
+            if pad.high_profile && pad.jump_buffered() {
+                let back = -body.forward();
+                let d = if stick { Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or(back) } else { back };
+                let a = back.angle_between(d);
+                if a <= 135f32.to_radians() {
+                    let d = if a > std::f32::consts::FRAC_PI_2 {
+                        let side = if back.cross(d).y >= 0.0 { 1.0 } else { -1.0 };
+                        Quat::from_rotation_y(1.553_343_1 * side) * back
+                    } else {
+                        d
+                    };
+                    pad.consume_jump();
+                    l.jump_dir = d;
+                    l.jump_back = back;
+                    l.jump_target = Some(super::targets::find_jump_target(body.feet, d, &guidance, &collision));
+                    let a = blend(JUMP[l.foot], 0, &[]);
+                    let from = body.feet;
+                    l.play(LadderPhase::Jump, a, from, from, true);
+                    continue;
+                }
+            }
+        }
         match phase {
             LadderPhase::EnterGround | LadderPhase::Entry => {
                 if done {
@@ -721,11 +880,12 @@ pub fn update_ladder(
                 }
             }
             LadderPhase::Wait | LadderPhase::ClimbUp | LadderPhase::ClimbDown => {
-                // `HumanLadder__TryTurn` 0xE26440 (every frame of the climb state): on a ladder leaning 10° or more over
-                // the climber (its up axis against the facing), the revolve to the top side when there is room to the
-                // left (else the right), otherwise flag +908 0x40 → the release (0xE21E80)
+                // `HumanLadder__TryTurn` 0xE26440 (every frame of the climb state, mid-step too: `StateClimb_Update`
+                // 0xE27540; RE/24 LADDER-15): on a ladder leaning 10° or more over the climber (its up axis against the
+                // facing), the revolve to the top side when there is room to the left (else the right), otherwise flag
+                // +908 0x40 → the release (0xE21E80)
                 let up = (l.top - l.base).normalize_or(Vec3::Y);
-                if l.tilt() >= 10f32.to_radians() && up.dot(fwd) < 0.0 && !(matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done) {
+                if l.tilt() >= 10f32.to_radians() && up.dot(fwd) < 0.0 {
                     let side = [false, true].into_iter().find(|&r| revolve_room(body.feet, fwd, r, &collision));
                     match side {
                         Some(right) => {
@@ -750,73 +910,45 @@ pub fn update_ladder(
                         continue;
                     }
                 }
-                // QuickDrop (event 0, slots 6 / 7): the empty-hand button (interp +0x1129), on a ladder within 30° of
-                // vertical (`sub_E1EAC0`) → the release (MvtAnimState 15 / 16), its action as the fall's animation
-                if pad.hand_buffered() && (l.top - l.base).normalize_or(Vec3::Y).y > (30f32).to_radians().cos() {
-                    pad.consume_hand();
-                    // always the low-profile release (+908 0x10 → `sub_E1D670`: 158 + incl + 2·lowerFoot, 0xE1D6AF; RE/24
-                    // LADDER-11)
-                    let fall = blend(RELEASE[0][l.foot], 0, &[]);
-                    let from = body.feet;
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
-                    data.air.fall_action = fall;
-                    continue;
-                }
-                // Jump off (event 1, slots 4 / 5): high profile, the Legs buffer (+0x1126) and a push-off direction: the
-                // stick, or straight back with no stick; more than 135° from straight back (into the ladder) → none,
-                // 90°–135° → turned to ±89°. The target is searched at the press (IHuman vt56 + the scorer, else the Leap
-                // of Faith vt76, else the free target vt68) and stored for the clip's end (`sub_E22050`; RE/24 LADDER-12).
-                if pad.high_profile && pad.jump_buffered() {
-                    let back = l.n;
-                    let d = if stick { Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or(back) } else { back };
-                    let a = back.angle_between(d);
-                    if a <= 135f32.to_radians() {
-                        let d = if a > std::f32::consts::FRAC_PI_2 {
-                            let side = if back.cross(d).y >= 0.0 { 1.0 } else { -1.0 };
-                            Quat::from_rotation_y(1.553_343_1 * side) * back
-                        } else {
-                            d
-                        };
-                        pad.consume_jump();
-                        l.jump_dir = d;
-                        l.jump_target = Some(super::targets::find_jump_target(body.feet, d, &guidance, &collision));
-                        let a = blend(JUMP[l.foot], 0, &[]);
-                        let from = body.feet;
-                        l.play(LadderPhase::Jump, a, from, from, true);
-                        continue;
-                    }
-                }
-                // the step in progress finishes first
                 let stepping = matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done;
-                // +908 & 0x20 (`Human__ProbeWallTopThickness`: from 1.5 m out at the top back along the ladder, 3 m, a
-                // wall top's near and far edges with a drop below each). PORT: a far edge within 1.5 m behind the top
-                let thick_top = *l.thick_top.get_or_insert_with(|| super::passover::far_edge(l.top, -l.n, &guidance).is_some_and(|(_, t)| t <= 1.5));
+                let thick_top = *l.thick_top.get_or_insert_with(|| wall_top_behind(l.top, l.n, &guidance));
                 // ReachedTop / ReachedBottom (`UpdateReachedTopBottom` 0xE1D490) on the continuous height while climbing,
                 // and the exits posted every frame (LadderState 0xEEBF87, events 2 / 3): mid-step too (RE/24 LADDER-9).
                 // The top margin: 1.63 m in low profile or with a wall top (0x20), else 1.95 m (LADDER-8)
                 let margin = if !l.high || thick_top { 1.63 } else { 1.95 };
                 let len = l.len();
-                let h_now = body.feet.y - l.base.y;
+                let h_now = l.height_of(body.feet);
                 if stepping && phase == LadderPhase::ClimbUp && h_now + margin >= len && top_exit_free(l.top, l.n, &collision) {
-                    let hi = (l.high && !thick_top) as usize;
-                    let from = body.feet;
-                    let top_feet = l.top - l.n * 0.5;
-                    let end = if hi == 1 { from + Vec3::Y * 1.0 } else { top_feet };
-                    l.play(LadderPhase::ExitTop(0), blend(EXIT_TOP[hi][l.foot], 0, &[]), from, end, true);
+                    l.play_exit(true, body.feet, &collision);
                     continue;
                 }
                 if stepping && phase == LadderPhase::ClimbDown && (h_now <= 0.0 || collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_some()) {
-                    let hi = l.high as usize;
-                    let from = body.feet;
-                    let to = l.root_at(0.0);
-                    let floor = collision.ground_height(to + Vec3::Y * 0.3, 0.6).unwrap_or(to.y);
-                    l.play(LadderPhase::ExitGround, blend(EXIT_GROUND[hi][l.foot], 0, &[]), from, Vec3::new(to.x, floor, to.z), true);
+                    l.play_exit(false, body.feet, &collision);
+                    continue;
+                }
+                // the low profile reverses mid-step: `HumanLadder__ChooseClimbAnim` switches up ↔ down at once (MvtAnimState
+                // 3 → 2 at 0xE249B9, 2 → 3 at 0xE24A88); the high profile only on the item's flag (+42 & 4) or its end
+                // (RE/24 LADDER-15). The other clip back to the rung the step left, on the other foot. PORT: the item and
+                // its start point come from the action graph's transitions (Anim__PlayAction(id, 0, 0, −1)); the high
+                // profile's flag is not read, its steps finish
+                if stepping && !l.high && ((phase == LadderPhase::ClimbUp && along < -0.5) || (phase == LadderPhase::ClimbDown && along > 0.5)) {
+                    let up = along > 0.5;
+                    let rate = if pad.band <= 1 { 0.5 } else { 1.0 };
+                    l.foot ^= 1;
+                    l.height = (l.height + if up { 0.5 } else { -0.5 }).clamp(0.0, len);
+                    if !up {
+                        l.reached_top = false;
+                    }
+                    let (from, to) = (body.feet, l.root_at(l.height));
+                    let id = if up { CLIMB_UP[0] } else { CLIMB_DOWN[0] };
+                    l.play(if up { LadderPhase::ClimbUp } else { LadderPhase::ClimbDown }, blend(id, l.foot, &[]), from, to, true);
+                    l.rate = rate;
                     continue;
                 }
                 // the sideways move (event 4, slots 14 / 15): the stick within 20° of the side (|dot(d, facing)| <
-                // 0.342, 0xEEBED9), the Climb ability; posted only while no step runs (PORT: the event queue between
-                // the main state's sub-states is not modelled)
-                if !stepping && stick && sd.dot(fwd).abs() < 0.342 && ab.allows(super::abilities::Ability::Climb) {
+                // 0.342, 0xEEBED9), the Climb ability; the climb sub-state takes it at any time, mid-step too (`sub_E1FC80`
+                // has no MvtAnimState test; RE/24 LADDER-15)
+                if stick && sd.dot(fwd).abs() < 0.342 && ab.allows(super::abilities::Ability::Climb) {
                     let right = sd.dot(super::right_of(fwd)) >= 0.0;
                     // `HumanLadder__FindSideJump` 0xE228E0 carves the ladder zones out of its query (`sub_1170880` at 0xE22C81;
                     // no steep removal; RE/24 GUIDE-2)
@@ -871,13 +1003,8 @@ pub fn update_ladder(
                     } else if along > 0.5 {
                         let step = if l.high { 1.0 } else { 0.5 };
                         if reached_top {
-                            // exit to the top (13 / 14): the high exit only in high profile without a wall top (`PlayExit`
-                            // 0xE254C0); it ends on the top, 0.5 m in from the edge
-                            let hx = (l.high && !thick_top) as usize;
-                            let from = body.feet;
-                            let top_feet = Vec3::new(l.top.x, l.top.y, l.top.z) - l.n * 0.5;
-                            let end = if hx == 1 { from + Vec3::Y * 1.0 } else { top_feet };
-                            l.play(LadderPhase::ExitTop(0), blend(EXIT_TOP[hx][l.foot], 0, &[]), from, end, true);
+                            // exit to the top (13 / 14)
+                            l.play_exit(true, body.feet, &collision);
                         } else {
                             let from = l.root_at(l.height);
                             l.height = (l.height + step).min(len);
@@ -889,10 +1016,7 @@ pub fn update_ladder(
                         let step = if l.high { 1.0 } else { 0.5 };
                         if l.height - step < -0.01 {
                             // exit to the ground (11 / 12)
-                            let from = body.feet;
-                            let to = l.root_at(0.0);
-                            let floor = collision.ground_height(to + Vec3::Y * 0.3, 0.6).unwrap_or(to.y);
-                            l.play(LadderPhase::ExitGround, blend(EXIT_GROUND[hi][l.foot], 0, &[]), from, Vec3::new(to.x, floor, to.z), true);
+                            l.play_exit(false, body.feet, &collision);
                         } else {
                             let from = l.root_at(l.height);
                             l.height -= step;
@@ -922,22 +1046,17 @@ pub fn update_ladder(
                     l.wait();
                 }
             }
-            LadderPhase::ExitTop(i) => {
+            LadderPhase::ExitTop(_) | LadderPhase::ExitGround => {
                 if done {
-                    if l.high && i == 0 {
-                        if let Some(a) = blend(EXIT_TOP[hi][l.foot], 1, &[]) {
-                            let from = body.feet;
-                            let top_feet = l.top - l.n * 0.5;
-                            l.play(LadderPhase::ExitTop(1), Some(a), from, top_feet, true);
-                            continue;
+                    // the action's next item (the high top exit's b), until its last item ends (`sub_E1F280`)
+                    if let Some(a) = l.action.and_then(|a| blend(a.id, a.item + 1, &[])) {
+                        if let Some(x) = l.exit.as_mut() {
+                            x.before += dur;
                         }
+                        let next = match phase { LadderPhase::ExitTop(i) => LadderPhase::ExitTop(i + 1), p => p };
+                        l.play_exit_item(next, Some(a), body.feet);
+                        continue;
                     }
-                    body.grounded = true;
-                    leave = Some(TransitionSetup::ToMovement { landing: None });
-                }
-            }
-            LadderPhase::ExitGround => {
-                if done {
                     body.grounded = true;
                     leave = Some(TransitionSetup::ToMovement { landing: None });
                 }
@@ -949,7 +1068,7 @@ pub fn update_ladder(
                     let from = body.feet;
                     let dir = l.jump_dir.normalize_or(l.n);
                     let target = l.jump_target.take().flatten();
-                    body.heading = super::heading_of(l.n);
+                    body.heading = super::heading_of(l.jump_back.normalize_or(l.n));
                     leave = Some(TransitionSetup::ToInAir(InAirEntry::ReboundJump { from, target, dir, foot_left: l.foot == 0 }));
                 }
             }
@@ -963,6 +1082,22 @@ pub fn update_ladder(
 #[cfg(test)]
 mod catch_tests {
     use super::*;
+    /// RE/24 LADDER-23: from the top the climb side is the one away from the character, unless its box is blocked.
+    #[test]
+    fn the_top_entry_takes_the_far_side_unless_its_box_is_blocked() {
+        use crate::collision::Aabb3;
+        use crate::guidance::GuidanceEdge;
+        let (base, top) = (Vec3::ZERO, Vec3::Y * 5.5);
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: base, p1: top, n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::Ladder });
+        // at the top's height on the guidance front (-Z), facing the ladder
+        let (_, _, n, from_top) = find_ladder(Vec3::new(0.0, 5.0, -0.5), Vec3::Z, Vec3::Z, &g).expect("the ladder");
+        assert!(from_top && n.dot(Vec3::Z) > 0.99, "the side away from the character: {n:?}");
+        assert_eq!(top_entry_side(base, top, n, &CollisionWorld::default()), n);
+        let mut wall = CollisionWorld::default();
+        wall.boxes.push(Aabb3 { min: Vec3::new(-1.0, 0.0, 0.05), max: Vec3::new(1.0, 5.0, 2.0) });
+        assert_eq!(top_entry_side(base, top, n, &wall), -n, "blocked: the near side");
+    }
     #[test]
     fn rung_truncation_has_no_epsilon_and_strict_top_limit() {
         assert_eq!(catch_height(0.49999,5.0),None);
