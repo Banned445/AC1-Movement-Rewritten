@@ -39,10 +39,16 @@ impl Sim {
             .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
             .insert_resource(SpawnPoint(SPAWN))
             .init_resource::<CameraRig>()
-            .add_systems(Update, (crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
+            .add_systems(Update, ((crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain(), crate::anim::headless_animation_systems()).chain());
         let (c, g) = level::geometry();
         app.insert_resource(c).insert_resource(g);
+        // the animation runs as in the game when the install is found (the player's BonePose; bone positions in the
+        // simulation, phase 2)
+        let animated = crate::bone_pose::add_headless_animation(&mut app);
         let player = app.world_mut().spawn(player_components(feet, heading)).id();
+        if animated {
+            app.world_mut().entity_mut(player).insert(crate::anim::AnimPlayer::default());
+        }
         Sim { app, player, saw_air: false, cam_follow: true }
     }
 
@@ -109,6 +115,32 @@ impl Sim {
         }
         false
     }
+}
+
+/// Bone positions in the simulation (phase 2): with the install the tests' simulation animates the player as the game
+/// does, so its bones follow the moves: walking swings the feet, and the hands sit about shoulder-high off the ground.
+#[test]
+fn the_simulation_animates_the_player_with_the_install() {
+    use crate::bone_pose::{BonePose, PoseSkeleton, LEFT_FOOT, RIGHT_FOOT, RIGHT_HAND};
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    let mut gap = Vec::new();
+    for _ in 0..90 {
+        s.run(1.0 / 60.0 + 1e-4);
+        let (pose, skel, b) = (s.app.world().get::<BonePose>(s.player).unwrap(), s.app.world().resource::<PoseSkeleton>(), s.body());
+        let (l, r) = (pose.world_pos(skel, LEFT_FOOT, b).unwrap(), pose.world_pos(skel, RIGHT_FOOT, b).unwrap());
+        gap.push((l - r).dot(b.forward()));
+        let hand = pose.world_pos(skel, RIGHT_HAND, b).unwrap();
+        assert!((0.5..1.6).contains(&(hand.y - b.feet.y)), "the hand {hand} over the feet {}", b.feet);
+    }
+    let seq = s.app.world().get::<BonePose>(s.player).unwrap().seq;
+    assert!(seq >= 90, "posed every frame: {seq}");
+    // the feet change lead while walking
+    assert!(gap.iter().any(|g| *g > 0.1) && gap.iter().any(|g| *g < -0.1), "feet lead {gap:?}");
 }
 
 #[test]

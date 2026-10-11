@@ -63,6 +63,24 @@ pub fn load_pose_skeleton(mut skel: ResMut<PoseSkeleton>) {
     }
 }
 
+/// One skeleton per process for the runs without the renderer (tests, replays). None without the install.
+pub fn shared_pose_skeleton() -> Option<PoseSkeleton> {
+    static SKEL: std::sync::OnceLock<Option<PoseSkeleton>> = std::sync::OnceLock::new();
+    SKEL.get_or_init(|| crate::assets::altair::load_skeleton(&crate::assets::game_dir()).ok().map(|b| PoseSkeleton::from_bones(&b))).clone()
+}
+
+/// Readies a schedule without the renderer (the tests' `Sim`, the replays, `CitySim`) for the animation: inserts the
+/// shared library and skeleton (empty ones without the install). The harness chains `anim::headless_animation_systems`
+/// after its contexts, so the player's `BonePose` follows its actions as in the game. Returns whether the install was
+/// found: give the player an `AnimPlayer` only then. `AC_SIM_NO_ANIM=1` keeps the runs without animation (to compare).
+pub fn add_headless_animation(app: &mut App) -> bool {
+    let shared = if std::env::var_os("AC_SIM_NO_ANIM").is_some() { None } else { crate::anim::shared_library().zip(shared_pose_skeleton()) };
+    let on = shared.is_some();
+    let (lib, skel) = shared.unwrap_or_default();
+    app.insert_resource(lib).insert_resource(skel);
+    on
+}
+
 /// The player's pose of the last animation step: each bone's local transform, the skeleton root's transform in the
 /// player's space, and each bone in the player's space (forward kinematics). Written by `anim::animate_pose`; the
 /// renderer copies `locals` and `root` onto its joints.

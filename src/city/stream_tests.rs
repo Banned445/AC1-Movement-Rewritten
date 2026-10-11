@@ -89,7 +89,12 @@ impl CitySim {
             .add_systems(Update, (super::update_city, crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,
                 crate::player::air::update_air, crate::player::ledge::update_ledge, crate::player::climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk,
                 crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, super::hold_player).chain());
+        app.add_systems(Update, crate::anim::headless_animation_systems().after(super::hold_player));
+        let animated = crate::bone_pose::add_headless_animation(&mut app);
         let player = app.world_mut().spawn((crate::player::player_components(prepared.spawn, prepared.heading), Transform::default())).id();
+        if animated {
+            app.world_mut().entity_mut(player).insert(crate::anim::AnimPlayer::default());
+        }
         app.world_mut().run_system_once_with(super::spawn, prepared).unwrap();
         app.update();
         Some(Self { app, player })

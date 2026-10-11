@@ -8,6 +8,7 @@
 //! space (Z-up, facing +Y, feet at 0) to Bevy space.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy::prelude::*;
 
@@ -105,14 +106,16 @@ pub fn contact_bits(keys: &[(f32, u8)], t: f32) -> u8 {
     keys[i.saturating_sub(1)].1
 }
 
-#[derive(Resource, Default)]
+/// The clips and the action graph from the install. The tables are shared (`Arc`): the headless runs clone one load
+/// per process (`shared_library`).
+#[derive(Resource, Default, Clone)]
 pub struct AnimLibrary {
-    pub clips: HashMap<String, AnimClip>,
-    pub graph: ActionGraph,
+    pub clips: Arc<HashMap<String, AnimClip>>,
+    pub graph: Arc<ActionGraph>,
     /// Body-part channels and the bones of each part (from the install).
     pub body: crate::assets::body_parts::BodyParts,
     /// Animation resource id → resource (clip) name.
-    pub anim_names: HashMap<u32, String>,
+    pub anim_names: Arc<HashMap<u32, String>>,
     pub status: String,
 }
 
@@ -1506,8 +1509,24 @@ fn load_library(mut lib: ResMut<AnimLibrary>) {
     if std::env::var_os("AC_NO_MODEL").is_some() {
         return;
     }
+    match library_from_install() {
+        Ok(l) => {
+            *lib = l;
+            info!("{}", lib.status);
+        }
+        Err(e) => {
+            lib.status = format!("anims: not loaded ({e})");
+            warn!("{}", lib.status);
+        }
+    }
+}
+
+/// The clips, the graph and the body parts from the install.
+fn library_from_install() -> Result<AnimLibrary, String> {
+    let mut lib = AnimLibrary::default();
     match load_locomotion(&game_dir()) {
         Ok((raw, graph, names)) => {
+            let mut clips = HashMap::new();
             for c in raw {
                 let rotations = c.rotations.into_iter().map(|(k, v)| (k, v.into_iter().map(|(t, q)| (t, Quat::from_array(q).normalize())).collect())).collect();
                 let translations: HashMap<u32, Vec<(f32, Vec3)>> =
@@ -1517,22 +1536,33 @@ fn load_library(mut lib: ResMut<AnimLibrary>) {
                     .and_then(|k| Some((k.first()?.1, k.last()?.1)))
                     .map(|(a, b)| (b - a).length() / c.duration.max(1e-3))
                     .unwrap_or(0.0);
-                lib.clips.insert(c.name.clone(), AnimClip { name: c.name, duration: c.duration, rotations, translations, root_speed, contacts: c.contacts, events: c.events });
+                clips.insert(c.name.clone(), AnimClip { name: c.name, duration: c.duration, rotations, translations, root_speed, contacts: c.contacts, events: c.events });
             }
-            lib.status = format!("anims: {} clips, {} graph actions from your install", lib.clips.len(), graph.actions.len());
-            lib.graph = graph;
-            lib.anim_names = names;
+            lib.status = format!("anims: {} clips, {} graph actions from your install", clips.len(), graph.actions.len());
+            lib.clips = Arc::new(clips);
+            lib.graph = Arc::new(graph);
+            lib.anim_names = Arc::new(names);
             match crate::assets::body_parts::load_body_parts(&game_dir()) {
                 Ok(b) => lib.body = b,
                 Err(e) => warn!("body parts not loaded: {e}"),
             }
-            info!("{}", lib.status);
+            Ok(lib)
         }
-        Err(e) => {
-            lib.status = format!("anims: not loaded ({e})");
-            warn!("{}", lib.status);
-        }
+        Err(e) => Err(e),
     }
+}
+
+/// One library per process for the runs without the renderer (tests, replays): loaded on first use, then cloned
+/// (its tables are shared). None without the install.
+pub fn shared_library() -> Option<AnimLibrary> {
+    static LIB: std::sync::OnceLock<Option<AnimLibrary>> = std::sync::OnceLock::new();
+    LIB.get_or_init(|| library_from_install().ok()).clone()
+}
+
+/// The clip choice and the animation step, for a schedule without the renderer: the player's `BonePose` follows its
+/// actions as in the game (the rig writer `apply_clip` and IK are the renderer's).
+pub fn headless_animation_systems() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+    (choose_clip, animate_pose).chain().into_configs()
 }
 
 #[cfg(test)]
@@ -1547,7 +1577,7 @@ mod tests {
     fn a_repeated_item_runs_its_clips_that_many_times() {
         // RE/24 ANIM-6: a repeated item lasts its clips' length times its repeat count and runs its clips that many times
         let mut lib = AnimLibrary::default();
-        lib.clips.insert("c".into(), AnimClip { name: "c".into(), duration: 0.5, ..Default::default() });
+        Arc::make_mut(&mut lib.clips).insert("c".into(), AnimClip { name: "c".into(), duration: 0.5, ..Default::default() });
         let it = ItemPlay { layers: vec![("c".into(), 1.0)], repeat: 4, ..Default::default() };
         assert!((lib.item_duration(&it) - 2.0).abs() < 1e-6);
         assert!((it.clip_phase(0.3) - 0.2).abs() < 1e-5, "the second run, 0.2 in");
@@ -1639,7 +1669,7 @@ mod tests {
             return;
         }
         let (_, graph, _) = load_locomotion(&dir).expect("graph");
-        let lib = AnimLibrary { graph, ..Default::default() };
+        let lib = AnimLibrary { graph: Arc::new(graph), ..Default::default() };
         let item = |action: u32| {
             let it = &lib.graph.actions[&action].items[0];
             ItemPlay { layers: Vec::new(), blend: it.blend, root_motion: false, action, transitions: it.transitions.clone(), word: it.flags, repeat: it.repeat }
