@@ -1190,17 +1190,35 @@ pub fn hang_boxes_free(collision: &crate::collision::CollisionWorld, root: Vec3,
 /// passes its side, −1 if a moving side goes left, +1 if right).
 fn try_move_clear(grid: &HoldGrid, d: &HumanClimbData, collision: &crate::collision::CollisionWorld, m: (usize, Side, i32, i32), long: bool) -> Option<(usize, [Option<(Hold, Hold)>; 2])> {
     let (next, sides) = try_move(grid, d.pose, m)?;
-    let mut holds = [d.hand_l, d.hand_r, d.foot_l, d.foot_r];
+    let side = if long { m.2.signum() } else { 0 };
+    body_boxes_free(collision, &move_pose(grid, d, m), side).then_some((next, sides))
+}
+
+/// `HumanClimb__ComputeRootFromMove` 0xDEC6E0: the target pose from the grid cells of all four limbs, the non-moving side's
+/// too (its pose cell; the moving sides' cell + the entry's offset; hands two rows up); an empty cell takes the other
+/// side's cell (0xDEC80A / 0xDEC94F / 0xDECA7A / 0xDECBA2). The limbs' IK targets are not changed by it (StartMove
+/// 0xDFA3B2..0xDFA610) (RE/24 CLIMB-15). PORT: a limb with no cell on either side keeps its current hold.
+fn move_pose(grid: &HoldGrid, d: &HumanClimbData, m: (usize, Side, i32, i32)) -> ClimbPose {
+    let (_, side, dx, dy) = m;
+    let (pl, pr) = POSES[d.pose];
+    let cell = |i: usize, (c, r): (i32, i32)| {
+        let moves = matches!((side, i), (Side::Both, _) | (Side::L, 0) | (Side::R, 1));
+        if moves { (c + dx, r + dy) } else { (c, r) }
+    };
+    let cells = [cell(0, pl), cell(1, pr)];
+    let current = [d.hand_l, d.hand_r, d.foot_l, d.foot_r];
+    let mut holds = current;
     let mut normals = d.hold_n;
-    for (i, s) in sides.iter().enumerate() {
-        if let Some((f, h)) = s {
-            (holds[i], normals[i]) = (h.pos, h.normal);
-            (holds[2 + i], normals[2 + i]) = (f.pos, f.normal);
+    for i in 0..2 {
+        for (limb, rows) in [(i, CLIMB_HAND_ROWS), (2 + i, 0)] {
+            let at = |(c, r): (i32, i32)| grid.hold(c, r + rows);
+            if let Some(h) = at(cells[i]).or_else(|| at(cells[1 - i])) {
+                (holds[limb], normals[limb]) = (h.pos, h.normal);
+            }
         }
     }
     let fallback = -Vec3::new(d.normal.x, 0.0, d.normal.z).normalize_or(Vec3::Z);
-    let side = if long { m.2.signum() } else { 0 };
-    body_boxes_free(collision, &climb_pose(holds, normals, fallback), side).then_some((next, sides))
+    climb_pose(holds, normals, fallback)
 }
 
 /// The holds of a grid move (the first half of IsGridMoveValid 0xDECD70).
@@ -1462,7 +1480,9 @@ pub fn update_climb(
                 }
             }
         }
-        if let Some(((next, sides), _, action)) = chosen {
+        if let Some(((next, sides), m, action)) = chosen {
+            // the target root from the grid cells of all four limbs (RE/24 CLIMB-15), before the moving sides' holds change
+            let target = move_pose(&grid, d, m);
             d.move_action = (action != 0 && action != u32::MAX).then_some(action);
             d.move_seq += 1;
             if let Some((f, h)) = sides[0] {
@@ -1477,7 +1497,8 @@ pub fn update_climb(
             d.look = None;
             // StartMove 0xDFA0C0: the root frame of the new holds (0xDEC6E0), interpolated over the move action's length
             d.tilt_from = d.frame.tilt();
-            d.set_frame();
+            d.frame = target;
+            d.normal = target.normal();
             d.moving = Some(RootInterp::new(body.feet, d.frame.root, move_time(d.move_action)));
             d.advance_new_move(&mut body, dt);
             d.grid_move = true;
@@ -1741,6 +1762,35 @@ mod tests {
 
     fn hold(pos: Vec3) -> Hold {
         Hold { pos, normal: Vec3::NEG_Z, edge: 0, centred: true, kind: 0 }
+    }
+
+    /// RE/24 CLIMB-15: a grid move's target root takes the non-moving side's holds from its grid cells, not from where
+    /// its limbs hold now; an empty cell takes the other side's.
+    #[test]
+    fn the_move_root_reads_every_limbs_grid_cell() {
+        let (cols, rows, x0) = (8, 8, -3.0);
+        let centre = |c: i32, r: i32| Vec3::new(x0 + CLIMB_COL * (c as f32 + 0.5), -1.2 + CLIMB_ROW * r as f32, 0.0);
+        let mut holds = vec![None; (cols * rows) as usize];
+        for r in 0..rows {
+            for c in 0..cols {
+                holds[(r * cols + c) as usize] = Some(Hold { pos: centre(c, r), normal: Vec3::Z, edge: 0, centred: true, kind: 0 });
+            }
+        }
+        let grid = HoldGrid { origin: Vec3::ZERO, right: Vec3::X, forward: Vec3::NEG_Z, x0, cols, rows, holds };
+        // pose 3: left in column 3, right in column 4, feet on row 2; the right limbs hold 0.2 m off their cells' holds
+        let mut d = HumanClimbData { pose: 3, normal: Vec3::Z, hold_n: [Vec3::Z; 4], ..Default::default() };
+        (d.hand_l, d.foot_l) = (centre(3, 4), centre(3, 2));
+        (d.hand_r, d.foot_r) = (centre(4, 4) + Vec3::X * 0.2, centre(4, 2) + Vec3::X * 0.2);
+        let m = (4, Side::L, 0, 1); // the left side one row up
+        let cells = climb_pose([centre(3, 5), centre(4, 4), centre(3, 3), centre(4, 2)], [Vec3::Z; 4], Vec3::NEG_Z);
+        assert!((move_pose(&grid, &d, m).root - cells.root).length() < 1e-5, "the non-moving side from its cells");
+        // the right side's cells empty: they take the left side's
+        let mut sparse = grid;
+        for r in [2, 4] {
+            sparse.holds[(r * cols + 4) as usize] = None;
+        }
+        let fallback = climb_pose([centre(3, 5), centre(3, 5), centre(3, 3), centre(3, 3)], [Vec3::Z; 4], Vec3::NEG_Z);
+        assert!((move_pose(&sparse, &d, m).root - fallback.root).length() < 1e-5, "an empty cell takes the other side's");
     }
 
     /// RE/24 CLIMB-25: the side ledge grab is a wall hang only with the wall under both foot supports (±0.2 m).
