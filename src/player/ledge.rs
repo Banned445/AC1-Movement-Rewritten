@@ -738,6 +738,8 @@ pub fn update_ledge(
                         let [l, r] = hands_from_bones(bones, body.feet, body.forward(), &guidance);
                         d.hand_l = l.unwrap_or(d.hand_l);
                         d.hand_r = r.unwrap_or(d.hand_r);
+                        // `LimbIK__ReleaseAll`, then the contacts at weight 1 (0xDE19B8, 0xDE1D80)
+                        limbs.contact_set = limbs.contact_set.wrapping_add(1);
                     }
                 }
                 if mv.kind == ledge_moves::MoveKind::SwingBack {

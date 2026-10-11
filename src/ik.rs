@@ -63,8 +63,6 @@ pub struct LimbState {
     has_goal: bool,
     /// Tag-driven: inside a travel window.
     travel: bool,
-    /// Tag-driven: seconds the hold has differed from the contact without a release.
-    wait: f32,
     /// Tag-driven: released with no contact ahead in its clip (0xE56FC0 clears the travel flag, rec+2); the old
     /// hold is forgotten and the next contact attaches at the new hold.
     released: bool,
@@ -139,18 +137,13 @@ impl LimbState {
                     // contact made: the limb is on its new hold
                     self.goal = self.to;
                     self.travel = false;
-                    self.wait = 0.0;
                 }
-                if (p - self.goal).length() > IK_RETARGET_DIST {
-                    // a new hold chosen while the limb is still in contact: it stays on the old one until
-                    // the animation releases it. PORT: if this clip never releases it, settle after a wait.
-                    self.wait += dt;
-                    if self.wait > IK_CONTACT_WAIT {
-                        self.goal = self.goal.lerp(p, (dt * 8.0).min(1.0));
-                    }
-                } else {
+                // a new hold chosen while the limb is still in contact: it stays on the old one; the new contact is
+                // copied into the old only on the tag's rising edge (0xE572D0–0xE572FD), and `SolveEffectors` keeps the
+                // goal on the old contact meanwhile (0xE57960–0xE5799F; RE/24 ANIM-19). A context that moves a hold
+                // without a tag cycle sets the contact directly (`LimbTargets::contact_set`)
+                if (p - self.goal).length() <= IK_RETARGET_DIST {
                     self.goal = p;
-                    self.wait = 0.0;
                 }
                 self.to = self.goal;
             }
@@ -239,6 +232,8 @@ pub struct LimbIk {
     pub ground: [GroundFoot; 2],
     pub pelvis: f32,
     pub stick: StickToGround,
+    /// The last `LimbTargets::contact_set` taken.
+    contact_set: u32,
     /// IKGroundBiped +1520 bit 3: switched off on even ground; stays off while a foot is still fading out.
     ground_off: bool,
     /// Each foot's cached ground hit (point, normal, seconds left), re-probed every 0.3-0.5 s (`FootIK__ProbeGroundCached`
@@ -564,6 +559,9 @@ pub(crate) fn solve_limbs(
             targets.feet.map(|f| f.1),
         ];
         let mut goals: [Option<(Vec3, f32)>; 4] = [None; 4];
+        // the context set the contacts directly (`LimbIK__ReleaseAll`, then each contact at weight 1, as
+        // `HumanLedge__RePoseHandsFromBones` 0xDE1970 does): the limbs take the new holds at once
+        let snap = std::mem::replace(&mut ik.contact_set, targets.contact_set) != targets.contact_set;
         let effector_offsets = |global: &[Iso]| -> [Option<Vec3>; 4] { std::array::from_fn(|l| effectors[l].map(|e| global[e].pos - global[chains[l][2]].pos)) };
         for i in 0..4 {
             // the animated contact is the effector bone's position (the knuckle / toe), or the fallback from the end bone
@@ -574,6 +572,9 @@ pub(crate) fn solve_limbs(
             // the clip's contact tags decide attach / travel / release when the clip has them (game);
             // otherwise the context's timing is used
             // a suspended IK (the context skipped LimbIK__PostUpdate) applies nothing and keeps the limb's state
+            if let (true, Some(p)) = (snap, wanted[i]) {
+                ik.limbs[i] = LimbState { weight: 1.0, goal: p, from: p, to: p, anim_from: anim_contact, has_goal: true, ..Default::default() };
+            }
             let g = if targets.suspended {
                 None
             } else {
@@ -1155,6 +1156,21 @@ mod tests {
         let (drop, lean) = head_clearance(&c, h, Vec3::NEG_Z);
         assert_eq!(drop, 0.0);
         assert!((lean - 0.1).abs() < 0.03, "{lean}");
+    }
+
+    /// RE/24 ANIM-19: while the tag stays on, a new hold never pulls the limb off its contact (0xE57960); the next
+    /// rising edge after a travel takes it.
+    #[test]
+    fn a_held_contact_keeps_its_hold_until_the_tag_cycles() {
+        let (old, new) = (Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.3, 2.0, 0.0));
+        let dt = 1.0 / 60.0;
+        let mut l = LimbState::default();
+        l.update_tagged(Some(old), old, Tag::On, dt);
+        for _ in 0..120 {
+            assert_eq!(l.update_tagged(Some(new), old, Tag::On, dt), Some(old), "held on the old contact");
+        }
+        l.update_tagged(Some(new), old, Tag::Travel { s: 0.5, until: 0.1 }, dt);
+        assert_eq!(l.update_tagged(Some(new), new, Tag::On, dt), Some(new), "the rising edge takes the new hold");
     }
 
     #[test]
