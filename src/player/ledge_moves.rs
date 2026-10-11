@@ -1546,7 +1546,12 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
     let found = durations.iter().sum::<f32>() > 0.0;
     // the running jump's receptions move the root linearly over the first item (0xE02BA0 with a12 = -1: item 0's weighted
     // clip length; the swing: `sub_501C90`(0), 0xE09623), not along the clips over the whole action (bug-1791711526).
-    // The straight jump's receptions keep the clip path (0xE08DD7: anim mode over the playing item).
+    // The straight jump's receptions (0xE08E43–0xE08F31): the stand arrivals (0x01290ED0, 0x01272A6A, 0x0127163A; LedgeData
+    // +76 = 4) interpolate the root in anim mode over the playing item (`sub_501C90`(0)) onto the point 0.1 m along the
+    // arrival vector (the waist one 0.5 m out, 1 m down) and hold it (0xE08DD7); the hang receptions (0x0121B072,
+    // 0x01271632; +76 = 1) start no interpolation (0xE08C9A), the clips' own motion moves the root. PORT: both keep the
+    // clips over the whole sequence plus a linear correction onto `to` (the hangs' root from the hands needs the
+    // simulation's bone positions, Step 3).
     let root_time = match arr {
         LedgeArrival::Surface { .. } if found => Some(durations[0].max(1e-3)),
         _ => None,
