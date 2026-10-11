@@ -184,8 +184,10 @@ impl AnimLibrary {
         if w > 0.0 { d / w } else { 0.0 }
     }
 
+    /// The item's dominant clip: the first of equal maxima (`sub_777AE0` keeps it with a strict `w > max`, 0x777BF9;
+    /// RE/24 ANIM-9).
     fn dominant<'a>(&'a self, item: &ItemPlay) -> Option<&'a AnimClip> {
-        item.layers.iter().max_by(|a, b| a.1.total_cmp(&b.1)).and_then(|(n, _)| self.clips.get(n))
+        item.layers.iter().fold(None::<&(String, f32)>, |best, l| if best.is_none_or(|b| l.1 > b.1) { Some(l) } else { best }).and_then(|(n, _)| self.clips.get(n))
     }
 }
 
@@ -1160,8 +1162,11 @@ fn start_blend(p: &mut AnimPlayer, b: ActBlend, had: bool, a_state: Option<(Vec<
     let mut time = b.time;
     if let Some((items, item, phase, _)) = a_state.as_ref() {
         if b.clamp {
+            // what is left of the whole action A, its later items included (an ActionEvaluator's vfunc 14 `sub_7723D0`:
+            // the action's duration less its time, 0x774032 / 0x774054; RE/24 ANIM-9)
             if let Some(it) = items.get(*item) {
-                time = time.min((1.0 - phase) * lib.item_duration(it));
+                let rest: f32 = items.iter().skip(*item + 1).map(|it| lib.item_duration(it)).sum();
+                time = time.min((1.0 - phase) * lib.item_duration(it) + rest);
             }
         }
     }
@@ -1201,35 +1206,30 @@ pub fn root_motion_offset(clip: &AnimClip, phase: f32) -> Vec3 {
     (sample_vec(keys, phase * clip.duration) - start) - end * phase
 }
 
-/// Weighted pose of a layer set at normalised phase `phase`: per bone (rotation, translation).
+/// Weighted pose of a layer set at normalised phase `phase`: per bone (rotation, translation). The item evaluator
+/// (`sub_777AE0` 0x777DD3–0x777EF8) blends the active clips pairwise in index order, clip i in with the factor
+/// wᵢ / Σⱼ≤ᵢ wⱼ (rotations by `qinterp`); clips of weight ≤ 0.0005 are skipped (0x777B5C) (RE/24 ANIM-15 / ANIM-9).
 fn sample_layers(lib: &AnimLibrary, rig: &Rig, layers: &[(String, f32)], phase: f32, out: &mut Vec<(Quat, Vec3)>) {
     out.clear();
-    out.extend(rig.rest.iter().map(|_| (Quat::from_xyzw(0.0, 0.0, 0.0, 0.0), Vec3::ZERO)));
-    let mut total = vec![0.0f32; rig.bone_ids.len()];
-    let mut first: Vec<Option<Quat>> = vec![None; rig.bone_ids.len()];
+    out.extend(rig.rest.iter().map(|r| (r.rotation, r.translation)));
+    let mut total = 0.0f32;
     for (name, w) in layers {
-        if *w <= 0.0 {
+        if *w <= 0.0005 {
             continue;
         }
         let Some(c) = lib.clips.get(name) else { continue };
         let t = phase * c.duration;
+        total += *w;
+        let f = *w / total;
         for (i, bone) in rig.bone_ids.iter().enumerate() {
             let r = c.rotations.get(bone).map(|k| sample_rot(k, t)).unwrap_or(rig.rest[i].rotation);
             let p = c.translations.get(bone).map(|k| sample_vec(k, t)).unwrap_or(rig.rest[i].translation);
-            let r0 = *first[i].get_or_insert(r);
-            let r = if r0.dot(r) < 0.0 { -r } else { r };
             let acc = &mut out[i];
-            acc.0 = Quat::from_vec4(Vec4::from(acc.0) + Vec4::from(r) * *w);
-            acc.1 += p * *w;
-            total[i] += *w;
-        }
-    }
-    for (i, acc) in out.iter_mut().enumerate() {
-        if total[i] > 0.0 {
-            acc.0 = acc.0.normalize();
-            acc.1 /= total[i];
-        } else {
-            *acc = (rig.rest[i].rotation, rig.rest[i].translation);
+            if f >= 1.0 {
+                *acc = (r, p);
+            } else {
+                *acc = (qinterp(acc.0, r, f), acc.1.lerp(p, f));
+            }
         }
     }
 }
