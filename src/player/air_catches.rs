@@ -62,8 +62,9 @@ pub enum CatchFound {
 ///    - feet holds (`FindCatchFeetHolds` 0xE0A810: the same search from the feet at the higher hand − 1.2 m, along
 ///      −(the hands' wall normals)) → **type 1, the
 ///      climb catch** (`Human__ComputeClimbPoseFromHolds`);
-///    - else feet on the wall (two `sub_11718B0` probes 1 m below) → **type 3, the wall-hang catch**
-///      `ACT_CATCH_WALL` (its 3-way angle blend snapped to the dominant class, 30° / 45°);
+///    - else feet on the wall (`wall_catch_feet`: two `sub_11718B0` boxes 1 m below, both required, no body box)
+///      → **type 3, the wall-hang catch** `ACT_CATCH_WALL` (its 3-way angle blend snapped to the dominant class,
+///      30° / 45°);
 ///    - else nothing here: the search goes on.
 /// 2. A fall of 3 m or more: `sub_DFFE30` (one hold, the feet + 1.95 m + 0.25 / 0.5 m along the reach, half
 ///    0.4 / 0.25 or 0.5 / 0.25, 70°, mask 50) → **type 4**, the free hang: beyond 120° from the facing
@@ -71,8 +72,7 @@ pub enum CatchFound {
 ///    Under 3 m: `FindClimbCatch` 0xE0AC70 (the ledge catch's search around the feet + 1.95 m) → **type 5**,
 ///    `hangfree_min`.
 /// Every search ignores holds less than 0.5 m below the last released hold (InAirData +0x190 / +0x1F4).
-/// PORT: the feet-on-wall test (`sub_11718B0`) is the collision foot rays (`hang_type_at`); the bodies' clearance tests
-/// (`sub_B2DC80` / `sub_B2DEB0`) are the port's hang boxes.
+/// PORT: the free hangs' clearance test (`sub_B2DEB0`) is the port's hang boxes.
 pub fn ledge_search(
     feet: Vec3,
     reach: Vec3,
@@ -83,7 +83,7 @@ pub fn ledge_search(
     guidance: &crate::guidance::GuidanceWorld,
     collision: &CollisionWorld,
 ) -> Option<CatchFound> {
-    use super::ledge::{hang_root_at, hang_type_at, LedgeHangType};
+    use super::ledge::{hang_root_at, LedgeHangType};
     let long = fall_height >= 3.0;
     let dir = Vec3::new(reach.x, 0.0, reach.z).normalize_or(Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z));
     let below_release = |y: f32| release_hold.is_none_or(|r| r.y - 0.5 > y);
@@ -121,12 +121,9 @@ pub fn ledge_search(
             };
             return Some(CatchFound::Climb(entry));
         }
-        if hang_type_at(mid, n, collision) == LedgeHangType::Wall {
-            let root = hang_root_at(hl, hr, n, LedgeHangType::Wall, collision);
-            if super::climb::hang_boxes_free(collision, root, into, true) {
-                let action = super::ledge::ACT_CATCH_WALL[long as usize];
-                return Some(CatchFound::Hang { mid, normal: n, wall: true, action, one_hand: None });
-            }
+        if wall_catch_feet(hl, hr, a.wall_normal, b.wall_normal, collision) {
+            let action = super::ledge::ACT_CATCH_WALL[long as usize];
+            return Some(CatchFound::Hang { mid, normal: n, wall: true, action, one_hand: None });
         }
     }
     // 2. the free hangs at the feet + 1.95 m: both hand records on the one hold (`sub_B15AD0`(…, &v137, &v137, …)
@@ -170,6 +167,21 @@ pub fn ledge_search(
         return Some(CatchFound::Hang { mid, normal: n, wall: false, action: super::ledge::ACT_CATCH_FREE[0], one_hand: None });
     }
     None
+}
+
+/// The wall catch's feet (`CheckAirCatch` 0xE0CD2F–0xE0CEBE, type 3): from the hands' midpoint at the higher hand's
+/// height − 1 m − 0.125·n̂ (n̂ the normalised flat sum of the two holds' wall normals), two `Guidance__FindWallSupport`
+/// 0x11718B0 boxes (half 0.4 / 0.625 / 0.2, step 0.1) toward −n̂, offset (−0.15, 0, +0.1) and (+0.15, 0, −0.1) in the
+/// wall's frame (x across, z up); both must hit. The free types test the body box (`sub_B2DEB0`), the wall catch does
+/// not (RE/24 AIR-14).
+pub fn wall_catch_feet(hl: Vec3, hr: Vec3, nl: Vec3, nr: Vec3, collision: &CollisionWorld) -> bool {
+    let n = Vec3::new(nl.x + nr.x, 0.0, nl.z + nr.z).normalize_or(Vec3::new(nl.x, 0.0, nl.z).normalize_or(Vec3::Z));
+    let mid = Vec3::new((hl.x + hr.x) * 0.5, hl.y.max(hr.y), (hl.z + hr.z) * 0.5);
+    let into = -n;
+    let c = mid - Vec3::Y + into * 0.125;
+    let across = into.cross(Vec3::Y);
+    use super::ledge::support_ray;
+    support_ray(c - across * 0.15, n, 0.625, 0.1, collision) && support_ray(c + across * 0.15, n, 0.625, -0.1, collision)
 }
 
 /// The knee catch (type 0), `xx_fall_tr_hangknee_min_a` / `_max_a` [fall < 3 m, ≥ 3 m].
@@ -337,6 +349,20 @@ mod ray_tests {
         assert!(target_ahead(root,Some(target(Vec3::Z*1.0004,0x10000)),&world));
         world.layers.push(crate::layers::NOTHING);
         assert!(target_ahead(root,Some(target(Vec3::Z*3.0,1)),&world));
+    }
+
+    /// RE/24 AIR-14: the wall catch needs the wall under both feet (two support boxes 1 m below the hands).
+    #[test]
+    fn the_wall_catch_needs_both_feet_on_the_wall() {
+        let (hl, hr) = (Vec3::new(-0.3, 3.0, 0.0), Vec3::new(0.3, 3.0, 0.0));
+        let feet = |min: Vec3, max: Vec3| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min, max });
+            wall_catch_feet(hl, hr, Vec3::Z, Vec3::Z, &c)
+        };
+        assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 3.0, 0.0)), "a wall under the hands");
+        assert!(!feet(Vec3::new(-2.0, 2.5, -2.0), Vec3::new(2.0, 3.0, 0.0)), "an overhang");
+        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.0, 3.0, 0.0)), "the wall under one foot only");
     }
 
     /// RE/24 AIR-34: the knee catch takes the edges of mask 386 (LedgeGrab, Quadruped, Kiosk), not a beam's.
