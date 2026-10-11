@@ -1622,6 +1622,35 @@ fn beam_jump_at_a_ledge_above() {
 // ---------------------------------------------------------------- beam input: 90° waits, pull-down, wall run (RE/05 §2.10)
 
 /// Standing on the free beam (x 84.5..90.5, z 70, 4 m) at `x`, facing +X.
+/// RE/24 NARROW-5: a side free-step arrival (mode 3) plays `freestep_entry_*_tr_beam_air_90` facing across the beam and
+/// settles into the 90° wait; with the stick along the beam it walks off that way instead.
+#[test]
+fn a_side_arrival_faces_across_the_beam_then_waits_or_walks_off() {
+    use crate::player::narrow::{free_step_beam_entry, BeamEntryMode, BeamState, BEAM_AIR90_WALK, BEAM_SIDE_AIR90};
+    for walk in [false, true] {
+        let point = Vec3::new(87.0, 4.0, 70.0);
+        // arriving across the beam (facing +Z): mode 3
+        let mut s = Sim::new(point, FACE_PZ);
+        let e = {
+            let g = s.app.world().resource::<crate::guidance::GuidanceWorld>();
+            let c = s.app.world().resource::<crate::collision::CollisionWorld>();
+            free_step_beam_entry(point, Vec3::Z, None, 0, None, false, g, c).expect("the free beam")
+        };
+        assert_eq!(e.mode, BeamEntryMode::Side);
+        assert_eq!(e.action.map(|a| a.id), Some(BEAM_SIDE_AIR90[0]));
+        force(&mut s, crate::player::TransitionSetup::ToBeam(e));
+        assert!(s.data().narrow.across.is_some_and(|a| a.dot(Vec3::Z) > 0.99), "facing across, toward the arrival's forward");
+        if walk {
+            s.pad(Vec3::X, 1.0, false, false);
+            assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Walk), "never walked off: {:?}", s.data().narrow.state);
+            assert_eq!(s.data().narrow.action.map(|a| a.id), Some(BEAM_AIR90_WALK[0]), "+X is to the left of the across facing (+Z)");
+            assert!(s.data().narrow.toward_p1);
+        } else {
+            assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Wait90), "never settled: {:?}", s.data().narrow.state);
+        }
+    }
+}
+
 fn on_free_beam(x: f32) -> Sim {
     use crate::player::narrow::{BeamEntry, BeamEntryMode};
     let point = Vec3::new(x, 4.0, 70.0);

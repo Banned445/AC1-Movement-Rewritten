@@ -74,6 +74,13 @@ pub const BEAM_LANDING: u32 = jump_blend::LAND_DAMAGE;
 /// `crouchwait_foot{l,r}_turn_{left,right}_to_crouchwait_90`), then waits in `crouchwait_90` (0xF702B0).
 pub const BEAM_TO_90: [[u32; 2]; 2] = [[0x350D_9386, 0x350D_9387], [0x350D_9388, 0x350D_9389]];
 pub const BEAM_WAIT_90: u32 = 0x02E4_A9DF;
+/// The side free-step arrival (mode 3, `sub_F76C70`): `xx_h_freestep_entry_foot{l,r}_tr_beam_air_90` [footl, footr]
+/// (RE/24 NARROW-5).
+pub const BEAM_SIDE_AIR90: [u32; 2] = [0x0481_85FA, 0x0481_85FC];
+/// Its walks off along the beam (`sub_F76F20`): `beam_air_90_tr_crouch{walk,jog}_footr_{left,right}` [left, right].
+pub const BEAM_AIR90_WALK: [u32; 2] = [0x0481_85FD, 0x0481_85FE];
+/// Its settle into the 90° wait (the graph: `beam_air_90_tr_crouchwait_90`).
+pub const BEAM_AIR90_TO_WAIT: u32 = 0x0481_85EB;
 /// From the 90° wait: the stick to a side turns back along the beam (`Play90TurnBack` 0xF78630:
 /// `crouchwait_90_turn_{left,right}`), the stick back turns around across it (`PlayTurn180` 0xF78740:
 /// `crouchwait_90_turn180`). Pushing forward (off the beam) does nothing for the player (0xF7BA60 is AI only).
@@ -95,6 +102,7 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     0x516D_52DB, 0x516D_52DC, 0x516D_52DD, 0x516D_52DE, 0x516D_52DF,
     BEAM_TO_90[0][0], BEAM_TO_90[0][1], BEAM_TO_90[1][0], BEAM_TO_90[1][1], BEAM_WAIT_90, BEAM_90_TURN_BACK[0], BEAM_90_TURN_BACK[1], BEAM_90_TURN180,
     BEAM_CORNER_HOP[0], BEAM_CORNER_HOP[1], BEAM_CORNER_HOP[2],
+    BEAM_SIDE_AIR90[0], BEAM_SIDE_AIR90[1], BEAM_AIR90_WALK[0], BEAM_AIR90_WALK[1], BEAM_AIR90_TO_WAIT,
 ];
 
 /// 0xF7C3A0: the root stops this far before a beam end.
@@ -393,7 +401,12 @@ impl HumanNarrowObjectData {
         self.entry_mode = e.mode;
         self.foot = e.foot;
         self.hand_target = None;
-        self.across = None;
+        // mode 3 faces across the beam (+1040 = 2): the entry vector turned 90° about up, flipped toward the current
+        // forward (0xF76E30–0xF76E85, RE/24 NARROW-5)
+        self.across = (e.mode == BeamEntryMode::Side).then(|| {
+            let r = super::right_of(self.dir());
+            if r.dot(e.facing) >= 0.0 { r } else { -r }
+        });
         self.warp_from = e.from;
         self.warp_elapsed = 0.0;
         self.warp_heading = (super::heading_of(e.facing), super::heading_of(self.facing()));
@@ -755,8 +768,11 @@ pub fn free_step_beam_entry(
             let speed = if jog { beam_bands()[4] } else { beam_bands()[0] };
             (axis.dot(f) >= 0.0, item(BEAM_WALK, foot, &speed_weights(speed)))
         }
+        // mode 3: `freestep_entry_foot*_tr_beam_air_90` by the arriving foot (`sub_F76C70`; RE/24 NARROW-5). PORT: the
+        // foot index follows the port's foot (the exit-feet reading of NARROW-7 is not applied)
+        BeamEntryMode::Side => (axis.dot(f) >= 0.0, item(BEAM_SIDE_AIR90[foot.min(1)], 0, &[]).or(reception)),
         // the beam direction nearest the facing
-        _ => (axis.dot(f) >= 0.0, if mode == BeamEntryMode::Side { reception } else { None }),
+        _ => (axis.dot(f) >= 0.0, None),
     };
     Some(BeamEntry { p0, p1, point, from: feet, toward_p1, mode, foot, action, facing: f })
 }
@@ -1429,6 +1445,24 @@ pub fn update_narrow(
                             n.play(BeamState::PilotisIn, Some(next)); n.t = excess;
                             continue;
                         }
+                    }
+                    // mode 3's end (`StateSideEntry_Update` 0xF80390 → `sub_F76F20`): the stick along the beam (to a side of
+                    // the across facing) walks off that way with `beam_air_90_tr_crouch*_{left,right}` at band 4; else the
+                    // 90° wait (RE/24 NARROW-5)
+                    if n.entry_mode == BeamEntryMode::Side && n.kind == NarrowKind::Beam && n.across.is_some() {
+                        if side {
+                            let r = super::right_of(facing);
+                            let along = if left { -r } else { r };
+                            n.toward_p1 = along.dot(n.dir()) >= 0.0;
+                            n.across = None;
+                            n.speed = beam_bands()[4];
+                            let w = item(BEAM_AIR90_WALK[!left as usize], 0, &speed_weights(n.speed)).or_else(|| item(BEAM_WALK, n.foot, &speed_weights(n.speed)));
+                            n.play(BeamState::Walk, w);
+                        } else {
+                            n.speed = 0.0;
+                            n.play(BeamState::Wait90, item(BEAM_WAIT_90, 0, &[]));
+                        }
+                        continue;
                     }
                     let walking = matches!(n.entry_mode, BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack) && n.kind == NarrowKind::Beam;
                     if walking && forward {
