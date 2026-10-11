@@ -746,13 +746,13 @@ fn side_column_holds(g: &GuidanceWorld, d: &HumanClimbData, facing: Vec3, dir: u
 
 /// `HumanClimb__TrySideLedgeGrab` 0xDF22C0 (dirs 4–9, ChooseMove: near after the corner moves onto the ground, far after
 /// the outside corner; flags 4610 / 4611 + 2920): the side columns' hand row alone (record 4 up, 3 level, 2 down: the
-/// corner climb's hand row) becomes a hang on that wall. Both hands on the hold, +2940 = the dir. Two foot probes 1 m
-/// below it, 0.2 m to either side and 0.125 m into the wall (`sub_11718B0`, box 0.25 / 0.625 / 0.15, RE/24 CLIMB-25)
-/// → both found: a wall hang
+/// corner climb's hand row) becomes a hang on that wall. Both hands on the hold, +2940 = the dir. Two foot supports
+/// (`Guidance__FindWallSupport` 0x11718B0, from each hand record: 1 m below, ∓0.2 m along S, 0.125 m into the wall, box
+/// 0.25 / 0.625 / 0.15, step 0.07; 0xDF24D3 / 0xDF25E2, RE/24 CLIMB-25) → both found (0xDF265E): a wall hang
 /// (`sub_B157B0`, `Human__WallHangBodyBoxFree`, lateral path 1.8 × 1.1 m), else a free hang (`sub_B15AD0`,
 /// `Human__FreeHangBodyBoxesFree`, 1.8 × 2.4 m). The Ledge fill (`HumanClimb__FillLedge_FromClimb` 0xDEEAC0, SubState 9)
 /// plays `CLIMB_TO_HANG[wall / free][+2940]` while the root goes to the hang.
-/// PORT: the foot probes are the collision foot rays (`hang_type_at`); the lateral path is `lateral_path_free`.
+/// A wall hang whose box fails is not tried as a free hang (0xDF26E6). PORT: the lateral path is `lateral_path_free`.
 fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize, near: bool) -> Option<LedgeEntry> {
     let (side, row) = corner_side(dir)?;
     let base = feet_base(d);
@@ -763,14 +763,24 @@ fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWor
     let n = h.wall_normal;
     let hf = -Vec3::new(n.x, 0.0, n.z).normalize_or(v);
     let e = LedgeEntry::at(g.fit_hands(h.point, n), n, root, LedgeSubState::TransitionInFromClimb);
-    let hang = super::ledge::hang_type_at((e.hand_l + e.hand_r) * 0.5, n, collision);
-    let wall = hang == super::ledge::LedgeHangType::Wall;
+    let wall = side_grab_feet(h.point, n, collision);
+    let hang = if wall { super::ledge::LedgeHangType::Wall } else { super::ledge::LedgeHangType::Free };
     let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, n, hang, collision);
     if !hang_boxes_free(collision, to, hf, wall) || !lateral_path_free(collision, root, facing, to, hf) {
         return None;
     }
     let mv = super::ledge_moves::climb_to_hang_move(root, e.hand_l, e.hand_r, n, CLIMB_TO_HANG[!wall as usize][dir], hang, collision);
     Some(LedgeEntry { entry_move: Some(mv), ..e })
+}
+
+/// `TrySideLedgeGrab`'s feet (0xDF24D3 / 0xDF25E2): the wall under both foot supports, 1 m below the hold, ∓0.2 m along
+/// S and 0.125 m into the wall (RE/24 CLIMB-25).
+fn side_grab_feet(hold: Vec3, n: Vec3, collision: &crate::collision::CollisionWorld) -> bool {
+    let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let s = right_of(into);
+    let c = hold - Vec3::Y + into * 0.125;
+    let foot = |p: Vec3| super::ledge::support_ray(p, n, 0.625, 0.0, collision);
+    foot(c - s * 0.2) && foot(c + s * 0.2)
 }
 
 /// The Ledge fill's actions by +2940 (`dword_1A2CC90` wall hang / `dword_1A2CCB8` free hang, written by 0xDE4F80):
@@ -1725,6 +1735,20 @@ mod tests {
 
     fn hold(pos: Vec3) -> Hold {
         Hold { pos, normal: Vec3::NEG_Z, edge: 0, centred: true, kind: 0 }
+    }
+
+    /// RE/24 CLIMB-25: the side ledge grab is a wall hang only with the wall under both foot supports (±0.2 m).
+    #[test]
+    fn the_side_ledge_grab_needs_both_feet_on_the_wall() {
+        use crate::collision::{Aabb3, CollisionWorld};
+        let feet = |min: Vec3, max: Vec3| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min, max });
+            side_grab_feet(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c)
+        };
+        assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 3.0, 0.0)), "a wall under the hold");
+        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.1, 3.0, 0.0)), "the wall under one foot only");
+        assert!(!feet(Vec3::new(-2.0, 2.5, -2.0), Vec3::new(2.0, 3.0, 0.0)), "an overhang");
     }
 
     /// RE/24 CLIMB-4: `sub_DECEA0` finds a landing beside the wall from edges running out from it. Facing the wall (+Z),
