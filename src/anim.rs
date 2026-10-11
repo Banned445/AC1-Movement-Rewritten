@@ -591,25 +591,7 @@ const ACT_PULLUP_WALL: u32 = 0x0106_D2C5;
 const ACT_PULLUP_FREE: u32 = 0x0127_19F2;
 /// Pull-up outcome "stand": hangknee → free-step entry (0xDE2EE0 → 0xDD2A50).
 const ACT_HANGKNEE_TO_WAIT: u32 = crate::player::ledge_moves::ACT_KNEE_TO_FREESTEP[0];
-/// [wall, free] × [left open, left close, right open, right close].
-const ACT_SHIMMY: [[u32; 4]; 2] = [[0x01B7_0B35, 0x01B7_0B36, 0x01B7_0B37, 0x01B7_0B38], [0x01A2_490A, 0x01A2_490B, 0x01A2_490C, 0x01A2_490D]];
-/// The `ACT_VSTEP` column for a vertical hand step (`PickVerticalHandAndAnim` 0xDCB3E0, tables `StaticInitTables`
-/// 0xDCC3E5..0xDCC403): up, left first → `1m_u_1lu`; down, left first → `1m_d_1ru` (the clips are named by the hand left
-/// up), and the second halves likewise (RE/24 LEDGE-6). Played the other way round, the clip's raised hand was the one
-/// the IK held low and the lowered one could not reach its hold (bug-1791714114).
-fn vstep_index(down: bool, second: bool, first_left: bool) -> usize {
-    if down {
-        4 + (second as usize) * 2 + first_left as usize
-    } else {
-        (second as usize) * 2 + (!first_left) as usize
-    }
-}
-
-/// [wall, free] × [up: 1m_u_1lu, 1m_u_1ru, 1lu_u_1m, 1ru_u_1m, down: 1m_d_1lu, 1m_d_1ru, 1lu_d_1m, 1ru_d_1m].
-const ACT_VSTEP: [[u32; 8]; 2] = [
-    [0x01B7_0FAA, 0x01B7_0FAB, 0x01B7_0FAC, 0x01B7_0FAD, 0x01B7_0FAE, 0x01B7_0FAF, 0x01B7_0FB0, 0x01B7_0FB1],
-    [0x01A2_79B9, 0x01A2_79BA, 0x01A2_79BB, 0x01A2_79BC, 0x01A2_79BD, 0x01A2_79BE, 0x01A2_79BF, 0x01A2_79C0],
-];
+use crate::player::ledge::{shimmy_index, vstep_index, ACT_SHIMMY, ACT_VSTEP};
 /// Catches (CheckAirCatch): ledge with wall below (3-way angle blend), free hang; [< 3 m, ≥ 3 m].
 const ACT_CATCH_WALL: [u32; 2] = crate::player::ledge::ACT_CATCH_WALL;
 const ACT_CATCH_FREE: [u32; 2] = crate::player::ledge::ACT_CATCH_FREE;
@@ -973,12 +955,7 @@ fn choose_clip(
                     }
                     a if moving && a.starts_with("shimmy ") => {
                         // alt flag set after the step = the lead hand reached out (open)
-                        let k = match (a.ends_with("left"), l.alt_flag) {
-                            (true, true) => 0,
-                            (true, false) => 1,
-                            (false, true) => 2,
-                            (false, false) => 3,
-                        };
+                        let k = shimmy_index(!a.ends_with("left"), l.alt_flag);
                         action(&lib, &[ACT_SHIMMY[wi][k]], false, token, Some(0.08), None)
                     }
                     "hand step up" | "hand step down" if moving || l.pending_vstep.is_some() => {
