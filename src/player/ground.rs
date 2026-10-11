@@ -1101,8 +1101,15 @@ pub fn update_ground(
         // `Human__CanGrabLadder` (reach 0.6) → event 38, from the foot or from the top; no button. PORT: the ladder
         // entity's reply (0xEE720A) is taken as yes
         if !(g.high_profile && pad.legs_held) && pad.magnitude > 0.0 && !busy && ab.allows(Ability::Ladder) {
-            if let Some((base, top, n, from_top)) = super::ladder::find_ladder(body.feet, pad.dir, body.forward(), &guidance) {
-                let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None, ..Default::default() };
+            if let Some((base, top, mut n, from_top)) = super::ladder::find_ladder(body.feet, pad.dir, body.forward(), &guidance) {
+                // the approach side's attach box blocked → the back-approach turn onto the far side (RE/24 LADDER-4)
+                let mut back_turn = None;
+                if !from_top && super::ladder::attach_blocked(base + n * super::ladder::ATTACH_OUT, -n, &collision) {
+                    let to_char = Vec3::new(body.feet.x - base.x, 0.0, body.feet.z - base.z);
+                    back_turn = Some(to_char.dot(super::right_of(-n)) > 0.0);
+                    n = -n;
+                }
+                let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None, back_turn, ..Default::default() };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
                 continue;
             }

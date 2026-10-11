@@ -2531,6 +2531,25 @@ fn walk_to_a_ladder_climb_it_and_step_onto_the_top() {
     assert!((f.y - 5.0).abs() < 0.05 && f.z > 63.6, "on the wall top: {f:?}");
 }
 
+/// RE/24 LADDER-4: a blocked attach box on the approach side turns onto the far side: the turn's two items, then the
+/// wait facing the ladder from the other side.
+#[test]
+fn a_blocked_approach_side_turns_onto_the_far_side() {
+    use crate::player::ladder::{attach_blocked, LadderEntry, LadderPhase, ATTACH_OUT, TURN};
+    let (base, top) = (Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.0, 63.5));
+    // a crate on the approach side (-Z) at the attach box's height
+    let mut c = crate::collision::CollisionWorld::default();
+    c.boxes.push(crate::collision::Aabb3 { min: Vec3::new(49.7, 0.8, 62.8), max: Vec3::new(50.3, 1.2, 63.2) });
+    assert!(attach_blocked(base + Vec3::NEG_Z * ATTACH_OUT, Vec3::Z, &c));
+    assert!(!attach_blocked(base + Vec3::NEG_Z * ATTACH_OUT, Vec3::Z, &crate::collision::CollisionWorld::default()));
+    let from = Vec3::new(50.0, 0.0, 62.6);
+    let mut s = Sim::new(from, FACE_PZ);
+    force(&mut s, crate::player::TransitionSetup::ToLadder(LadderEntry { base, top, n: Vec3::Z, from, facing: Vec3::Z, back_turn: Some(true), ..Default::default() }));
+    assert_eq!(s.data().ladder.action.map(|a| (a.id, a.item)), Some((TURN[0], 0)));
+    assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled: {:?}", s.data().ladder.phase);
+    assert!(s.body().forward().dot(Vec3::NEG_Z) > 0.99, "facing the ladder from the far side");
+}
+
 /// RE/24 LADDER-5: the ground entry attaches at the nearest rung to the root's height, 0.5 m higher in high profile.
 #[test]
 fn a_ground_entry_attaches_at_the_rung_and_higher_in_high_profile() {

@@ -149,6 +149,17 @@ pub struct LadderEntry {
     pub catch_out: Option<Vec3>,
     /// Controller speed for the catch blend (0xE0BB70).
     pub catch_speed: f32,
+    /// The back-approach turn (`sub_E24FD0`: the attach box blocked on the approach side, RE/24 LADDER-4): `Some(true)`
+    /// = `TURN[0]` (signed approach angle > 0), `Some(false)` = `TURN[1]`; `n` is then the far side.
+    pub back_turn: Option<bool>,
+}
+
+/// `sub_E24FD0` 0xE24FD0 (from `StateEntry_Enter` 0xE26AFB): a static-geometry box at the attach point + 0.95 m up, half
+/// 0.45 across / 0.45 along the facing / 0.35 up in the frame [F × up, F, up], F = the facing toward the ladder; blocked
+/// → the back-approach turn (RE/24 LADDER-4).
+pub fn attach_blocked(attach: Vec3, f: Vec3, collision: &CollisionWorld) -> bool {
+    let f = Vec3::new(f.x, 0.0, f.z).normalize_or(Vec3::NEG_Z);
+    !collision.obb_free(attach + Vec3::Y * 0.95, [super::right_of(f), Vec3::Y, f], Vec3::new(0.45, 0.35, 0.45))
 }
 
 #[derive(Debug, Default)]
@@ -322,6 +333,13 @@ impl HumanLadderData {
             let k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
             self.height = 0.5 * k + if e.high { 0.5 } else { 0.0 };
             let to = self.root_at(self.height);
+            if let Some(left) = e.back_turn {
+                // the back-approach turn onto the far side (+908 bit 2: 0x0A64400C / D, items a then b into the wait,
+                // single-weight blend; RE/24 LADDER-4). PORT: the heading snaps (the game slerps at rate 1.6)
+                self.chain = true;
+                self.play(LadderPhase::Entry, blend(TURN[(!left) as usize], 0, &[]), e.from, to, false);
+                return;
+            }
             // the clip plays in the character's frame at the entry (start matrix +592, RE/24 LADDER-6)
             self.fwd = Vec3::new(e.facing.x, 0.0, e.facing.z).normalize_or(-self.n);
             self.play(LadderPhase::EnterGround, blend(ENTER_GROUND[hi][e.foot], 0, &w), e.from, to, true);
