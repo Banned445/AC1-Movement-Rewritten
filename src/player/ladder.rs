@@ -178,6 +178,8 @@ pub struct HumanLadderData {
     pub heading: Vec3,
     /// The jump's push-off direction (horizontal), set when the jump starts.
     pub jump_dir: Vec3,
+    /// The jump off's target, searched at the press (`sub_E22050` copies it to +800; RE/24 LADDER-12).
+    pub jump_target: Option<Option<super::targets::JumpTarget>>,
     /// Playback rate of the running action: 0.5 for a low-profile climb with the stick in the walk band (0xE24540).
     pub rate: f32,
     /// The entry action's items play in order (`LadderEntry::chain`).
@@ -710,7 +712,9 @@ pub fn update_ladder(
                 // vertical (`sub_E1EAC0`) → the release (MvtAnimState 15 / 16), its action as the fall's animation
                 if pad.hand_buffered() && (l.top - l.base).normalize_or(Vec3::Y).y > (30f32).to_radians().cos() {
                     pad.consume_hand();
-                    let fall = blend(RELEASE[l.high as usize][l.foot], 0, &[]);
+                    // always the low-profile release (+908 0x10 → `sub_E1D670`: 158 + incl + 2·lowerFoot, 0xE1D6AF; RE/24
+                    // LADDER-11)
+                    let fall = blend(RELEASE[0][l.foot], 0, &[]);
                     let from = body.feet;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
                     data.air.fall_action = fall;
@@ -718,8 +722,8 @@ pub fn update_ladder(
                 }
                 // Jump off (event 1, slots 4 / 5): high profile, the Legs buffer (+0x1126) and a push-off direction: the
                 // stick, or straight back with no stick; more than 135° from straight back (into the ladder) → none,
-                // 90°–135° → turned to ±89°. PORT: the target search (IHuman vt56 / vt76 / vt68) happens when the
-                // `wait_tr_rebound` clip ends.
+                // 90°–135° → turned to ±89°. The target is searched at the press (IHuman vt56 + the scorer, else the Leap
+                // of Faith vt76, else the free target vt68) and stored for the clip's end (`sub_E22050`; RE/24 LADDER-12).
                 if pad.high_profile && pad.jump_buffered() {
                     let back = l.n;
                     let d = if stick { Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or(back) } else { back };
@@ -733,6 +737,7 @@ pub fn update_ladder(
                         };
                         pad.consume_jump();
                         l.jump_dir = d;
+                        l.jump_target = Some(super::targets::find_jump_target(body.feet, d, &guidance, &collision));
                         let a = blend(JUMP[l.foot], 0, &[]);
                         let from = body.feet;
                         l.play(LadderPhase::Jump, a, from, from, true);
@@ -897,14 +902,13 @@ pub fn update_ladder(
             }
             LadderPhase::Jump => {
                 if done {
-                    // a jump target along the push-off (the guidance search of the ground jumps), else a free jump
+                    // the clip's end (`sub_E1EBB0` 0xE1EC71): facing away from the ladder (−character Y, `sub_52BD40`),
+                    // then the stored target with jump kind 2 (`sub_B27180`), presentation 67 (RE/24 LADDER-12)
                     let from = body.feet;
                     let dir = l.jump_dir.normalize_or(l.n);
-                    leave = Some(TransitionSetup::ToInAir(match super::targets::find_jump_target(from, dir, &guidance, &collision) {
-                        Some(target) => InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: l.foot == 0 },
-                        None => InAirEntry::FreeJump { from, dir, ahead: crate::tuning::FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: l.foot == 0 },
-                    }));
-                    body.heading = super::heading_of(dir);
+                    let target = l.jump_target.take().flatten();
+                    body.heading = super::heading_of(l.n);
+                    leave = Some(TransitionSetup::ToInAir(InAirEntry::ReboundJump { from, target, dir, foot_left: l.foot == 0 }));
                 }
             }
         }

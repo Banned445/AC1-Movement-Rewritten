@@ -2652,7 +2652,10 @@ fn high_profile_legs_jumps_off_a_ladder_straight_back() {
     s.press_legs();
     assert!(s.run_until(0.2, |s| s.data().ladder.phase == Some(LadderPhase::Jump)), "no jump");
     assert!(s.data().ladder.jump_dir.distance(Vec3::NEG_Z) < 1e-3, "straight back: {:?}", s.data().ladder.jump_dir);
+    // the target was searched at the press and the jump is the rebound (kind 2), facing away (RE/24 LADDER-12)
+    assert!(s.data().ladder.jump_target.is_some(), "searched at the press");
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "never left");
+    assert!(crate::player::jump_blend::TAKEOFF_REBOUND.contains(&s.data().air.takeoff.unwrap().id), "the rebound takeoff");
 }
 
 #[test]
