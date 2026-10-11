@@ -1319,7 +1319,9 @@ pub fn update_ground(
         // degrees into it) → vt1596 → HumanHayStack, entry Ground (0xD84F80).
         // `HumanNarrowObject__CheckSupportAndFall` 0xE51190's haystack branch: the free-step arrival (a NarrowObject
         // Movement stay in the game; PORT: its reception plays in Ground) past 0.6 of its action with a haystack found
-        // by the support search → HumanHayStack, entry FreeStep (0xE5146A). Live: the way into a rimmed haystack.
+        // by the support search → HumanHayStack, entry FreeStep (0xE5146A). Live: the way into a rimmed haystack. The
+        // search runs along −the support normal (0xE51308; PORT: the arrival's forward) and only here, not in the beam /
+        // pilotis catch receptions (RE/24 NARROW-21).
         if let Some(os) = g.oneshot.filter(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id)) {
             if os.t / os.duration.max(1e-4) > 0.6 {
                 if let Some(stack) = super::hay::find_support(body.feet, body.forward(), body.forward(), &guidance.haystacks, &collision) {
