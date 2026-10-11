@@ -159,6 +159,9 @@ pub struct HumanLadderData {
     /// +908 & 0x20: a wall top behind the ladder's top (`Human__ProbeWallTopThickness` 0xB18FB0 at entry, from
     /// `SetupFromEntryType` 0xE22400; RE/24 LADDER-8). `None` until probed on the first update.
     pub thick_top: Option<bool>,
+    /// ReachedTop (+84): updated only while climbing up (MvtAnimState 2 / 4), kept in the wait (`UpdateReachedTopBottom`
+    /// 0xE1D490; RE/24 LADDER-9).
+    pub reached_top: bool,
     /// Root height above the base (HeightInLadder +0x50).
     pub height: f32,
     pub phase: Option<LadderPhase>,
@@ -265,6 +268,7 @@ impl HumanLadderData {
     pub fn enter(&mut self, e: LadderEntry) {
         self.warp = None;
         self.thick_top = None;
+        self.reached_top = false;
         self.blend_time = 0.1;
         self.base = e.base;
         self.top = e.top;
@@ -606,9 +610,13 @@ pub fn update_ladder(
         };
         if l.warp.is_some() {
             l.advance_catch_root(&mut body, dt);
-        } else if crate::tuning::AIR_CATCHES && phase == LadderPhase::Wait {
-            // 0xE226D0: constant-speed 2 m/s alignment after approach-side entry.
-            body.feet = body.feet.move_towards(p, 2.0 * dt);
+        } else if phase == LadderPhase::Wait {
+            // `AlignRootWhileWaiting` 0xE226D0 in every wait: the nearest 0.5 m rung (`sub_E1F8E0`, capped at the
+            // ladder's height − 1.95 m) at 2 m/s, snapping within one step (RE/24 LADDER-18)
+            let rung = ((l.height.min(l.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc() * 0.5;
+            l.height = rung;
+            let target = l.root_at(rung);
+            body.feet = body.feet.move_towards(target, 2.0 * dt);
             body.heading = super::heading_of(l.heading);
         } else {
             body.feet = p;
@@ -801,7 +809,13 @@ pub fn update_ladder(
                     let top_free = top_exit_free(l.top, l.n, &collision);
                     // ReachedTop at the seam (the same rule as mid-step above, on the margin of LADDER-8)
                     let margin = if !l.high || thick_top { 1.63 } else { 1.95 };
-                    let reached_top = l.height + margin >= len;
+                    // ReachedTop is kept from the climb up (the wait aligns below it, LADDER-18)
+                    let reached_top = l.reached_top || l.height + margin >= len;
+                    if along > 0.5 {
+                        l.reached_top = reached_top;
+                    } else if along < -0.5 {
+                        l.reached_top = false;
+                    }
                     if along > 0.5 && reached_top && !top_free {
                         // the top is blocked: the climb stops (`sub_E240B0`)
                         if phase != LadderPhase::Wait || done {
