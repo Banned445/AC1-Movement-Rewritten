@@ -140,6 +140,65 @@ pub struct HumanGroundData {
     pub stance_timer: f32,
     /// Human+3056 … +3093: the step-up just made, while it holds (RE/24 GUIDE-15).
     pub step_up: Option<StepUp>,
+    /// Which of the foot-IK switching states the ground was in last frame (RE/24 GROUND-16).
+    pub ik_state: IkState,
+}
+
+/// The ground states that switch the standing foot IK and the stick-to-ground smoothing (`crate::ik::GroundIkSwitch`;
+/// RE/24 GROUND-16). Each turns them off over 0.2 s on entry and back on in its exit; the other states (Idle, Move, the
+/// run stop, the skid turn, the pivot, the look-down, the ledge stop, the crouch, the static jump's preparation) leave
+/// them as they are. Entering the ground turns them on over 0.2 s (`HumanGround__OnActivateSetup` 0xDAE949), leaving it
+/// off over 0.2 s (state 1's exit 0xD97BA0, the hand-overs 0xD97920, 0xDAC8B0 …).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IkState {
+    #[default]
+    On,
+    /// States 21 / 22 (`Movement_Enter` 0xDA8890), exits `sub_D85330` / `sub_D99260`: on over 0.35 s (the landing's
+    /// `LandingToMove_Layout6` 0xD990A0 asks for 0.3 s after it, too late: only the first call acts).
+    Landing,
+    /// State 20 (0xDA8890), exit `sub_D85270`: on at once.
+    RollEnding,
+    /// State 40 (`HumanGround__ObstacleCollision_Enter` 0xD9CBF6), exit `sub_D83DC0`: on at once.
+    Lean,
+    /// State 36, FreeRun (`sub_D8B9D0`), exit `sub_D853F0`: on over 0.2 s (also on the way into the static jump's
+    /// preparation, `sub_D8E690`).
+    FreeRun,
+    /// Another context.
+    Away,
+}
+
+impl IkState {
+    fn of(g: &HumanGroundData) -> Self {
+        match g.owner {
+            TreeState::Landing | TreeState::DamageLanding if g.oneshot.is_some() => return Self::Landing,
+            TreeState::RollEnding if g.oneshot.is_some() => return Self::RollEnding,
+            _ => {}
+        }
+        if g.collide.is_some() {
+            Self::Lean
+        } else if g.extra.is_some_and(|e| e.mode == super::ground_extras::ExtraMode::FreeRun) {
+            Self::FreeRun
+        } else {
+            Self::On
+        }
+    }
+
+    /// The exit's and the entry's calls when the state changes.
+    pub fn switch(self, to: Self, sw: &mut crate::ik::GroundIkSwitch, dt: f32) {
+        if self == to {
+            return;
+        }
+        match self {
+            Self::Landing => sw.on(0.35),
+            Self::RollEnding | Self::Lean => sw.on(0.0),
+            Self::FreeRun => sw.on(0.2),
+            Self::On | Self::Away => {}
+        }
+        match to {
+            Self::Landing | Self::RollEnding | Self::Lean | Self::FreeRun | Self::Away => sw.off(0.2, dt),
+            Self::On => {}
+        }
+    }
 }
 
 /// The step-up tracker (`Human__PostUpdate` 0xB2708D → `sub_B26A30`): a stick-to-ground snap up by more than 0.25 m
@@ -637,21 +696,31 @@ pub fn update_ground(
     mut rig: ResMut<CameraRig>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
     skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>, Option<&crate::bone_pose::BonePose>), With<Player>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>, Option<&crate::bone_pose::BonePose>, Option<&mut crate::ik::GroundIkSwitch>), With<Player>>,
 ) {
     use super::abilities::Ability;
     let ab = super::abilities::of(abilities.as_deref());
     let dt = time.delta_secs().min(1.0 / 20.0);
-    for (mut loco, mut body, mut data, anim, pose) in &mut q {
+    for (mut loco, mut body, mut data, anim, pose, mut ik_switch) in &mut q {
         // `Human__GetLeadingFoot` 0xB18850 on last frame's pose (`bone_pose`); None without the install
         let leading_foot = skeleton.as_deref().zip(pose).filter(|(_, p)| p.seq > 0).and_then(|(s, p)| p.leading_foot(s));
         let g = &mut data.ground;
         if loco.current != ActorContextId::Ground {
+            // left the ground: the foot IK and the smoothing go off (RE/24 GROUND-16)
+            if let Some(sw) = ik_switch.as_deref_mut() {
+                g.ik_state.switch(IkState::Away, sw, dt);
+            }
+            g.ik_state = IkState::Away;
             continue;
         }
         if loco.just_switched {
             // the entry work of the first run; the update itself is skipped only for the rest of the switching frame
             loco.just_switched = false;
+            // `HumanGround__OnActivateSetup` 0xDAE949: the foot IK and the smoothing on over 0.2 s
+            if let Some(sw) = ik_switch.as_deref_mut() {
+                sw.on(0.2);
+            }
+            g.ik_state = IkState::On;
             if let Some(l) = g.pending_landing.take() {
                 // drop > 3 m: camera shake (drop − 3) / 7 (0xE05940)
                 if l.total_drop > 3.0 {
@@ -672,6 +741,13 @@ pub fn update_ground(
         }
         // the step-up tracker at last frame's end (`Human__PostUpdate` runs after the contexts; event 68 reads it)
         g.step_up = g.step_up.and_then(|s| s.hold(body.feet));
+        // the foot IK switch of the state the ground is in (its entry or exit, RE/24 GROUND-16). PORT: read once per
+        // frame, before the update, so a state's calls come at most a frame late
+        let ik_now = IkState::of(g);
+        if let Some(sw) = ik_switch.as_deref_mut() {
+            g.ik_state.switch(ik_now, sw, dt);
+        }
+        g.ik_state = ik_now;
 
         // ---------------------------------------------------------------- the free-step arrival's narrow mount
         // NarrowObject Movement (0xE534B0) after the reception: `TryPilotisFreeStep` 0xE50190 (from the air box along
@@ -1948,6 +2024,25 @@ impl AnyHit for std::ops::RangeInclusive<f32> {
 #[cfg(test)]
 mod reanalysis_tests {
     use super::*;
+
+    /// RE/24 GROUND-16: each switching state turns the foot IK off over 0.2 s on entry and on in its exit: the landings
+    /// over 0.35 s, the roll ending and the lean at once, FreeRun over 0.2 s; the others leave it alone.
+    #[test]
+    fn each_ground_state_switches_the_foot_ik_with_its_own_fade() {
+        let dt = 1.0 / 60.0;
+        for (state, back) in [(IkState::Landing, 0.35), (IkState::RollEnding, 0.0), (IkState::Lean, 0.0), (IkState::FreeRun, 0.2)] {
+            let mut sw = crate::ik::GroundIkSwitch::default();
+            IkState::On.switch(state, &mut sw, dt);
+            assert_eq!((sw.state, sw.smooth, sw.fade()), (3, false, 0.2), "{state:?} entry");
+            state.switch(IkState::On, &mut sw, dt);
+            assert_eq!((sw.state, sw.smooth, sw.fade()), (0, true, back), "{state:?} exit");
+        }
+        let mut sw = crate::ik::GroundIkSwitch::default();
+        IkState::On.switch(IkState::On, &mut sw, dt);
+        assert_eq!(sw.state, 2);
+        IkState::Landing.switch(IkState::Away, &mut sw, dt);
+        assert_eq!((sw.state, sw.smooth), (3, false), "the landing's exit finds it on; leaving the ground turns it off");
+    }
 
     /// RE/24 GUIDE-15: a step up of more than 0.25 m holds while the character stays on the contact's side, within 5 cm
     /// of its closest approach.

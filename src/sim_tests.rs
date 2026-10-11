@@ -1057,6 +1057,28 @@ fn small_drop_lands_with_the_forward_landing_blend() {
     assert!(w[1] + w[4] > 0.99, "{w:?}");
 }
 
+/// RE/24 GROUND-16: leaving the ground switches the foot IK and the smoothing off, a landing keeps them off (on at the
+/// ground entry, off again for state 21), and its end switches them on over 0.35 s.
+#[test]
+fn a_drop_switches_the_foot_ik_off_until_the_landing_ends() {
+    use crate::ik::GroundIkSwitch;
+    let sw = |s: &Sim| *s.app.world().get::<GroundIkSwitch>(s.player).unwrap();
+    let mut s = Sim::new(Vec3::new(19.0, 3.0, 12.0), -std::f32::consts::FRAC_PI_2);
+    assert_eq!((sw(&s).state, sw(&s).smooth), (2, true), "on, standing on the roof");
+    s.pad(Vec3::X, 1.0, true, false);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::InAir), "never left the roof");
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!((sw(&s).state, sw(&s).smooth), (3, false), "off in the air");
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::Ground), "never landed");
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(s.ground().oneshot.is_some(), "the landing plays");
+    assert_eq!((sw(&s).state, sw(&s).smooth), (3, false), "on at the entry, off again for the landing");
+    assert!(s.run_until(3.0, |s| s.ground().oneshot.is_none()), "the landing never ended");
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!((sw(&s).state, sw(&s).smooth), (0, true), "on after the landing");
+    assert!((sw(&s).fade() - 0.35).abs() < 1e-6);
+}
+
 /// Start hanging (wall hang) with the hands centred on `mid`, facing into the wall whose normal is `n`.
 fn hang_at(mid: Vec3, n: Vec3) -> Sim {
     use crate::player::ledge::{LedgeEntry, LedgeSubState};

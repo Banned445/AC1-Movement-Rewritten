@@ -339,6 +339,7 @@ pub fn player_components(feet: Vec3, heading: f32) -> impl Bundle {
         Body { feet, heading, grounded: true, ..default() },
         HumanDataBundle::default(),
         LimbTargets::default(),
+        crate::ik::GroundIkSwitch::default(),
         interpreter::Interpreter::default(),
     )
 }
