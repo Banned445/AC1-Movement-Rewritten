@@ -1301,7 +1301,10 @@ pub fn update_ground(
                 // the step off the edge. PORT: HG+609 bit 0 (set by some state enters) is taken to be clear outside
                 // one-shot actions.
                 if r.drop >= 0.53 && r.dist < -0.01 && super::jump_candidates::room_past_edge(&r, &collision) {
-                    if let Some(entry) = step_off_entry(body.feet, flat_fwd, &r, g.high_profile, g.speed_param, g.blend.foot == 0) {
+                    // the takeoff foot is the one opposite the leading foot: `sub_B27180`(…, 2 − (GetLeadingFoot() != 1))
+                    // 0xD9D4B9, so a left foot ahead takes off on `footr` (RE/24 AIR-28). PORT: the leading foot is the
+                    // locomotion's (MoveBlend foot 0 = left ahead), not the bone test of 0xB18850
+                    if let Some(entry) = step_off_entry(body.feet, flat_fwd, &r, g.high_profile, g.speed_param, g.blend.foot != 0) {
                         jump_log("step off (event 68)", body.feet, None);
                         switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
