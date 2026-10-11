@@ -1372,6 +1372,40 @@ fn a_released_stick_rebounds_only_if_it_last_pointed_at_the_wall() {
     assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir), "the stale angle at the wall rebounds straight back");
 }
 
+/// RE/24 NARROW-1: the beam walk's speed ramps toward the profile's band at 2 m/s² (the jog weight follows it); let go
+/// while jogging it plays the jog stop, while walking it settles into the wait.
+#[test]
+fn the_beam_walk_ramps_its_speed_and_stops_by_it() {
+    use crate::player::narrow::{beam_bands, BeamState};
+    let b = beam_bands();
+    assert!(b[0] > 1.0 && b[4] > b[0] + 1.0, "bands from the walk clips: {b:?}");
+    // on in low profile (the mount seeds band 0, band 4 when running), then high profile ramps up
+    let mut s = Sim::new(Vec3::new(71.0, 4.0, 70.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Walk), "never walked: {:?}", s.data().narrow.state);
+    s.pad(Vec3::X, 1.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    let v0 = s.data().narrow.speed;
+    s.run(0.25);
+    let v1 = s.data().narrow.speed;
+    assert!(v1 > v0 && v1 - v0 <= 2.0 * 0.26 + 1e-3, "ramps up at 2 m/s²: {v0} -> {v1}");
+    assert!(s.run_until(2.0, |s| s.data().narrow.speed >= b[2] - 1e-3), "reaches the jog band");
+    s.pad(Vec3::X, 0.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.data().narrow.state, BeamState::Stop, "let go at jog speed: the jog stop");
+
+    let mut s = Sim::new(Vec3::new(71.0, 4.0, 70.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Walk), "never walked");
+    s.run(0.5);
+    assert!((s.data().narrow.speed - b[1]).abs() < 1e-3, "low profile holds the walk band: {}", s.data().narrow.speed);
+    s.pad(Vec3::X, 0.0, false, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.data().narrow.state, BeamState::Wait, "let go at walk speed: the wait");
+}
+
 #[test]
 fn walk_across_a_beam_onto_the_far_platform() {
     use crate::player::narrow::{BeamState, BEAM_WALK};

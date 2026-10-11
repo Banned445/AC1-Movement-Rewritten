@@ -332,6 +332,35 @@ pub struct HumanNarrowObjectData {
     pub hop: Option<CornerHop>,
     /// Mode 8 destination, independent of the beam segment.
     step_off_to: Vec3,
+    /// Beam +1716 / +1720: the walk's current and desired speed (m/s, RE/24 NARROW-1).
+    pub speed: f32,
+    pub desired: f32,
+    /// Beam +2224 bit 0: the root clamped at the beam's end this tick.
+    clamped: bool,
+}
+
+/// The beam's speed bands (beam +164, `sub_F7D3E0` 0xF7D600–0xF7D61B): [walk, walk, jog, jog, jog], each the walk
+/// action's clip root displacement over its duration (RE/24 NARROW-1); the 1.04 / 1.78 / 2.87 / 4.71 constants are the
+/// fallback only.
+pub fn beam_bands() -> [f32; 5] {
+    static BANDS: std::sync::OnceLock<[f32; 5]> = std::sync::OnceLock::new();
+    *BANDS.get_or_init(|| {
+        let speed = |w: [f32; 2]| {
+            let a = ActionBlend::new(BEAM_WALK, 0, &w);
+            let d = a.duration();
+            let v = a.disp(1.0);
+            if d > 1e-4 { Vec2::new(v[0], v[1]).length() / d } else { 0.0 }
+        };
+        let (walk, jog) = (speed([1.0, 0.0]), speed([0.0, 1.0]));
+        if walk > 0.0 && jog > walk { [walk, walk, jog, jog, jog] } else { [1.04, 1.78, 2.87, 4.71, 4.71] }
+    })
+}
+
+/// The walk / start items' [walk, jog] weights from the speed (0xF7D890): jog = clamp((speed − band0) / (band4 − band0)).
+fn speed_weights(speed: f32) -> [f32; 2] {
+    let b = beam_bands();
+    let j = ((speed - b[0]) / (b[4] - b[0]).max(1e-4)).clamp(0.0, 1.0);
+    [1.0 - j, j]
 }
 
 fn item(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -477,6 +506,8 @@ impl HumanNarrowObjectData {
     }
 
     fn wait_state(&mut self) {
+        // the wait seeds the speed at 0 (0xF708D7)
+        self.speed = 0.0;
         match self.kind {
             NarrowKind::Beam => {
                 let w = item(BEAM_WAIT[self.foot], 0, &[]);
@@ -1061,7 +1092,33 @@ pub fn update_narrow(
         let side = stick && !forward && !back;
         let left = pad.dir.dot(super::right_of(facing)) < 0.0;
         let jog = pad.high_profile;
-        let walk_w = if jog { [0.0, 1.0] } else { [1.0, 0.0] };
+        // the speed model (RE/24 NARROW-1): the interpreter's desired band (0xEE9AF0 → vt128 `GetSpeedBand` 0xE53090:
+        // band 2 in high profile, 1 in low, while the stick is within 120° of the facing, else 0; clamped to band 4 by
+        // vt120 0xE52E60); the ramp 0xF79E90 moves the speed toward it at +2 m/s² and −3 m/s², braking whenever the
+        // stick is not forward (`ClassifyStickDir` ≠ 0)
+        let bands = beam_bands();
+        n.desired = if stick && a < 120f32.to_radians() { if jog { bands[2] } else { bands[1] } } else { 0.0 }.clamp(0.0, bands[4]);
+        if matches!(n.state, BeamState::Start | BeamState::Walk | BeamState::Stop) {
+            n.speed = if !forward || n.speed > n.desired {
+                (n.speed - 3.0 * dt).max(if forward { n.desired } else { 0.0 })
+            } else {
+                (n.speed + 2.0 * dt).min(n.desired)
+            };
+            // the playing walk / start item's weights follow the speed (0xF7D890); the phase is kept
+            if matches!(n.state, BeamState::Start | BeamState::Walk) {
+                if let Some(act) = n.action.filter(|a| a.id == BEAM_WALK || BEAM_START.contains(&a.id)) {
+                    let d0 = act.duration().max(1e-4);
+                    let phase = (n.t / d0).min(1.0);
+                    if let Some(b) = item(act.id, act.item, &speed_weights(n.speed)) {
+                        // the new blend's curve takes over at the same phase: what was applied moves with it
+                        n.t = phase * b.duration();
+                        n.applied += Vec3::from_array(b.disp(phase)) - Vec3::from_array(act.disp(phase));
+                        n.action = Some(b);
+                    }
+                }
+            }
+        }
+        let walk_w = speed_weights(n.speed);
         let dur = n.action.map(|a| a.duration()).unwrap_or(0.3);
         // RE/05 §2.14: item advance 0x778010 marks completion only with positive leftover time.
         // PORT: these single-item, one-shot actions have no queued evaluator in the movement simulation.
@@ -1134,7 +1191,7 @@ pub fn update_narrow(
         // the facing; the target search (vt288) → vt236 → `StartCornerHop` 0xF7D2F0.
         if n.kind == NarrowKind::Beam
             && matches!(n.state, BeamState::Start | BeamState::Walk)
-            && jog
+            && n.speed > beam_bands()[1]
             && stick
             && a > 40f32.to_radians()
             && a < 140f32.to_radians()
@@ -1225,6 +1282,7 @@ pub fn update_narrow(
                 let limit_lo = if n.toward_p1 { 0.0 } else { stop };
                 let limit_hi = if n.toward_p1 { n.len() - stop } else { n.len() };
                 let over = if n.toward_p1 { s - limit_hi } else { limit_lo - s };
+                n.clamped = next.is_none() && over >= 0.0;
                 s = s.clamp(limit_lo.min(limit_hi), limit_hi.max(limit_lo));
                 n.s = s;
                 if let (Some((q0, q1)), true) = (next, over >= 0.0) {
@@ -1261,7 +1319,7 @@ pub fn update_narrow(
                     n.lateral = off - n.dir() * off.dot(n.dir());
                     if Vec2::new(body.feet.x - n.entry_from.x, body.feet.z - n.entry_from.z).length_squared() > 0.25
                         || n.to_end() <= BEAM_END_STOP || moved.hit_wall {
-                        if forward { n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w)); }
+                        if forward { n.speed = if jog { beam_bands()[4] } else { beam_bands()[0] }; n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed))); }
                         else { n.wait_state(); }
                     } else if done {
                         n.foot ^= 1;
@@ -1297,7 +1355,7 @@ pub fn update_narrow(
                     }
                     let walking = matches!(n.entry_mode, BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack) && n.kind == NarrowKind::Beam;
                     if walking && forward {
-                        let w = item(BEAM_WALK, n.foot, &walk_w);
+                        n.speed = if jog { beam_bands()[4] } else { beam_bands()[0] }; let w = item(BEAM_WALK, n.foot, &speed_weights(n.speed));
                         n.play(BeamState::Walk, w);
                     } else {
                         n.wait_state();
@@ -1314,25 +1372,30 @@ pub fn update_narrow(
                     n.turn_left = left;
                     let t = item(BEAM_TO_90[!left as usize][n.foot], 0, &[]);
                     n.play(BeamState::TurnTo90, t);
-                } else if forward && n.to_end() > BEAM_END_STOP + 0.05 {
-                    let st = item(BEAM_START[n.foot], 0, &walk_w);
-                    n.play(BeamState::Start, st);
-                } else if forward && can_step_off(n, &collision) {
-                    let st = item(BEAM_START[n.foot], 0, &walk_w);
+                } else if forward && (n.to_end() > BEAM_END_STOP + 0.05 || can_step_off(n, &collision)) {
+                    // the start seeds the speed at band 0 (0xF724C4)
+                    n.speed = beam_bands()[0];
+                    let st = item(BEAM_START[n.foot], 0, &speed_weights(n.speed));
                     n.play(BeamState::Start, st);
                 } else if done {
                     n.wait_state();
                 }
             }
             BeamState::Start | BeamState::Walk => {
-                if !forward {
-                    // released: the jog stops with its stop action, the walk settles into the wait
-                    if jog {
-                        let st = item(BEAM_JOG_STOP[n.foot], 0, &[]);
-                        n.play(BeamState::Stop, st);
-                    } else {
-                        n.wait_state();
-                    }
+                // Walk → Idle 0xF747B0 and Walk → JogStop 0xF749D0 by the speed (RE/24 NARROW-1). PORT: the obstacle
+                // contact branches (0xB25230) are not modelled here (event 17 handles the obstacle)
+                let b = beam_bands();
+                let walking = n.state == BeamState::Walk;
+                let phase = n.t / dur.max(1e-4);
+                let idle = n.clamped
+                    || (walking && n.speed < b[0])
+                    || (!walking && n.desired < b[0] && (phase < 0.5 || n.speed < b[0]));
+                let jog_stop = n.desired < b[0] && ((walking && n.speed > b[1]) || (!walking && n.speed > b[0] && phase > 0.5));
+                if idle {
+                    n.wait_state();
+                } else if jog_stop {
+                    let st = item(BEAM_JOG_STOP[n.foot], 0, &[]);
+                    n.play(BeamState::Stop, st);
                 } else if done {
                     if n.state == BeamState::Walk {
                         n.foot ^= 1;
@@ -1424,7 +1487,7 @@ pub fn update_narrow(
                     n.hop = None;
                     if forward {
                         n.foot ^= 1;
-                        let w = item(BEAM_WALK, n.foot, &walk_w);
+                        n.speed = n.speed.max(beam_bands()[1]); let w = item(BEAM_WALK, n.foot, &speed_weights(n.speed));
                         n.play(BeamState::Walk, w);
                     } else {
                         n.wait_state();
@@ -1435,7 +1498,7 @@ pub fn update_narrow(
                 // 0xF80560 can resume Main before the entry clip ends, once the 0.2 s timer expires.
                 if BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward && n.impulse_elapsed >= 0.2 {
                     n.across = None;
-                    n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w));
+                    n.speed = beam_bands()[4]; n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed)));
                 } else if done {
                     let w = item(BEAM_IMPULSE_WAIT, 0, &[]);
                     n.play(BeamState::ImpulseWait, w);
@@ -1446,7 +1509,7 @@ pub fn update_narrow(
                 if (BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward && n.impulse_elapsed >= 0.2) || (!BEAM_COMPLETION && stick) {
                     if BEAM_COMPLETION {
                         n.across = None;
-                        n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w));
+                        n.speed = beam_bands()[4]; n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed)));
                     } else { n.wait_state(); }
                 }
             }
