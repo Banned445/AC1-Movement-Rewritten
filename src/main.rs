@@ -10,6 +10,7 @@ mod assets;
 mod camera;
 mod collision;
 mod debug_capture;
+mod demo_course;
 mod debug_fly;
 mod guidance;
 mod hud;
@@ -68,7 +69,11 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "AC1 Movement Rewritten".into(),
-                resolution: (1600, 900).into(),
+                // `AC_WINDOW=<w>x<h>` (demo recordings), else 1600 x 900
+                resolution: std::env::var("AC_WINDOW").ok().and_then(|v| {
+                    let (w, h) = v.split_once('x')?;
+                    Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+                }).unwrap_or((1600, 900)).into(),
                 ..default()
             }),
             ..default()

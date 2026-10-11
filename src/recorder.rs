@@ -225,6 +225,10 @@ impl Plugin for RecorderPlugin {
                 .add_systems(PostStartup, replay_place.after(crate::map_menu::initialize))
                 .add_systems(Update, replay_input.before(record_input))
                 .add_systems(Last, replay_advance);
+            // `AC_VIDEO=<out.mp4>`: every replayed frame piped to ffmpeg (`AC_FFMPEG`, else `ffmpeg` on the PATH)
+            if let Ok(out) = std::env::var("AC_VIDEO") {
+                app.insert_resource(VideoCapture::new(out)).add_systems(Last, capture_frame.before(replay_advance));
+            }
         }
     }
 }
@@ -344,19 +348,123 @@ fn replay_input(replay: Res<Replay>, mut pad: ResMut<PadInput>, mut rig: ResMut<
     }
 }
 
-/// Sets the next frame's timestep; at the end writes `replay_state.txt` and exits.
-fn replay_advance(mut replay: ResMut<Replay>, rec: Res<Recorder>, mut strategy: ResMut<TimeUpdateStrategy>, mut exit: MessageWriter<AppExit>) {
+/// The replay's video: the frames' screenshots, written to ffmpeg's stdin in frame order as they come back.
+#[derive(Resource)]
+struct VideoCapture {
+    out: String,
+    shared: std::sync::Arc<std::sync::Mutex<VideoPipe>>,
+    spawned: u64,
+}
+
+#[derive(Default)]
+struct VideoPipe {
+    child: Option<std::process::Child>,
+    pending: std::collections::BTreeMap<u64, Vec<u8>>,
+    next: u64,
+    size: Option<(u32, u32)>,
+    written: u64,
+}
+
+impl VideoCapture {
+    fn new(out: String) -> Self {
+        VideoCapture { out, shared: default(), spawned: 0 }
+    }
+    /// Every spawned frame has been written.
+    fn done(&self) -> bool {
+        self.shared.lock().map(|p| p.written >= self.spawned).unwrap_or(true)
+    }
+    fn finish(&self) {
+        let Ok(mut p) = self.shared.lock() else { return };
+        if let Some(mut child) = p.child.take() {
+            drop(child.stdin.take());
+            match child.wait() {
+                Ok(s) => info!("video: {} frames → {} ({s})", p.written, self.out),
+                Err(e) => error!("video: ffmpeg failed: {e}"),
+            }
+        }
+    }
+}
+
+fn capture_frame(mut commands: Commands, replay: Res<Replay>, mut video: ResMut<VideoCapture>) {
+    if replay.next >= replay.rec.frames.len() {
+        return;
+    }
+    let index = video.spawned;
+    video.spawned += 1;
+    let shared = video.shared.clone();
+    let out = video.out.clone();
+    commands.spawn(Screenshot::primary_window()).observe(move |shot: On<bevy::render::view::screenshot::ScreenshotCaptured>| {
+        let Ok(img) = shot.image.clone().try_into_dynamic() else { return };
+        let rgb = img.to_rgb8();
+        let Ok(mut p) = shared.lock() else { return };
+        if p.child.is_none() {
+            let (w, h) = (rgb.width(), rgb.height());
+            let ffmpeg = std::env::var("AC_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+            let crf = std::env::var("AC_VIDEO_CRF").unwrap_or_else(|_| "20".into());
+            let child = std::process::Command::new(ffmpeg)
+                .args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &format!("{w}x{h}"), "-r", "60", "-i", "-",
+                    "-c:v", "libx264", "-preset", "slow", "-crf", &crf, "-pix_fmt", "yuv420p", "-movflags", "+faststart", &out])
+                .stdin(std::process::Stdio::piped())
+                .spawn();
+            match child {
+                Ok(c) => {
+                    p.child = Some(c);
+                    p.size = Some((w, h));
+                }
+                Err(e) => {
+                    error!("video: cannot start ffmpeg: {e}");
+                    return;
+                }
+            }
+        }
+        if p.size != Some((rgb.width(), rgb.height())) {
+            error!("video: frame {index} changed size");
+            return;
+        }
+        p.pending.insert(index, rgb.into_raw());
+        use std::io::Write as _;
+        while let Some(bytes) = { let n = p.next; p.pending.remove(&n) } {
+            if let Some(stdin) = p.child.as_mut().and_then(|c| c.stdin.as_mut()) {
+                if let Err(e) = stdin.write_all(&bytes) {
+                    error!("video: write failed: {e}");
+                }
+            }
+            p.next += 1;
+            p.written += 1;
+        }
+    });
+}
+
+/// Sets the next frame's timestep; at the end writes `replay_state.txt` and exits (with a video, once its last frames
+/// are written).
+fn replay_advance(mut replay: ResMut<Replay>, rec: Res<Recorder>, mut strategy: ResMut<TimeUpdateStrategy>, mut exit: MessageWriter<AppExit>, video: Option<Res<VideoCapture>>) {
+    if replay.next >= replay.rec.frames.len() {
+        // the video's last screenshots are still coming back: the world holds still meanwhile
+        *strategy = TimeUpdateStrategy::ManualDuration(Duration::ZERO);
+        if video.as_ref().is_none_or(|v| v.done()) {
+            if let Some(v) = video.as_ref() {
+                v.finish();
+            }
+            exit.write(AppExit::Success);
+        }
+        return;
+    }
     replay.next += 1;
     match replay.rec.frames.get(replay.next) {
         Some(f) => *strategy = TimeUpdateStrategy::ManualDuration(Duration::from_nanos(f.dt_nanos)),
         None => {
+            if video.is_some() {
+                *strategy = TimeUpdateStrategy::ManualDuration(Duration::ZERO);
+            }
             let path = replay.dir.join("replay_state.txt");
             let text: String = rec.ring.iter().map(|(_, l)| format!("{l}\n")).collect();
             match std::fs::write(&path, text) {
                 Ok(()) => info!("replay done: {}", path.display()),
                 Err(e) => error!("replay: cannot write {}: {e}", path.display()),
             }
-            exit.write(AppExit::Success);
+            if video.is_none() {
+                exit.write(AppExit::Success);
+            }
         }
     }
 }

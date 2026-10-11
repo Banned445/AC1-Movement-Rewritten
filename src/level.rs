@@ -428,7 +428,12 @@ pub(crate) fn build_level(
     mut collision: ResMut<CollisionWorld>,
     mut guidance: ResMut<GuidanceWorld>,
 ) {
-    let (c, g) = geometry();
+    let (mut c, mut g) = geometry();
+    // the demo course (`AC_DEMO_COURSE`), appended after the greybox
+    if crate::demo_course::enabled() {
+        crate::demo_course::add(&mut c, &mut g);
+        crate::demo_course::spawn(&mut commands, &mut meshes, &mut materials);
+    }
     *collision = c;
     *guidance = g;
 
