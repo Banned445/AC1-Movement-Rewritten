@@ -828,6 +828,19 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
     (mv, Some(tail))
 }
 
+/// The blended swing back's weights over `swingback_up_{min,max}_{200,300}` (`StartLedgeJump` 0xDDCE40, blended):
+/// [(1 − h)(1 − v), (1 − h)v, h(1 − v), hv]. v = clamp(the higher new hand − root − 2.0); h = the flat distance from the
+/// current hands' midpoint `mid` to the new one projected onto the plane through `mid` whose normal is the new free
+/// pose's right axis (`Vec_ProjectOntoPlane`, 0xDDD057), so the sideways offset does not count (RE/24 LEDGE-23).
+pub fn swing_back_weights(hl: Vec3, hr: Vec3, nn: Vec3, mid: Vec3, root: Vec3) -> [f32; 4] {
+    let point = (hl + hr) * 0.5;
+    let v = (hl.y.max(hr.y) - root.y - 2.0).clamp(0.0, 1.0);
+    let new_right = right_of(-Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero());
+    let d = Vec3::new(point.x - mid.x, 0.0, point.z - mid.z);
+    let h = (d - new_right * d.dot(new_right)).length().clamp(0.0, 1.0);
+    [(1.0 - h) * (1.0 - v), (1.0 - h) * v, h * (1.0 - v), h * v]
+}
+
 /// `HumanLedge__TryWallJumpUp` 0xDD62A0 (wall hang, no pending step, stick up): the swing back to the front edge of an
 /// overhang behind, then the blended swing (0xDDCE40): weights over `swingback_up_{min,max}_{200,300}` by
 /// v = clamp(targetZ − rootZ − 2.0) and h = clamp(horizontal distance of the hands).
@@ -858,9 +871,7 @@ pub fn try_swing_back(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: Led
         let nn = a.wall_normal;
         let point = (hl + hr) * 0.5;
         let to = hang_root_at(hl, hr, nn, LedgeHangType::Free, _collision);
-        let v = (point.y - root.y - 2.0).clamp(0.0, 1.0);
-        let h = Vec2::new(point.x - mid.x, point.z - mid.z).length().clamp(0.0, 1.0);
-        let w = [(1.0 - h) * (1.0 - v), (1.0 - h) * v, h * (1.0 - v), h * v];
+        let w = swing_back_weights(hl, hr, nn, mid, root);
         let a = jump_blend::action_items(SWING_BACK).map(|_| ActionBlend::new(SWING_BACK, 0, &w));
         let b = jump_blend::action_items(SWING_BACK_B).map(|_| ActionBlend::new(SWING_BACK_B, 0, &w));
         let (da, db) = (a.map(|a| a.duration()).unwrap_or(0.0), b.map(|b| b.duration()).unwrap_or(0.0));
@@ -1927,6 +1938,19 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RE/24 LEDGE-23: the swing back's horizontal weight counts the travel out from the wall only, not sideways.
+    #[test]
+    fn the_swing_back_ignores_the_sideways_offset() {
+        let (mid, root) = (Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.0, 0.9, 0.5));
+        let nn = Vec3::NEG_Z; // the new edge faces -Z, 0.6 m out behind; hands 2.4 m above the root
+        let straight = swing_back_weights(Vec3::new(-0.2, 3.3, -0.6), Vec3::new(0.2, 3.3, -0.6), nn, mid, root);
+        let shifted = swing_back_weights(Vec3::new(0.6, 3.3, -0.6), Vec3::new(1.0, 3.3, -0.6), nn, mid, root);
+        assert_eq!(straight, shifted);
+        // v reads the higher hand: 3.4 − 0.9 − 2.0 = 0.5
+        let uneven = swing_back_weights(Vec3::new(-0.2, 3.4, -0.6), Vec3::new(0.2, 3.2, -0.6), nn, mid, root);
+        assert!((uneven[1] + uneven[3] - 0.5).abs() < 1e-5, "{uneven:?}");
+    }
 
     /// RE/24 AIR-8: min for a short jump, max for a fall above 2.5 m or a jump from more than 6 m away; the lean blends
     /// toward the 30° clip (leaning back) or the 45° clip (leaning in).
