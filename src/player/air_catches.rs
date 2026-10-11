@@ -280,7 +280,7 @@ pub fn edge_landing(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidan
     } else if a > 45f32.to_radians() && a < 135f32.to_radians() {
         (STEP_OFF[2], rot(-90.0))
     } else {
-        // PORT: the front case's facing (`sub_42FA60`) is not decoded; the body keeps facing away from the normal
+        // the front case faces the negated averaged normal (`sub_42FA60` 0x42FA60, RE/24 AIR-17)
         (STEP_OFF[0], -n)
     })
 }

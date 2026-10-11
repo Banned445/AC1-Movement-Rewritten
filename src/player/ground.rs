@@ -1422,7 +1422,8 @@ pub fn update_ground(
         let before = body.feet;
         let mut r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, delta, true, dt) };
         // PORT: the run stop's root motion (≈0.5 m of slide) does not carry the character off a roof edge; it stops at
-        // the last supported position. The game's guard for this is not traced (LIVE: run stop next to an edge).
+        // the last supported position. The game has no guard: its root motion carries the body until the fall-off rule
+        // or event 68's floor branch fires (RE/24 GROUND-1 / 2 / 31). LIVE (RE/20 #12): the visual check only.
         if stopping && collision.ground_support(r.position).is_none() {
             r.position = before;
         }
@@ -1698,9 +1699,9 @@ pub fn static_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, c
     let cuts = vec![(0.5f32, 0.5f32); world.edges.len()];
     let q = std::f32::consts::FRAC_PI_4;
     let sets = [
-        ChainParams { dir: -fwd, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: 1 },
-        ChainParams { dir: right, right: fwd, ranges: [(0.0, 0.0), (0.0, q)], parallel: q, mask: 1 },
-        ChainParams { dir: -right, right: fwd, ranges: [(-q, 0.0), (0.0, 0.0)], parallel: q, mask: 1 },
+        ChainParams { dir: -fwd, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: u32::MAX },
+        ChainParams { dir: right, right: fwd, ranges: [(0.0, 0.0), (0.0, q)], parallel: q, mask: u32::MAX },
+        ChainParams { dir: -right, right: fwd, ranges: [(-q, 0.0), (0.0, 0.0)], parallel: q, mask: u32::MAX },
     ];
     let mut candidates = Vec::new();
     for p in &sets {

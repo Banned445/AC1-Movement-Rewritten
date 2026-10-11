@@ -542,7 +542,9 @@ impl GuidanceWorld {
     }
 
     /// `report` with each report edge's index in this world and, for a clipped report, the lengths cut off its two ends
-    /// (the contact's runtime scratch, `sub_6764E0`; none for Beam edges).
+    /// (the contact's runtime scratch, `sub_6764E0`; none for Beam edges). These are the report's filter cuts: the game's
+    /// query-time clipping records none (`GuidanceObject__AddClippedContact` 0x5AB340), only the report cuts and filters
+    /// do (`GuidanceZoneBox__CutReport` 0x6621D0 and the like; RE/24 GUIDE-13).
     pub fn report_indexed(&self, centre: Vec3, forward: Vec3, min: Vec3, max: Vec3, clip: bool) -> Report {
         let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
         let right = forward.cross(Vec3::Y);
@@ -601,7 +603,8 @@ pub struct ChainParams {
     pub ranges: [(f32, f32); 2],
     /// +72: an edge's direction within this angle of `right` (|cos| ≥ |cos(parallel)|, +76).
     pub parallel: f32,
-    /// +80: the type mask.
+    /// +80: the type mask (`(1 << type) & mask` only; the static jump and the jump candidates pass −1, 0xE16804; RE/24
+    /// GUIDE-19).
     pub mask: u32,
 }
 
@@ -620,7 +623,7 @@ impl GuidanceWorld {
         let right = p.right.normalize_or_zero();
         let mut cands: Vec<usize> = Vec::new();
         for (i, e) in self.edges.iter().enumerate() {
-            if p.mask != 1 && (1u32 << e.subtype as u32) & p.mask == 0 {
+            if (1u32 << e.subtype as u32) & p.mask == 0 {
                 continue;
             }
             let d = e.p1 - e.p0;

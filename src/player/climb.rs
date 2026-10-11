@@ -555,9 +555,9 @@ impl HoldGrid {
     /// edges facing the climber within 45°) for the edge point nearest a reference 0.2 m out of the cell centre. The
     /// depth window lets the grid follow a wall that leans in or out. A hit counts only in its own cell.
     ///
-    /// Not modelled: the direction box the grid also queries (local x / z bounds by direction, depth from the limbs'
-    /// −1.0 to +0.5 m). The cell probes do not read it; it feeds the runtime edges of capsules and barrels
-    /// (sub_B27E80 / sub_B28180) and the corner candidates (sub_DE8380).
+    /// Every cell probe reads the ChooseMove direction report (local x / z bounds by direction, depth from the limbs'
+    /// −1.0 to +0.5 m, no steep edges, no ladders; RE/24 CLIMB-14), which also feeds the runtime edges of capsules and
+    /// barrels (sub_B27E80 / sub_B28180) and the corner candidates (sub_DE8380).
     pub fn build(g: &GuidanceWorld, d: &HumanClimbData, root: Vec3, facing: Vec3) -> Self {
         let forward = Vec3::new(facing.x, 0.0, facing.z).normalize_or(-d.normal);
         let right = right_of(forward);
@@ -659,7 +659,6 @@ fn corner_from_grid(grid: &HoldGrid, pose: usize, dir: usize) -> Option<Hold> {
 /// side: 0.25 m across, 0.5 m along the side both ways, 0.3 m up and down, edges whose wall faces back against the
 /// side within 50°, nearest to a point 0.2 m back toward the climber (sub_11713A0, mask 50). These are the top edges
 /// of walls square to the climb face, ahead in the move. The row (1 + row offset) must hold a plain ledge grab.
-/// PORT: the game's search filter `dword_193419C` (climb holds) is not modelled.
 fn corner_from_candidates(g: &GuidanceWorld, d: &HumanClimbData, facing: Vec3, dir: usize) -> Option<Hold> {
     let (side, row) = corner_side(dir)?;
     let mut base = (d.foot_l + d.foot_r) * 0.5;
@@ -737,7 +736,8 @@ fn side_column_holds(g: &GuidanceWorld, d: &HumanClimbData, facing: Vec3, dir: u
 /// `HumanClimb__TrySideLedgeGrab` 0xDF22C0 (dirs 4–9, ChooseMove: near after the corner moves onto the ground, far after
 /// the outside corner; flags 4610 / 4611 + 2920): the side columns' hand row alone (record 4 up, 3 level, 2 down: the
 /// corner climb's hand row) becomes a hang on that wall. Both hands on the hold, +2940 = the dir. Two foot probes 1 m
-/// below it, 0.2 m to either side and 0.5 m out (`sub_11718B0`, box 0.25 / 0.625 / 0.15) → both found: a wall hang
+/// below it, 0.2 m to either side and 0.125 m into the wall (`sub_11718B0`, box 0.25 / 0.625 / 0.15, RE/24 CLIMB-25)
+/// → both found: a wall hang
 /// (`sub_B157B0`, `Human__WallHangBodyBoxFree`, lateral path 1.8 × 1.1 m), else a free hang (`sub_B15AD0`,
 /// `Human__FreeHangBodyBoxesFree`, 1.8 × 2.4 m). The Ledge fill (`HumanClimb__FillLedge_FromClimb` 0xDEEAC0, SubState 9)
 /// plays `CLIMB_TO_HANG[wall / free][+2940]` while the root goes to the hang.
@@ -1202,7 +1202,8 @@ pub fn update_climb(
         let n = d.normal;
         // Update 0xDFE7F0, every state: `sub_E55A10(human+1328)` checks that the objects behind the four limbs' holds
         // still exist (handle flag 0x10000000 and a live pointer, or no hold). A destroyed or unloaded hold drops the
-        // character (fill HumanClimb__FillInAirData_LostGrip 0xDF3300). PORT: the hold must still lie on a grab edge.
+        // character (fill HumanClimb__FillInAirData_LostGrip 0xDF3300). PORT: the hold must still lie on a grab edge (the game
+        // loses a hold only when its object dies, RE/24 CLIMB-18).
         // (a reach to a ladder holds rungs, not grab edges)
         let lost = d.reach.is_none_or(|r| r.ladder.is_none())
             && [d.hand_l, d.hand_r, d.foot_l, d.foot_r].iter().zip(d.hold_n).any(|(p, hn)| guidance.on_edge(*p, hn, CLIMB_HOLD_TOL).is_none());
@@ -1247,7 +1248,7 @@ pub fn update_climb(
             }
             // high profile with the Legs buffer → event 2 (`sub_DF9BE0` / `sub_DEA560`): the target stored, state 5, the
             // rebound `xx_h_hangwall_tr_rebound_footl` (0x011FFC1A, locked) in place, then the jump when it is done
-            // (`StateKnockedOff_Update` 0xDEE840 → fill `sub_DEAE30`, RE/24 CLIMB-7). PORT: the kind-0 takeoff until AIR-5.
+            // (`StateKnockedOff_Update` 0xDEE840 → fill `sub_DEAE30`, RE/24 CLIMB-7), kind 2 with the rebound takeoff (AIR-5).
             if pad.high_profile && pad.jump_buffered() {
                 if let Some(jd) = super::targets::jump_off_wall_dir((pad.speed01 > 0.0).then_some(pad.dir_snap), n) {
                     pad.consume_jump();
@@ -1526,7 +1527,7 @@ pub fn update_climb(
         // Both hands go onto the one hold (LimbIK targets 0 and 1, 0xDF0EF0 / 0xDF0F32; the Ledge context spreads them
         // later). The wall hang first (`Human__FindWallHangFeetSupports` 0xB16130, `WallHangBodyBoxFree` 0xB2DC80,
         // `LateralPathFree` 1.8 / 1.1), else the free hang (`FreeHangBodyBoxesFree`, `LateralPathFree` 1.8 / 2.4)
-        // (0xDF0DFF) (RE/24 CLIMB-8). PORT / LIVE: climbing down at the bottom picks the row-3 hold 1.2 m up, whose wall
+        // (0xDF0DFF) (RE/24 CLIMB-8). PORT / LIVE (RE/20 #10): climbing down at the bottom picks the row-3 hold 1.2 m up, whose wall
         // hang's root is 0.1 m above the floor; the game's body box (root … root + 1.3 m) would not refuse it, yet the
         // climber is seen to step off there (RE/20 item 10). The port keeps its stand-in: the hang's feet 0.3 m clear of
         // the floor.

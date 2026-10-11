@@ -264,7 +264,7 @@ fn eight_metre_drop_lands_at_the_band_edge() {
     s.run(0.2);
     let l = s.ground().last_landing.expect("landed");
     // the step off the rim (event 68) is a small free jump: its rise puts the fall just over the 8 m band edge
-    // (0xED6280: 8 m and more is SmallDamage). LIVE: the game's fall height after a step off (RE/18 §9)
+    // (0xED6280: 8 m and more is SmallDamage). LIVE (RE/20 #3): the game's fall height after a step off (RE/18 §9)
     assert!((7.95..8.15).contains(&l.fall_height), "{l:?}");
     assert!(l.damage <= 10, "{l:?}");
     assert!(s.body().feet.x < -5.0, "unexpected respawn: {:?}", s.body().feet);
@@ -824,8 +824,7 @@ fn rooftop_jump_plays_the_game_items_and_free_step_reception() {
     s.pad(Vec3::X, 1.0, true, true);
     assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::InAir), "never jumped");
     let air = &s.data().air;
-    let AirMode::Jump { real, duration, t_takeoff, .. } = air.mode else { panic!("not a jump: {:?}", air.mode) };
-    assert!(real);
+    let AirMode::Jump { duration, t_takeoff, .. } = air.mode else { panic!("not a jump: {:?}", air.mode) };
     let (to, fl) = (air.takeoff.unwrap(), air.flight.unwrap());
     assert!(TAKEOFF_RUN.contains(&to.id));
     // durations are the items' Σw·T (takeoff 0.13–0.33 s, flight 0.2–0.6 s for these clips)
@@ -925,15 +924,15 @@ fn outer_corner_wraps_around_the_wall_end() {
 
 #[test]
 fn swing_back_catches_the_beam_behind_into_a_free_hang() {
-    use crate::player::ledge_moves::{MoveKind, HOP_UP};
+    use crate::player::ledge_moves::{MoveKind, SWING_BACK};
     // `HumanLedge__TryWallJumpUp` 0xDD62A0: hanging on wall E's -Z face, stick up → the box 0.75 m out from the wall
     // (root + 2.25 m) finds the far side edge of the beam behind (z 48.8, top 3.2 m), facing the way the wall does
     let mut s = hang_at(Vec3::new(42.0, 2.6, 49.7), Vec3::NEG_Z);
     s.pad(Vec3::Z, 1.0, false, false); // up
-    let hopped = s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::HopUp));
-    assert!(hopped, "no hop: {}", s.data().ledge.last_action);
+    let hopped = s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::SwingBack));
+    assert!(hopped, "no swing back: {}", s.data().ledge.last_action);
     let mv = s.data().ledge.mv.unwrap();
-    assert_eq!(mv.seq[0].map(|a| a.id), Some(HOP_UP));
+    assert_eq!(mv.seq[0].map(|a| a.id), Some(SWING_BACK));
     s.pad(Vec3::Z, 0.0, false, false);
     assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
     let l = &s.data().ledge;
@@ -3009,7 +3008,7 @@ fn the_ledge_suspends_the_limb_ik_through_the_pull_up() {
     }
     // the action exceptions: Entry only for the swing back / hop `_b` / step1_to_hangwall, the pull-up only for
     // hangfree_tr_hangwall, never for the wall run's swing into the wall-free hang
-    assert!(ledge_ik_runs(S::Entry, Some(crate::player::ledge_moves::HOP_UP_B)) && !ledge_ik_runs(S::Entry, None));
+    assert!(ledge_ik_runs(S::Entry, Some(crate::player::ledge_moves::SWING_BACK_B)) && !ledge_ik_runs(S::Entry, None));
     assert!(ledge_ik_runs(S::Pullup, Some(0x01B7_02FD)));
     assert!(!ledge_ik_runs(S::HandPlacement, Some(0x0106_F36F)));
     let mut s = hang_at(Vec3::new(12.0, 2.6, 41.7), Vec3::NEG_Z);

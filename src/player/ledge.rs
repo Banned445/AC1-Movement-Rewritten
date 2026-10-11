@@ -52,7 +52,7 @@ pub enum LedgeSubState {
 
 /// The ledge sub-states whose update runs the limb IK (`sub_DCD910` 0xDCD910: SubState 0, 1, 3, 4, 6, 8, 11, 13; RE/24
 /// ANIM-10), by the playing `action`:
-/// - Entry (0) only while the climb's swing back (0x1EB21811), the hop's `_b` (`HOP_UP_B`) or `step1_to_hangwall`
+/// - Entry (0) only while the climb's swing back (0x1EB21811), the swing back's `_b` (`SWING_BACK_B`) or `step1_to_hangwall`
 ///   (0x0106CFC5) plays;
 /// - Pullup (4) only while `xx_h_hangfree_tr_hangwall` (0x01B702FD) plays;
 /// - never while one of `IK_NEVER` plays (the wall run's swing into the wall-free hang, `air_all_to_swing_tr_hangfree_b`,
@@ -70,7 +70,7 @@ pub fn ledge_ik_runs(s: LedgeSubState, action: Option<u32>) -> bool {
     }
 }
 
-/// `sub_DCD910`'s Entry actions with the IK on: the climb's swing back, `HOP_UP_B`, `step1_to_hangwall`.
+/// `sub_DCD910`'s Entry actions with the IK on: the climb's swing back, `SWING_BACK_B`, `step1_to_hangwall`.
 const IK_ENTRY: [u32; 3] = [0x1EB2_1811, 0x4CD6_8F50, 0x0106_CFC5];
 /// `sub_DCD910`'s actions that never run the IK.
 const IK_NEVER: [u32; 10] = [0x0106_F36F, 0x0121_A15E, 0x035F_27A1, 0x035F_27A2, 0x035F_27AD, 0x035F_27AF, 0x0292_6C68, 0x0292_6C69, 0x0292_40CA, 0x0292_40CB];
@@ -191,7 +191,7 @@ pub struct HumanLedgeData {
     pub blocked_right: bool,
     moves: Vec<RootInterp>,
     after: Option<After>,
-    /// Running corner turn / ledge jump / hop up (`ledge_moves`).
+    /// Running corner turn / ledge jump / swing back (`ledge_moves`).
     pub mv: Option<LedgeMove>,
     /// Moves queued after `mv` (pull-down stages); each starts from where the previous one ended.
     pub queue: Vec<LedgeMove>,
@@ -199,9 +199,6 @@ pub struct HumanLedgeData {
     pub then_climb: Option<ClimbEntry>,
     /// The Ladder context takes over when `mv` ends (TrySideMoveToLadder 0xDD4CD0: flag 1860 | 0x10).
     pub then_ladder: Option<super::ladder::LadderEntry>,
-    /// Free hang forced by the hop (0xDDAB00) until the next move re-evaluates the wall below.
-    /// PORT: the game switches back through TrySwitchHangType's free → wall anims (not ported).
-    pub force_free: bool,
     /// The hang type has been evaluated for this hang (it then changes only through moves: switches,
     /// corners, jumps — 0xDE1060).
     pub hang_set: bool,
@@ -403,7 +400,6 @@ pub fn quantize(stick: Vec3, facing: Vec3) -> LedgeDir {
 
 fn start_move(d: &mut HumanLedgeData, mv: LedgeMove, what: &'static str) {
     d.mv = Some(mv);
-    d.force_free = false;
     d.step_seq += 1;
     d.sub_state = LedgeSubState::HandPlacement;
     d.blocked_up = false;
@@ -612,7 +608,6 @@ pub fn update_ledge(
                     hang_type_at(hand_mid(d), mv.normal, &collision)
                 };
                 d.hang_set = true;
-                d.force_free = false;
                 d.mv = None;
                 d.sub_state = LedgeSubState::Movement;
                 if let ledge_moves::MoveKind::SideJump { .. } = mv.kind {
@@ -843,9 +838,9 @@ pub fn update_ledge(
                         d.then_climb = Some(e);
                         continue;
                     }
-                    // TryWallJumpUp 0xDD62A0: hop up to a ledge above the reach of a hand step (wall hang).
-                    if let Some(mv) = ledge_moves::try_hop_up(d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
-                        start_move(d, mv, "hop up");
+                    // TryWallJumpUp 0xDD62A0: the swing back to an overhang's front edge behind (wall hang).
+                    if let Some(mv) = ledge_moves::try_swing_back(d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                        start_move(d, mv, "swing back");
                         continue;
                     }
                     // the pull-up (event 0) only when nothing else is possible up: `HumanLedge__CanPullup` 0xDE2270 needs
@@ -931,7 +926,6 @@ pub fn update_ledge(
                     }
                     if move_right_hand { d.hand_r = t } else { d.hand_l = t }
                     d.alt_flag = !d.alt_flag;
-                    d.force_free = false;
                     let to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
                     // after the toggle: alt_flag set = this was the lead hand's reach (open), clear = closing step
                     d.moves.push(RootInterp::new(body.feet, to, if d.alt_flag { SHIMMY_OPEN_TIME } else { SHIMMY_CLOSE_TIME }));

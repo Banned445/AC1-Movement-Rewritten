@@ -388,10 +388,10 @@ pub fn find_ladder_catch(feet: Vec3, dir: Vec3, grab: bool, guidance: &GuidanceW
 /// The wall run's ladder (`GoAssassinActionInterpreter__WallingState` 0xEE05E0 with the Ladder ability `sub_D32600`):
 /// the search `sub_EDFBC0`(1) needs the stick (> 0) and takes a ladder whose segment (base … top + 0.5 m) passes within
 /// √20 m of the root, its nearest point within 90° of the stick. IHumanWalling slot 7 (`sub_E36420` → `sub_E34160`) accepts
-/// it in the Vertical sub-state once its step is done, with `Human__CanGrabLadder` 0xB239D0 (reach 0.6 m, the root on the
-/// ladder's front within 90°); slot 8 (`sub_E364F0`) switches to the Ladder (fill `sub_E34D60`: EntryType 3, state 3:
-/// the high climb up's right-foot item, then the main state). PORT: the grab test's segment is the ladder's own (the game
-/// takes its height from a settings object, 3 m by default).
+/// it in the Vertical sub-state once its step is done, with `Human__CanGrabLadder` 0xB239D0 (reach 0.6 m: the root or
+/// the head, the character facing the ladder within 90°; RE/24 LADDER-2); slot 8 (`sub_E364F0`) switches to the Ladder (fill `sub_E34D60`: EntryType 3, state 3:
+/// the high climb up's right-foot item, then the main state). The grab test's segment is the ladder's own (LadderHeight,
+/// component 0x7BBFDBE3; 3 m only without one).
 pub fn find_wall_run_ladder(feet: Vec3, stick: Vec3, guidance: &GuidanceWorld) -> Option<LadderEntry> {
     let stick = Vec3::new(stick.x, 0.0, stick.z).normalize_or_zero();
     if stick == Vec3::ZERO {
@@ -660,7 +660,7 @@ pub fn update_ladder(
         // The interpreter's ladder state (`GoAssassinActionInterpreter__LadderState` 0xEEB570): above the 0.35 dead
         // zone, a stick within 60° of the facing axis (|dot(d, right)| ≤ 0.866) asks to climb (IHumanLadder slot 0, ±up:
         // up when it points along the facing, `sub_571960` ≥ 0); within 30° of the right axis it is the side step
-        // (event 5, slots 8 / 9, not ported).
+        // (event 5, slots 8 / 9: the revolve below).
         // The stick is the interpreter's latched one in the character's frame (+0x1310, 0xEEB696; RE/24 INPUT-4).
         let stick = pad.speed01 > 0.0;
         let fwd = -l.n;

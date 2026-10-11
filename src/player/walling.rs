@@ -296,7 +296,7 @@ fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: 
     let world = GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() };
     let cuts: Vec<(f32, f32)> = keep.iter().map(|&i| report.cuts.get(i).copied().unwrap_or((0.0, 0.0))).collect();
     let q = std::f32::consts::FRAC_PI_4;
-    let params = ChainParams { dir: -f, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: 1 };
+    let params = ChainParams { dir: -f, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: u32::MAX };
     let mut out: Vec<LedgeCandidate> = Vec::new();
     for chain in world.chains(&params) {
         let Some(hit) = world.grab_point_toward(&chain, root, Some(f), Some(f), &[0.5, 0.1], 0.3, &cuts) else { continue };
