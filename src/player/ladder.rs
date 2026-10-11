@@ -172,7 +172,7 @@ pub fn top_entry_side(base: Vec3, top: Vec3, n: Vec3, collision: &CollisionWorld
 /// +908 & 0x20 (`Human__ProbeWallTopThickness` 0xB18FB0 from `SetupFromEntryType` 0xE22400: from base + (H − 0.75)·Z
 /// + 1.5·Y back along −Y, 3 m, a wall top's near and far edges with a drop below each; RE/24 LADDER-8). PORT: the roof
 /// edge right behind the ladder's top (a LedgeGrab edge facing out, up to 1 m below the top: the native tops stand
-/// 0.4–0.75 m above their roofs) with a far edge within 1.5 m behind it.
+/// 0.37–0.73 m above their roofs) with a far edge within 1.5 m behind it.
 pub fn wall_top_behind(top: Vec3, n: Vec3, guidance: &GuidanceWorld) -> bool {
     let n = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     guidance

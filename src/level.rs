@@ -160,7 +160,7 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
 ];
 
 /// Ladders (bottom, top on the wall face; outward normal): guidance edges of sub-type Ladder.
-/// Like the native ladders, each one against a roof stands 0.5 m above it: Damascus's ladder tops are 0.42–0.73 m above
+/// Like the native ladders, each one against a roof stands 0.5 m above it: Damascus's ladder tops are 0.37–0.73 m above
 /// their roofs, their lengths whole LadderHeights (4.5, 5, 8.5 m), so the top exit's clip (1 m up, the low profile's
 /// ReachedTop at H − 1.63 m) lands on the roof (RE/24 LADDER-10).
 pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
