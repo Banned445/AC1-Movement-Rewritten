@@ -241,7 +241,12 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
             SwingOut::Stay
         }
         SwingPhase::Settle(id, item) => {
-            *feet = s.root;
+            // the legs impact requests the controller root hands + 0.5·forward + 0.5·up − 2.4·up (+1296, flag +1360,
+            // `HumanLedge__SwingLandingToImpactLegs` 0xDD0077), reached in one frame (`CharacterController__RequestMoveTo`
+            // 0x710B40: the velocity (target − position) / dt) (RE/24 NARROW-17); the others stay on the hang root.
+            // PORT: its blend parameters (`sub_4FEBF0` 0 / 1 / 2 = 0, 0.5, 0.5) are not mapped onto the clips; the
+            // weights come from the legs box's depth (`legs_weights`)
+            *feet = if id == IMPACT_LEGS { legs_impact_root(s) } else { s.root };
             if !done {
                 return SwingOut::Stay;
             }
@@ -269,6 +274,12 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
             SwingOut::Hang
         }
     }
+}
+
+/// The legs impact's controller root (0xDCFFC0–0xDD0077): the hands (LedgeData+144) + 0.5·forward + 0.5·up − 2.4·up.
+pub fn legs_impact_root(s: &Swing) -> Vec3 {
+    let f = Vec3::new(s.fwd.x, 0.0, s.fwd.z).normalize_or(Vec3::NEG_Z);
+    s.hands_mid + f * 0.5 - Vec3::Y * 1.9
 }
 
 fn legs_weights(f: f32) -> Vec<f32> {
@@ -312,6 +323,19 @@ mod stop_tests {
         assert!(free_jump_room(Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z, &c));
         assert!(!free_jump_room(Vec3::ZERO, Vec3::NEG_Z, &c));
         assert!(matches!(release(&c), SwingOut::Stay), "no room: no jump");
+    }
+
+    /// RE/24 NARROW-17: the legs impact holds the root at the controller target (0xDD0077): 0.5 m toward the obstacle and
+    /// 1.9 m below the hands, not on the hang root.
+    #[test]
+    fn the_legs_impact_moves_the_root_toward_the_obstacle() {
+        let mut s = start(Vec3::new(0.0, 0.6, 0.0), Vec3::NEG_Z, Vec3::new(0.0, 3.0, 0.0), 0).expect("swing cycle");
+        let Some(a) = single(IMPACT_LEGS, 0, &[1.0, 0.0, 0.0]) else { return };
+        s.phase = SwingPhase::Settle(IMPACT_LEGS, 0);
+        s.action = a;
+        let mut feet = s.root;
+        let _ = update(&mut s, 1.0 / 60.0, false, false, &mut feet, &CollisionWorld::default(), |_, _| None);
+        assert!((feet - Vec3::new(0.0, 1.1, -0.5)).length() < 1e-4, "{feet:?}");
     }
 
     /// RE/24 NARROW-16: let go on front_down (item 1), the swing finishes the item, then plays the back stop's four
