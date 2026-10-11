@@ -103,6 +103,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
                     // roof; which of the two the game jumps at there is not established (LIVE, RE/20 #7 / #8; RE/18 §9 item 2)
                     // PORT (live 2026-10-09, RE/18 §9): a haystack cart's rim is landed on, not vaulted, so no pass-over
                     // when a haystack lies just beyond the edge
+                    // (0.8 m beyond the edge, the stack's box widened 0.3 m: no game source, RE/24 AIR-36)
                     let hay_beyond = guidance.haystacks.iter().any(|s| {
                         let p = c.pos - c.wall * 0.8;
                         p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3

@@ -526,6 +526,8 @@ impl HumanInAirData {
         if std::env::var_os("AC_ANIM_LOG").is_some() {
             info!("straight jump: flight {:#010x} b {:.2} {d:.2}s, clip end {:.2} vs aim {:.2}", j.flight, j.b, (clip_end - from).length(), (aim - from).length());
         }
+        // PORT: the 0.2 s floor (no game source, RE/24 AIR-36) only guards a flight whose clips are not loaded; the
+        // game's duration is the flight's Σw·T (+0x1E8)
         AirMode::Jump { from, clip_end, aim, duration: d.max(0.2), t: 0.0, then_fall_to: None, t_takeoff: 0.0, fwd }
     }
 }
@@ -794,7 +796,8 @@ pub fn update_air(
                     landed_at = Some(body.feet.y);
                 } else if blocked {
                     // held back by a wall (anti-stuck 0xE0B1E0, simplified): fall from here with the path's
-                    // horizontal velocity damped and no upward push
+                    // horizontal velocity damped and no upward push. PORT: the 30 % kept has no game source; the game's
+                    // support-loss re-entry (0xE01B70, RE/24 AIR-24) is not ported (RE/24 AIR-36)
                     air.mode = AirMode::Fall { steer_to: None };
                     body.velocity.x *= 0.3;
                     body.velocity.z *= 0.3;
@@ -881,6 +884,8 @@ pub fn update_air(
                         pass_on = Some(super::passover::PassOverEntry { edge, normal, from: body.feet, flight_foot_left: air.foot_left, flight_w: fw });
                     }
                     if air.target_flags == jump_blend::TARGET_HAYSTACK && then_fall_to.is_none() {
+                        // PORT: the game requests the haystack on every arrival at the target (its owner entity); the
+                        // port finds the stack by its box widened 0.3 m (no game source, RE/24 AIR-36)
                         if let Some(stack) = guidance.haystacks.iter().find(|s| {
                             let p = body.feet;
                             p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3
@@ -898,6 +903,7 @@ pub fn update_air(
                         _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() || ladder_on.is_some() || kiosk_on.is_some() => {}
                         // 0xE07D00 returns 0: the jump ends with no reception and the fall's air catch takes over
                         _ if no_arrival => air.mode = AirMode::Fall { steer_to: None },
+                        // PORT: "no ground under the feet" (0.05 / 0.1 m) has no game source (RE/24 AIR-36)
                         Some(p) if collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_none() => {
                             // the tail's start velocity (0xE0F038–0xE0F12A): half of this frame's root step plus the
                             // part of the frame after the item ended times the last step, m / frame
