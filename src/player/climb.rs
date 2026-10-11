@@ -44,8 +44,9 @@ pub struct ClimbEntry {
     pub foot_right: bool,
     /// The transition action played while the root moves into the climb (from a ledge: `LEDGE_TO_CLIMB`).
     pub action: Option<u32>,
-    /// ClimbData+40, the filler's pose flag (EntryPoseType): entry types 1 / 3 take pose 3 when set, else 0 (EnterCommon
-    /// 0xDE97B0). `None`: the filler is not decoded; PORT: the feet more than 0.45 m apart stand in for it.
+    /// ClimbData+40, the filler's pose flag (EntryPoseType): entry types 1 / 3 take pose 3 when set, else 0; `EnterCommon`
+    /// 0xDE97B0 clears it after reading. Only the climb catch writes it (`CheckAirCatch` 0xE0CCEF); the other fillers
+    /// (0xDD46A0, 0xDD48B0, 0xDDA3D0, 0xDCB670, the ground start 0xB26080) leave it clear: pose 0 (RE/24 CLIMB-24).
     pub pose_2m: Option<bool>,
     /// ClimbData+108, an EntryType 2 entry's end action: `EnterCommon` sets +2916 for type 2, so when the entry's Move ends
     /// `PlayReachEnd` 0xDE9B50 plays it in the Wait state (the ledge jumps' fill `FillClimb_AfterLedgeJump` 0xDD8290 copies
@@ -441,8 +442,7 @@ fn entry_pose(e: &ClimbEntry) -> usize {
     match e.entry_type {
         ClimbEntryType::Default | ClimbEntryType::FromLedgeParallelJump => 0,
         ClimbEntryType::FromLedge | ClimbEntryType::FromGround => {
-            let two = e.pose_2m.unwrap_or_else(|| (e.foot_r - e.foot_l).length() > CLIMB_COL * 0.6);
-            if two { 3 } else { 0 }
+            if e.pose_2m == Some(true) { 3 } else { 0 }
         }
     }
 }
@@ -1855,7 +1855,7 @@ mod tests {
         };
         assert_eq!(entry_pose(&e(ClimbEntryType::FromLedge, Some(true))), 3);
         assert_eq!(entry_pose(&e(ClimbEntryType::FromLedge, Some(false))), 0, "the flag, not the spacing");
-        assert_eq!(entry_pose(&e(ClimbEntryType::FromGround, None)), 3, "PORT: the feet's spacing without the flag");
+        assert_eq!(entry_pose(&e(ClimbEntryType::FromGround, None)), 0, "no filler but the climb catch sets +40, whatever the feet's spacing");
         assert_eq!(entry_pose(&e(ClimbEntryType::FromLedgeParallelJump, Some(true))), 0);
         assert_eq!(entry_pose(&e(ClimbEntryType::Default, Some(true))), 0);
         let mut d = HumanClimbData::default();
