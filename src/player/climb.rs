@@ -917,10 +917,11 @@ fn side_ladder(g: &GuidanceWorld, root: Vec3, facing: Vec3, dir: usize) -> Optio
 /// 0xDE8400: from the feet midpoint at the lower foot (then once more 0.6 m further along the move), foot candidates
 /// 1.2 m up or down, then 0.4 m to the leading hand's side and to the other (box 0.2 across, 0.5 deep, 0.4 up and down —
 /// 0.3 after the first foot hit; 45°; nearest a point 0.2 m out), each with a hand hold 1.2 m above it (0.375 across,
-/// 0.5 deep, 0.3). Both feet on the foot hold, both hands on the hand hold; clearance: a capsule (r 0.35, 1.8 m) from the
-/// root + 0.15 m out swept to the new root. Long when (|dz| − 0.8) / 1.3 ≥ 0.5; the entry's dir: up 0 / 1, down 2 / 3 by
-/// the side of the foot hold (right when it is right of the grid origin).
-/// PORT: the grid origin is the feet base; the capsule's start (sub_B18140) is simplified.
+/// 0.5 deep, 0.3). Both feet on the foot hold, both hands on the hand hold; clearance: a capsule (r 0.35, 1.8 m) from
+/// `sub_B18140`(root) + 0.15 m out, swept to `sub_B18140`(new root): it ends at the target (0xDF0509; `sub_B18140` 0xB18140
+/// adds the horizontal part of the pose's 1.8 m up axis, nothing on an upright root). Long when (|dz| − 0.8) / 1.3 ≥ 0.5;
+/// the entry's dir: up 0 / 1, down 2 / 3 by the side of the foot hold, right when right of the line through the root along
+/// the facing (the inverted ChooseMove grid matrix, 0xDF05F6) (RE/24 CLIMB-13).
 fn vertical_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize) -> Option<ClimbReach> {
     let mv = if dir < 2 { Vec3::Y } else { Vec3::NEG_Y };
     let sign = if dir == 0 || dir == 2 { -1.0 } else { 1.0 };
@@ -943,11 +944,13 @@ fn vertical_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorl
     let (f, h) = find(base).or_else(|| find(base + mv * 0.6))?;
     let (fn_, hn) = (f.wall_normal, h.wall_normal);
     let pose = climb_pose([h.point, h.point, f.point, f.point], [hn, hn, fn_, fn_], facing);
-    if !collision.capsule_cast_free(root - facing * 0.15, 1.8, 0.35, pose.root - root) {
+    let b18140 = |root: Vec3, up: Vec3| root + Vec3::new(up.x, 0.0, up.z) * 1.8;
+    let start = b18140(root, d.frame.up) - facing * 0.15;
+    if !collision.capsule_cast_free(start, 1.8, 0.35, b18140(pose.root, pose.up) - start) {
         return None;
     }
     let long = (((base.y - f.point.y).abs() - 0.8) / 1.3).clamp(0.0, 1.0) >= 0.5;
-    let on_right = (f.point - base).dot(right) >= 0.0;
+    let on_right = (f.point - root).dot(right) >= 0.0;
     let entry = if dir < 2 { on_right as usize } else { 2 + on_right as usize };
     let ids = reach_ids(CLIMB_REACH_VERTICAL[entry][long as usize]);
     Some(ClimbReach::new(ids, [h.point, h.point, f.point, f.point], [hn, hn, fn_, fn_], None))
