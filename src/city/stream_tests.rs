@@ -146,6 +146,13 @@ impl CitySim {
     pub fn place(&mut self, feet: Vec3, facing: Vec3) {
         let mut b = self.app.world_mut().get_mut::<Body>(self.player).unwrap();
         b.feet = feet; b.heading = crate::player::heading_of(facing); b.velocity = Vec3::ZERO; b.grounded = true; b.proxy.manifold.clear();
+        // back on the ground: a hang or climb left from an earlier attempt would otherwise keep its holds
+        let w = self.app.world_mut();
+        let mut q = w.query::<(&mut crate::player::Locomotion, &mut crate::player::HumanDataBundle)>();
+        let (mut loco, mut data) = q.get_mut(w, self.player).unwrap();
+        if loco.current != ActorContextId::Ground {
+            crate::player::switch_context(&mut loco, &mut data, crate::player::TransitionSetup::ToMovement { landing: None });
+        }
     }
     pub fn run_until(&mut self, max_s: f32, pred: impl Fn(&CitySim) -> bool) -> bool {
         for _ in 0..(max_s * 60.0) as usize { self.step(); if pred(self) { return true; } }
@@ -419,7 +426,7 @@ fn damascus_runs_up_and_climbs_a_tall_facade() {
         if on_wall && s.run_until(6.0, |s| s.body().feet.y > start_y + 2.0) {
             return;
         }
-        tried.push(format!("{q}: {:?} at {}", s.loco().current, s.body().feet));
+        tried.push(format!("{q}: {:?} at {} ledge {} hands {} {} walling {:?}", s.loco().current, s.body().feet, s.data().ledge.last_action, s.data().ledge.hand_l, s.data().ledge.hand_r, s.data().walling.sub_state));
         s.pad(n, 0.0, false, false); s.run(2.0);
     }
     panic!("no facade climbed: {tried:#?}");
