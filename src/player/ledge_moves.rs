@@ -551,6 +551,17 @@ pub fn try_corner(
 ///
 /// PORT: the hang's feet support (`sub_11718B0`, 1.0 m below the hand box) is the collision foot rays
 /// (`hang_type_at`); the hang's body sweep is the capsule test at the target.
+/// `TrySideJumpToLedge` 0xDDD490's clearance (0xDDDF85): a capsule r 0.35 from Q = `sub_B18140`(root) − 0.2625·u +
+/// 0.15·outward (u the flat unit vector toward the target pose; `sub_B18140` adds the horizontal part of the root's
+/// pitched up axis, nothing for the upright root, RE/24 CLIMB-13), 1.8 / 1.0 / 2.0 m tall for jump types 0 / 1 / 2,
+/// swept by the move to the target root; a blocked pass goes on to the next one (RE/24 LEDGE-28).
+fn side_jump_clear(root: Vec3, target: Vec3, n: Vec3, ty: usize, collision: &CollisionWorld) -> bool {
+    let out = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let u = Vec3::new(target.x - root.x, 0.0, target.z - root.z).normalize_or_zero();
+    let q = root - u * 0.2625 + out * 0.15;
+    collision.capsule_cast_free(q, [1.8, 1.0, 2.0][ty], 0.35, target - root)
+}
+
 pub fn try_side_jump(
     right: bool,
     hand_l: Vec3,
@@ -584,7 +595,7 @@ pub fn try_side_jump(
             let fc = f.point + side * HAND_SPACING * 0.5;
             let (fl, fr) = (fc - r * HAND_SPACING * 0.5, fc + r * HAND_SPACING * 0.5);
             let target = super::climb::climb_root_at(hl, hr, fl, fr, nn);
-            if !collision.capsule_cast_free(root - facing * 0.15, 1.8, 0.35, target - root) {
+            if !side_jump_clear(root, target, n, 0, collision) {
                 continue;
             }
             let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][long as usize * 4 + 2 + right as usize];
@@ -633,10 +644,10 @@ pub fn try_side_jump(
         // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
         let new_hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
         let to = hang_root_at(hl, hr, nn, new_hang, collision);
-        if !collision.capsule_fits(to + Vec3::Y * 0.05) {
+        let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };
+        if !side_jump_clear(root, to, n, ty, collision) {
             continue;
         }
-        let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };
         let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][(ty * 2 + long as usize) * 4 + 2 + right as usize];
         // categories 1 / 2 (RE/24 LEDGE-14): the start on its own displacement, the loop interpolating the root linearly to
         // the wall / free pose and setting +104 by it (`sub_DD8550` 0xDD8550), the end the hang idle's entry
@@ -939,7 +950,10 @@ pub fn try_jump_up_to_climb(
     let lower = guidance.probe_facing(upper.point - Vec3::Y * JUMP_TO_CLIMB_UP, facing, JUMP_TO_CLIMB_HALF, 0.2, 0.785_398_2, MASK_CLIMB_HOLDS)?;
     let nn = upper.wall_normal;
     let target = super::climb::climb_root_at(upper.point, upper.point, lower.point, lower.point, nn);
-    if !collision.capsule_fits(target + Vec3::Y * 0.05 + nn * 0.1) {
+    // the clearance (`Human__CapsuleCastFree` 0xDD625F): a capsule r 0.35 from P = the hands' midpoint (the higher
+    // hand's height) + 0.65·outward − 1.1 m, 1.8 m tall, swept by the move to the climb pose root (RE/24 LEDGE-28)
+    let p = base + Vec3::new(n.x, 0.0, n.z).normalize_or_zero() * 0.65 - Vec3::Y * 1.1;
+    if !collision.capsule_cast_free(p, 1.8, 0.35, target - root) {
         return None;
     }
     let entry = LEDGE_JUMP_TABLE[0][0];
