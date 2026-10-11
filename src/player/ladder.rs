@@ -88,8 +88,8 @@ use crate::collision::CollisionWorld;
 use crate::guidance::{GuidanceSubType, GuidanceWorld};
 use crate::input::PadInput;
 
-/// Root offset out from the ladder line (0xE266D0: attach point − 0.5 along the ladder direction, hypothesis on
-/// its sign: out of the wall).
+/// Root offset out from the ladder line (0xE266D0: attach point − 0.5·F, F = the facing toward the ladder: 0.5 m out on
+/// the climber's side; RE/24 LADDER-5 settles the sign).
 pub const ATTACH_OUT: f32 = 0.5;
 /// `sub_B239D0`: within 1.5 m of the top → the entry from the top.
 pub const TOP_ENTRY_BAND: f32 = 1.5;
@@ -305,8 +305,13 @@ impl HumanLadderData {
             let k = a / std::f32::consts::FRAC_PI_2;
             let left = to_char.dot(super::right_of(-self.n)) < 0.0;
             let w = if left { [1.0 - k, k, 0.0] } else { [1.0 - k, 0.0, k] };
-            self.height = 0.0;
-            let to = self.root_at(0.0);
+            // the attach rung (`sub_E1F8E0` 0xE1F95D–0xE1F984): the nearest 0.5 m rung to the root's height, below the
+            // ladder's height − 1.95 m; high profile 0.5 m higher (0xE26AB5–0xE26AE2, RE/24 LADDER-5). PORT: the buried
+            // base (`sub_E25B20`) is not measured
+            let h_in = (e.from.y - e.base.y).max(0.0);
+            let k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
+            self.height = 0.5 * k + if e.high { 0.5 } else { 0.0 };
+            let to = self.root_at(self.height);
             self.play(LadderPhase::EnterGround, blend(ENTER_GROUND[hi][e.foot], 0, &w), e.from, to, true);
         }
     }

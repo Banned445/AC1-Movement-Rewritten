@@ -2531,6 +2531,20 @@ fn walk_to_a_ladder_climb_it_and_step_onto_the_top() {
     assert!((f.y - 5.0).abs() < 0.05 && f.z > 63.6, "on the wall top: {f:?}");
 }
 
+/// RE/24 LADDER-5: the ground entry attaches at the nearest rung to the root's height, 0.5 m higher in high profile.
+#[test]
+fn a_ground_entry_attaches_at_the_rung_and_higher_in_high_profile() {
+    use crate::player::ladder::LadderPhase;
+    for high in [false, true] {
+        let mut s = Sim::new(Vec3::new(50.0, 0.0, 62.0), FACE_PZ);
+        s.pad(Vec3::Z, 1.0, high, false);
+        assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ladder), "no entry");
+        assert_eq!(s.data().ladder.phase, Some(LadderPhase::EnterGround));
+        let want = if high { 0.5 } else { 0.0 };
+        assert!((s.data().ladder.height - want).abs() < 1e-4, "high {high}: {}", s.data().ladder.height);
+    }
+}
+
 /// RE/24 LADDER-8 / LADDER-9: the ladder up the 1 m wall (a wall top behind its top: +908 & 0x20) ends with the low exit
 /// even in high profile, taken as soon as ReachedTop holds.
 #[test]
