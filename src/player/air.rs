@@ -124,8 +124,9 @@ pub enum InAirEntry {
     /// 0xF73B80: `beam_jumpstraight_clear`, then InAir +416 = `…_clear_tr_fall`).
     OnPlace { from: Vec3, fwd: Vec3, action: ActionBlend, fall: Option<ActionBlend> },
     /// The swing jump from a bar (Ledge SwingReception event 7 -> `sub_DCD0B0`: `Human__SetupJumpToTarget` with jump
-    /// kind 3, the `swing_cycle_*_to_air` takeoff).
-    SwingJump { from: Vec3, target: JumpTarget },
+    /// kind 3, the `swing_cycle_*_to_air` takeoff). Without a target: the free target (IHuman vt68 mode 0, 0xEED0FB →
+    /// 0xB1E7F0: `FREE_JUMP_AHEAD` along `dir`, `FREE_JUMP_DOWN` below, type 1), ended by the ground contact.
+    SwingJump { from: Vec3, target: Option<JumpTarget>, dir: Vec3 },
     /// The rebound off a wall (jump kind 2, the `xx_h_rebound_*_to_air` takeoff: `HumanWalling__ReboundJump` 0xE365C0,
     /// `HumanLedge__ReboundEndJump` 0xDD0A40, `HumanClimb__ReboundEndJump` 0xDEAE30 via 0xB27180), the character
     /// already turned away from the wall. Without a target: 7 m along `dir`, 3 m down, type 1 (0xE36883), ended by the
@@ -146,7 +147,7 @@ impl InAirEntry {
             InAirEntry::FreeJump { dir, ahead, speed_param, foot_left, .. } => InAirEntry::FreeJump { from: p, dir, ahead, speed_param, foot_left },
             InAirEntry::FreeStepJump { target, foot_left, .. } => InAirEntry::FreeStepJump { from: p, target, foot_left },
             InAirEntry::OnPlace { fwd, action, fall, .. } => InAirEntry::OnPlace { from: p, fwd, action, fall },
-            InAirEntry::SwingJump { target, .. } => InAirEntry::SwingJump { from: p, target },
+            InAirEntry::SwingJump { target, dir, .. } => InAirEntry::SwingJump { from: p, target, dir },
             InAirEntry::ReboundJump { target, dir, foot_left, .. } => InAirEntry::ReboundJump { from: p, target, dir, foot_left },
             InAirEntry::Fall { velocity, origin, speed_param, .. } => InAirEntry::Fall { from: p, velocity, origin, speed_param },
             InAirEntry::LetGoDive { target, origin, .. } => InAirEntry::LetGoDive { from: p, target, origin },
@@ -346,17 +347,28 @@ impl HumanInAirData {
                 let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
                 self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 1);
             }
-            InAirEntry::SwingJump { from, target } => {
+            InAirEntry::SwingJump { from, target, dir } => {
                 self.speed_ratio = 0.0;
                 self.foot_left = true;
                 self.start_y = from.y;
                 self.start = from;
                 self.apex_y = from.y;
                 self.prev_y = from.y;
-                self.target_flags = target.type_flags;
-                self.target = Some(target);
-                let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
-                self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 3);
+                match target {
+                    Some(target) => {
+                        self.target_flags = target.type_flags;
+                        self.target = Some(target);
+                        let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
+                        self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 3);
+                    }
+                    None => {
+                        let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
+                        let aim = from + flat * FREE_JUMP_AHEAD - Vec3::Y * FREE_JUMP_DOWN;
+                        self.target_flags = TARGET_FREESTEP;
+                        self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 3);
+                        self.free_target = true;
+                    }
+                }
             }
             InAirEntry::ReboundJump { from, target, dir, foot_left } => {
                 self.speed_ratio = 0.0;

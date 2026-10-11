@@ -147,15 +147,25 @@ pub enum SwingOut {
     Stay,
     /// The free hang (Ledge Movement, `sub_DCE900` / the settle's `_tr_hangfree`).
     Hang,
-    /// The swing jump (event 7 -> `sub_DCD0B0`: `Human__SetupJumpToTarget` with jump kind 3).
-    Jump(JumpTarget),
+    /// The swing jump (event 7 -> `sub_DCD0B0`: `Human__SetupJumpToTarget` with jump kind 3). None: the free jump along
+    /// the facing (IHuman vt68's free target, 0xEED0FB).
+    Jump(Option<JumpTarget>),
+}
+
+/// IHumanLedge vt104 `sub_DD38A0`: may the swing jump go free? `Human__BoxQueryNearestFromRear` 0xB2A070 with a box
+/// half 0.2 across, 1.0 along the flat facing and 0.75 up, centred 1.0 m ahead of the root and 0.75 m up, must hold
+/// nothing (the result 1000).
+pub fn free_jump_room(root: Vec3, fwd: Vec3, collision: &CollisionWorld) -> bool {
+    let f = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z);
+    collision.obb_free(root + f + Vec3::Y * 0.75, [super::right_of(f), f, Vec3::Y], Vec3::new(0.2, 1.0, 0.75))
 }
 
 /// `HumanLedge__StateSwingReception_Update` 0xDD24F0 with its events (0xDD2890). The interpreter's ledge state
 /// (0xEECCF9–0xEED11F, RE/24 LEDGE-17 / CENSUS-3) drives it with held buttons: `held` = high profile and Legs held
 /// (+4397; its negation +4398 sends the stop, event 6), `jump_pressed` = held, Legs pressed and the stick past the dead
-/// zone within 75° of the facing (event 7). `find_target` = the jump target along the facing (the guidance search;
-/// PORT: the Leap of Faith and the free jump that follow it are not modelled).
+/// zone within 75° of the facing (event 7). `find_target` = the jump target along the facing (the guidance search,
+/// then the Leap of Faith, `targets::swing_jump_target`); without one the free jump when there is room ahead
+/// (`free_jump_room`, 0xEED0D9), else no jump.
 pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut Vec3, collision: &CollisionWorld, find_target: impl Fn(Vec3, Vec3) -> Option<JumpTarget>) -> SwingOut {
     s.t += dt;
     if jump_pressed && s.on_pole {
@@ -215,7 +225,10 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
             // event 7 (guard 0xDCD000): released at the end of back_down (item 3), toward the target
             if i == 3 && s.jump_req {
                 if let Some(t) = s.target.or_else(|| find_target(s.root, s.fwd)) {
-                    return SwingOut::Jump(t);
+                    return SwingOut::Jump(Some(t));
+                }
+                if free_jump_room(s.root, s.fwd, collision) {
+                    return SwingOut::Jump(None);
                 }
             }
             let next = (i + 1) % 4;
@@ -276,6 +289,29 @@ mod stop_tests {
         // a wall from z = −0.4 on: the rear face is at z = +0.5
         c.boxes.push(Aabb3 { min: Vec3::new(-2.0, -2.0, -3.0), max: Vec3::new(2.0, 2.0, -0.4) });
         assert!((box_depth(&c, Vec3::ZERO, Vec3::NEG_Z, 0.35) - 0.9).abs() < 1e-3);
+    }
+
+    /// RE/24 LEDGE-17: with no target (guidance or haystack) the swing jump goes free when `sub_DD38A0` finds the 2 m
+    /// box ahead of the root empty; a wall in it keeps the swing going.
+    #[test]
+    fn a_swing_jump_without_a_target_goes_free_only_with_room_ahead() {
+        use crate::collision::Aabb3;
+        let release = |c: &CollisionWorld| {
+            let mut s = start(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y * 2.4, 0).expect("swing cycle");
+            s.phase = SwingPhase::Cycle(3);
+            s.action = single(SWING_CYCLE, 3, &[]).unwrap();
+            s.jump_req = true;
+            let mut feet = Vec3::ZERO;
+            let d = s.action.duration();
+            update(&mut s, d + 1e-3, true, false, &mut feet, c, |_, _| None)
+        };
+        let mut c = CollisionWorld::default();
+        assert!(matches!(release(&c), SwingOut::Jump(None)), "free jump into open space");
+        // a wall 1.5 m ahead, from the root up to 3 m
+        c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -3.0), max: Vec3::new(2.0, 3.0, -1.5) });
+        assert!(free_jump_room(Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z, &c));
+        assert!(!free_jump_room(Vec3::ZERO, Vec3::NEG_Z, &c));
+        assert!(matches!(release(&c), SwingOut::Stay), "no room: no jump");
     }
 
     /// RE/24 NARROW-16: let go on front_down (item 1), the swing finishes the item, then plays the back stop's four

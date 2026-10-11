@@ -515,7 +515,7 @@ pub fn update_ledge(
             if jump {
                 pad.consume_jump();
             }
-            let out = super::swing::update(&mut s, dt, held, jump, &mut feet, &collision, |p, f| super::targets::find_jump_target(p, f, &guidance, &collision));
+            let out = super::swing::update(&mut s, dt, held, jump, &mut feet, &collision, |p, f| super::targets::swing_jump_target(p, f, &guidance, &collision));
             body.feet = feet;
             match out {
                 super::swing::SwingOut::Stay => data.ledge.swing = Some(s),
@@ -531,7 +531,8 @@ pub fn update_ledge(
                 super::swing::SwingOut::Jump(target) => {
                     data.ledge.swing = None;
                     let from = body.feet;
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(super::air::InAirEntry::SwingJump { from, target }));
+                    let dir = s.fwd;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(super::air::InAirEntry::SwingJump { from, target, dir }));
                 }
             }
             continue;

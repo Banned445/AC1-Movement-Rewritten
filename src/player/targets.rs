@@ -70,6 +70,19 @@ pub fn find_jump_target(
     find_target(feet, want_dir, want_dir, &Query::TAP, false, guidance, collision).or_else(|| haystack_target(feet, want_dir, want_dir, guidance, collision))
 }
 
+/// The swing jump's target (the interpreter's ledge state, event 7, 0xEECEC6–0xEED063): the candidate query along the
+/// facing and the scorer; the Leap of Faith search (vt76) only when the query found no candidates at all (with
+/// candidates but none chosen the interpreter goes straight to the free jump). PORT: the query is the tap jump's (the
+/// game picks types 128, then 1), and the Leap of Faith looks along the facing (the game: the camera-relative stick).
+pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+    let cands = jump_candidates::query(feet, fwd, &Query::TAP, guidance, collision);
+    if cands.is_empty() {
+        return haystack_target(feet, fwd, fwd, guidance, collision);
+    }
+    let (i, ty) = jump_candidates::select(&cands, feet, fwd, fwd, 1, false)?;
+    to_target(&cands[i], ty, feet, guidance, collision)
+}
+
 /// Query + scorer + the port's target for the chosen candidate. `facing` = the actor's forward (the scorer's frame),
 /// `want` = the wanted direction.
 pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
