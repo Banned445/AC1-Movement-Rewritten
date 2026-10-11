@@ -794,11 +794,12 @@ fn choose_clip(
                 }
                 // a jump whose actions are not loaded, or the free-step arrival's few frames: the pose carries on
                 AirMode::Jump { .. } | AirMode::Arrive { .. } => continue,
-                // Leap of Faith free-fall tail: `faith_jump_fall` (0xB1EC40 third action)
+                // Leap of Faith free-fall tail: `faith_jump_fall` (0xB1EC40 third action), played when the flight ends with
+                // a 0.5 s blend (0xE0F3D4, RE/24 AIR-22); the let-go's dive keeps its own blend
                 AirMode::Fall { .. } if data.air.flight.is_some_and(|f| f.id == crate::player::jump_blend::FLIGHT_FAITH) => {
                     let b = crate::player::jump_blend::ActionBlend::new(crate::player::jump_blend::FALL_FAITH, 0, &[1.0]);
                     p.sim_phase = Some(0.5);
-                    sim_request(&mut p, &lib, &b, 2_500_000 + data.air.seq as u64, 0.2)
+                    sim_request(&mut p, &lib, &b, 2_500_000 + data.air.seq as u64, if data.air.hollywood { 0.2 } else { 0.5 })
                 }
                 // the jump's own fall action (InAir +416, e.g. `beam_jumpstraight_clear_tr_fall`)
                 AirMode::Fall { .. } if data.air.fall_action.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
@@ -818,6 +819,11 @@ fn choose_clip(
                     action(&lib, &[crate::player::air::DROP_ENTRY[ty][side], crate::player::air::DROP_LOOP[side]], false, 4_200_000 + data.air.seq as u64, Some(0.2), None)
                 }
                 _ => {
+                    // a jump set up by 0xB20200 whose flight ended without an arrival: the JumpFallAction (+432, request
+                    // 33 = `xx_h_jump_falling01` 0x00D81513) plays at once with a 0.5 s blend (0xE0F3D4–0xE0F45B, RE/24
+                    // AIR-22). PORT: the falling blend 0x1F0C22C2 stands in for it (its layer 0 is falling01; the grasp
+                    // layers carry the empty-hand grasp the game plays on the upper body)
+                    let after_flight = data.air.takeoff.is_some() && data.air.flight.is_some();
                     if p.seen_fall != Some(data.air.seq) {
                         p.seen_fall = Some(data.air.seq);
                         p.grasp_dir = Vec3::ZERO;
@@ -827,7 +833,7 @@ fn choose_clip(
                         // the locomotion and hang waits author none) and the sub-state lasts its remaining length
                         // (sub_502570); then the main fall plays the falling blend. The port lets the full-body item
                         // run to its end and hold its last frame.
-                        p.fall_entry = p.clip.is_some() && !p.items.is_empty();
+                        p.fall_entry = !after_flight && p.clip.is_some() && !p.items.is_empty();
                         if p.fall_entry {
                             p.looping = false;
                             continue;
@@ -857,7 +863,7 @@ fn choose_clip(
                         let gd = p.grasp_dir;
                         p.grasp_dir = if crate::tuning::GAME_FALLS && want == Vec3::ZERO { Vec3::ZERO } else { gd + (want - gd) * k };
                         let w = fall_grasp_weights(p.grasp_dir, facing);
-                        let r = action(&lib, &[ACT_FALL], true, 0, Some(0.15), Some("fall"));
+                        let r = action(&lib, &[ACT_FALL], true, 0, Some(if after_flight { 0.5 } else { 0.15 }), Some("fall"));
                         if let Some(mut r) = r {
                             if let Some(it) = r.items.first_mut() {
                                 if it.layers.len() == 6 {
