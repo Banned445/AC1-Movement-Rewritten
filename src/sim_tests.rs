@@ -2720,10 +2720,10 @@ fn a_jump_at_a_ladder_lands_on_it() {
 
 #[test]
 fn a_wall_run_beside_a_ladder_steps_onto_it() {
-    use crate::player::ladder::{LadderPhase, CLIMB_UP};
+    use crate::player::ladder::{LadderPhase, WALL_RUN_TO_LADDER};
     use crate::player::walling::WallingSubState;
     // the interpreter's walling state (0xEE05E0): a ladder within 0.6 m at the end of a Vertical step, the stick toward
-    // it → Ladder EntryType 3 (the high climb up's right-foot item)
+    // it → Ladder EntryType 3: the wall run's own transition clip first (RE/24 LADDER-13)
     let mut s = Sim::new(Vec3::new(50.2, 0.0, 62.0), FACE_PZ);
     s.pad(Vec3::Z, 1.0, true, true);
     s.press_legs();
@@ -2732,7 +2732,7 @@ fn a_wall_run_beside_a_ladder_steps_onto_it() {
     assert_eq!(s.loco().current, ActorContextId::Ladder, "the ladder (last walling state {:?})", s.data().walling.sub_state);
     let l = &s.data().ladder;
     assert_eq!(l.phase, Some(LadderPhase::Entry));
-    assert_eq!(l.action.map(|a| (a.id, a.item)), Some((CLIMB_UP[1], 1)));
+    assert_eq!(l.action.map(|a| (a.id, a.item)), Some((WALL_RUN_TO_LADDER, 0)));
     assert!(l.high);
     let _ = WallingSubState::Vertical;
     s.pad(Vec3::ZERO, 0.0, true, false);

@@ -61,7 +61,7 @@ pub fn revolve_room(root: Vec3, fwd: Vec3, right: bool, collision: &CollisionWor
 }
 
 pub const DUMPED_ACTIONS: &[u32] = &[
-    REVOLVE[0], REVOLVE[1],
+    REVOLVE[0], REVOLVE[1], WALL_RUN_TO_LADDER,
     TO_HANG_SIDE[0][0], TO_HANG_SIDE[0][1], TO_HANG_SIDE[1][0], TO_HANG_SIDE[1][1],
     SIDE_JUMP[0][0][0][0], SIDE_JUMP[0][0][0][1], SIDE_JUMP[0][0][0][2], SIDE_JUMP[0][0][1][0], SIDE_JUMP[0][0][1][1], SIDE_JUMP[0][0][1][2],
     SIDE_JUMP[0][1][0][0], SIDE_JUMP[0][1][0][1], SIDE_JUMP[0][1][0][2], SIDE_JUMP[0][1][1][0], SIDE_JUMP[0][1][1][1], SIDE_JUMP[0][1][1][2],
@@ -91,6 +91,8 @@ use crate::input::PadInput;
 /// Root offset out from the ladder line (0xE266D0: attach point − 0.5·F, F = the facing toward the ladder: 0.5 m out on
 /// the climber's side; RE/24 LADDER-5 settles the sign).
 pub const ATTACH_OUT: f32 = 0.5;
+/// The wall run onto a ladder (HumanWalling block, `sub_E202C0`: 0xA3511EAF).
+pub const WALL_RUN_TO_LADDER: u32 = 0xA351_1EAF;
 /// `sub_B239D0`: within 1.5 m of the top → the entry from the top.
 pub const TOP_ENTRY_BAND: f32 = 1.5;
 /// 0xE266D0: the entry from the top ends 0.7 m below the top.
@@ -385,8 +387,11 @@ pub fn find_wall_run_ladder(feet: Vec3, stick: Vec3, guidance: &GuidanceWorld) -
         if feet.distance(q) > 0.6 || (d.length() > 1e-3 && d.normalize().dot(n) < 0.0) {
             continue;
         }
-        let height = (feet.y - base.y + 1.0).min(top.y - base.y);
-        return Some(LadderEntry { base, top, n, from: feet, facing: -n, high: true, from_ledge: true, action: Some(CLIMB_UP[1]), item: 1, height: Some(height), ..Default::default() });
+        // state 3 (`sub_E202C0` 0xE202C0): `xx_h_wallingfront_step1_footr_tr_h_ladder_up_l` with the root interpolated
+        // onto the ladder line (− 0.5 m along the facing) at the root's own height over the action; it ends left foot
+        // ahead, then the high climb (RE/24 LADDER-13). PORT: the climb up the game chains after it starts from the wait
+        let height = (feet.y - base.y).clamp(0.0, top.y - base.y);
+        return Some(LadderEntry { base, top, n, from: feet, facing: -n, high: true, from_ledge: true, action: Some(WALL_RUN_TO_LADDER), item: 0, height: Some(height), foot: 0, ..Default::default() });
     }
     None
 }
