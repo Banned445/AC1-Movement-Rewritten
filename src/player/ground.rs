@@ -592,12 +592,15 @@ pub fn update_ground(
     spawn: Res<SpawnPoint>,
     mut rig: ResMut<CameraRig>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>), With<Player>>,
+    skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>, Option<&crate::bone_pose::BonePose>), With<Player>>,
 ) {
     use super::abilities::Ability;
     let ab = super::abilities::of(abilities.as_deref());
     let dt = time.delta_secs().min(1.0 / 20.0);
-    for (mut loco, mut body, mut data, anim) in &mut q {
+    for (mut loco, mut body, mut data, anim, pose) in &mut q {
+        // `Human__GetLeadingFoot` 0xB18850 on last frame's pose (`bone_pose`); None without the install
+        let leading_foot = skeleton.as_deref().zip(pose).filter(|(_, p)| p.seq > 0).and_then(|(s, p)| p.leading_foot(s));
         let g = &mut data.ground;
         if loco.current != ActorContextId::Ground {
             continue;
@@ -801,7 +804,10 @@ pub fn update_ground(
                     g.tr = None;
                 } else {
                     g.tr = None;
-                    g.set_wait_foot(super::ground_tree::pick_locomotion_foot(super::anim_gate::word(&t.action), g.blend.foot));
+                    // Idle from Move (0xD8B220) as below: the leading foot's wait (RE/24 GROUND-24); PORT without a pose:
+                    // the transition's exit foot
+                    let lead = leading_foot.unwrap_or_else(|| super::ground_tree::pick_locomotion_foot(super::anim_gate::word(&t.action), g.blend.foot));
+                    g.set_wait_foot(lead);
                     g.speed_param = 0.0;
                     g.blend.speed_param = 0.0;
                 }
@@ -910,10 +916,12 @@ pub fn update_ground(
             // the Move guards try the run stop first (0xD7EC90), Idle only otherwise: the run stop reads the playing
             // locomotion item (RE/24 GROUND-7)
             if GAME_GROUND_TREE && g.speed_param <= 0.25 {
-                // Idle from Move (0xD8B220): the wait of the locomotion item's exit foot (its word, 0xD86760). PORT: the
-                // game picks it by the bone leading foot (`Human__GetLeadingFoot` 0xD8B279, RE/24 GROUND-24)
+                // Idle from Move (0xD8B220): the wait of the leading foot (`Human__GetLeadingFoot` 0xD8B279: the left
+                // foot ahead → the left wait, `dword_1A2BFE0`; else the right one; RE/24 GROUND-24). PORT without a pose:
+                // the locomotion item's exit foot (its word, 0xD86760)
                 let word = super::anim_gate::item_word(super::move_blend::ACT_GROUND_LOCOMOTION, g.blend.foot);
-                g.set_wait_foot(super::ground_tree::pick_locomotion_foot(word, g.blend.foot));
+                let lead = leading_foot.unwrap_or_else(|| super::ground_tree::pick_locomotion_foot(word, g.blend.foot));
+                g.set_wait_foot(lead);
             }
             if g.speed_param > 0.25 {
                 g.start_run_stop();
@@ -1113,7 +1121,10 @@ pub fn update_ground(
                     back_turn = Some(to_char.dot(super::right_of(-n)) > 0.0);
                     n = -n;
                 }
-                let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None, back_turn, ..Default::default() };
+                // the entry's column: 2·(`Human__GetLeadingFoot` ≠ 1) (0xE26A4C, RE/24 LADDER-24); PORT without a pose: the
+                // locomotion blend's foot
+                let foot = leading_foot.unwrap_or((g.blend.foot != 0) as usize);
+                let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot, from_ledge: false, action: None, back_turn, ..Default::default() };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
                 continue;
             }
@@ -1125,7 +1136,8 @@ pub fn update_ground(
         let forward = body.forward();
         if pad.hand_just_pressed() && ab.allows(Ability::Climb) {
             // leading foot (Human__GetLeadingFoot 0xB18850): the playing locomotion item, footl = left ahead
-            if let Some(entry) = climb_start_entry(body.feet, forward, g.blend.foot != 0, &guidance) {
+            // the climb start's foot variant: `Human__GetLeadingFoot` ≠ 1 (0xB261A8); PORT without a pose: the blend's foot
+            if let Some(entry) = climb_start_entry(body.feet, forward, leading_foot.map_or(g.blend.foot != 0, |f| f == 1), &guidance) {
                 pad.consume_hand();
                 switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
                 continue;

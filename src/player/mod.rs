@@ -128,6 +128,9 @@ pub struct LimbTargets {
     /// The limb IK is not run this frame (the context's update skips `LimbIK__PostUpdate`): nothing is applied and the
     /// limbs' state is kept, so the animation alone shows, with no fade (the ledge's sub-state gate 0xDCD910).
     pub suspended: bool,
+    /// Bumped when the context sets the contacts directly, outside the clips' contact tags (`LimbIK__ReleaseAll` and a
+    /// contact at weight 1, e.g. `HumanLedge__RePoseHandsFromBones` 0xDE1970): the IK takes the new holds at once.
+    pub contact_set: u32,
 }
 
 /// Linear root interpolation used by all discrete moves (`sub_711130` / `sub_7113F0(human+80)`).

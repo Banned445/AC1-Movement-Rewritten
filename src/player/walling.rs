@@ -622,7 +622,10 @@ pub fn update_walling(
             WallingSubState::EntryB => {
                 // (command ≠ 0 would play entry_footl_tr_fall 0xFF7CA1 and leave; only AI walls send it)
                 if let Some(e) = probe_entry(&guidance, feet, facing, &collision) {
+                    // the hangs enter the Ledge's Entry state (+76 = 0; the pull-ups 4): its end re-poses the hands (LEDGE-22)
+                    let hang = e.sub_state != LedgeSubState::Pullup;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
+                    data.ledge.repose_at_entry_end = hang;
                     continue;
                 }
                 let a = single(STEP1, 0);
@@ -630,7 +633,9 @@ pub fn update_walling(
             }
             WallingSubState::Vertical => {
                 if let Some(e) = probe_vertical(&guidance, feet, facing, &collision) {
+                    let hang = e.sub_state != LedgeSubState::Pullup;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
+                    data.ledge.repose_at_entry_end = hang;
                     continue;
                 }
                 let (a, b) = (single(VERTICAL_END, 0), single(VERTICAL_END, 1));

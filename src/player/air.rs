@@ -721,12 +721,13 @@ pub fn update_air(
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
+    skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::bone_pose::BonePose>), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
     // the InAir empty-hand catch needs Grasp (0xEDBC26)
     let grasp = super::abilities::of(abilities.as_deref()).allows(super::abilities::Ability::Grasp);
-    for (mut loco, mut body, mut data) in &mut q {
+    for (mut loco, mut body, mut data, pose) in &mut q {
         if loco.current != ActorContextId::InAir {
             continue;
         }
@@ -1170,7 +1171,10 @@ pub fn update_air(
                     e.facing = body.forward();
                     e.catch_speed = body.velocity.length();
                     ladder_on = Some(e);
-                } else if let Some(found) = super::air_catches::ledge_search(body.feet, reach, body.forward(), fall_height, manual, air.release_hold, &guidance, &collision) {
+                } else if let Some(found) = super::air_catches::ledge_search(body.feet, reach, body.forward(), fall_height, manual,
+                    // the Hips bone of last frame's pose at the root where it stands (`bone_pose`)
+                    skeleton.as_deref().zip(pose).and_then(|(s, p)| p.world_pos(s, crate::bone_pose::HIPS, &body)),
+                    air.release_hold, &guidance, &collision) {
                     // CheckAirCatch 0xE0BB70: the ledge, climb and free-hang catches (RE/19 §2)
                     air.long_catch = fall_height >= 3.0;
                     match found {

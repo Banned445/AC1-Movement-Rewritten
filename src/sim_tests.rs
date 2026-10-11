@@ -39,10 +39,16 @@ impl Sim {
             .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
             .insert_resource(SpawnPoint(SPAWN))
             .init_resource::<CameraRig>()
-            .add_systems(Update, (crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain());
+            .add_systems(Update, ((crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain(), crate::anim::headless_animation_systems()).chain());
         let (c, g) = level::geometry();
         app.insert_resource(c).insert_resource(g);
+        // the animation runs as in the game when the install is found (the player's BonePose; bone positions in the
+        // simulation, phase 2)
+        let animated = crate::bone_pose::add_headless_animation(&mut app);
         let player = app.world_mut().spawn(player_components(feet, heading)).id();
+        if animated {
+            app.world_mut().entity_mut(player).insert(crate::anim::AnimPlayer::default());
+        }
         Sim { app, player, saw_air: false, cam_follow: true }
     }
 
@@ -109,6 +115,32 @@ impl Sim {
         }
         false
     }
+}
+
+/// Bone positions in the simulation (phase 2): with the install the tests' simulation animates the player as the game
+/// does, so its bones follow the moves: walking swings the feet, and the hands sit about shoulder-high off the ground.
+#[test]
+fn the_simulation_animates_the_player_with_the_install() {
+    use crate::bone_pose::{BonePose, PoseSkeleton, LEFT_FOOT, RIGHT_FOOT, RIGHT_HAND};
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    let mut gap = Vec::new();
+    for _ in 0..90 {
+        s.run(1.0 / 60.0 + 1e-4);
+        let (pose, skel, b) = (s.app.world().get::<BonePose>(s.player).unwrap(), s.app.world().resource::<PoseSkeleton>(), s.body());
+        let (l, r) = (pose.world_pos(skel, LEFT_FOOT, b).unwrap(), pose.world_pos(skel, RIGHT_FOOT, b).unwrap());
+        gap.push((l - r).dot(b.forward()));
+        let hand = pose.world_pos(skel, RIGHT_HAND, b).unwrap();
+        assert!((0.5..1.6).contains(&(hand.y - b.feet.y)), "the hand {hand} over the feet {}", b.feet);
+    }
+    let seq = s.app.world().get::<BonePose>(s.player).unwrap().seq;
+    assert!(seq >= 90, "posed every frame: {seq}");
+    // the feet change lead while walking
+    assert!(gap.iter().any(|g| *g > 0.1) && gap.iter().any(|g| *g < -0.1), "feet lead {gap:?}");
 }
 
 #[test]
@@ -443,6 +475,66 @@ fn a_hang_over_climb_holds_moves_sideways_into_the_climb() {
     }
 }
 
+/// RE/24 GROUND-24: a walk's stop (Idle from Move 0xD8B220) plays the wait of the foot that leads in the pose
+/// (`Human__GetLeadingFoot` 0xD8B279), read from last frame's pose.
+#[test]
+fn a_walk_stops_into_the_wait_of_the_leading_foot_bone() {
+    use crate::bone_pose::{BonePose, PoseSkeleton};
+    let mut seen = std::collections::HashSet::new();
+    for walk in [0.55f32, 0.7, 0.85, 1.0, 1.15, 1.3] {
+        let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+        if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+            eprintln!("skipped: game install not found");
+            return;
+        }
+        s.pad(Vec3::NEG_Z, 0.5, false, false);
+        s.run(walk);
+        assert!(s.ground().speed_param > 0.0 && s.ground().speed_param <= 0.25, "walking: {}", s.ground().speed_param);
+        let lead = {
+            let w = s.app.world();
+            w.get::<BonePose>(s.player).unwrap().leading_foot(w.resource::<PoseSkeleton>()).unwrap()
+        };
+        s.pad(Vec3::ZERO, 0.0, false, false);
+        s.run(1.0 / 60.0 + 1e-4);
+        assert_eq!(s.ground().speed_param, 0.0, "stopped");
+        assert_eq!(s.ground().wait_foot, lead, "the leading foot's wait");
+        seen.insert(lead);
+    }
+    assert_eq!(seen.len(), 2, "both feet led at some stop");
+}
+
+/// RE/24 LADDER-24: the ladder's ground entry takes its column from the leading foot bone (0xE26A4C: 2·(lead ≠ 1)).
+#[test]
+fn a_ladder_entry_takes_the_leading_foot_column() {
+    use crate::bone_pose::{BonePose, PoseSkeleton};
+    use crate::player::ladder::ENTER_GROUND;
+    let mut seen = std::collections::HashSet::new();
+    for from_z in [60.5f32, 60.7, 60.9, 61.1, 61.3, 61.5] {
+        let mut s = Sim::new(Vec3::new(50.0, 0.0, from_z), FACE_PZ);
+        if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+            eprintln!("skipped: game install not found");
+            return;
+        }
+        s.pad(Vec3::Z, 1.0, false, false);
+        let mut lead = None;
+        for _ in 0..180 {
+            {
+                let w = s.app.world();
+                lead = w.get::<BonePose>(s.player).unwrap().leading_foot(w.resource::<PoseSkeleton>());
+            }
+            s.run(1.0 / 60.0 + 1e-4);
+            if s.loco().current == ActorContextId::Ladder {
+                break;
+            }
+        }
+        assert_eq!(s.loco().current, ActorContextId::Ladder, "no entry from {from_z}");
+        let lead = lead.unwrap();
+        assert_eq!(s.data().ladder.action.map(|a| a.id), Some(ENTER_GROUND[0][lead]), "from {from_z}: the leading foot {lead}'s column");
+        seen.insert(lead);
+    }
+    assert_eq!(seen.len(), 2, "both feet led at some entry");
+}
+
 #[test]
 fn climb_start_from_the_ground_uses_the_leading_foot() {
     // sub_B26080 (0xB261A8): 0x01BC382C + (Human__GetLeadingFoot() != 1)
@@ -455,7 +547,11 @@ fn climb_start_from_the_ground_uses_the_leading_foot() {
         let mut lead = None;
         for _ in 0..60 {
             if s.loco().current == ActorContextId::Ground {
-                lead = Some(s.ground().blend.foot != 0);
+                // the leading foot bone of the pose the ground reads (`Human__GetLeadingFoot`); the blend's foot without
+                // the install
+                let pose = s.app.world().get::<crate::bone_pose::BonePose>(s.player).filter(|p| p.seq > 0);
+                let bones = pose.and_then(|p| p.leading_foot(s.app.world().resource::<crate::bone_pose::PoseSkeleton>()));
+                lead = Some(bones.map_or(s.ground().blend.foot != 0, |f| f == 1));
             }
             s.run(1.0 / 60.0 + 1e-4);
             if s.loco().current == ActorContextId::Climb {
@@ -467,7 +563,10 @@ fn climb_start_from_the_ground_uses_the_leading_foot() {
         assert_eq!(s.data().climb.move_action, Some(climb::CLIMB_FROM_GROUND[lead as usize]), "leading foot right = {lead}");
         seen.insert(lead);
     }
-    assert_eq!(seen.len(), 2, "both feet exercised");
+    // the stand-in follows the forced blend foot; the bones follow the wait's pose
+    let probe = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
+    let animated = probe.app.world().get::<crate::anim::AnimPlayer>(probe.player).is_some();
+    assert!(animated || seen.len() == 2, "both feet exercised");
 }
 
 #[test]
@@ -512,6 +611,37 @@ fn climb_jumps_up_to_an_overhang_when_the_holds_run_out() {
     assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Free);
     let hands = (s.data().ledge.hand_l + s.data().ledge.hand_r) * 0.5;
     assert!((hands.y - 3.5).abs() < 0.05 && (hands.z - 26.0).abs() < 0.05, "hands on the slab's outer edge: {hands:?}");
+}
+
+/// RE/24 LEDGE-22: the climb's jump up enters the Ledge's Entry state (+76 = 0, 0xDF9650), whose end re-poses the hands
+/// onto the edge under the animated hand bones (`HumanLedge__RePoseHandsFromBones` 0xDE1970): the clip's own grip, wider
+/// than the jump's two search hits.
+#[test]
+fn the_jump_up_ends_with_the_hands_under_the_hand_bones() {
+    use crate::bone_pose::{BonePose, PoseSkeleton, LEFT_HAND, RIGHT_HAND};
+    let mut s = Sim::new(Vec3::new(-22.0, 0.0, 26.5), FACE_PZ);
+    if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand();
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb));
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ledge), "never jumped");
+    let mv = s.data().ledge.mv.expect("the jump");
+    s.pad(Vec3::Z, 0.0, false, false);
+    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_none()), "jump never ended");
+    // the bones the re-pose read: last frame's pose at the root where it stands now (the pose is not stepped since)
+    let (pose, skel, b) = (s.app.world().get::<BonePose>(s.player).unwrap(), s.app.world().resource::<PoseSkeleton>(), s.body());
+    let (bl, br) = (pose.world_pos(skel, LEFT_HAND, b).unwrap(), pose.world_pos(skel, RIGHT_HAND, b).unwrap());
+    let (hl, hr) = (s.data().ledge.hand_l, s.data().ledge.hand_r);
+    for (h, bone) in [(hl, bl), (hr, br)] {
+        assert!((h.y - 3.5).abs() < 0.02 && (h.z - 26.0).abs() < 0.02, "on the slab's outer edge: {h:?}");
+        assert!((h.x - bone.x).abs() < 0.02, "under its bone: {h:?} {bone:?}");
+    }
+    assert!((hl - hr).length() > (mv.hand_l - mv.hand_r).length() + 0.05, "the clip's grip, not the search hits");
 }
 
 #[test]
@@ -1048,7 +1178,11 @@ fn two_metre_wall_jumps_into_a_wall_hang() {
     let j = s.data().air.target.and_then(|t| t.straight).expect("straight jump band");
     assert_eq!(j.flight, 0x0127_1631, "2.2 m with a wall below: jumpstraight_to_hangwall");
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ledge));
+    // the hang reception starts no interpolation and its clips are in place (0xE08C9A): the root holds where the flight
+    // ended
+    let arrived = s.body().feet;
     assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
+    assert!(s.body().feet.distance(arrived) < 1e-4, "the root held: {arrived:?} → {:?}", s.body().feet);
     assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Wall);
     assert!((s.body().feet.y - 1.1).abs() < 0.05, "wall-hang root 1.1 m below the hands: {:?}", s.body().feet);
 }

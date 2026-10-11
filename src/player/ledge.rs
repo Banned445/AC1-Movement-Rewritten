@@ -223,6 +223,10 @@ pub struct HumanLedgeData {
     pub last_action: &'static str,
     /// Incremented whenever a discrete move starts (lets the animator restart one-shot clips).
     pub step_seq: u32,
+    /// The entry ends in the Entry state (LedgeData +76 = 0: walling's hangs, the climb's jump up): its end re-poses the
+    /// hands from the hand bones (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0; RE/24 LEDGE-22). Set by the caller after the
+    /// switch; `enter` clears it.
+    pub repose_at_entry_end: bool,
     /// +1844: the hand the last step moved (0 left, 1 right; `StartHandStep` 0xDDE0C0). `EnterCommon` 0xDE26D0 sets 0, so
     /// the first vertical step after an entry moves the right hand (`PickVerticalHandAndAnim` 0xDCB3E0, RE/24 LEDGE-5).
     pub last_hand: usize,
@@ -277,6 +281,7 @@ impl HumanLedgeData {
         self.pass_over = None;
         self.swing = None;
         self.alt_flag = false; // EnterCommon 0xDE26D0 clears +0x85
+        self.repose_at_entry_end = false;
         self.last_hand = 0; // and +1844
         self.blocked_up = false;
         self.pending_vstep = None;
@@ -316,6 +321,26 @@ impl HumanLedgeData {
     pub fn moving(&self) -> bool {
         !self.moves.is_empty() || self.mv.is_some()
     }
+}
+
+/// `HumanLedge__RePoseHandsFromBones` 0xDE1970 (RE/24 LEDGE-22): the hands onto the holds under the animated hand bones
+/// (`bones`: the LeftHand / RightHand handles, Human +0x290 / +0x298, read through `bone_pose`). The non-steep edges
+/// (`Guidance__IsNotSteep`) within a 1.5 m sphere at the root + 1.5 m whose wall (the lower of the edge's two normals,
+/// flattened) faces the character (its dot with the facing < −0.785, compared as written, 0xDE1C3B); each hand goes onto
+/// the nearest point of those edges to its own bone. A hand with no such edge keeps its hold.
+pub fn hands_from_bones(bones: [Vec3; 2], root: Vec3, facing: Vec3, guidance: &GuidanceWorld) -> [Option<Vec3>; 2] {
+    let centre = root + Vec3::Y * 1.5;
+    let facing = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
+    let edges: Vec<_> = guidance
+        .edges
+        .iter()
+        .filter(|e| !crate::guidance::steep(e.p1 - e.p0) && e.closest_point(centre).distance(centre) <= 1.5)
+        .filter(|e| {
+            let n = if e.n0.y <= e.n1.y { e.n0 } else { e.n1 };
+            Vec3::new(n.x, 0.0, n.z).normalize_or_zero().dot(facing) < -0.785_398_2
+        })
+        .collect();
+    bones.map(|b| edges.iter().map(|e| e.closest_point(b)).min_by(|p, q| p.distance_squared(b).total_cmp(&q.distance_squared(b))))
 }
 
 fn hand_mid(d: &HumanLedgeData) -> Vec3 {
@@ -496,11 +521,12 @@ pub fn update_ledge(
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, &mut LimbTargets), With<Player>>,
+    skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, &mut LimbTargets, Option<&crate::bone_pose::BonePose>), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
     let ab = super::abilities::of(abilities.as_deref());
-    for (mut loco, mut body, mut data, mut limbs) in &mut q {
+    for (mut loco, mut body, mut data, mut limbs, pose) in &mut q {
         if loco.current != ActorContextId::Ledge {
             continue;
         }
@@ -699,6 +725,23 @@ pub fn update_ledge(
                 d.hang_set = true;
                 d.mv = None;
                 d.sub_state = LedgeSubState::Movement;
+                // the Entry state's end (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0, RE/24 LEDGE-22): the entries in the
+                // Entry state (+76 = 0: walling's hangs, the climb's jump up, the swing back's second part) re-pose the
+                // hands from the hand bones, unless `step1_to_hangwall` plays. The bones are last frame's pose at the root
+                // where it stands now (`bone_pose`); without the install the move's own hand points stay (PORT)
+                let entry_end = std::mem::take(&mut d.repose_at_entry_end) || mv.kind == ledge_moves::MoveKind::SwingBack;
+                let last = mv.seq.iter().flatten().last().map(|a| a.id);
+                if entry_end && last != Some(super::walling::STEP1_TO_HANGWALL) {
+                    use crate::bone_pose::{LEFT_HAND, RIGHT_HAND};
+                    let bones = skeleton.as_deref().zip(pose).and_then(|(s, p)| Some([p.world_pos(s, LEFT_HAND, &body)?, p.world_pos(s, RIGHT_HAND, &body)?]));
+                    if let Some(bones) = bones {
+                        let [l, r] = hands_from_bones(bones, body.feet, body.forward(), &guidance);
+                        d.hand_l = l.unwrap_or(d.hand_l);
+                        d.hand_r = r.unwrap_or(d.hand_r);
+                        // `LimbIK__ReleaseAll`, then the contacts at weight 1 (0xDE19B8, 0xDE1D80)
+                        limbs.contact_set = limbs.contact_set.wrapping_add(1);
+                    }
+                }
                 if mv.kind == ledge_moves::MoveKind::SwingBack {
                     d.swing_strength = Some((mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0), d.step_seq));
                 }
