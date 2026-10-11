@@ -155,6 +155,8 @@ mod completion_tests {
         let old = Vec3::Z * 0.2;
         assert_eq!(constrain_lateral(old, Vec3::Z * 0.3, false, 0.1), old);
         assert_eq!(constrain_lateral(old, Vec3::Z * 0.1, false, 0.1), Vec3::Z * 0.1);
+        // RE/24 NARROW-14: from the line the proposed sway is kept
+        assert_eq!(constrain_lateral(Vec3::ZERO, Vec3::Z * 0.05, false, 0.1), Vec3::Z * 0.05);
         assert!((constrain_lateral(old, old, true, 1.0/60.0).length() - (0.2 - 2.0/60.0)).abs() < 1e-5);
         assert_eq!(constrain_lateral(old, old, true, 1.0), Vec3::ZERO);
     }
@@ -995,12 +997,12 @@ fn detect_beam_segments(root:Vec3,forward:Vec3,current:Option<(Vec3,Vec3)>,segme
     None
 }
 
-/// 0xF7C3A0: root motion may reduce lateral error but must not increase it. Its optional
-/// correction approaches the line at 2 m/s; current beam callers pass correction=false (0xF7EED0).
+/// 0xF7C3A0: root motion may reduce lateral error but must not increase it; the rule applies only while the current
+/// offset is over 0.0005 m (0xF7C833), so a sway may start from the line (RE/24 NARROW-14). Its optional correction
+/// approaches the line at 2 m/s; current beam callers pass correction=false (0xF7EED0).
 fn constrain_lateral(old: Vec3, proposed: Vec3, correction: bool, dt: f32) -> Vec3 {
     let old_len = old.length();
-    let mut lateral = if proposed.length() > old_len { old } else { proposed };
-    if old_len <= 0.0005 { lateral = Vec3::ZERO; }
+    let mut lateral = if old_len > 0.0005 && proposed.length() > old_len { old } else { proposed };
     if correction {
         let len = lateral.length();
         lateral *= (1.0 - (2.0 * dt / len.max(1e-6)).min(1.0)).max(0.0);
@@ -1373,8 +1375,10 @@ pub fn update_narrow(
                 let limit_lo = if n.toward_p1 { 0.0 } else { stop };
                 let limit_hi = if n.toward_p1 { n.len() - stop } else { n.len() };
                 let over = if n.toward_p1 { s - limit_hi } else { limit_lo - s };
-                n.clamped = next.is_none() && over >= 0.0;
-                s = s.clamp(limit_lo.min(limit_hi), limit_hi.max(limit_lo));
+                // the end clamp only while the facing runs along the beam (|f·dir| > cos 80°, 0xF7C664; RE/24 NARROW-14)
+                let along_beam = body.forward().dot(n.dir()).abs() > 0.173_648_18;
+                n.clamped = next.is_none() && over >= 0.0 && along_beam;
+                s = if along_beam { s.clamp(limit_lo.min(limit_hi), limit_hi.max(limit_lo)) } else { s.clamp(0.0, n.len()) };
                 n.s = s;
                 if let (Some((q0, q1)), true) = (next, over >= 0.0) {
                     // `ConstrainRootMotionToBeam` 0xF7C3A0 switches to the next segment; going along it from the
