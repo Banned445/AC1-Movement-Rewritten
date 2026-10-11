@@ -218,6 +218,8 @@ pub struct HumanInAirData {
     turn_pending: bool,
     /// (takeoff heading, destination heading) of that turn.
     pub turn: Option<(f32, f32)>,
+    /// 0xB145B0's sweep for the down variants (start, target), cast on the first update (`apply_down_variants`).
+    down_check: Option<(Vec3, Vec3)>,
 }
 
 impl HumanInAirData {
@@ -225,6 +227,7 @@ impl HumanInAirData {
         self.seq = self.seq.wrapping_add(1);
         self.turn_pending = false;
         self.turn = None;
+        self.down_check = None;
         self.apex_reached = false;
         self.fall_origin = FallOrigin::Ground;
         self.target_flags = 0;
@@ -353,7 +356,10 @@ impl HumanInAirData {
         let flat = Vec3::new(aim.x - from.x, 0.0, aim.z - from.z);
         let fwd = flat.normalize_or(Vec3::NEG_Z);
         let b = jump_blend::compute_kind(aim.y - from.y, flat.length(), target_type, self.foot_left, 1.0, kind);
-        let (takeoff_id, flight_id) = jump_blend::down_variants(b.takeoff, b.flight, aim.y - from.y);
+        let (takeoff_id, flight_id) = (b.takeoff, b.flight);
+        if aim.y - from.y < -jump_blend::DOWN_VARIANT_DROP && jump_blend::down_variants(takeoff_id, flight_id) != (takeoff_id, flight_id) {
+            self.down_check = Some((from, aim));
+        }
         let takeoff = ActionBlend::new(takeoff_id, 0, &b.takeoff_w);
         let flight = ActionBlend::new(flight_id, 0, &b.flight_w);
         let (t1, t2) = (takeoff.duration(), flight.duration());
@@ -391,6 +397,34 @@ impl HumanInAirData {
 }
 
 impl HumanInAirData {
+    /// `Human__UseBeamFreestepJumpVariants` 0xB145B0 (RE/24 AIR-1), on the first update (it needs the collision): with
+    /// the target more than 0.4 m below the start, a ray from the start + 0.2 m up toward the target, as long as its
+    /// crossing of the plane 0.4 m below the start, on the main character's layer (21; 5 for other characters). It
+    /// swaps to the down variants only when the ray **hits** (`Human__RayClear` 0xE1C820 → 0xE1C470 returns 1 when
+    /// clear): a jump onto solid ground ahead (the no-target jump on flat ground), not one off an edge over open air.
+    fn apply_down_variants(&mut self, collision: &CollisionWorld) {
+        let Some((start, target)) = self.down_check.take() else { return };
+        let o = start + Vec3::Y * 0.2;
+        let dir = (target - o).normalize_or_zero();
+        if dir.y >= -1e-4 {
+            return;
+        }
+        let len = 0.6 / -dir.y;
+        if collision.ray_distance(o, dir, len, crate::layers::MAIN_CHARACTER) >= len - 1e-4 {
+            return;
+        }
+        let (Some(mut takeoff), Some(mut flight)) = (self.takeoff, self.flight) else { return };
+        (takeoff.id, flight.id) = jump_blend::down_variants(takeoff.id, flight.id);
+        self.takeoff = Some(takeoff);
+        self.flight = Some(flight);
+        if let AirMode::Jump { from, clip_end, duration, t_takeoff, fwd, .. } = &mut self.mode {
+            let (t1, t2) = (takeoff.duration(), flight.duration());
+            *duration = (t1 + t2).max(1e-3);
+            *t_takeoff = t1;
+            *clip_end = *from + to_world(add(takeoff.disp(1.0), flight.disp(1.0)), *fwd);
+        }
+    }
+
     /// The run jump's frame (0xB20200: the character's own matrix at takeoff): the clips' root motion plays in the
     /// takeoff facing, the linear correction carries it onto the target, and the facing turns to the destination.
     /// PORT: the destination orientation (InAirData +256, from 0xB1EC40) is taken as the direction to the target.
@@ -517,6 +551,7 @@ pub fn update_air(
         if loco.just_switched {
             if let Some(v) = data.air.entry_velocity.take() { body.velocity = v; }
             loco.just_switched = false;
+            data.air.apply_down_variants(&collision);
             data.air.begin_turn(body.heading);
             if loco.switched_this_frame {
                 // the controller keeps integrating the take-off velocity; the jump's path shifts with it so the
@@ -1006,6 +1041,23 @@ pub fn update_air(
 #[cfg(test)]
 mod fall_tests {
     use super::*;
+
+    /// RE/24 AIR-1: the free jump's target lies 3 m down. On solid ground ahead the sweep hits and the jump flies the
+    /// down variants (the live no-target jump); off the edge of a roof over open air it keeps the free-step flight.
+    #[test]
+    fn the_down_variants_need_a_blocked_sweep() {
+        use crate::collision::Aabb3;
+        let flight_of = |floor_ahead: f32| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min: Vec3::new(-5.0, -1.0, -floor_ahead), max: Vec3::new(5.0, 0.0, 5.0) });
+            let mut air = HumanInAirData::default();
+            air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
+            air.apply_down_variants(&c);
+            air.flight.map(|f| f.id).unwrap()
+        };
+        assert!(jump_blend::FLIGHT_FREESTEP_DOWN.contains(&flight_of(20.0)), "solid ground ahead: the down flight");
+        assert!(jump_blend::FLIGHT_FREESTEP.contains(&flight_of(0.1)), "over open air: the free-step flight");
+    }
     #[test]
     fn a_run_jump_turns_to_its_target_over_the_takeoff() {
         // bug 1791501015: the facing snapped 42° in one frame at takeoff. 0xE0EF30 slerps the jump frame from the
