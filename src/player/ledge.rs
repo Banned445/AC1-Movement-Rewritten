@@ -598,6 +598,7 @@ pub fn update_ledge(
         limbs.suspended = !ik_runs;
         limbs.hands = ik_runs.then_some((d.hand_l, d.hand_r));
         limbs.normal = n;
+        // PORT: the travel time of a clip without contact tags (tagged clips use their window; RE/24 CLIMB-27)
         limbs.transit = d.moves.first().map(|m| m.duration).unwrap_or(SHIMMY_OPEN_TIME) * 0.8;
         // the feet follow the hang clip (braced against the wall, or dangling); only the hands are pinned
         limbs.feet = None;

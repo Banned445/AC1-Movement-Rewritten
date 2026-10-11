@@ -1312,7 +1312,8 @@ pub fn update_climb(
         limbs.feet = Some((d.foot_l, d.foot_r));
         limbs.normal = n;
         limbs.adjust = crate::ik::ADJUST_SLOPE | crate::ik::ADJUST_HEAD;
-        // a moving limb lands on its new hold a little before the root settles
+        // the limbs travel inside the playing clip's contact-tag window (`LimbIK__SolveEffectors` 0xE57570, ik.rs
+        // `update_tagged`). PORT: a clip without contact tags travels over 0.8 of the move (no game source, RE/24 CLIMB-27)
         limbs.transit = d.moving.map(|m| m.duration).unwrap_or(CLIMB_MOVE_TIME) * 0.8;
 
         // the interpreter's climb state (`GoAssassinActionInterpreter__ClimbState` 0xEE5EB0): in Wait, and mid-move during a
