@@ -2293,7 +2293,8 @@ fn landing_on_a_bar_with_nothing_ahead_settles_into_the_hang() {
     if matches!(w.phase, SwingPhase::Settle(id, _) if id == IMPACT_ELBOW) {
         assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_none()));
     } else {
-        assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_none()), "the released stick stops the swing");
+        // the stop waits for the down item to end, then plays its four items (RE/24 NARROW-16)
+        assert!(s.run_until(6.0, |s| s.data().ledge.swing.is_none()), "the released stick stops the swing");
     }
     assert_eq!(s.loco().current, ActorContextId::Ledge, "hanging");
 }

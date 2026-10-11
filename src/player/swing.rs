@@ -172,9 +172,14 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
         }
         SwingPhase::Cycle(i) => {
             *feet = s.root;
-            // event 6 (+4398: high profile or Legs released; guard 0xDCCF40: not on the up items 0 / 2)
+            if !done {
+                return SwingOut::Stay;
+            }
+            // event 6 (+4398: high profile or Legs released; guard `Guard_SwingStop` 0xDCCF40: not on the up items 0 / 2,
+            // and only at the item boundary, `sub_502290`): the graph plays the stop of the other side, front_down →
+            // `swing_stop_back` 0x023E0C62, back_down → `swing_stop_front` 0x023E0C61, items a → d (RE/24 NARROW-16)
             if !held && (i == 1 || i == 3) {
-                let id = SWING_STOP[(i == 3) as usize];
+                let id = SWING_STOP[(i == 1) as usize];
                 if let Some(a) = single(id, 0, &[]) {
                     s.phase = SwingPhase::Settle(id, 0);
                     s.action = a;
@@ -183,9 +188,6 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
                     return SwingOut::Stay;
                 }
                 return SwingOut::Hang;
-            }
-            if !done {
-                return SwingOut::Stay;
             }
             // event 7 (guard 0xDCD000): released at the end of back_down (item 3), toward the target
             if i == 3 && s.jump_req {
@@ -207,7 +209,17 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
             if !done {
                 return SwingOut::Stay;
             }
-            // the impact actions' second item is their transition into the free hang (PORT: the stops play item a only)
+            // the stops play their four items a → d, d leading into the free hang
+            if SWING_STOP.contains(&id) && item < 3 {
+                if let Some(a) = single(id, item + 1, &[]) {
+                    s.phase = SwingPhase::Settle(id, item + 1);
+                    s.action = a;
+                    s.t = 0.0;
+                    s.seq = s.seq.wrapping_add(1);
+                    return SwingOut::Stay;
+                }
+            }
+            // the impact actions' second item is their transition into the free hang
             if (id == IMPACT_LEGS || id == IMPACT_ELBOW || id == IMPACT_SHOULDER) && item == 0 {
                 let w = if id == IMPACT_LEGS { legs_weights(s.impact_w) } else { vec![1.0] };
                 if let Some(a) = single(id, 1, &w) {
@@ -225,4 +237,33 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
 
 fn legs_weights(f: f32) -> Vec<f32> {
     if f <= 0.5 { vec![1.0 - f * 2.0, f * 2.0, 0.0] } else { vec![0.0, 2.0 - f * 2.0, f * 2.0 - 1.0] }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    /// RE/24 NARROW-16: let go on front_down (item 1), the swing finishes the item, then plays the back stop's four
+    /// items and hangs.
+    #[test]
+    fn a_stop_waits_for_the_item_and_plays_the_other_sides_four_items() {
+        let mut s = start(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y * 2.4, 0).expect("swing cycle");
+        s.phase = SwingPhase::Cycle(1);
+        s.action = single(SWING_CYCLE, 1, &[]).unwrap();
+        let c = CollisionWorld::default();
+        let mut feet = Vec3::ZERO;
+        let none = |_: Vec3, _: Vec3| None;
+        let dur = s.action.duration();
+        assert!(matches!(update(&mut s, dur * 0.5, false, false, &mut feet, &c, none), SwingOut::Stay));
+        assert!(matches!(s.phase, SwingPhase::Cycle(1)), "the item plays on");
+        let _ = update(&mut s, dur, false, false, &mut feet, &c, none);
+        assert!(matches!(s.phase, SwingPhase::Settle(id, 0) if id == SWING_STOP[1]), "front_down leads to the back stop: {:?}", s.phase);
+        for k in 1..4 {
+            let d = s.action.duration();
+            let _ = update(&mut s, d + 1e-3, false, false, &mut feet, &c, none);
+            assert!(matches!(s.phase, SwingPhase::Settle(_, i) if i == k), "item {k}: {:?}", s.phase);
+        }
+        let d = s.action.duration();
+        assert!(matches!(update(&mut s, d + 1e-3, false, false, &mut feet, &c, none), SwingOut::Hang));
+    }
 }
