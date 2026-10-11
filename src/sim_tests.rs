@@ -503,6 +503,49 @@ fn a_walk_stops_into_the_wait_of_the_leading_foot_bone() {
     assert_eq!(seen.len(), 2, "both feet led at some stop");
 }
 
+/// RE/24 GROUND-14: switching profile while standing plays the stance-change wait (HG+1524) for at least 0.1 s after a
+/// low wait and 0.5 s after a high one (`sub_D7E5C0`), then the new profile's wait.
+#[test]
+fn switching_profile_while_standing_plays_the_stance_change_wait() {
+    use crate::player::ground_tree::{idle_wait, STANCE_WAITS};
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(0.5);
+    let wait = |s: &Sim| idle_wait(s.ground().wait_high, s.ground().wait_foot, s.ground().stance_change);
+    assert!(!s.ground().stance_change && !s.ground().wait_high, "the low wait");
+    let foot = s.ground().wait_foot;
+    assert!(foot < 2);
+    // low → high: `xx_l_waithigh` / `xx_lh_wait` for 0.1 s
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(s.ground().stance_change && s.ground().wait_high);
+    assert_eq!(wait(&s), STANCE_WAITS[1][foot]);
+    if let Some(p) = s.app.world().get::<crate::anim::AnimPlayer>(s.player) {
+        assert_eq!(p.clip.as_deref(), Some(format!("act_{:08x}", STANCE_WAITS[1][foot]).as_str()), "the animation plays it");
+    }
+    s.run(0.05);
+    assert!(s.ground().stance_change, "still within its 0.1 s");
+    s.run(0.1);
+    assert!(!s.ground().stance_change && s.ground().wait_high, "the high wait");
+    assert_eq!(s.ground().wait_foot, foot);
+    // high → low: `xx_hl_wait` for 0.5 s
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(s.ground().stance_change && !s.ground().wait_high);
+    assert_eq!(wait(&s), STANCE_WAITS[0][foot]);
+    s.run(0.4);
+    assert!(s.ground().stance_change, "still within its 0.5 s");
+    s.run(0.15);
+    assert!(!s.ground().stance_change, "the low wait again");
+    // moving clears it: a switch then a step leaves no stance-change wait behind
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(s.ground().stance_change);
+    s.pad(Vec3::NEG_Z, 0.5, true, false);
+    s.run(0.2);
+    assert!(!s.ground().stance_change, "cleared by the start");
+}
+
 /// RE/24 LADDER-24: the ladder's ground entry takes its column from the leading foot bone (0xE26A4C: 2·(lead ≠ 1)).
 #[test]
 fn a_ladder_entry_takes_the_leading_foot_column() {

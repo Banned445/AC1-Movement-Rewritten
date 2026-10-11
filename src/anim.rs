@@ -799,7 +799,8 @@ fn choose_clip(
             // standing: the game's wait action of the leading foot (MoveBlend foot: 0 = left ahead), entered through the
             // graph's transition like every action (RE/13 §7)
             ActorContextId::Ground if speed_band(g.speed_param) == SpeedBand::None => {
-                let id = if crate::tuning::GAME_GROUND_TREE { crate::player::ground_tree::wait_action(g.high_profile, g.wait_foot) } else { ACT_WAIT[g.high_profile as usize][(g.blend.foot != 0) as usize] };
+                // the wait's own profile and the stance-change wait (HG+1500 / HG+1524, RE/24 GROUND-14)
+                let id = if crate::tuning::GAME_GROUND_TREE { crate::player::ground_tree::idle_wait(g.wait_high, g.wait_foot, g.stance_change) } else { ACT_WAIT[g.high_profile as usize][(g.blend.foot != 0) as usize] };
                 let name = match (g.high_profile, g.blend.foot == 0) {
                     (true, true) => "idle_high",
                     (true, false) => "idle_high_r",

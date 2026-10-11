@@ -132,6 +132,12 @@ pub struct HumanGroundData {
     /// The foot column of Idle's wait (`HumanGround__PickLocomotionFoot` on the item Idle was entered from: 0 left
     /// ahead, 1 right ahead, 2 parallel), RE/02 §4.6.
     pub wait_foot: usize,
+    /// HG+1500 while standing: the profile of the wait playing (`HumanGround__IdleWait_Enter` 0xD94580 takes the
+    /// wanted one, HG+1504 = `high_profile`).
+    pub wait_high: bool,
+    /// HG+1524: the stance-change wait plays (RE/24 GROUND-14); `stance_timer` is its time still to play (HG+736).
+    pub stance_change: bool,
+    pub stance_timer: f32,
 }
 
 /// The Movement child states that end a one-shot by their own rules (`HumanGround__Movement_Update` 0xDAD1C0).
@@ -979,6 +985,31 @@ pub fn update_ground(
         // start from standing (Idle → Move, 0xD84AC0 → `HumanGround__PlayStartMove` 0xD98990)
         if moving && !busy && !edge_halt && g.oneshot.is_none() && g.tr.is_none() && g.speed_param <= 0.0 && g.collide.is_none() && g.ledge_stop.is_none() && g.ledge_stop_lock.is_none() {
             g.play_start_move();
+        }
+        // Idle's wait update (0xDA6DC0, RE/24 GROUND-14): when the playing item may be left for standing (`sub_D84D10`:
+        // it ends, or `AnimAllowsModeExit` 0xD80010 by the wanted profile) and the wanted profile is not the wait's
+        // (HG+1504 ≠ HG+1500), or the stance-change wait has played its time, HG+1524 toggles (`sub_D7E5C0`: 0 → 1 with
+        // 0.1 s after a low wait, 0.5 s after a high one; 1 → 0) and the wait is entered again in the wanted profile
+        // (0xD94580). The other states clear HG+1524 (`PlayStartMove` 0xD98BBF, `Movement_EnterBody` 0xD92E7D,
+        // `Pivot_Enter` 0xDA6412, `LookDown_Enter` 0xD9FE88), and a wait entered from them takes the wanted profile.
+        let idle = GAME_GROUND_TREE && g.speed_param <= 0.0 && g.oneshot.is_none() && g.tr.is_none_or(|t| t.to_wait)
+            && g.crouch.is_none() && g.extra.is_none() && g.collide.is_none() && g.look_down.is_none() && g.ledge_stop.is_none();
+        if idle {
+            g.stance_timer = (g.stance_timer - dt).max(0.0);
+            // the waits allow standing in both profiles (words 0x0FC5 / 0x0FCA / 0x0FCF); a transition into the wait by
+            // its own word
+            let gate = g.tr.is_none_or(|t| super::anim_gate::allows_mode_exit(&t.action, false, g.high_profile));
+            if gate && (g.wait_high != g.high_profile || (g.stance_change && g.stance_timer <= 0.0)) {
+                g.stance_change = !g.stance_change;
+                if g.stance_change {
+                    g.stance_timer = super::ground_tree::STANCE_TIME[g.wait_high as usize];
+                }
+                g.wait_high = g.high_profile;
+                g.tr = None;
+            }
+        } else {
+            g.stance_change = false;
+            g.wait_high = g.high_profile;
         }
 
         // speed parameter, lean/bank and blend weights (MoveBlend 0xDA0810). The heading snapshot is the

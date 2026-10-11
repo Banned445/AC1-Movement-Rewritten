@@ -24,6 +24,26 @@ pub fn wait_action(high: bool, foot: usize) -> u32 {
     if foot >= 2 { WAITS_PARALLEL[high as usize] } else { WAITS[high as usize][foot] }
 }
 
+/// The stance-change waits, the same table with HG+1524 = 1 (`InitAnimTables` 0xDB6E50), [to low, to high] x [left,
+/// right foot ahead]: 0xF0000049 / 0xF000008C (request ids of 0x00F3935C / 0x00F39360, `xx_hl_wait_hipm_foot{l,r}`,
+/// 1.6 s), 0x00F39416 `xx_l_waithigh_hipm_footl` (1.07 s), 0x00F39417 `xx_lh_wait_hipm_footr` (0.07 s). The
+/// parallel-feet column is −1 (RE/24 GROUND-14).
+pub const STANCE_WAITS: [[u32; 2]; 2] = [[0x00F3_935C, 0x00F3_9360], [0x00F3_9416, 0x00F3_9417]];
+/// How long a stance-change wait plays at least, [after a low wait, after a high one]: HG+772 / HG+768 (`OnEnterInit`
+/// 0xDA7F1F / 0xDA7F0F), armed by `sub_D7E5C0` with the old profile.
+pub const STANCE_TIME: [f32; 2] = [0.1, 0.5];
+
+/// The wait Idle plays (`HumanGround__IdleWait_Enter` 0xD94580: `dword_1A2BFE0[3·(HG+1524 + 2·HG+1500) + foot]`; HG+1492,
+/// the current move mode, is 0 there): the stance-change wait while HG+1524 is set. Its parallel-feet entry, −1, plays
+/// nothing (`Anim__PlayActionById` 0x500740 finds no action, **hypothesis**), so the old profile's wait goes on.
+pub fn idle_wait(high: bool, foot: usize, stance_change: bool) -> u32 {
+    match stance_change {
+        true if foot < 2 => STANCE_WAITS[high as usize][foot],
+        true => WAITS_PARALLEL[!high as usize],
+        false => wait_action(high, foot),
+    }
+}
+
 /// The destinations whose authored item transitions the simulation follows: the locomotion and the four waits.
 pub const GROUND_DESTINATIONS: [u32; 7] = [ACT_GROUND_LOCOMOTION, WAITS[0][0], WAITS[0][1], WAITS[1][0], WAITS[1][1], WAITS_PARALLEL[0], WAITS_PARALLEL[1]];
 
