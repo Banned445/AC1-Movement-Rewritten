@@ -152,6 +152,9 @@ pub struct HumanLadderData {
     pub base: Vec3,
     pub top: Vec3,
     pub n: Vec3,
+    /// +908 & 0x20: a wall top behind the ladder's top (`Human__ProbeWallTopThickness` 0xB18FB0 at entry, from
+    /// `SetupFromEntryType` 0xE22400; RE/24 LADDER-8). `None` until probed on the first update.
+    pub thick_top: Option<bool>,
     /// Root height above the base (HeightInLadder +0x50).
     pub height: f32,
     pub phase: Option<LadderPhase>,
@@ -257,6 +260,7 @@ impl HumanLadderData {
     /// `HumanLadder__StateEntry_Enter` 0xE266D0.
     pub fn enter(&mut self, e: LadderEntry) {
         self.warp = None;
+        self.thick_top = None;
         self.blend_time = 0.1;
         self.base = e.base;
         self.top = e.top;
@@ -715,6 +719,31 @@ pub fn update_ladder(
                 }
                 // the step in progress finishes first
                 let stepping = matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done;
+                // +908 & 0x20 (`Human__ProbeWallTopThickness`: from 1.5 m out at the top back along the ladder, 3 m, a
+                // wall top's near and far edges with a drop below each). PORT: a far edge within 1.5 m behind the top
+                let thick_top = *l.thick_top.get_or_insert_with(|| super::passover::far_edge(l.top, -l.n, &guidance).is_some_and(|(_, t)| t <= 1.5));
+                // ReachedTop / ReachedBottom (`UpdateReachedTopBottom` 0xE1D490) on the continuous height while climbing,
+                // and the exits posted every frame (LadderState 0xEEBF87, events 2 / 3): mid-step too (RE/24 LADDER-9).
+                // The top margin: 1.63 m in low profile or with a wall top (0x20), else 1.95 m (LADDER-8)
+                let margin = if !l.high || thick_top { 1.63 } else { 1.95 };
+                let len = l.len();
+                let h_now = body.feet.y - l.base.y;
+                if stepping && phase == LadderPhase::ClimbUp && h_now + margin >= len && top_exit_free(l.top, l.n, &collision) {
+                    let hi = (l.high && !thick_top) as usize;
+                    let from = body.feet;
+                    let top_feet = l.top - l.n * 0.5;
+                    let end = if hi == 1 { from + Vec3::Y * 1.0 } else { top_feet };
+                    l.play(LadderPhase::ExitTop(0), blend(EXIT_TOP[hi][l.foot], 0, &[]), from, end, true);
+                    continue;
+                }
+                if stepping && phase == LadderPhase::ClimbDown && (h_now <= 0.0 || collision.ground_height(body.feet + Vec3::Y * 0.05, 0.1).is_some()) {
+                    let hi = l.high as usize;
+                    let from = body.feet;
+                    let to = l.root_at(0.0);
+                    let floor = collision.ground_height(to + Vec3::Y * 0.3, 0.6).unwrap_or(to.y);
+                    l.play(LadderPhase::ExitGround, blend(EXIT_GROUND[hi][l.foot], 0, &[]), from, Vec3::new(to.x, floor, to.z), true);
+                    continue;
+                }
                 // the sideways move (event 4, slots 14 / 15): the stick within 20° of the side (|dot(d, facing)| <
                 // 0.342, 0xEEBED9), the Climb ability; posted only while no step runs (PORT: the event queue between
                 // the main state's sub-states is not modelled)
@@ -756,9 +785,9 @@ pub fn update_ladder(
                     // 0xED7180 sends 0.5, `HumanLadder__ChooseClimbAnim` 0xE248F2 halves the rate at ≤ 0.5; RE/24 INPUT-9)
                     let rate = if !l.high && pad.band <= 1 { 0.5 } else { 1.0 };
                     let top_free = top_exit_free(l.top, l.n, &collision);
-                    // ReachedTop (`sub_E1D490`): the root within 1.63 m of the top (1.95 m in high profile when the top is
-                    // blocked)
-                    let reached_top = l.height + if l.high && !top_free { 1.95 } else { 1.63 } >= len;
+                    // ReachedTop at the seam (the same rule as mid-step above, on the margin of LADDER-8)
+                    let margin = if !l.high || thick_top { 1.63 } else { 1.95 };
+                    let reached_top = l.height + margin >= len;
                     if along > 0.5 && reached_top && !top_free {
                         // the top is blocked: the climb stops (`sub_E240B0`)
                         if phase != LadderPhase::Wait || done {
@@ -766,13 +795,14 @@ pub fn update_ladder(
                         }
                     } else if along > 0.5 {
                         let step = if l.high { 1.0 } else { 0.5 };
-                        let rise = if l.high { 1.5 } else { 1.0 };
-                        if l.height + rise >= len - 0.26 {
-                            // exit to the top (13 / 14): ends on the top, 0.5 m in from the edge
+                        if reached_top {
+                            // exit to the top (13 / 14): the high exit only in high profile without a wall top (`PlayExit`
+                            // 0xE254C0); it ends on the top, 0.5 m in from the edge
+                            let hx = (l.high && !thick_top) as usize;
                             let from = body.feet;
                             let top_feet = Vec3::new(l.top.x, l.top.y, l.top.z) - l.n * 0.5;
-                            let end = if l.high { from + Vec3::Y * 1.0 } else { top_feet };
-                            l.play(LadderPhase::ExitTop(0), blend(EXIT_TOP[hi][l.foot], 0, &[]), from, end, true);
+                            let end = if hx == 1 { from + Vec3::Y * 1.0 } else { top_feet };
+                            l.play(LadderPhase::ExitTop(0), blend(EXIT_TOP[hx][l.foot], 0, &[]), from, end, true);
                         } else {
                             let from = l.root_at(l.height);
                             l.height = (l.height + step).min(len);

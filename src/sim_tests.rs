@@ -2531,6 +2531,20 @@ fn walk_to_a_ladder_climb_it_and_step_onto_the_top() {
     assert!((f.y - 5.0).abs() < 0.05 && f.z > 63.6, "on the wall top: {f:?}");
 }
 
+/// RE/24 LADDER-8 / LADDER-9: the ladder up the 1 m wall (a wall top behind its top: +908 & 0x20) ends with the low exit
+/// even in high profile, taken as soon as ReachedTop holds.
+#[test]
+fn a_high_profile_ladder_onto_a_wall_top_takes_the_low_exit() {
+    use crate::player::ladder::{LadderPhase, EXIT_TOP};
+    let mut s = Sim::new(Vec3::new(50.0, 0.0, 62.0), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ladder), "no entry");
+    assert!(s.run_until(10.0, |s| matches!(s.data().ladder.phase, Some(LadderPhase::ExitTop(_)))), "no exit: {:?}", s.data().ladder.phase);
+    assert_eq!(s.data().ladder.thick_top, Some(true), "the wall top behind the ladder");
+    assert!(EXIT_TOP[0].contains(&s.data().ladder.action.unwrap().id), "the low exit");
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood on top");
+}
+
 /// RE/24 LADDER-7: after a ground entry the wait's column is the entry item's feet after (LEFTAHEAD → column l), not
 /// the foot the entry started on.
 #[test]
