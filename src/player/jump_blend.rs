@@ -248,10 +248,10 @@ pub fn compute_kind(dz: f32, dist: f32, target_type: u32, foot_left: bool, scale
     }
     flight_weights(&mut fw, d, h, down, class, deep);
     takeoff_weights(&mut tw, &fw, down, angle, class, deep, kind);
-    if kind == 3 {
-        // the swing takeoff is one 8-clip group (0xB1EC40 kind 3 maps both side groups onto the front one)
-        tw.truncate(8);
-    }
+    // one weight per clip of the takeoff item: 40 for the run / free-step takeoffs, 32 for the rebound (kind 2), 8 for
+    // the swing (kind 3 maps both side groups onto the front one). The animator plays an item only when the counts
+    // match: the rebound's 40 weights left its takeoff unplayed and the walling pose carried on (bug-1791711180)
+    tw.truncate(action_items(takeoff).and_then(|i| i.first().map(|c| c.len())).unwrap_or(if kind == 3 { 8 } else { 40 }));
     // > 3 m drop: move weight into the deep flight variants (0xB1EC40 tail, after the takeoff used them)
     if deep && dz < -3.0 {
         let k = ((-dz - 3.0) / 5.0).clamp(0.0, 1.0);
@@ -600,6 +600,22 @@ pub fn item_disp(clips: &[&str], w: &[f32], phase: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// bug-1791711180: every takeoff blend carries one weight per clip of its item, or the animator cannot play it (the
+    /// wall rebound's 32-clip takeoff had 40 and the walling pose played through its takeoff).
+    #[test]
+    fn takeoff_weights_match_the_takeoff_items_clip_count() {
+        for kind in 0..4u8 {
+            for &(ty, dz, dist) in &[(1u32, 0.0f32, 4.0f32), (0x10000, -2.0, 5.0), (0x80, 1.0, 3.0), (0x1, -6.0, 6.0)] {
+                for &angle in &[-1.2f32, 0.0, 0.7] {
+                    let b = compute_kind(dz, dist, ty, true, 1.0, kind, angle);
+                    let n = action_items(b.takeoff).and_then(|i| i.first().map(|c| c.len())).unwrap();
+                    assert_eq!(b.takeoff_w.len(), n, "kind {kind} type {ty:#x} angle {angle}: takeoff {:#x}", b.takeoff);
+                    assert!(b.takeoff_w.iter().sum::<f32>() > 0.5, "kind {kind} type {ty:#x} angle {angle}: no weight left");
+                }
+            }
+        }
+    }
 
     /// RE/24 AIR-5: 0xB1EC40's takeoff groups. A run jump (angle 0) blends front and right, a side angle to the left
     /// picks front and left, beyond 90° the back groups; the rebound (kind 2) shifts to its front-right / right groups for

@@ -2226,6 +2226,37 @@ fn a_vertical_hand_step_waits_for_the_stick_for_the_second_hand() {
     assert!((l.hand_l.y - 3.2).abs() < 0.05 && (l.hand_r.y - 3.2).abs() < 0.05, "both hands on the upper ledge: {:?} {:?}", l.hand_l, l.hand_r);
 }
 
+/// bug-1791711547: a free hang's vertical hand step lifts the body the whole step with the first hand (the root hangs
+/// from the higher hand target, `ComputeRootFromHandTargets` 0xDD6730: max − 2.4), so the reaching hand gets to its
+/// hold; the halfway root left it 0.4 m short. Wall K's bars (0.6 m apart from 3.6 m) under the bay.
+#[test]
+fn a_free_hang_hand_step_lifts_the_body_with_the_first_hand() {
+    use crate::player::ledge::LedgeHangType;
+    let mut s = hang_at(Vec3::new(-30.1, 3.6, -11.4), Vec3::NEG_Z);
+    assert_eq!(s.data().ledge.hang_type, LedgeHangType::Free, "a free hang under the bay");
+    let y0 = s.body().feet.y;
+    // how far out from its hands' line the root hangs (the hands themselves move onto the bars' edge)
+    let out = |s: &Sim| crate::player::ledge::root_out(s.body().feet, s.data().ledge.hand_l, s.data().ledge.hand_r, Vec3::NEG_Z);
+    let out0 = out(&s);
+    s.pad(Vec3::Z, 1.0, false, false); // up
+    assert!(s.run_until(2.0, |s| s.data().ledge.last_action == "hand step up"), "no hand step: {}", s.data().ledge.last_action);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ledge.pending_vstep.is_some()), "first half never ended");
+    s.run(0.5);
+    let l = &s.data().ledge;
+    let top = l.hand_l.y.max(l.hand_r.y);
+    assert!((top - y0 - 2.4 - 0.6).abs() < 0.05, "one hand on the bar above: {:?} {:?}", l.hand_l, l.hand_r);
+    assert!((s.body().feet.y - (top - 2.4)).abs() < 0.02, "the root hangs from the higher hand: {} vs {}", s.body().feet.y, top - 2.4);
+    // bug-1791714696: the bar above has wall below it, but a hand step keeps the hang's distance from the wall (only a
+    // hang-type switch changes it); it moved 0.5 m out and both hands fell short
+    assert!((out(&s) - out0).abs() < 0.02, "stays as far out from the hands: {} vs {out0}", out(&s));
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ledge.pending_vstep.is_none()), "second hand never moved");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0);
+    assert!((out(&s) - out0).abs() < 0.02, "still as far out after the second hand: {} vs {out0}", out(&s));
+}
+
 // ---------------------------------------------------------------- swing bars (RE/03 §7.10)
 
 /// The swing's held-button rules (RE/24 LEDGE-17 / CENSUS-3, the interpreter 0xEECCF9–0xEED11F): on a bar (a Pole edge),
@@ -2267,6 +2298,13 @@ fn a_free_hang_jump_at_a_wall_lands_feet_on_the_wall() {
     assert!(s.data().ledge.swing.is_none(), "swings in front of a wall");
     let m = s.data().ledge.mv.expect("the wall reception");
     assert_eq!(m.seq[0].map(|a| a.id), Some(crate::player::ledge_moves::RECEPTION_WALL_OTHER));
+    // bug-1791711526: the root goes onto the hang in 0.1666 s (0xE0949A -> 0xE02BA0), then holds while the reception
+    // plays on; it no longer slides there over the whole action
+    assert_eq!(m.root_time, Some(0.1666));
+    s.run(0.2);
+    let held = s.body().feet;
+    assert!((held - m.to).length() < 1e-3, "on the hang after 0.17 s: {:?} vs {:?}", held, m.to);
+    assert!(s.data().ledge.mv.is_some(), "the reception still plays");
     s.pad(Vec3::ZERO, 0.0, false, false);
     assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "reception never ended");
     assert_eq!(s.data().ledge.hang_type, LedgeHangType::Wall, "feet on the wall");
@@ -3395,12 +3433,42 @@ fn a_free_hang_drops_into_a_wall_hang_on_the_ledge_below() {
 ///   with its `baseline.txt` when it has one, else with the `state.txt` it was captured with.
 ///
 /// `AC_REBASELINE=1` writes each fixture's `baseline.txt` from this replay (the capture's own `state.txt` is kept).
+/// One frame of simulation detail for `AC_DUMP` (the context, the body, and the context's own state).
+fn dump_line(i: usize, s: &Sim) -> String {
+    let d = s.data();
+    let b = s.body();
+    let ctx = s.loco().current;
+    let detail = match ctx {
+        ActorContextId::InAir => format!(
+            "air={:?} takeoff={:?} flight={:?} target={:?}/{:#x}",
+            d.air.mode,
+            d.air.takeoff.map(|a| (format!("{:#010x}", a.id), a.item)),
+            d.air.flight.map(|a| (format!("{:#010x}", a.id), a.item)),
+            d.air.target,
+            d.air.target_flags
+        ),
+        ActorContextId::Walling => format!("walling={:?}", d.walling.sub_state),
+        ActorContextId::Ledge => format!(
+            "ledge={:?}/{:?} \"{}\" hands={:?} {:?} mv={:?}",
+            d.ledge.sub_state, d.ledge.hang_type, d.ledge.last_action, d.ledge.hand_l, d.ledge.hand_r, d.ledge.mv.map(|m| (m.kind, m.t))
+        ),
+        ActorContextId::Climb => format!("climb=pose{} \"{}\"", d.climb.pose, d.climb.last_action),
+        _ => String::new(),
+    };
+    format!("{i} {ctx:?} feet={:?} heading={:.3} vel={:?} {detail}", b.feet, b.heading, b.velocity)
+}
+
 #[test]
 #[ignore]
 fn replay_bug_recordings() {
     use crate::recorder::{bugs_dir, gameplay_key, Recording};
     let only = std::env::var("AC_BUG").ok();
     let rebaseline = std::env::var_os("AC_REBASELINE").is_some();
+    // `AC_DUMP=<from>..<to>`: print the simulation's per-frame detail for those frames (debugging a capture)
+    let dump = std::env::var("AC_DUMP").ok().and_then(|d| {
+        let (a, b) = d.split_once("..")?;
+        Some(a.parse::<usize>().ok()?..=b.parse::<usize>().ok()?)
+    });
     let Ok(entries) = std::fs::read_dir(bugs_dir()) else {
         eprintln!("no bugs folder at {}", bugs_dir().display());
         return;
@@ -3443,6 +3511,9 @@ fn replay_bug_recordings() {
                 rig.pitch = f.cam_pitch;
             }
             s.app.update();
+            if dump.as_ref().is_some_and(|r| r.contains(&i)) {
+                eprintln!("{}", dump_line(i, &s));
+            }
             if state.contains_key(&(i as u64)) {
                 let got = gameplay_key(i as u64, s.loco(), s.body());
                 if let Some(w) = want.get(&(i as u64)) {

@@ -139,6 +139,17 @@ pub fn action_time(id: u32) -> f32 {
 /// How long a catch holds the hang: both items of the catch action are locked (word 0x0FE0), and
 /// `HumanLedge__Movement_ChooseAction` 0xDE29E0 starts no move while the playing item is locked. The wall catch
 /// takes its straight clips (PORT: the port's ledges are straight, as the animator plays them).
+/// The catches' root interpolation (`HumanInAir__CheckAirCatch` 0xE0DB5C): the length of the item playing once the catch
+/// starts (`sub_502590`(0), item 0) + 0.2 s, linear (mode 0). The catch action itself plays on to its end.
+pub fn catch_root_time(id: u32) -> f32 {
+    use super::jump_blend::{action_items, ActionBlend};
+    let t = action_items(id).and_then(|items| items.first().map(|c| {
+        let w: Vec<f32> = (0..c.len()).map(|k| if k == 0 { 1.0 } else { 0.0 }).collect();
+        ActionBlend::new(id, 0, &w).duration()
+    })).unwrap_or(0.0);
+    if t > 0.0 { t + 0.2 } else { GRAB_TIME }
+}
+
 pub fn catch_time(wall: bool, long: bool) -> f32 {
     use super::jump_blend::{action_items, ActionBlend};
     let id = if wall { ACT_CATCH_WALL[long as usize] } else { ACT_CATCH_FREE[long as usize] };
@@ -364,6 +375,25 @@ pub fn hang_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType) -> Ve
 /// `xx_h_hangwallfree_wait`, whose hands are 0.46 m in front of the root (fingertips 0.52 m, 2.41 m up), so its
 /// root sits 0.5 m out from the wall and 2.4 m below the hands, as the game's band offsets for the jump into it
 /// (+0.5·n, −2.4 m, 0xB21DA0). `hangfree_wait` has the hands right above the root (FREE_HANG_OUT).
+/// The root for a hand step's new hand targets: its height from the hang (`hang_root_at`), its distance from the wall kept
+/// from the root as it hangs now (`out`, measured from the old hands). The game changes how far out a hang sits only
+/// through a hang-type switch (`TrySwitchHangType` 0xDE1060, its own actions), which the step paths try first; the
+/// wall-under-the-hands test of `hang_root_at` would otherwise move a free hang 0.5 m out once a hand reaches a bar with
+/// wall below it, and both hands fell short of their holds (bug-1791714696).
+pub fn step_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, out: f32, collision: &CollisionWorld) -> Vec3 {
+    let nf = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let mid = (hand_l + hand_r) * 0.5;
+    let y = hang_root_at(hand_l, hand_r, n, hang, collision).y;
+    Vec3::new(mid.x + nf.x * out, y, mid.z + nf.z * out)
+}
+
+/// How far out from its hands' line a root hangs (along the flat wall normal), for `step_root`.
+pub fn root_out(feet: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) -> f32 {
+    let nf = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let mid = (hand_l + hand_r) * 0.5;
+    Vec3::new(feet.x - mid.x, 0.0, feet.z - mid.z).dot(nf)
+}
+
 pub fn hang_root_at(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, collision: &CollisionWorld) -> Vec3 {
     let mid = (hand_l + hand_r) * 0.5;
     if hang == LedgeHangType::Free && wall_below_hands(mid, n, collision) {
@@ -513,12 +543,16 @@ pub fn update_ledge(
             d.hang_set = true;
         }
         if let Some(long) = d.catch.take() {
+            let id = d.catch_action.unwrap_or(if d.hang_type == LedgeHangType::Wall { ACT_CATCH_WALL[long as usize] } else { ACT_CATCH_FREE[long as usize] });
             let t = match d.catch_action {
                 Some(id) => action_time(id),
                 None => catch_time(d.hang_type == LedgeHangType::Wall, long),
             };
             if let Some(m) = d.moves.first_mut() {
+                // the catch lasts its action; the root arrives after item 0 + 0.2 s (0xE0DB5C), not over the whole action
+                // (it slid onto the hold for a second, bug-1791711526)
                 m.duration = t;
+                m.reach = catch_root_time(id).min(t);
             }
         }
         // the limb IK runs only in some sub-states (`sub_DCD910` from `HumanLedge__Update` 0xDE3EC8): elsewhere the
@@ -750,9 +784,10 @@ pub fn update_ledge(
                 Some(h) => h.point + right * (second_p - hand_mid(d)).dot(right),
                 None => first_p + along,
             };
+            let out = root_out(body.feet, d.hand_l, d.hand_r, n);
             if second == 0 { d.hand_l = target } else { d.hand_r = target }
             d.pending_vstep = None;
-            let to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
+            let to = step_root(d.hand_l, d.hand_r, n, d.hang_type, out, &collision);
             d.vstep = Some((second == 1, true));
             d.moves.push(RootInterp::new(body.feet, to, VSTEP_SECOND_TIME));
             d.step_seq += 1;
@@ -814,8 +849,14 @@ pub fn update_ledge(
                     // first hand moves now, the second one next (pending vertical step)
                     let first_left = !d.alt_flag;
                     d.alt_flag = !d.alt_flag;
+                    let out = root_out(body.feet, d.hand_l, d.hand_r, n);
                     if first_left { d.hand_l = tl } else { d.hand_r = tr }
-                    let mid_root = (body.feet + hang_root_at(tl, tr, n, d.hang_type, &collision)) * 0.5;
+                    // the root from the two hand targets as they stand after the first hand (`ComputeRootFromHandTargets`
+                    // 0xDD6730): a free hang hangs from the higher hand (max − 2.4), so a step up lifts the body the
+                    // whole step and the reaching hand gets to its hold; a wall hang's vertical step reads the lower hand
+                    // (min − 1.1) and waits for the second. The halfway root left the reaching arm 0.4 m short of its hold
+                    // (bug-1791711547). The distance from the wall stays (`step_root`, bug-1791714696)
+                    let mid_root = step_root(d.hand_l, d.hand_r, n, d.hang_type, out, &collision);
                     d.vstep = Some((first_left, false));
                     let first_time = match (d.hang_type, sign > 0.0) {
                         (LedgeHangType::Wall, true) => VSTEP_TIME,
