@@ -221,6 +221,8 @@ const HEAD: u32 = 0x07c1_59a2;
 #[derive(Component, Default)]
 pub struct LimbIk {
     pub limbs: [LimbState; 4],
+    /// The hands' rail effectors (`LimbTargets::rails`): weight and goal.
+    pub rails: [(f32, Vec3); 2],
     /// Last hips translation of the post-adjustments (world), for the log.
     pub fit: Vec3,
     /// LimbIK +660: the head-clearance hips drop (m), +664: the chest lean (0..0.5), both moving at 1 /s.
@@ -334,6 +336,8 @@ pub struct GroundFoot {
 
 /// `IKGroundBiped` fade time (`sub_42D5E0(0.2)`, `sub_42F290(…, 0.2)`).
 const GROUND_IK_FADE: f32 = 0.2;
+/// The ladder rail effectors' blend in and out (`dword_1681860` = 0.1, `sub_E20DC0`).
+const LADDER_RAIL_BLEND: f32 = 0.1;
 
 impl GroundFoot {
     fn fade_in(&mut self, from: f32) {
@@ -584,6 +588,20 @@ pub(crate) fn solve_limbs(
                 }
             };
             goals[i] = g.map(|g| (g, ik.limbs[i].weight));
+        }
+        // the ladder's rail effectors (`sub_E20DC0`): set at weight 1 with a 0.1 s blend (`sub_E13C50`), moved while on
+        // (`sub_E12ED0`), released over 0.1 s (`sub_E128A0`). PORT (hypothesis): the blends are linear. The goal is the
+        // hand bone's (the chain's end), so the solver's contact is it plus the animated offset to the effector
+        let rail_offs = effector_offsets(&global);
+        for h in 0..2 {
+            let r = &mut ik.rails[h];
+            match targets.rails[h] {
+                Some(p) => *r = ((r.0 + dt / LADDER_RAIL_BLEND).min(1.0), p),
+                None => r.0 = (r.0 - dt / LADDER_RAIL_BLEND).max(0.0),
+            }
+            if goals[h].is_none() && r.0 > 0.0 {
+                goals[h] = Some((r.1 + rail_offs[h].unwrap_or(Vec3::ZERO), r.0));
+            }
         }
         // feet without a hold: kept above the surface under them
         let mut ground_fix: [Option<Vec3>; 4] = [None; 4];

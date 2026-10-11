@@ -131,6 +131,9 @@ pub struct LimbTargets {
     /// Bumped when the context sets the contacts directly, outside the clips' contact tags (`LimbIK__ReleaseAll` and a
     /// contact at weight 1, e.g. `HumanLedge__RePoseHandsFromBones` 0xDE1970): the IK takes the new holds at once.
     pub contact_set: u32,
+    /// The ladder's rail goals for the left / right hand, set outside the contact tags (effectors 8 / 13, weight 1,
+    /// blended in and out over 0.1 s; `sub_E20DC0`, RE/24 LADDER-20).
+    pub rails: [Option<Vec3>; 2],
 }
 
 /// Linear root interpolation used by all discrete moves (`sub_711130` / `sub_7113F0(human+80)`).
@@ -317,6 +320,10 @@ pub fn release_limbs(mut q: Query<(&Locomotion, &mut LimbTargets), With<Player>>
         }
         if loco.current != ActorContextId::Ledge {
             limbs.suspended = false;
+        }
+        // leaving the ladder's main state releases both rails (`sub_E21160`)
+        if loco.current != ActorContextId::Ladder {
+            limbs.rails = [None; 2];
         }
     }
 }
