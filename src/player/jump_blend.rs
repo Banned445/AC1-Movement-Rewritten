@@ -134,6 +134,26 @@ pub fn bands(target_type: u32) -> (f32, f32, f32, f32, f32) {
     }
 }
 
+/// `sub_B1EAA0` (from 0xB1EC40 0xB1FAB4, stored at InAirData+452 by 0xB20200, RE/24 AIR-6): the arrival reception's
+/// weights. The free-step, pass-over, haystack and free-hang types (1, 0x10000, 0x100, 0x200, 0x400, 0x800, 0x80, 2)
+/// copy the flight weights (`None`); the others (0x40, 0x1000, 0x2000, 0x4000, the swing types) get an [up, down, long]
+/// triplet from the target bands: v = (up − dz) / (up − down), l = dist / (v·far), both clamped to 0..1, weights
+/// [1 − v, (1 − l)·v, l·v]. `dz` = the target below / above the start, `dist` = the flat distance to the pulled-back
+/// target; the swing jump (kind 3) shifts the bands by −0.7 m.
+pub fn arrival_weights(target_type: u32, kind: u8, dz: f32, dist: f32) -> Option<[f32; 3]> {
+    if matches!(target_type, 0x10000 | 1 | 0x100 | 0x200 | 0x400 | 0x800 | 0x80 | 2) {
+        return None;
+    }
+    let (up, down, _, _, far) = bands(target_type);
+    let o = if kind == 3 { -0.7 } else { 0.0 };
+    let (up, down) = (up - o, down - o);
+    let v0 = (up - dz) / (up - down);
+    let l = dist / (v0 * far);
+    let l = if l.is_nan() { 1.0 } else { l.clamp(0.0, 1.0) };
+    let v = v0.clamp(0.0, 1.0);
+    Some([1.0 - v, (1.0 - l) * v, l * v])
+}
+
 pub fn flight_action(target_type: u32, foot_left: bool) -> u32 {
     let f = (!foot_left) as usize;
     match target_type {
@@ -521,6 +541,21 @@ pub fn item_disp(clips: &[&str], w: &[f32], phase: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RE/24 AIR-6: the ladder arrival's triplet: a ladder 2 m below and 4 m away (after the pull-back) blends
+    /// v = (2.5 + 2) / 5.5, l = 4 / (v · 7.5); free-step targets keep the flight's weights.
+    #[test]
+    fn the_ladder_arrival_weighs_up_down_and_long() {
+        let w = arrival_weights(0x1000, 0, -2.0, 4.0).unwrap();
+        let v = 4.5f32 / 5.5;
+        let l = 4.0 / (v * 7.5);
+        for (a, b) in w.iter().zip([1.0 - v, (1.0 - l) * v, l * v]) {
+            assert!((a - b).abs() < 1e-5, "{w:?}");
+        }
+        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        assert!(arrival_weights(1, 0, -2.0, 4.0).is_none());
+        assert!(arrival_weights(0x80, 0, -2.0, 4.0).is_none());
+    }
 
     #[test]
     fn flight_weights_sum_to_one() {

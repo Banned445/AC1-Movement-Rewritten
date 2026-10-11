@@ -257,6 +257,8 @@ pub struct HumanInAirData {
     pub turn: Option<(f32, f32)>,
     /// 0xB145B0's sweep for the down variants (start, target), cast on the first update (`apply_down_variants`).
     down_check: Option<(Vec3, Vec3)>,
+    /// InAirData+452: the arrival reception's [up, down, long] weights (`sub_B1EAA0`), `None` = the flight's.
+    pub arrival_w: Option<[f32; 3]>,
 }
 
 impl HumanInAirData {
@@ -265,6 +267,7 @@ impl HumanInAirData {
         self.turn_pending = false;
         self.turn = None;
         self.down_check = None;
+        self.arrival_w = None;
         self.apex_reached = false;
         self.fall_origin = FallOrigin::Ground;
         self.target_flags = 0;
@@ -382,6 +385,9 @@ impl HumanInAirData {
     /// Human__SetupJumpToTarget 0xB20200 for a ground running jump (kind 0): pick and weight the takeoff and
     /// flight items (0xB1EC40), T₁/T₂ = their Σw·T durations, anim end = their summed displacement.
     fn real_jump(&mut self, from: Vec3, aim: Vec3, target_type: u32, then_fall_to: Option<Vec3>, kind: u8) -> AirMode {
+        // the distance to the pulled-back target, the height of the target itself (0xB1F502 / 0xB1FAA6)
+        let to = Vec3::new(aim.x - from.x, 0.0, aim.z - from.z).length();
+        self.arrival_w = jump_blend::arrival_weights(target_type, kind, aim.y - from.y, (to - 0.5).max(0.0));
         let aim = pull_back(from, aim, target_type);
         let flat = Vec3::new(aim.x - from.x, 0.0, aim.z - from.z);
         let fwd = flat.normalize_or(Vec3::NEG_Z);
@@ -685,9 +691,12 @@ pub fn update_air(
                             LedgeArrival::Surface { free } => {
                                 if super::ledge::reception_feet(mid, normal, &collision) {
                                     let arrival = LedgeArrival::Surface { free: false };
-                                    let mut m = ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, &collision);
+                                    // the fall height (`GetFallHeight` 0xE07FB0) and the jump origin (Data+64) pick min / max
+                                    let fall = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
+                                    let w = ledge_moves::wall_reception_weights(fall, air.start, mid, 0.0);
+                                    let mut m = ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, w, &collision);
                                     if free {
-                                        ledge_moves::use_free_jump_wall_reception(&mut m);
+                                        ledge_moves::use_free_jump_wall_reception(&mut m, w);
                                     }
                                     e.entry_move = Some(m);
                                     hang_on = Some(e);
@@ -699,7 +708,7 @@ pub fn update_air(
                                 }
                             }
                             LedgeArrival::Straight(_) => {
-                                e.entry_move = Some(ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, &collision));
+                                e.entry_move = Some(ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, [0.0; 6], &collision));
                                 hang_on = Some(e);
                             }
                         }
@@ -708,8 +717,11 @@ pub fn update_air(
                     // sets Ladder EntryType 1 (state 2 waits for the action, then the low wait)
                     if let Some(mut e) = air.target.and_then(|t| t.ladder) {
                         e.from = body.feet;
-                        // the arrival's first item blends [up, down, long] by the flight's weights (sub_502E30, +452)
-                        if let Some(f) = air.flight {
+                        // the arrival's first item blends [up, down, long] by InAirData+452 (sub_502E30): `sub_B1EAA0`'s
+                        // triplet for a ladder target (RE/24 AIR-6)
+                        if let Some(w) = air.arrival_w {
+                            e.w = w;
+                        } else if let Some(f) = air.flight {
                             for (k, x) in f.weights().iter().enumerate().take(3) {
                                 e.w[k] = *x;
                             }

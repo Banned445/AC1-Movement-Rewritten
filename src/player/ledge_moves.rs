@@ -1406,10 +1406,9 @@ pub fn hang_jump_in_beam(dz: f32, wall: bool) -> Option<HangJumpIn> {
 
 /// The free-hang jump (0x80) that finds foot holds (0xE07D00 → `HumanInAir__PlayLedgeReception` 0xE02BA0 with
 /// `RECEPTION_WALL_OTHER` instead of `RECEPTION_SURFACE_WALL`): the wall reception's actions swapped for it, same clip
-/// weights (straight, min). PORT: the game times the reception's root interpolation to 0.1666 s; the port keeps the
-/// clips' own durations.
-pub fn use_free_jump_wall_reception(m: &mut LedgeMove) {
-    let w = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+/// weights (`wall_reception_weights`). PORT: the game times the reception's root interpolation to 0.1666 s; the port
+/// keeps the clips' own durations.
+pub fn use_free_jump_wall_reception(m: &mut LedgeMove, w: [f32; 6]) {
     let item = |i: usize| jump_blend::action_items(RECEPTION_WALL_OTHER).filter(|it| it.len() > i).map(|_| ActionBlend::new(RECEPTION_WALL_OTHER, i, &w));
     let seq = [item(0), item(1), None, None];
     let durations = seq_durations(&seq);
@@ -1432,7 +1431,26 @@ pub enum LedgeArrival {
 /// the hang root (or onto the top for knee / waist heights), following the clips' displacement plus a
 /// correction (receptions are FROMANIM; the game interpolates the root over the action, 0xE07D00 →
 /// sub_711130).
-pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, collision: &CollisionWorld) -> LedgeMove {
+/// `sub_E02790` (from 0xE094D1, RE/24 AIR-8): the wall reception's six weights. The max set (slots 3–5) when the fall
+/// height is above 2.5 m or the jump started more than 6 m from the hold (squared distance > 36), else the min set
+/// (0–2); within the set the pose's lean a (its up about the lateral axis, from `sub_B157B0`): a ≥ 0 → [1 − w, w, 0],
+/// w = min(a / 30°, 1); a < 0 → [1 − w, 0, w], w = min(−a / 45°, 1). PORT: the port's wall-hang pose is upright (a = 0).
+pub fn wall_reception_weights(fall_height: f32, origin: Vec3, hold: Vec3, lean: f32) -> [f32; 6] {
+    let k = if fall_height > 2.5 || origin.distance_squared(hold) > 36.0 { 3 } else { 0 };
+    let mut w = [0.0f32; 6];
+    if lean >= 0.0 {
+        let t = (lean / 30f32.to_radians()).min(1.0);
+        w[k] = 1.0 - t;
+        w[k + 1] = t;
+    } else {
+        let t = (-lean / 45f32.to_radians()).min(1.0);
+        w[k] = 1.0 - t;
+        w[k + 2] = t;
+    }
+    w
+}
+
+pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, reception_w: [f32; 6], collision: &CollisionWorld) -> LedgeMove {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mid = (hand_l + hand_r) * 0.5;
     let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
@@ -1459,9 +1477,8 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
             }
         }
         LedgeArrival::Surface { free: false } => {
-            // 0xE02790 weights the 6 clips by the wall angle (straight / 30 out / 45 in) and min / max;
-            // the port's ledges are straight; (hypothesis) min
-            let w = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+            // 0xE02790 weights the 6 clips by min / max and the pose's lean (`wall_reception_weights`)
+            let w = reception_w;
             let to = hang_root(hand_l, hand_r, n, LedgeHangType::Wall);
             ([item(RECEPTION_SURFACE_WALL, 0, &w), item(RECEPTION_SURFACE_WALL, 1, &w), item(RECEPTION_SURFACE_WALL, 2, &w), None], to, false, false)
         }
@@ -1874,6 +1891,20 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RE/24 AIR-8: min for a short jump, max for a fall above 2.5 m or a jump from more than 6 m away; the lean blends
+    /// toward the 30° clip (leaning back) or the 45° clip (leaning in).
+    #[test]
+    fn the_wall_reception_picks_min_or_max_and_the_lean() {
+        let o = Vec3::ZERO;
+        assert_eq!(wall_reception_weights(1.0, o, Vec3::new(0.0, 2.0, -3.0), 0.0), [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(wall_reception_weights(3.0, o, Vec3::new(0.0, 2.0, -3.0), 0.0), [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(wall_reception_weights(0.0, o, Vec3::new(0.0, 0.0, -6.5), 0.0)[3], 1.0);
+        let w = wall_reception_weights(0.0, o, Vec3::new(0.0, 0.0, -1.0), 15f32.to_radians());
+        assert!((w[0] - 0.5).abs() < 1e-5 && (w[1] - 0.5).abs() < 1e-5 && w[2] == 0.0);
+        let w = wall_reception_weights(0.0, o, Vec3::new(0.0, 0.0, -1.0), -90f32.to_radians());
+        assert_eq!([w[0], w[1], w[2]], [0.0, 0.0, 1.0]);
+    }
     use crate::collision::Aabb3;
     use crate::guidance::{GuidanceEdge, GuidanceSubType};
 
