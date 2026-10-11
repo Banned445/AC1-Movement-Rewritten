@@ -769,9 +769,11 @@ pub fn free_step_beam_entry(
                 let a = (ang - 30f32.to_radians()).clamp(0.0, 90f32.to_radians());
                 (a / 60f32.to_radians()).clamp(0.0, 1.0)
             };
+            // `foot` is the reception's exit index (0 left ahead, RE/24 NARROW-7): index 0 / 1 are the
+            // `freestep_entry_footl` clips (paired with the crouch's footr)
             let k = match (mode, foot) {
-                (BeamEntryMode::SideWalkBack, 1) => 0,
-                (BeamEntryMode::SideWalk, 1) => 1,
+                (BeamEntryMode::SideWalkBack, 0) => 0,
+                (BeamEntryMode::SideWalk, 0) => 1,
                 (BeamEntryMode::SideWalkBack, _) => 2,
                 _ => 3,
             };
@@ -784,8 +786,8 @@ pub fn free_step_beam_entry(
             let speed = if jog { beam_bands()[4] } else { beam_bands()[0] };
             (axis.dot(f) >= 0.0, item(BEAM_WALK, foot, &speed_weights(speed)))
         }
-        // mode 3: `freestep_entry_foot*_tr_beam_air_90` by the arriving foot (`sub_F76C70`; RE/24 NARROW-5). PORT: the
-        // foot index follows the port's foot (the exit-feet reading of NARROW-7 is not applied)
+        // mode 3: `freestep_entry_foot*_tr_beam_air_90` by the reception's exit feet (`sub_F76C70`; RE/24 NARROW-5 /
+        // NARROW-7)
         BeamEntryMode::Side => (axis.dot(f) >= 0.0, item(BEAM_SIDE_AIR90[foot.min(1)], 0, &[]).or(reception)),
         // the beam direction nearest the facing
         _ => (axis.dot(f) >= 0.0, None),

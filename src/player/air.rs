@@ -1283,7 +1283,12 @@ pub fn update_air(
             // returns to Ground on wide support (0xE51190, the port's default).
             // Both mounts wait for the reception's end (IHumanNarrowObject vt152 0xE4C670: the playing action done;
             // RE/24 NARROW-4): the port plays the reception in Ground and tries them there (`ground::narrow_pending`).
-            let pending = (on_target && matches!(air.target_flags, 1 | 0x10000)).then(|| ((!air.foot_left) as usize, body.forward(), body.feet));
+            // the beam and the pilotis pick their clips by the reception's exit feet: `(word & 0xC) != 4` → footr, else
+            // footl (PlayWait 0xF704B9, TryPilotisFreeStep 0xE502BA; RE/24 NARROW-7): 0x010DE1FE (after a footl flight)
+            // ends right foot ahead, 0x010DF150 left foot ahead
+            let reception = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
+            let exit_foot = super::anim_gate::item_word(reception, 0).map_or(air.foot_left as usize, |w| ((w & 0xC) != 4) as usize);
+            let pending = (on_target && matches!(air.target_flags, 1 | 0x10000)).then(|| (exit_foot, body.forward(), body.feet));
             switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: Some(landing) });
             data.ground.narrow_pending = pending;
         }
@@ -1360,6 +1365,15 @@ mod fall_tests {
             assert_eq!(air.apex_y,from.y);
         }
     }
+    /// RE/24 NARROW-7: the free-step receptions' exit feet: after a footl flight 0x010DE1FE ends right foot ahead (the
+    /// beam's footr clips), after a footr flight 0x010DF150 left foot ahead (footl).
+    #[test]
+    fn the_free_step_receptions_exit_on_the_other_foot() {
+        let exit = |id: u32| super::super::anim_gate::item_word(id, 0).map(|w| (w >> 2) & 3);
+        assert_eq!(exit(jump_blend::RECEPTION_FREESTEP[0]), Some(2), "right foot ahead");
+        assert_eq!(exit(jump_blend::RECEPTION_FREESTEP[1]), Some(1), "left foot ahead");
+    }
+
     /// RE/24 AIR-31: the takeoff item carries word bit 0x1000 (no apex record while it plays); the flight does not.
     #[test]
     fn the_takeoff_item_holds_the_apex_record() {
