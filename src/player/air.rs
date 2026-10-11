@@ -447,6 +447,16 @@ impl HumanInAirData {
 }
 
 impl HumanInAirData {
+    /// `HumanInAir__IsLeapOfFaithDiveAnim` 0xDFEFC0 (IHumanInAir slot 18): slot 0 plays a faith action, the takeoffs
+    /// 0x23A949B1 / 0x23A949B7, the flight 0x23A949B2 or the fall 0x23A949B5. The port's faith jump and let-go dive hold
+    /// the flight in `flight` (the Fall mode plays the faith fall from it, anim.rs); the let-go's own item before the
+    /// dive is not one.
+    pub fn faith_dive(&self) -> bool {
+        [self.takeoff, self.flight].into_iter().flatten().any(|a| {
+            jump_blend::TAKEOFF_FAITH.contains(&a.id) || a.id == jump_blend::FLIGHT_FAITH || a.id == jump_blend::FALL_FAITH
+        })
+    }
+
     /// Human__SetupJumpToTarget 0xB20200 for a ground running jump (kind 0): pick and weight the takeoff and
     /// flight items (0xB1EC40), T₁/T₂ = their Σw·T durations, anim end = their summed displacement.
     fn real_jump(&mut self, from: Vec3, aim: Vec3, target_type: u32, then_fall_to: Option<Vec3>, kind: u8) -> AirMode {
@@ -1045,7 +1055,8 @@ pub fn update_air(
                 }
                 // InAir sub-state 3, the edge landing (0xE0D684): a flat contact with edges at the feet, under 9 m
                 let fall_h = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
-                if AIR_CATCHES && narrow_on.is_none() && hay_on.is_none() && r.landed && body.velocity.y <= 0.0 && !air.edge_landed
+                // not during the faith dive (`!vt72()` 0xE0D684, RE/24 AIR-32)
+                if AIR_CATCHES && narrow_on.is_none() && hay_on.is_none() && r.landed && body.velocity.y <= 0.0 && !air.edge_landed && !air.faith_dive()
                     // PORT: the proxy's contact list is empty on the landing frame; a landing that is not a steep
                     // contact is the flat contact (GetGroundContactType = 1)
                     && fall_h < 9.0 && contact != super::ground_extras::GroundContact::Steep
@@ -1096,7 +1107,8 @@ pub fn update_air(
         let arriving = matches!(air.mode, AirMode::Arrive { .. });
         if AIR_CATCHES && !arriving && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
             let fall_height = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
-            let manual = grasp && super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
+            // the empty-hand catch needs `!vt72()`: none during the faith dive (0xE0BF71, RE/24 AIR-32)
+            let manual = grasp && !air.faith_dive() && super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
             // Data+505: set by the jump's set-up, cleared when its flight ends without an arrival (0xE0F268)
             let jumping = matches!(air.mode, AirMode::Jump { .. });
             let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, air.target.map(|t| t.type_flags), body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
@@ -1314,6 +1326,21 @@ mod fall_tests {
             assert!(!air.apex_reached && air.flight.is_none() && air.takeoff.is_none());
             assert_eq!(air.apex_y,from.y);
         }
+    }
+    /// RE/24 AIR-32: the faith jump and the let-go's dive are `IsLeapOfFaithDiveAnim`; a plain fall and the let-go's
+    /// own item before the dive are not.
+    #[test]
+    fn the_faith_dive_is_the_faith_actions() {
+        let target = JumpTarget { position: Vec3::new(0.0, -10.0, -4.0), type_flags: jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None };
+        let mut air = HumanInAirData::default();
+        air.enter(InAirEntry::JumpToTarget { from: Vec3::ZERO, target, speed_param: 0.5, foot_left: true });
+        assert!(air.faith_dive());
+        air.enter(InAirEntry::Fall { from: Vec3::ZERO, velocity: Vec3::ZERO, origin: FallOrigin::Ground, speed_param: 0.0 });
+        assert!(!air.faith_dive());
+        air.enter(InAirEntry::LetGoDive { from: Vec3::ZERO, target, origin: FallOrigin::HangWall });
+        assert!(!air.faith_dive(), "the let-go plays first");
+        air.flight = Some(ActionBlend::new(jump_blend::FLIGHT_FAITH, 0, &[1.0]));
+        assert!(air.faith_dive());
     }
     #[test]
     fn fall_height_is_zero_until_the_apex_flag() {
