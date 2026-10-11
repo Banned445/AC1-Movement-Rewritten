@@ -232,9 +232,14 @@ impl CollisionWorld {
     /// As `ray_distance`, with the surface normal at the hit (against the ray): the foot IK's ground ray
     /// (`FootIK__RayDown` 0x432570). None when nothing is hit within `max`.
     pub fn ray_hit(&self, origin: Vec3, direction: Vec3, max: f32, layer: u8) -> Option<(f32, Vec3)> {
+        self.ray_hit_layer(origin, direction, max, layer).map(|(d, n, _)| (d, n))
+    }
+
+    /// As `ray_hit`, with the layer of the body hit.
+    pub fn ray_hit_layer(&self, origin: Vec3, direction: Vec3, max: f32, layer: u8) -> Option<(f32, Vec3, u8)> {
         let direction = direction.normalize_or_zero();
         if direction == Vec3::ZERO { return None; }
-        let mut best: Option<(f32, Vec3)> = None;
+        let mut best: Option<(f32, Vec3, u8)> = None;
         for (i, b) in self.boxes.iter().enumerate() {
             if !self.sees(layer, i) { continue; }
             let (mut lo, mut hi, mut axis_lo) = (0.0f32, best.map_or(max, |h| h.0), usize::MAX);
@@ -253,7 +258,7 @@ impl CollisionWorld {
             if hit && axis_lo != usize::MAX {
                 let mut n = Vec3::ZERO;
                 n[axis_lo] = -direction[axis_lo].signum();
-                best = Some((lo, n));
+                best = Some((lo, n, self.layer_of(i)));
             }
         }
         let reach = best.map_or(max, |h| h.0);
@@ -261,7 +266,7 @@ impl CollisionWorld {
         for t in self.triangles_in_bounds(origin.min(end), origin.max(end)).filter(|t| layer == 0 || crate::layers::collides(layer, t.layer)) {
             if let Some(d) = t.ray(origin, direction, best.map_or(max, |h| h.0)) {
                 if best.is_none_or(|h| d < h.0) {
-                    best = Some((d, if t.normal.dot(direction) > 0.0 { -t.normal } else { t.normal }));
+                    best = Some((d, if t.normal.dot(direction) > 0.0 { -t.normal } else { t.normal }, t.layer));
                 }
             }
         }

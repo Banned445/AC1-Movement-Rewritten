@@ -198,6 +198,8 @@ impl HumanWallingData {
 
 /// The walling probes' collision layer (14, `Human__RayClear` / `Human__RayDistance` in 0xE149E0 / 0xE14590).
 const WALL_RAY_LAYER: u8 = crate::layers::RAYCAST_NO_CHARACTERS;
+/// The fuzzy-zone layers a wall hit must not be on (`sub_E1C1F0`).
+const FUZZY_LAYERS: [u8; 5] = [crate::layers::FUZZY_ZONE, crate::layers::FUZZY_ZONE_ALL_CHARACTER, crate::layers::FUZZY_ZONE_NO_CAMERA, crate::layers::FUZZY_ZONE_ALL_CHARACTER_NO_CAMERA, crate::layers::FUZZY_ZONE_NO_CAMERA_ALLOW_ASSASSINATION];
 
 /// `Human__WallingWidthCheck` 0xE149E0 (RE/24 WALL-1): from the hit + 0.001·n, a ray 0.5 m along n turned −45° and then
 /// +45° about up. Both clear → accept the hit. A ray that hits found something jutting out beside the contact (an inner
@@ -252,7 +254,14 @@ fn slope_normal(hit: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> 
 pub fn wall_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
     let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let o = feet + Vec3::Y * (1.3 * H);
-    let (d, normal) = collision.ray_hit(o, f, 1.5 * H, WALL_RAY_LAYER)?;
+    // the wall ray: filter 47 (`sub_4FB6E0`(47) 0xE18404, RaycastFuzzyZone); a hit on a fuzzy zone (layers 24 / 26 / 25 /
+    // 33 / 41, `sub_E1C1F0`) is no wall (`sub_E14410`). PORT: the owner (CharacterComponent) and material rejections
+    // (type 2, class 3 / 8–9: the haystacks) have no counterpart: no characters, the haystacks are not solid (RE/24
+    // WALL-18)
+    let (d, normal, hit_layer) = collision.ray_hit_layer(o, f, 1.5 * H, crate::layers::RAYCAST_FUZZY_ZONE)?;
+    if FUZZY_LAYERS.contains(&hit_layer) {
+        return None;
+    }
     let n = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
     if n == Vec3::ZERO || n.dot(-f) < 45f32.to_radians().cos() {
         return None;
@@ -643,6 +652,23 @@ mod wall_entry_tests {
         for t in [[a, b, cc], [a, cc, d]] {
             c.triangles.push(Triangle::new(t, crate::layers::STATIC).unwrap());
         }
+    }
+
+    /// RE/24 WALL-18: the wall ray (filter 47) sees fuzzy zones, and a fuzzy zone in front of a wall is no wall
+    /// (`sub_E14410`); a static body there is.
+    #[test]
+    fn a_fuzzy_zone_is_no_wall_to_run_up() {
+        let feet = Vec3::new(0.0, 0.0, 1.0);
+        let wall = |front: u8| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -0.3), max: Vec3::new(2.0, 4.0, 0.3) });
+            c.layers.push(front);
+            c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -2.0), max: Vec3::new(2.0, 4.0, -0.6) });
+            c.layers.push(crate::layers::STATIC);
+            wall_ahead(feet, Vec3::NEG_Z, &c).is_some()
+        };
+        assert!(wall(crate::layers::STATIC));
+        assert!(!wall(crate::layers::FUZZY_ZONE), "the fuzzy zone in front hides the wall behind it");
     }
 
     /// RE/24 WALL-1: the width check never needs the wall to reach 0.5 m to both sides: a 0.3 m post and the last 0.2 m
