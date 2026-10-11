@@ -235,7 +235,7 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
             _ => {}
         }
         // steep edges are removed (0x66C350; 40 degrees as in 0xB12480)
-        if (b - a).normalize().y.abs() > 0.643 {
+        if crate::guidance::steep(b - a) {
             continue;
         }
         let w = wall_of(e.n0, e.n1);
@@ -668,8 +668,7 @@ pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWo
             continue;
         }
         let d = e.p1 - e.p0;
-        let len = d.length();
-        if len < 1e-4 || (d.y / len).abs() > 0.643 {
+        if d.length() < 1e-4 || crate::guidance::steep(d) {
             continue;
         }
         // the sphere zone (radius) around the feet

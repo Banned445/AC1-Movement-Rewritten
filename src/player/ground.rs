@@ -1652,7 +1652,7 @@ pub fn beam_obstacle_target(stand: Vec3, dir: Vec3, guidance: &GuidanceWorld, co
         }
         let d = e.p1 - e.p0;
         let len = d.length();
-        if len < 1e-6 || (d / len).y.abs() > 0.643 {
+        if crate::guidance::steep(d) {
             continue;
         }
         let u = d / len;
@@ -1698,7 +1698,7 @@ pub fn static_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, c
     let keep: Vec<usize> = (0..report.world.edges.len())
         .filter(|&i| {
             let e = &report.world.edges[i];
-            (1u32 << e.subtype as u32) & MASK_CATCH != 0 && (e.p1 - e.p0).normalize_or_zero().y.abs() <= 0.643
+            (1u32 << e.subtype as u32) & MASK_CATCH != 0 && !crate::guidance::steep(e.p1 - e.p0)
         })
         .collect();
     let world = GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() };

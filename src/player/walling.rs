@@ -299,7 +299,7 @@ fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: 
     let keep: Vec<usize> = (0..report.world.edges.len())
         .filter(|&i| {
             let e = &report.world.edges[i];
-            (1u32 << e.subtype as u32) & 0x182 != 0 && (e.p1 - e.p0).normalize_or_zero().y.abs() <= 0.642_787_6
+            (1u32 << e.subtype as u32) & 0x182 != 0 && !crate::guidance::steep(e.p1 - e.p0)
         })
         .collect();
     let world = GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() };
