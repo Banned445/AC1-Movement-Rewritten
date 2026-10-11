@@ -857,8 +857,10 @@ fn corner_climb(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld,
 
 /// `HumanClimb__SideReachToLadder` 0xDEF3A0 (from `HumanClimb__TrySideReach` 0xDF2EC0, dirs 4–9): a ladder edge in a box
 /// 0.35 m into the wall and 1.7 m along the move from the root (half extents 0.8 along the move, 0.5 deep, 0.5 up; any
-/// angle; mask 8), facing the way of the climb within 45°. The ladder's forward is its object Y turned along the facing;
-/// the root goes 0.5 m out from the hit, both feet on the hit, the hands 1.0 m up and 0.15 m either side. Clearance: a
+/// angle; mask 8), facing the way of the climb within 45°. The ladder's forward is its object Y turned along the facing
+/// (0xDEF68F; every Damascus ladder's wall normal is ± its object Y, so the hit's normal is it); the root goes 0.5 m out
+/// from the hit, both feet on the hit, the hands in the object frame {Y × Z, Y, Z}: 1.0 m up the ladder and 0.15 m either
+/// side (Z = the ladder's own up, the edge, which leans; RE/24 CLIMB-26). Clearance: a
 /// capsule (r 0.35, 1.8 m) from the root + 0.15 m out swept to the new root (0xB136E0). Type 3: the climb → climb reach's
 /// start and loop, then the Ladder context with the end `…_tr_ladder_wait_{r,l}`.
 fn ladder_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize) -> Option<ClimbReach> {
@@ -875,13 +877,14 @@ fn ladder_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld,
     if !collision.capsule_cast_free(root - facing * 0.15, 1.8, 0.35, to - root) {
         return None;
     }
-    let r = right_of(lf);
-    let (hl, hr) = (hit.point + Vec3::Y - r * 0.15, hit.point + Vec3::Y + r * 0.15);
+    let e = &g.edges[hit.edge];
+    let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
+    let up = (top - base).normalize_or(Vec3::Y);
+    let r = lf.cross(up).normalize_or(right_of(lf));
+    let (hl, hr) = (hit.point + up - r * 0.15, hit.point + up + r * 0.15);
     let start = feet_base(d) + v * 0.9;
     let long = (Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length() / 1.6).clamp(0.0, 1.0) >= 0.5;
     let ids = CLIMB_REACH_TABLE[3][long as usize][right as usize];
-    let e = &g.edges[hit.edge];
-    let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
     let entry = super::ladder::LadderEntry {
         base,
         top,
@@ -915,6 +918,8 @@ fn side_ladder(g: &GuidanceWorld, root: Vec3, facing: Vec3, dir: usize) -> Optio
     if hit.wall_normal.dot(facing).abs() <= std::f32::consts::FRAC_1_SQRT_2 {
         return None;
     }
+    // the ladder's forward: its object Y turned toward the character (TryLadder 0xDF12F9; the wall normal is ± the object Y
+    // on every Damascus ladder, RE/24 CLIMB-26)
     let lf = if hit.wall_normal.dot(facing) >= 0.0 { hit.wall_normal } else { -hit.wall_normal };
     let to = hit.point - lf * 0.5;
     let e = &g.edges[hit.edge];
