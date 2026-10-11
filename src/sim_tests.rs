@@ -2216,6 +2216,8 @@ fn a_vertical_hand_step_waits_for_the_stick_for_the_second_hand() {
     s.run(1.0);
     let l = &s.data().ledge;
     assert!(l.pending_vstep.is_some() && (l.hand_l.y - l.hand_r.y).abs() > 0.5, "hands split while waiting: {:?} {:?}", l.hand_l, l.hand_r);
+    // RE/24 LEDGE-5: the first vertical step after an entry moves the right hand (+1844 = 0), and clears +133
+    assert!(l.hand_r.y > l.hand_l.y + 0.5 && l.last_hand == 1 && !l.alt_flag, "the right hand first: {:?} {:?}", l.hand_l, l.hand_r);
     // a lateral stick is taken as the pending direction
     s.pad(Vec3::NEG_Z, 1.0, false, false);
     assert!(s.run_until(2.0, |s| s.data().ledge.pending_vstep.is_none()), "second hand never moved");
@@ -2224,6 +2226,9 @@ fn a_vertical_hand_step_waits_for_the_stick_for_the_second_hand() {
     assert!(s.run_until(2.0, |s| s.data().ledge.sub_state == crate::player::ledge::LedgeSubState::Movement), "second half never ended");
     let l = &s.data().ledge;
     assert!((l.hand_l.y - 3.2).abs() < 0.05 && (l.hand_r.y - 3.2).abs() < 0.05, "both hands on the upper ledge: {:?} {:?}", l.hand_l, l.hand_r);
+    // each onto the row point nearest the hands' midpoint line at its turn (x_ref 0): they end nearly together (the second
+    // search runs from the half-step's midpoint), the left one moved last
+    assert!((l.hand_l - l.hand_r).length() < 0.15 && l.last_hand == 0, "hands nearly together: {:?} {:?}", l.hand_l, l.hand_r);
 }
 
 /// bug-1791711547: a free hang's vertical hand step lifts the body the whole step with the first hand (the root hangs
