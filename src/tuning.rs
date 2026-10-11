@@ -82,9 +82,6 @@ pub fn player_turn_rate(angle: f32, legs: bool, k: f32) -> f32 {
     }
 }
 
-/// Ground loss → InAir fall types by fall height 1 / 2 / 8 m and horizontal speed 2.5 m/s. 0xD8C380
-pub const FALL_TYPE_HEIGHTS: [f32; 3] = [1.0, 2.0, 8.0];
-
 // ---------------------------------------------------------------- in air (RE/04)
 /// Hard-coded gravity, m/s². 0xDFFC90
 pub const GRAVITY: f32 = 9.8;
@@ -197,21 +194,9 @@ pub const CATCH_BOX_V: f32 = 0.3;
 pub const CATCH_MAX_ANGLE: f32 = 70.0 * std::f32::consts::PI / 180.0;
 pub const CATCH_REACH_LEDGE: f32 = 1.4;
 pub const CATCH_REACH_WALL: f32 = 1.95;
-/// Ledge-type jump targets: max up 3.0 m, distance bands 2.5 / 6 / 8 m. 0xB1EC40
-pub const LEDGE_MAX_UP: f32 = 3.0;
 /// Highest hand target of the standing straight jump: its top band blends the 250 / 300 cm clips over
 /// 2.5–3.0 m (0xB21DA0). (hypothesis) the target finder's own limit is not traced.
 pub const STRAIGHT_JUMP_MAX: f32 = 3.0;
-#[allow(dead_code)]
-pub const LEDGE_FAR: f32 = 8.0;
-/// PORT: how far a running jump reaches for a ledge (hang target). The game only jumps along the world's precomputed
-/// jump links (`MetaLinkTypeID_JumpLink`, `WorldArea::JumpLinkRange` Normal / Extended), so its reach is level data;
-/// 0xB1EC40's 8 m is only the animation band. The port uses the 5.5 m float of the table at 0x1A2EA50 (hypothesis:
-/// the extended link range) and the 2.5 m near band for ledges the root has to rise more than 1 m to.
-/// LIVE: read JumpLinkRange_Normal / _Extended from a loaded WorldArea.
-pub const LEDGE_JUMP_FAR: f32 = 5.5;
-pub const LEDGE_JUMP_FAR_UP: f32 = 2.5;
-pub const LEDGE_JUMP_UP_RISE: f32 = 1.0;
 
 // ---------------------------------------------------------------- character proxy (RE/01 §7, `collision`)
 /// Capsule radius: shape 0.35 + keep distance 0.05 (`HumanGround__OnEnterInit` 0xDA7D20 → 0x52ED40(0.4), 0x52E9C0;

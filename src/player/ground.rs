@@ -1422,7 +1422,8 @@ pub fn update_ground(
         let before = body.feet;
         let mut r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, delta, true, dt) };
         // PORT: the run stop's root motion (≈0.5 m of slide) does not carry the character off a roof edge; it stops at
-        // the last supported position. The game's guard for this is not traced (LIVE: run stop next to an edge).
+        // the last supported position. The game has no guard: its root motion carries the body until the fall-off rule
+        // or event 68's floor branch fires (RE/24 GROUND-1 / 2 / 31). LIVE (RE/20 #12): the visual check only.
         if stopping && collision.ground_support(r.position).is_none() {
             r.position = before;
         }

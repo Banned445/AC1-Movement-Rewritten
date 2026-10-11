@@ -1527,7 +1527,7 @@ pub fn update_climb(
         // Both hands go onto the one hold (LimbIK targets 0 and 1, 0xDF0EF0 / 0xDF0F32; the Ledge context spreads them
         // later). The wall hang first (`Human__FindWallHangFeetSupports` 0xB16130, `WallHangBodyBoxFree` 0xB2DC80,
         // `LateralPathFree` 1.8 / 1.1), else the free hang (`FreeHangBodyBoxesFree`, `LateralPathFree` 1.8 / 2.4)
-        // (0xDF0DFF) (RE/24 CLIMB-8). PORT / LIVE: climbing down at the bottom picks the row-3 hold 1.2 m up, whose wall
+        // (0xDF0DFF) (RE/24 CLIMB-8). PORT / LIVE (RE/20 #10): climbing down at the bottom picks the row-3 hold 1.2 m up, whose wall
         // hang's root is 0.1 m above the floor; the game's body box (root … root + 1.3 m) would not refuse it, yet the
         // climber is seen to step off there (RE/20 item 10). The port keeps its stand-in: the hang's feet 0.3 m clear of
         // the floor.

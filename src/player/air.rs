@@ -954,7 +954,7 @@ pub fn update_air(
                         // as the native contact-list adapter.
                         // PORT: a fall entered faster than the cap (a free jump at sprint speed, 6.3 m/s) decays onto it
                         // at the same 4 m/s² instead of being clamped in one frame (a visible lurch). The game reaches
-                        // this path from its own entries only (LIVE: horizontal speed of a sprint off an edge).
+                        // this path from its own entries only (LIVE, RE/20 #14: horizontal speed of a sprint off an edge).
                         let len = h.length();
                         let new_len = (len - DRIFT_DECEL * dt).max(0.0);
                         let new_len = if len > DRIFT_MAX { new_len.max(DRIFT_MAX) } else { new_len.min(DRIFT_MAX) };
@@ -1021,7 +1021,7 @@ pub fn update_air(
                     // InAir knows the haystack (+336, `sub_E03A90`: within 3.5 m in height), i.e. from a jump at a
                     // haystack target that ends in a free fall (0xB1B8C0) or a let-go record (0xDD7810). PORT: the
                     // greybox haystacks are not solid; their box stands in for the contact (the top crossed, or a side
-                    // entered by the capsule's 0.45 m), and every fall takes it (LIVE: a plain fall onto a haystack).
+                    // entered by the capsule's 0.45 m), and every fall takes it (LIVE, RE/20 #1: a plain fall onto a haystack).
                     let next = body.feet;
                     let previous = next - body.velocity * dt;
                     let top = guidance.haystacks.iter().find(|stack| {

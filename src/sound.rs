@@ -103,7 +103,7 @@ fn start_loading(mut s: ResMut<Sounds>) {
 /// ContactTable groups the contact sounds by the same ids).
 /// PORT: the other switches (1, 3, 4, 5, 10..16) are not identified; their default event plays. The game reads every
 /// switch from the sound object type's callback (`dword_1A16DD8 + 188 * type + 16`), registered at runtime.
-/// LIVE: read that table in the running game to find the callback and the values it returns.
+/// LIVE (RE/20 #28): read that table in the running game to find the callback and the values it returns.
 fn switch_value(var: u32, material: Option<u16>) -> Option<u32> {
     match var {
         0 => material.map(u32::from),
