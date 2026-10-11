@@ -4669,6 +4669,14 @@ fn landing_on_a_roofs_lip_steps_off_the_edge() {
     assert_eq!(s.data().air.flight.map(|a| a.id), Some(STEP_OFF[0]), "step_off_front");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood again");
     assert!((s.body().feet.y - 3.0).abs() < 0.05, "back on the roof: {:?}", s.body().feet);
+    // a 0.2 m drop onto the lip: the edge landing waits behind the catches' gate (a fall over 0.3 m or 0.4 s in the air,
+    // `CheckAirCatch` LABEL_56, RE/24 AIR-16), so the body lands on the roof
+    let low = Vec3::new(41.0, 3.2, 9.1);
+    let mut s = Sim::new(low, 0.0);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from: low, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.body().feet);
+    assert!(!s.data().air.edge_landed && (s.body().feet.y - 3.0).abs() < 0.05, "landed on the roof: {:?}", s.body().feet);
 }
 
 

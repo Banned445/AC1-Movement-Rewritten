@@ -758,6 +758,8 @@ pub fn update_air(
         let mut climb_on: Option<super::climb::ClimbEntry> = None;
         let mut catch_hang: Option<(u32, bool, Option<bool>)> = None;
         let mut step_off: Option<(u32, Vec3)> = None;
+        // a flat landing contact where the edge landing may be searched (after the catches)
+        let mut edge_contact = false;
         let foot = (!air.foot_left) as usize;
         match air.mode {
             AirMode::Jump { from, clip_end, aim, duration, t, then_fall_to, t_takeoff, fwd } => {
@@ -1065,17 +1067,15 @@ pub fn update_air(
                         })
                         .map(|(stack, kind)| super::hay::HayStackEntry { stack: *stack, kind, from: body.feet, speed: body.velocity.length() });
                 }
-                // InAir sub-state 3, the edge landing (0xE0D684): a flat contact with edges at the feet, under 9 m
+                // InAir sub-state 3, the edge landing (0xE0D684): a flat contact with edges at the feet, under 9 m; it is
+                // searched last, after the catches (below, RE/24 AIR-16)
                 let fall_h = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
                 // not during the faith dive (`!vt72()` 0xE0D684, RE/24 AIR-32)
-                if AIR_CATCHES && narrow_on.is_none() && hay_on.is_none() && r.landed && body.velocity.y <= 0.0 && !air.edge_landed && !air.faith_dive()
+                edge_contact = AIR_CATCHES && narrow_on.is_none() && hay_on.is_none() && r.landed && body.velocity.y <= 0.0 && !air.edge_landed && !air.faith_dive()
                     // PORT: the proxy's contact list is empty on the landing frame; a landing that is not a steep
                     // contact is the flat contact (GetGroundContactType = 1)
-                    && fall_h < 9.0 && contact != super::ground_extras::GroundContact::Steep
-                {
-                    step_off = super::air_catches::edge_landing(body.feet, body.forward(), &guidance, &collision);
-                }
-                if narrow_on.is_some() || hay_on.is_some() || step_off.is_some() {
+                    && fall_h < 9.0 && contact != super::ground_extras::GroundContact::Steep;
+                if narrow_on.is_some() || hay_on.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 && !gated {
                     landed_at = Some(body.feet.y);
                 } else if let Some(v) = (dt > 0.0).then(|| (body.feet - before) / dt).and_then(|moved| {
@@ -1146,6 +1146,9 @@ pub fn update_air(
             }
             if ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
                 let ahead = super::air_catches::target_ahead(body.feet, air.target, &collision);
+                // PORT: the beam too only with no jump target ahead (`FindBeamCatch` 0xE0D41D is outside the game's
+                // `IsJumpTargetAhead` block; with a beam target the catch would take the jump before its arrival, which
+                // needs the gate timer InAir+104 decoded, RE/24 AIR-16 note)
                 if !ahead { narrow_on = narrow_catch(body.feet, body.forward(), foot, &guidance, &collision); }
                 // the knee catch (type 0, 0xE0D58B): an edge at the feet with a drop in front of it and room on top
                 if narrow_on.is_none() && !ahead {
@@ -1158,6 +1161,12 @@ pub fn update_air(
                         hang_on = Some(e);
                     }
                 }
+            }
+            // the edge landing last (`CheckAirCatch` LABEL_140), behind the same 0.3 m / 0.4 s gate (LABEL_56) as the
+            // narrow catches (RE/24 AIR-16)
+            let gate = fall_height > 0.3 || air.time_in_air >= 0.4;
+            if edge_contact && gate && ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && narrow_on.is_none() {
+                step_off = super::air_catches::edge_landing(body.feet, body.forward(), &guidance, &collision);
             }
         }
 
