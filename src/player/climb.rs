@@ -971,6 +971,21 @@ fn start_reach(d: &mut HumanClimbData, feet: Vec3, r: ClimbReach, label: &'stati
     d.last_action = label;
 }
 
+impl HumanClimbData {
+    /// The game advances a root interpolation once in the frame it starts (`RootInterp__Advance`(…, g_FrameDt) right
+    /// after `sub_711130`: StartMove 0xDFA7A2, TryDropToLedgeBelow 0xDF2097, StartReachLoop 0xDEF087; RE/24 CLIMB-17). A
+    /// move that ends in this step finishes in the next frame's Move state.
+    fn advance_new_move(&mut self, body: &mut Body, dt: f32) {
+        let Some(m) = self.moving.as_mut() else { return };
+        let (p, s) = m.advance(dt);
+        body.feet = p;
+        body.tilt = self.tilt_from.slerp(self.frame.tilt(), s);
+        if let Some((from, to)) = self.turn {
+            body.heading = from + wrap_angle(to - from) * s;
+        }
+    }
+}
+
 fn wrap_angle(a: f32) -> f32 {
     let t = std::f32::consts::TAU;
     (a + std::f32::consts::PI).rem_euclid(t) - std::f32::consts::PI
@@ -1313,6 +1328,7 @@ pub fn update_climb(
                         d.move_action = Some(r.ids[1]);
                         d.move_seq += 1;
                         d.moving = Some(RootInterp::new(body.feet, d.frame.root, move_time(Some(r.ids[1]))));
+                        d.advance_new_move(&mut body, dt);
                         continue;
                     }
                     let r = d.reach.take().unwrap();
@@ -1447,6 +1463,7 @@ pub fn update_climb(
             d.tilt_from = d.frame.tilt();
             d.set_frame();
             d.moving = Some(RootInterp::new(body.feet, d.frame.root, move_time(d.move_action)));
+            d.advance_new_move(&mut body, dt);
             d.grid_move = true;
             d.last_action = match dir {
                 0 | 1 => "climb up",
@@ -1465,6 +1482,7 @@ pub fn update_climb(
             if from_grid.is_none() {
                 if let Some(c) = corner_climb(&guidance, &collision, d, body.feet, facing, dir, true) {
                     start_corner_climb(d, body.heading, body.feet, c, "corner climb in");
+                    d.advance_new_move(&mut body, dt);
                     continue;
                 }
             }
@@ -1500,6 +1518,7 @@ pub fn update_climb(
                 d.ground_follow = Some(CORNER_TO_GROUND_B[i][j]);
                 // the root is interpolated onto the corner hold, facing into its wall, over the action (sub_711130)
                 d.moving = Some(RootInterp::new(body.feet, h.pos, move_time(Some(id))));
+                d.advance_new_move(&mut body, dt);
                 d.to_ground = true;
                 d.last_action = "corner to ground";
                 continue;
@@ -1596,6 +1615,7 @@ pub fn update_climb(
         if dir >= 4 {
             if let Some(c) = corner_climb(&guidance, &collision, d, body.feet, facing, dir, false) {
                 start_corner_climb(d, body.heading, body.feet, c, "corner climb out");
+                d.advance_new_move(&mut body, dt);
                 continue;
             }
             // TrySideLedgeGrab 0xDF22C0 far (flag 4611): a hang round the outside corner
@@ -1644,6 +1664,7 @@ pub fn update_climb(
                 d.move_seq += 1;
                 d.moving = Some(RootInterp::new(body.feet, target, move_time(Some(id))));
                 d.turn = (face.dot(facing) < 0.999).then(|| (body.heading, heading_of(face)));
+                d.advance_new_move(&mut body, dt);
                 d.to_ground = true;
                 d.to_narrow = (ty == 2).then_some(face);
                 d.look = None;
@@ -1656,6 +1677,7 @@ pub fn update_climb(
                 d.move_action = Some(id);
                 d.move_seq += 1;
                 d.moving = Some(RootInterp::new(body.feet, Vec3::new(body.feet.x, h, body.feet.z), move_time(Some(id))));
+                d.advance_new_move(&mut body, dt);
                 d.to_ground = true;
                 d.look = None;
                 d.last_action = "climb down to the ground";

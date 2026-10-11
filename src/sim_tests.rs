@@ -348,6 +348,27 @@ fn climbing_the_tower() -> Sim {
     s
 }
 
+/// RE/24 CLIMB-17: a grid move's root interpolation advances once in the frame it starts (StartMove 0xDFA7A2).
+#[test]
+fn a_climb_move_moves_the_root_in_the_frame_it_starts() {
+    let mut s = climbing_the_tower();
+    s.pad(Vec3::Z, 1.0, true, false);
+    for _ in 0..300 {
+        let before = s.body().feet;
+        let seq = s.data().climb.move_seq;
+        s.run(1.0 / 60.0 + 1e-4);
+        let c = &s.data().climb;
+        // the frame a grid move with a root change starts
+        if c.move_seq != seq && c.grid_move && c.moving.is_some_and(|m| m.from.distance(m.to) > 0.01) {
+            let m = c.moving.unwrap();
+            assert!(m.t > 0.0, "advanced in the starting frame: {m:?}");
+            assert!((s.body().feet - before).length() > 1e-4, "the root moved in the starting frame: {before} -> {}", s.body().feet);
+            return;
+        }
+    }
+    panic!("no grid move: {:?}", s.data().climb.last_action);
+}
+
 /// RE/24 CLIMB-7: the jump off the climb plays the rebound (0x011FFC1A) in place first, then jumps facing away.
 #[test]
 fn the_jump_off_the_climb_plays_the_rebound_first() {
