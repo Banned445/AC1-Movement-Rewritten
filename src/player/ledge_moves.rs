@@ -14,7 +14,7 @@
 use bevy::prelude::*;
 
 use super::jump_blend::{self, ActionBlend};
-use super::ledge::{hang_root_at, hang_root, hang_type_at, LedgeHangType};
+use super::ledge::{hang_root_at, hang_root, LedgeHangType};
 use super::right_of;
 use crate::collision::CollisionWorld;
 use crate::guidance::{GuidanceWorld, MASK_CLIMB_HOLDS};
@@ -1514,8 +1514,11 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
             let w = [1.0 - j.b, j.b];
             match j.end {
                 HangEnd::Hang(h) => {
-                    let to = hang_root_at(hand_l, hand_r, n, if h == LedgeHangType::Free || hang_type_at(mid, n, collision) == LedgeHangType::Free { LedgeHangType::Free } else { LedgeHangType::Wall }, collision);
-                    ([item(j.reception, 0, &w), item(j.reception, 1, &w), None, None], to, h == LedgeHangType::Free, false)
+                    // the hang receptions start no interpolation (0xE08C9A) and their clips are in place (0x01271632,
+                    // 0x0121B072, 0x012723A5: no displacement): the root stays where the flight ended, the target root
+                    // (hand + out·n − down, `Human__SetupJumpToHandTarget` 0xB21DA0); the Ledge's Movement state never
+                    // moves it (`StateMovement_Update` 0xDE38F0)
+                    ([item(j.reception, 0, &w), item(j.reception, 1, &w), None, None], from, h == LedgeHangType::Free, false)
                 }
                 HangEnd::StandFromKnee => ([item(j.reception, 0, &w), item(j.reception, 1, &w), item(ACT_KNEE_TO_FREESTEP[0], 0, &[1.0]), None], top, false, true),
                 // PORT: the reception's root (FROMANIM) is corrected onto the pull-up's stand point; where the game's
@@ -1549,9 +1552,8 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
     // The straight jump's receptions (0xE08E43–0xE08F31): the stand arrivals (0x01290ED0, 0x01272A6A, 0x0127163A; LedgeData
     // +76 = 4) interpolate the root in anim mode over the playing item (`sub_501C90`(0)) onto the point 0.1 m along the
     // arrival vector (the waist one 0.5 m out, 1 m down) and hold it (0xE08DD7); the hang receptions (0x0121B072,
-    // 0x01271632; +76 = 1) start no interpolation (0xE08C9A), the clips' own motion moves the root. PORT: both keep the
-    // clips over the whole sequence plus a linear correction onto `to` (the hangs' root from the hands needs the
-    // simulation's bone positions, Step 3).
+    // 0x01271632, 0x012723A5; +76 = 1) start no interpolation (0xE08C9A) and are in place, so the root holds (`to` =
+    // `from` above). PORT: the stand arrivals keep the clips over the whole sequence plus a linear correction onto `to`.
     let root_time = match arr {
         LedgeArrival::Surface { .. } if found => Some(durations[0].max(1e-3)),
         _ => None,

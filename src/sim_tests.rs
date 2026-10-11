@@ -1111,7 +1111,11 @@ fn two_metre_wall_jumps_into_a_wall_hang() {
     let j = s.data().air.target.and_then(|t| t.straight).expect("straight jump band");
     assert_eq!(j.flight, 0x0127_1631, "2.2 m with a wall below: jumpstraight_to_hangwall");
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ledge));
+    // the hang reception starts no interpolation and its clips are in place (0xE08C9A): the root holds where the flight
+    // ended
+    let arrived = s.body().feet;
     assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
+    assert!(s.body().feet.distance(arrived) < 1e-4, "the root held: {arrived:?} → {:?}", s.body().feet);
     assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Wall);
     assert!((s.body().feet.y - 1.1).abs() < 0.05, "wall-hang root 1.1 m below the hands: {:?}", s.body().feet);
 }
