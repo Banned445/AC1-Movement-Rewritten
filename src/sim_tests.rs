@@ -1721,6 +1721,30 @@ fn on_free_beam(x: f32) -> Sim {
 }
 
 #[test]
+fn a_side_arrival_with_the_stick_along_the_beam_walks_off_with_the_side_clip() {
+    use crate::player::narrow::{free_step_beam_entry, BeamEntryMode, BeamState, BEAM_SIDE_ENTRY};
+    // RE/24 NARROW-6 modes 4 / 5 (EnterByMode 0xF7AAA0): arriving across the free beam (x 84.5..90.5, z 70, 4 m) with the
+    // stick along it: Main / Walk at once with the side clip, the facing along the beam at once, no warp
+    let point = Vec3::new(87.0, 4.0, 70.0);
+    let mut s = Sim::new(point, 0.0);
+    let g = s.app.world().resource::<crate::guidance::GuidanceWorld>().clone();
+    let c = s.app.world().resource::<crate::collision::CollisionWorld>().clone();
+    let e = free_step_beam_entry(point, Vec3::Z, Some(Vec3::X), 0, None, false, &g, &c).expect("on the beam");
+    assert!(matches!(e.mode, BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack), "a side-walk mode: {:?}", e.mode);
+    force(&mut s, crate::player::TransitionSetup::ToBeam(e));
+    s.pad(Vec3::X, 1.0, false, false);
+    s.run(2.0 / 60.0);
+    let n = &s.data().narrow;
+    assert_eq!(n.state, BeamState::Walk, "walks at once");
+    assert!(n.action.is_some_and(|a| BEAM_SIDE_ENTRY.contains(&a.id)), "the side clip leads: {:?}", n.action.map(|a| a.id));
+    assert!(s.body().forward().dot(Vec3::X) > 0.99, "facing along the beam at once: {:?}", s.body().forward());
+    let x0 = s.body().feet.x;
+    s.run(0.5);
+    let f = s.body().feet;
+    assert!(f.x > x0 + 0.2 && (f.z - 70.0).abs() < 0.05 && (f.y - 4.0).abs() < 0.01, "moves along the beam: {f:?}");
+}
+
+#[test]
 fn stick_to_the_side_on_a_beam_turns_to_the_90_wait_and_back() {
     use crate::player::narrow::{BeamState, BEAM_WAIT_90};
     // Idle +91 → TurnTo90 (0xF77640) → Wait90 +100 facing across; then the stick along the beam turns back

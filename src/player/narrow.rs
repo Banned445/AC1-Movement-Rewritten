@@ -319,6 +319,9 @@ pub struct PilotisEntry {
 #[derive(Debug, Default)]
 pub struct HumanNarrowObjectData {
     pub kind: NarrowKind,
+    /// The entry turned the facing at once (modes 4 / 5, `sub_52BD40` 0xF7AFFE / 0xF7B185): the next frame sets the
+    /// heading instead of steering toward it.
+    pub turn_at_once: bool,
     pub p0: Vec3,
     pub p1: Vec3,
     /// Distance along the beam from p0.
@@ -415,6 +418,7 @@ impl HumanNarrowObjectData {
         self.entry_from = e.from;
         self.lateral = Vec3::ZERO;
         self.entry_mode = e.mode;
+        self.turn_at_once = false;
         self.foot = e.foot;
         self.hand_target = None;
         // mode 3 faces across the beam (+1040 = 2): the entry vector turned 90° about up, flipped toward the current
@@ -436,6 +440,18 @@ impl HumanNarrowObjectData {
                 }
                 None => self.play(BeamState::Wait, item(BEAM_WAIT[e.foot], 0, &[])),
             },
+            // modes 4 / 5 (EnterByMode 0xF7AAA0, 0xF7AFFE / 0xF7B185): the facing turns at once by ∓(w·60° + 30°) onto the
+            // walk, and Main / Walk starts with the side clip as the walk action's item (+1728 = 3), no reception warp:
+            // the clips carry no root yaw and move the root forward 1.2–1.8 m, which the walk projects onto the beam
+            // (RE/24 NARROW-6). PORT: the facing is the beam direction (the game's turned facing comes within the 30° /
+            // 90° blend of it); the speed is band 0, band 4 with the jog clips
+            BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack if e.action.is_some() => {
+                let jog = e.action.is_some_and(|a| a.weights().iter().skip(2).any(|w| *w > 0.0));
+                self.speed = if jog { beam_bands()[4] } else { beam_bands()[0] };
+                self.warp_heading = (super::heading_of(self.facing()), super::heading_of(self.facing()));
+                self.turn_at_once = true;
+                self.play(BeamState::Walk, e.action);
+            }
             BeamEntryMode::Side | BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack => {
                 self.warp = e.action.map(|a| a.duration()).unwrap_or(0.3);
                 self.play(BeamState::Reception, e.action);
@@ -1737,6 +1753,9 @@ pub fn update_narrow(
             body.feet = data.narrow.stand();
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;
+        }
+        if std::mem::take(&mut data.narrow.turn_at_once) {
+            body.heading = super::heading_of(data.narrow.facing());
         }
         let n = &data.narrow;
         body.feet = n.stand();
