@@ -1413,6 +1413,9 @@ fn walk_across_a_beam_onto_the_far_platform() {
     let mut s = Sim::new(Vec3::new(71.0, 4.0, 70.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, false, false);
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted: {:?} {:?}", s.loco().current, s.body().feet);
+    // the ground mount (mode 1) plays the beam walk from its first frame (RE/24 NARROW-2)
+    assert_eq!(s.data().narrow.state, BeamState::Entry);
+    assert_eq!(s.data().narrow.action.map(|a| a.id), Some(BEAM_WALK), "mode 1 plays the beam walk");
     assert!(s.run_until(2.0, |s| s.data().narrow.action.is_some_and(|a| a.id == BEAM_WALK)), "never walked: {:?}", s.data().narrow.state);
     // on the line, at the beam's height
     let f = s.body().feet;

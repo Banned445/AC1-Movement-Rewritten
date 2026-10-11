@@ -392,7 +392,7 @@ impl HumanNarrowObjectData {
         self.warp_elapsed = 0.0;
         self.warp_heading = (super::heading_of(e.facing), super::heading_of(self.facing()));
         match e.mode {
-            BeamEntryMode::Ground => self.play(BeamState::Entry, if BEAM_COMPLETION { e.action.or_else(|| self.ground_step(false)) } else { item(BEAM_WAIT[0], 0, &[]) }),
+            BeamEntryMode::Ground => self.play(BeamState::Entry, if BEAM_COMPLETION { e.action.or_else(|| item(BEAM_WALK, e.foot, &[1.0, 0.0])) } else { item(BEAM_WAIT[0], 0, &[]) }),
             // 0xF7AAA0 mode 2: standing → the wait by foot (table 0x1A353C0), moving → Main (the walk)
             BeamEntryMode::Straight => self.play(BeamState::Wait, item(BEAM_WAIT[e.foot], 0, &[])),
             BeamEntryMode::Side | BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack => {
@@ -1322,8 +1322,10 @@ pub fn update_narrow(
                         if forward { n.speed = if jog { beam_bands()[4] } else { beam_bands()[0] }; n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed))); }
                         else { n.wait_state(); }
                     } else if done {
+                        // the next beam walk item, the same blend
+                        let w = n.action.map(|a| { let w = a.weights(); [w.first().copied().unwrap_or(1.0), w.get(1).copied().unwrap_or(0.0)] }).unwrap_or([1.0, 0.0]);
                         n.foot ^= 1;
-                        n.play(BeamState::Entry, n.ground_step(jog));
+                        n.play(BeamState::Entry, item(BEAM_WALK, n.foot, &w));
                     }
                     body.heading = super::heading_of(facing);
                     continue;

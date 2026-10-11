@@ -1136,10 +1136,14 @@ pub fn update_ground(
         // decision layer's event 72 sender is not traced).
         if moving && !busy {
             if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, body.forward(), &guidance, &collision) {
-                // Mode 1 retains the incoming locomotion action (0xF7AAA0).
+                // Mode 1 plays the beam walk (`sub_F7B3B0` 0xF7B619: 0x28A3A8E4), keeping the playing locomotion item's
+                // index (the foot), jog weights [0, 1] when the Ground runs (NarrowObjectData+228 = Ground+1500), else
+                // walk [1, 0] (RE/24 NARROW-2; RE/05 §2.12's "retains the incoming locomotion" was wrong). PORT: the
+                // 1.0 s crossfade from the locomotion is the animator's
                 if super::narrow::BEAM_COMPLETION {
                     entry.foot = g.blend.foot;
-                    entry.action = Some(super::jump_blend::ActionBlend::new(super::move_blend::ACT_GROUND_LOCOMOTION, g.blend.foot, &g.blend.weights));
+                    let w = if g.speed_param > 0.25 { [0.0, 1.0] } else { [1.0, 0.0] };
+                    entry.action = Some(super::jump_blend::ActionBlend::new(super::narrow::BEAM_WALK, g.blend.foot, &w));
                 }
                 let phase = g.blend.phase;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(entry));
