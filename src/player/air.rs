@@ -163,15 +163,10 @@ pub enum AirMode {
         from: Vec3,
         clip_end: Vec3,
         aim: Vec3,
-        /// PLACEHOLDER arc height (ledge jumps only, see `real`).
-        apex: f32,
         duration: f32,
         t: f32,
         /// After the clip, continue as a free fall toward this point (over-drop or free jump).
         then_fall_to: Option<Vec3>,
-        /// The game's takeoff + flight items (`HumanInAirData::takeoff/flight`) drive the root. False for
-        /// jumps at a ledge (their flight comes from the ledge code, not 0xB20200): PLACEHOLDER arc.
-        real: bool,
         /// Takeoff item duration T₁ (HumanInAirData+0x1E4).
         t_takeoff: f32,
         /// Character forward at takeoff (the jump origin matrix +0x10).
@@ -398,7 +393,7 @@ impl HumanInAirData {
                 let fwd = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z);
                 let clip_end = from + to_world(action.disp(1.0), fwd);
                 let d = action.duration().max(0.1);
-                self.mode = AirMode::Jump { from, clip_end, aim: clip_end, apex: 0.0, duration: d, t: 0.0, then_fall_to: Some(clip_end), real: true, t_takeoff: 0.0, fwd };
+                self.mode = AirMode::Jump { from, clip_end, aim: clip_end, duration: d, t: 0.0, then_fall_to: Some(clip_end), t_takeoff: 0.0, fwd };
             }
             InAirEntry::FreeJump { from, dir, ahead, speed_param, foot_left } => {
                 self.start_y = from.y;
@@ -496,7 +491,7 @@ impl HumanInAirData {
             info!("target jump: type {target_type:#x} kind {kind} dz {:.2} dist {:.2}: takeoff {takeoff_id:#010x} {t1:.2}s, flight {flight_id:#010x} {t2:.2}s, clip end {:.2} vs aim {:.2}",
                 aim.y - from.y, flat.length(), (clip_end - from).length(), (aim - from).length());
         }
-        AirMode::Jump { from, clip_end, aim, apex: 0.0, duration: (t1 + t2).max(1e-3), t: 0.0, then_fall_to, real: true, t_takeoff: t1, fwd }
+        AirMode::Jump { from, clip_end, aim, duration: (t1 + t2).max(1e-3), t: 0.0, then_fall_to, t_takeoff: t1, fwd }
     }
 }
 
@@ -513,7 +508,7 @@ impl HumanInAirData {
         if std::env::var_os("AC_ANIM_LOG").is_some() {
             info!("straight jump: flight {:#010x} b {:.2} {d:.2}s, clip end {:.2} vs aim {:.2}", j.flight, j.b, (clip_end - from).length(), (aim - from).length());
         }
-        AirMode::Jump { from, clip_end, aim, apex: 0.0, duration: d.max(0.2), t: 0.0, then_fall_to: None, real: true, t_takeoff: 0.0, fwd }
+        AirMode::Jump { from, clip_end, aim, duration: d.max(0.2), t: 0.0, then_fall_to: None, t_takeoff: 0.0, fwd }
     }
 }
 
@@ -745,19 +740,15 @@ pub fn update_air(
         let mut step_off: Option<(u32, Vec3)> = None;
         let foot = (!air.foot_left) as usize;
         match air.mode {
-            AirMode::Jump { from, clip_end, aim, apex, duration, t, then_fall_to, real, t_takeoff, fwd } => {
+            AirMode::Jump { from, clip_end, aim, duration, t, then_fall_to, t_takeoff, fwd } => {
                 let t1 = (t + dt).min(duration);
                 let s = t1 / duration;
-                // the takeoff + flight items' blended root motion (0xE0DEF0); `real` is always set now
-                let clip_pos = if real {
-                    from + to_world(jump_disp(air, t1, t_takeoff, duration), fwd)
-                } else {
-                    from.lerp(clip_end, s) + Vec3::Y * (4.0 * apex * s * (1.0 - s))
-                };
+                // the takeoff + flight items' blended root motion (0xE0DEF0)
+                let clip_pos = from + to_world(jump_disp(air, t1, t_takeoff, duration), fwd);
                 // linear correction toward the real target (0xE0DEF0)
                 let path = |tt: f32| -> Vec3 {
                     let ss = (tt / duration).clamp(0.0, 1.0);
-                    let cp = if real { from + to_world(jump_disp(air, tt.clamp(0.0, duration), t_takeoff, duration), fwd) } else { from.lerp(clip_end, ss) + Vec3::Y * (4.0 * apex * ss * (1.0 - ss)) };
+                    let cp = from + to_world(jump_disp(air, tt.clamp(0.0, duration), t_takeoff, duration), fwd);
                     cp + (aim - clip_end) * ss
                 };
                 let next = clip_pos + (aim - clip_end) * s;
@@ -892,17 +883,17 @@ pub fn update_air(
                             air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
                         }
                         // a free-step arrival (case 1 / 0x10000) interpolates the root onto the target first
-                        None if real && air.target.is_some() && matches!(air.target_flags, 1 | 0x10000) => {
+                        None if air.target.is_some() && matches!(air.target_flags, 1 | 0x10000) => {
                             air.mode = AirMode::Arrive { from: body.feet, to: aim + body.forward() * 0.5, t: 0.0 };
                         }
                         None => {
                             landed_at = Some(body.feet.y);
-                            on_target = real;
+                            on_target = true;
                         }
                         _ => landed_at = Some(body.feet.y),
                     }
                 } else {
-                    air.mode = AirMode::Jump { from, clip_end, aim, apex, duration, t: t1, then_fall_to, real, t_takeoff, fwd };
+                    air.mode = AirMode::Jump { from, clip_end, aim, duration, t: t1, then_fall_to, t_takeoff, fwd };
                 }
             }
             AirMode::Fall { steer_to } => {

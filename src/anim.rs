@@ -94,7 +94,8 @@ pub fn sample_vec(keys: &[(f32, Vec3)], t: f32) -> Vec3 {
     keys[a].1.lerp(keys[b].1, s)
 }
 
-/// Contact bits at time `t` (keys are held: ByteLowest).
+/// Contact bits at time `t` (keys are held: ByteLowest, `sub_491040` returns the key with time[k] ≤ frame < time[k+1],
+/// frame = (int)(t·60 + 0.5), so the game switches half a tick early; RE/24 ANIM-14).
 pub fn contact_bits(keys: &[(f32, u8)], t: f32) -> u8 {
     if keys.is_empty() {
         return 0;
@@ -444,6 +445,7 @@ struct Request {
     looping: bool,
     fit: Option<f32>,
     token: u64,
+    /// PORT: fallback only (named clips, `named_blend`); graph actions take the authored blends (RE/24 ANIM-18).
     fade: f32,
     hold: bool,
     /// The blend into the requested action when the simulation knows it (a ground transition action: the authored
@@ -787,7 +789,7 @@ fn choose_clip(
             )),
             ActorContextId::InAir => match data.air.mode {
                 // the game's takeoff then flight item (0xB20200), at the sim's time
-                AirMode::Jump { real: true, t, t_takeoff, duration, .. } if data.air.flight.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
+                AirMode::Jump { t, t_takeoff, duration, .. } if data.air.flight.is_some_and(|b| sim_item(&lib, &b).is_some()) => {
                     let (b, ph) = if t < t_takeoff && data.air.takeoff.is_some() {
                         (data.air.takeoff.unwrap(), t / t_takeoff.max(1e-4))
                     } else {
@@ -907,7 +909,7 @@ fn choose_clip(
                 p.sim_phase = Some(if data.hay.phase == crate::player::hay::HayPhase::Waiting { ph.fract() } else { ph.min(1.0) });
                 sim_request(&mut p, &lib, &b, 5_000_000 + data.hay.seq as u64, 0.2)
             }
-            // corner turn / ledge jump / hop up (`ledge_moves`): its current action at the sim's phase
+            // corner turn / ledge jump / swing back (`ledge_moves`): its current action at the sim's phase
             // ladder (0xE27D30): the table's action for the state, at the sim's phase
             ActorContextId::Ladder if data.ladder.current().is_some_and(|(b, _)| sim_item(&lib, &b).is_some()) => {
                 let (b, ph) = data.ladder.current().unwrap();
@@ -1253,7 +1255,7 @@ pub fn apply_clip(
         p.action_flags = if item.action == 0 { 8 } else { lib.graph.actions.get(&item.action).map_or(8, |a| a.flags) };
         let duration = lib.item_duration(&item).max(1e-3);
         let root_speed = item.layers.first().and_then(|(n, _)| lib.clips.get(n)).map(|c| c.root_speed).unwrap_or(0.0);
-        // playback rate: locomotion cycles match their root motion to the actual speed (no foot
+        // playback rate (PORT: the named fallback cycles only, RE/24 ANIM-18): locomotion cycles match their root motion to the actual speed (no foot
         // sliding); one-shots play at their own rate or are stretched to `fit`
         // (only the looping part: a transition action queued in front plays at its own rate)
         let rate = if p.looping && p.item >= p.loop_from && root_speed > 0.1 {

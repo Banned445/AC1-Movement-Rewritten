@@ -1698,9 +1698,9 @@ pub fn static_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, c
     let cuts = vec![(0.5f32, 0.5f32); world.edges.len()];
     let q = std::f32::consts::FRAC_PI_4;
     let sets = [
-        ChainParams { dir: -fwd, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: 1 },
-        ChainParams { dir: right, right: fwd, ranges: [(0.0, 0.0), (0.0, q)], parallel: q, mask: 1 },
-        ChainParams { dir: -right, right: fwd, ranges: [(-q, 0.0), (0.0, 0.0)], parallel: q, mask: 1 },
+        ChainParams { dir: -fwd, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: u32::MAX },
+        ChainParams { dir: right, right: fwd, ranges: [(0.0, 0.0), (0.0, q)], parallel: q, mask: u32::MAX },
+        ChainParams { dir: -right, right: fwd, ranges: [(-q, 0.0), (0.0, 0.0)], parallel: q, mask: u32::MAX },
     ];
     let mut candidates = Vec::new();
     for p in &sets {

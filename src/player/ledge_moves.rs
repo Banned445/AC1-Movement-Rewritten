@@ -3,7 +3,8 @@
 //!   0xDD0600): inner corner (the wall ahead) and outer corner (around the end of the wall);
 //! - **side jumps between ledges** (`HumanLedge__TrySideJumpToLedge` 0xDDD490 → `StartLedgeJump` 0xDDCE40,
 //!   table 0x1A2C780 / 0x1A2C980);
-//! - **hop up to a ledge above** (`HumanLedge__TryWallJumpUp` 0xDD62A0 → the blended `StartLedgeJump`).
+//! - **the swing back** to an overhang's front edge behind the climber (`HumanLedge__TryWallJumpUp` 0xDD62A0 → the
+//!   blended `StartLedgeJump`; the game's name says "jump up", but its boxes search out from the wall, RE/24 §5).
 //!
 //! The move plays its action(s) while the root travels from the current hang to the target hang. Ledge
 //! jumps follow the clips' blended displacement plus a linear correction to the target (hypothesis: the
@@ -93,10 +94,10 @@ pub const CORNER_ACTIONS: [[u32; 4]; 2] = [
     [0x1E67_E881, 0x1E67_E882, 0x1E67_E883, 0x1E67_E884],
     [0x1E67_E885, 0x1E67_E886, 0x1E67_E887, 0x1E67_E888],
 ];
-/// Blended hop up (0xDDCE40 with flag 1861&2): `hangwall_to_swingback_up_{min,max}_{200,300}_a`, then
+/// Blended swing back (0xDDCE40 with flag 1861&2): `hangwall_to_swingback_up_{min,max}_{200,300}_a`, then
 /// (0xDDAB00) `…_b` with the same weights while the root moves to the new ledge; it ends in a free hang.
-pub const HOP_UP: u32 = 0x4CD6_8F4F;
-pub const HOP_UP_B: u32 = 0x4CD6_8F50;
+pub const SWING_BACK: u32 = 0x4CD6_8F4F;
+pub const SWING_BACK_B: u32 = 0x4CD6_8F50;
 
 pub const DUMPED_ACTIONS: &[u32] = &[
     RECEPTION_WALL_OTHER, REBOUND[0], REBOUND[1],
@@ -110,7 +111,7 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     0x4C460372, 0x4C460373, 0x4C460374, 0x4C460375, 0x4C460376, 0x4C460377,
     0x4C46037A, 0x4C46037B, 0x4C46037C, 0x4C46037D, 0x4C46037E, 0x4C46037F,
     0x1E67_E881, 0x1E67_E882, 0x1E67_E883, 0x1E67_E884, 0x1E67_E885, 0x1E67_E886, 0x1E67_E887, 0x1E67_E888,
-    HOP_UP, HOP_UP_B,
+    SWING_BACK, SWING_BACK_B,
     // hang-type switches (0xDE1060)
     TO_WALL[0], TO_WALL[1], TO_FREE[0], TO_FREE[1], TO_FREE[2], TO_FREE[3],
     // straight jump to a hand target (0xB21DA0) and its arrivals (0xE07D00)
@@ -175,7 +176,8 @@ pub fn single_item(id: u32, item: usize) -> Option<ActionBlend> {
 pub enum MoveKind {
     Corner { inner: bool },
     SideJump { long: bool },
-    HopUp,
+    /// The swing back to an edge behind (`TryWallJumpUp` 0xDD62A0).
+    SwingBack,
     /// Table jump type 0 up onto climb holds (0xDD5E10); the Climb context takes over for the end item.
     JumpUpToClimb,
     /// Free hang → holds below and ahead (0xDDF390): onto climb holds, or into a wall hang.
@@ -815,8 +817,8 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
     (mv, Some(tail))
 }
 
-/// `HumanLedge__TryWallJumpUp` 0xDD62A0 (wall hang, no pending step, stick up): the hop up and back to the front edge
-/// of an overhang, then the blended hop (0xDDCE40): weights over `swingback_up_{min,max}_{200,300}` by
+/// `HumanLedge__TryWallJumpUp` 0xDD62A0 (wall hang, no pending step, stick up): the swing back to the front edge of an
+/// overhang behind, then the blended swing (0xDDCE40): weights over `swingback_up_{min,max}_{200,300}` by
 /// v = clamp(targetZ − rootZ − 2.0) and h = clamp(horizontal distance of the hands).
 ///
 /// The search (`sub_1171050`, mask 50, 45°, pieces shortened 0.1 m): a box out from the wall, whose edges must face
@@ -827,7 +829,7 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
 ///
 /// Both hands must find an edge; the free-hang pose from them (sub_B15AD0) and its body boxes (sub_B2DD50) follow.
 /// PORT: the body boxes are not tested.
-pub fn try_hop_up(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHangType, guidance: &GuidanceWorld, _collision: &CollisionWorld) -> Option<LedgeMove> {
+pub fn try_swing_back(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHangType, guidance: &GuidanceWorld, _collision: &CollisionWorld) -> Option<LedgeMove> {
     if hang != LedgeHangType::Wall {
         return None;
     }
@@ -848,12 +850,12 @@ pub fn try_hop_up(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHa
         let v = (point.y - root.y - 2.0).clamp(0.0, 1.0);
         let h = Vec2::new(point.x - mid.x, point.z - mid.z).length().clamp(0.0, 1.0);
         let w = [(1.0 - h) * (1.0 - v), (1.0 - h) * v, h * (1.0 - v), h * v];
-        let a = jump_blend::action_items(HOP_UP).map(|_| ActionBlend::new(HOP_UP, 0, &w));
-        let b = jump_blend::action_items(HOP_UP_B).map(|_| ActionBlend::new(HOP_UP_B, 0, &w));
+        let a = jump_blend::action_items(SWING_BACK).map(|_| ActionBlend::new(SWING_BACK, 0, &w));
+        let b = jump_blend::action_items(SWING_BACK_B).map(|_| ActionBlend::new(SWING_BACK_B, 0, &w));
         let (da, db) = (a.map(|a| a.duration()).unwrap_or(0.0), b.map(|b| b.duration()).unwrap_or(0.0));
         let (da, db) = if da + db > 0.0 { (da, db) } else { (0.0, JUMP_UP_TIME) };
         return Some(LedgeMove {
-            kind: MoveKind::HopUp,
+            kind: MoveKind::SwingBack,
             seq: [a, b, None, None],
             durations: [da, db, 0.0, 0.0],
             t: 0.0,

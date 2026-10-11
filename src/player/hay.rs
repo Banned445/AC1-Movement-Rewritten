@@ -215,7 +215,7 @@ pub fn top_of(s: &Aabb3) -> Vec3 {
 
 /// Ground event 122's guard (0xD8F0B0): a controller contact with a haystack (entity descriptor 8; 9 = hiding place),
 /// the facing within 100 degrees of the contact (dot > -0.1736) and the stick within 45 degrees into it (dot >
-/// 0.7071). PORT: haystacks are not solid in the port, so the contact is the capsule (radius 0.4) touching the
+/// 0.7071). PORT: haystacks are not solid in the port, so the contact is the capsule (within 0.45 m) touching the
 /// haystack's side at foot height.
 pub fn ground_entry(feet: Vec3, facing: Vec3, stick: Vec3, stacks: &[Aabb3]) -> Option<HayStackEntry> {
     for s in stacks {

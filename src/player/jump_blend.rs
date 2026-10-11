@@ -117,13 +117,13 @@ pub const FAITH_DOWN: f32 = 30.0;
 pub const FAITH_NEAR: f32 = 7.5;
 
 /// 0xB1EC40 tail for the faith jump: l = clamp(dist / 7.5), d = clamp(−dz / 27) (−dz over (−3) − (−30));
-/// weights [(1−l)(1−d), l(1−d), d(1−l), d·l]. The takeoff item gets the same weights (**hypothesis**: the
-/// function returns before writing the takeoff array; its item default is [0, 0, 1, 0]).
+/// weights [(1−l)(1−d), l(1−d), d(1−l), d·l]. The takeoff item gets the same weights (0xB1F828 `sub_500F00` copies the
+/// flight weights); the takeoff is 0x23A949B7 for foot 1, else 0x23A949B1 (0xB1ED4A / 0xB1ED9B; RE/24 AIR-18).
 pub fn faith(dz: f32, dist: f32, foot_left: bool) -> JumpBlend {
     let l = (dist / FAITH_NEAR).clamp(0.0, 1.0);
     let d = (-dz / (FAITH_DOWN - FAITH_MIN_DROP)).clamp(0.0, 1.0);
     let w = vec![(1.0 - l) * (1.0 - d), l * (1.0 - d), d * (1.0 - l), d * l];
-    JumpBlend { takeoff: TAKEOFF_FAITH[(!foot_left) as usize], flight: FLIGHT_FAITH, takeoff_w: w.clone(), flight_w: w, h: d, d: l, class: 2, down: true }
+    JumpBlend { takeoff: TAKEOFF_FAITH[foot_left as usize], flight: FLIGHT_FAITH, takeoff_w: w.clone(), flight_w: w, h: d, d: l, class: 2, down: true }
 }
 
 /// Target types (HumanInAirData+0x290) used by the port.
