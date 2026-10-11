@@ -1242,9 +1242,10 @@ pub fn update_narrow(
 
         // ------------------------------------------------ the pull-down to a hang (event 9, the empty hand)
         // Accepted in Idle, Walk and the 90° wait (CanHandle 0xF7A4F0 / 0xF7F150 / 0xF7A650) and in the pilotis wait
-        // (0xE50BF0).
+        // (0xE50BF0). The empty hand held (`Pad__IsPressed`(3) 0xEEB358 / 0xEE91E7: the button's state byte, not a press;
+        // RE/24 NARROW-23).
         let can_pull_down = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::PilotisWait);
-        if can_pull_down && pad.hand_just_pressed() {
+        if can_pull_down && pad.hand_held {
             let camera_dir = Vec3::new(camera.yaw.sin(), 0.0, camera.yaw.cos());
             // the pull-down report (`sub_DDCB20`, RE/24 GUIDE-2)
             if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), camera_dir, &guidance.ledge_report(n.stand(), 2.5, true), &collision) {
@@ -1256,14 +1257,15 @@ pub fn update_narrow(
         }
 
         // ------------------------------------------------ the wall run (event 15, Walk only)
-        // 0xEE9AF0: high profile, Legs pressed, the stick > 0.35 within 60° of the facing; tested before the jumps.
+        // 0xEE9AF0: high profile, Legs held (`Pad__IsPressed`(0) 0xEEA765, RE/24 NARROW-23), the stick > 0.35 within 60°
+        // of the facing; tested before the jumps.
         // Guard `CanWallRun` 0xF77DC0 = the wall test 0xE18390 (1.5·h ahead), fill 0xB263B0 → Walling.
         // 0xB263B0 warps beam entries in 0.13 s; Ground retains its action-length warp.
         // the impulsion accepts it too (`sub_F7A740` case 15 → `sub_F79FE0`, the same wall test; RE/24 NARROW-9)
         if n.kind == NarrowKind::Beam
             && matches!(n.state, BeamState::Start | BeamState::Walk | BeamState::ImpulseIn | BeamState::ImpulseWait)
             && pad.high_profile
-            && pad.jump_buffered()
+            && pad.legs_held
             && stick
             && a < 60f32.to_radians()
         {

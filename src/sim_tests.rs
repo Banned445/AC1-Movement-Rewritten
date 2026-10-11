@@ -95,6 +95,10 @@ impl Sim {
     fn press_hand(&mut self) {
         self.app.world_mut().resource_mut::<PadInput>().hand_pressed_ago = -1.0 / 60.0;
     }
+    /// Hold (or release) the empty-hand button: its state byte, which `Pad__IsPressed` 0x93F170 reads.
+    fn hold_hand(&mut self, held: bool) {
+        self.app.world_mut().resource_mut::<PadInput>().hand_held = held;
+    }
     /// Run until `pred` holds or `max_s` elapses; returns whether it held.
     fn run_until(&mut self, max_s: f32, pred: impl Fn(&Sim) -> bool) -> bool {
         for _ in 0..(max_s * 60.0) as usize {
@@ -1717,8 +1721,10 @@ fn empty_hand_on_a_beam_pulls_down_to_a_hang_under_it() {
     // event 9 (0xE504D0 → 0xE4EF70): the side edge toward the stick, 4 m above the ground → Ledge pull-down type 3
     let mut s = on_free_beam(87.0);
     s.pad(Vec3::NEG_Z, 1.0, false, false);
-    s.press_hand();
+    // the empty hand held (RE/24 NARROW-23)
+    s.hold_hand(true);
     assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?} {:?}", s.loco().current, s.data().narrow.state);
+    s.hold_hand(false);
     let m = s.data().ledge.mv.expect("orientation stage");
     assert_eq!(m.kind, MoveKind::PullDown { stage: 1 });
     assert_eq!(m.seq[0].map(|a| a.id), Some(PULLDOWN_BEAM_ORIENT[0]), "beam_pilotis_to_pulldown_soft_front_orientation");
@@ -1745,8 +1751,10 @@ fn empty_hand_on_a_pilotis_pulls_down_to_a_hang() {
     s.app.world_mut().resource_mut::<CameraRig>().yaw = std::f32::consts::FRAC_PI_2;
     force(&mut s, crate::player::TransitionSetup::ToPilotis(PilotisEntry { top, from: top, facing: Vec3::X, kind: PilotisEntryType::FromInAir, foot: 0 }));
     assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::PilotisWait));
-    s.press_hand();
+    // the empty hand held (RE/24 NARROW-23)
+    s.hold_hand(true);
     assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
+    s.hold_hand(false);
     let m = s.data().ledge.mv.expect("orientation stage");
     assert_eq!(m.kind, MoveKind::PullDown { stage: 1 });
     assert_eq!(m.seq[0].map(|a| a.id), Some(PULLDOWN_BEAM_ORIENT[0]));
@@ -1765,8 +1773,8 @@ fn high_profile_legs_on_a_beam_runs_up_the_wall_ahead() {
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted: {:?}", s.loco().current);
     assert!(s.run_until(8.0, |s| s.body().feet.x > 107.5), "never walked near the wall: {:?} {:?}", s.data().narrow.state, s.body().feet);
     assert!(matches!(s.data().narrow.state, BeamState::Walk | BeamState::Start), "still walking: {:?}", s.data().narrow.state);
-    s.pad(Vec3::X, 1.0, true, false);
-    s.press_legs();
+    // Legs held (`Pad__IsPressed`(0) 0xEEA765, RE/24 NARROW-23)
+    s.pad(Vec3::X, 1.0, true, true);
     assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?} {:?}", s.loco().current, s.data().narrow.state);
 }
 
