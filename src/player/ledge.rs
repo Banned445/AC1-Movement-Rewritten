@@ -163,7 +163,8 @@ pub fn action_time(id: u32) -> f32 {
             let w: Vec<f32> = (0..n).map(|k| if k == 0 { 1.0 } else { 0.0 }).collect();
             ActionBlend::new(id, i, &w).duration()
         })
-        .sum();
+        .sum::<f32>()
+        + super::jump_blend::item_blend_adjust(id);
     if t > 0.0 { t } else { GRAB_TIME }
 }
 

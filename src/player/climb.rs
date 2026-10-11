@@ -220,7 +220,8 @@ pub const CLIMB_IMPULSE: u32 = 0x1E38_0CEB;
 /// `xx_h_climbing_1m_impultion_to_swingback_{min,max}_{200,300}cm` (0xDF9650), then the free hang.
 pub const CLIMB_JUMP_SWINGBACK: u32 = 0x1EB2_1811;
 
-/// A grid move's length: its action's blended duration (StartMove 0xDFA0C0 → `sub_507650`), 0.5 s with no action.
+/// A grid move's length: its action's blended duration (StartMove 0xDFA0C0 → `sub_507650`: the items' lengths and the
+/// item blends at the seams, `jump_blend::item_blend_adjust`), 0.5 s with no action.
 pub fn move_time(action: Option<u32>) -> f32 {
     action
         .and_then(|id| {
@@ -231,7 +232,8 @@ pub fn move_time(action: Option<u32>) -> f32 {
                     w[0] = 1.0;
                     super::jump_blend::ActionBlend::new(id, i, &w).duration()
                 })
-                .sum();
+                .sum::<f32>()
+                + super::jump_blend::item_blend_adjust(id);
             (d > 0.0).then_some(d)
         })
         .unwrap_or(MOVE_TIME_NO_ACTION)

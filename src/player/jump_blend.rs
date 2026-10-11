@@ -7,7 +7,7 @@
 //! root follows their blended DISPLACEMENT plus a linear correction to the target over both items
 //! (0xE0DEF0). An item's duration is Σ wᵢ·Tᵢ (0x507650 → 0x5B9480).
 
-use super::jump_clips::{ClipRoot, ACTIONS, CLIPS};
+use super::jump_clips::{ClipRoot, ACTIONS, CLIPS, ITEM_BLENDS};
 
 // ---------------------------------------------------------------- action ids (verified in the graph dump)
 /// Ground running takeoff (jump kind 0), [footl, footr] (0xB1EC40: 172788750 + (foot != 1)).
@@ -567,6 +567,23 @@ pub fn clip(name: &str) -> Option<&'static ClipRoot> {
     CLIPS.iter().find(|c| c.name == name)
 }
 
+/// What the item blends add to an action's summed item lengths (`AnimItem__GetBlendedDuration` 0x507650): at every
+/// seam the outgoing item's own ActionBlend (item +36): types 1 / 2 take its overlap (+4) off, types 3 / 4 / 5 add its
+/// time (capped by the overlap with flag 8) less the overlap, NONE nothing. Zero for every dumped movement action (only
+/// the debug Ghost items blend, RE/13 §7.3; RE/24 CLIMB-16).
+pub fn item_blend_adjust(id: u32) -> f32 {
+    let Some(&(_, blends)) = ITEM_BLENDS.iter().find(|b| b.0 == id) else { return 0.0 };
+    blends
+        .iter()
+        .take(blends.len().saturating_sub(1))
+        .map(|&(kind, clamp, time, overlap)| match kind {
+            1 | 2 => -overlap,
+            3..=5 => (if clamp && time > overlap { overlap } else { time }) - overlap,
+            _ => 0.0,
+        })
+        .sum()
+}
+
 /// Item duration Σ wᵢ·Tᵢ (0x5B9480).
 pub fn item_duration(clips: &[&str], w: &[f32]) -> f32 {
     clips.iter().zip(w).filter_map(|(n, w)| clip(n).map(|c| c.duration * w)).sum()
@@ -600,6 +617,15 @@ pub fn item_disp(clips: &[&str], w: &[f32], phase: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RE/24 CLIMB-16: 0x507650's seam blends add nothing to any dumped movement action (all its item blends are NONE).
+    #[test]
+    fn the_item_blends_change_no_movement_action_length() {
+        for &(id, _) in ITEM_BLENDS.iter() {
+            assert_eq!(item_blend_adjust(id), 0.0, "{id:#010x}");
+        }
+        assert_eq!(ITEM_BLENDS.len(), ACTIONS.len(), "one blend row per dumped action");
+    }
 
     /// bug-1791711180: every takeoff blend carries one weight per clip of its item, or the animator cannot play it (the
     /// wall rebound's 32-clip takeoff had 40 and the walling pose played through its takeoff).
