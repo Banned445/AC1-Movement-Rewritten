@@ -1096,22 +1096,15 @@ pub fn update_ground(
         // The interpreter tests the ground ladder (0xEE7147) and the empty-hand climb start (0xEE7255) before the wall-run
         // press (0xEE78C9) and the held start (0xEE7E50) (RE/24 WALL-16).
         // ---------------------------------------------------------------- ladder (event 38)
-        // Guard `sub_B239D0` (0xD83970): a ladder within reach, the character on its front within 90°; the entry from
-        // the top within 1.5 m of it. PORT triggers (event 38's sender is not traced): walking into the ladder's foot
-        // facing it; from the top, low profile + Legs at its top facing out over it.
-        {
-            let top_req = !g.high_profile && pad.jump_buffered();
-            if (moving || top_req) && !busy && ab.allows(Ability::Ladder) {
-                if let Some((base, top, n, from_top)) = super::ladder::find_ladder(body.feet, body.forward(), 0.8, &guidance) {
-                    if from_top == top_req {
-                        if from_top {
-                            pad.consume_jump();
-                        }
-                        let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None, ..Default::default() };
-                        switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
-                        continue;
-                    }
-                }
+        // The interpreter's automatic ladder entry (0xEE7143–0xEE723C, RE/24 LADDER-1): every ground frame, unless high
+        // profile with Legs held (the free-run path); the stick toward a ladder (`FindLadderNearby`) and event 38's guard
+        // `Human__CanGrabLadder` (reach 0.6) → event 38, from the foot or from the top; no button. PORT: the ladder
+        // entity's reply (0xEE720A) is taken as yes
+        if !(g.high_profile && pad.legs_held) && pad.magnitude > 0.0 && !busy && ab.allows(Ability::Ladder) {
+            if let Some((base, top, n, from_top)) = super::ladder::find_ladder(body.feet, pad.dir, body.forward(), &guidance) {
+                let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot: (g.blend.foot != 0) as usize, from_ledge: false, action: None, ..Default::default() };
+                switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
+                continue;
             }
         }
 

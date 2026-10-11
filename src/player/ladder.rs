@@ -386,29 +386,57 @@ pub fn top_exit_free(top: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
         && collision.obb_free(top + Vec3::Y * 0.9 + f * 0.35, axes, Vec3::new(0.3, 0.35, 0.4) - e)
 }
 
-/// Ground event 38's guard `sub_B239D0` (PORT trigger: see `ground.rs`): a Ladder edge whose line passes within
-/// `reach` of the feet, the character on its front side within 90°; `from_top` when the feet are within 1.5 m of
-/// the top.
-pub fn find_ladder(feet: Vec3, forward: Vec3, reach: f32, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3, Vec3, bool)> {
+/// The interpreter's ground ladder test (`ProcessGroundMovement` 0xEE7143–0xEE723C, RE/24 LADDER-1) and event 38's guard
+/// `Human__CanGrabLadder` 0xB239D0 (LADDER-2):
+/// - `FindLadderNearby`(1) 0xEDFBC0: the stick moved; the nearest point of base … top + 0.5 m within √20 m, its flat
+///   direction from the root within 90° of the stick; the first ladder that passes;
+/// - `CanGrabLadder` with reach 0.6 (`dword_16834C4`): the root, or else the head, within reach of base … top (the
+///   ladder's own height); the character faces the ladder within 90° (−forward against the closest point → root); the
+///   ladder's side is not tested (LADDER-3: the climb frame is signed toward the climber);
+/// - from the top when the root is within 1.5 m of the top's height.
+/// Returns (base, top, the outward normal on the climber's side, from the top). PORT: the head is the feet + 1.7 m; the
+/// top entry keeps the guidance normal (its far-side target, LADDER-23, is not ported).
+pub fn find_ladder(feet: Vec3, stick: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3, Vec3, bool)> {
+    const REACH: f32 = 0.6;
+    let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
+    let closest = |a: Vec3, b: Vec3, p: Vec3| {
+        let ab = b - a;
+        let t = if ab.length_squared() < 1e-8 { 0.0 } else { ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) };
+        a + ab * t
+    };
+    let stick = flat(stick).normalize_or_zero();
+    if stick == Vec3::ZERO {
+        return None;
+    }
     for e in &guidance.edges {
         if e.subtype != GuidanceSubType::Ladder {
             continue;
         }
         let (base, top) = if e.p0.y <= e.p1.y { (e.p0, e.p1) } else { (e.p1, e.p0) };
-        let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
-        let from_top = (feet.y - top.y).abs() <= TOP_ENTRY_BAND;
-        let q = Vec3::new(base.x, feet.y.clamp(base.y, top.y), base.z);
-        let d = Vec3::new(feet.x - q.x, 0.0, feet.z - q.z);
-        if d.length() > reach || (feet.y - top.y) > TOP_ENTRY_BAND || feet.y < base.y - 0.3 {
+        let up = (top - base).normalize_or(Vec3::Y);
+        // FindLadderNearby: base … top + 0.5 m along the ladder
+        let near = closest(base, top + up * 0.5, feet);
+        if (near - feet).length_squared() >= 20.0 {
             continue;
         }
-        if from_top {
-            // standing on top behind the ladder line, facing out over it
-            if d.dot(n) > 0.05 || forward.dot(n) < 0.5 {
-                continue;
-            }
-        } else if d.length() > 1e-3 && d.normalize().dot(n) < 0.0 || (-n).dot(forward) < 45f32.to_radians().cos() {
+        let to = flat(near - feet);
+        if to.length() > 1e-4 && to.normalize().dot(stick) < 0.0 {
             continue;
+        }
+        // CanGrabLadder: the root or the head within reach of base … top
+        let q = closest(base, top, feet);
+        let head = feet + Vec3::Y * 1.7;
+        if (feet - q).length() > REACH && (head - closest(base, top, head)).length() > REACH {
+            continue;
+        }
+        let away = flat(feet - q);
+        if away.length() > 1e-4 && away.normalize().dot(-forward) < 0.0 {
+            continue;
+        }
+        let from_top = (feet.y - top.y).abs() <= TOP_ENTRY_BAND;
+        let mut n = flat(e.n1).normalize_or_zero();
+        if !from_top && away.dot(n) < 0.0 {
+            n = -n;
         }
         return Some((base, top, n, from_top));
     }

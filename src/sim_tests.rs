@@ -2531,14 +2531,29 @@ fn walk_to_a_ladder_climb_it_and_step_onto_the_top() {
     assert!((f.y - 5.0).abs() < 0.05 && f.z > 63.6, "on the wall top: {f:?}");
 }
 
+/// RE/24 LADDER-1 / LADDER-2: the ground entry is automatic: walking at the ladder 55° off its front mounts it once
+/// within 0.6 m (no 45° front test); free running (high profile with Legs held) never takes it.
+#[test]
+fn walking_at_a_ladder_mounts_it_automatically_unless_free_running() {
+    let d = Vec3::new(55f32.to_radians().sin(), 0.0, 55f32.to_radians().cos());
+    for free_run in [false, true] {
+        let mut s = Sim::new(Vec3::new(49.2, 0.0, 62.4), crate::player::heading_of(d));
+        s.pad(d, 1.0, free_run, free_run);
+        let mounted = s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder);
+        assert_eq!(mounted, !free_run, "free run {free_run}: {:?} {:?}", s.loco().current, s.body().feet);
+    }
+}
+
 #[test]
 fn enter_a_ladder_from_the_top_and_climb_down() {
     use crate::player::ladder::{LadderPhase, ENTER_TOP, EXIT_GROUND};
-    // on the wall top (z 63.5..64.5, top 5) at the ladder, facing out (-Z)
+    // on the wall top (z 63.5..64.5, top 5) at the ladder, facing out (-Z): the stick toward the ladder enters it once
+    // within 0.6 m, no button (RE/24 LADDER-1)
     let mut s = Sim::new(Vec3::new(50.0, 5.0, 63.9), 0.0);
     s.run(0.1);
-    s.press_legs();
-    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Ladder), "no entry from the top: {:?}", s.loco().current);
+    s.pad(Vec3::NEG_Z, 0.5, false, false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ladder), "no entry from the top: {:?} {:?}", s.loco().current, s.body().feet);
+    s.pad(Vec3::ZERO, 0.0, false, false);
     assert!(ENTER_TOP[0].contains(&s.data().ladder.action.unwrap().id));
     assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled: {:?}", s.data().ladder.phase);
     assert!(s.body().forward().dot(Vec3::Z) > 0.99, "facing the ladder");
