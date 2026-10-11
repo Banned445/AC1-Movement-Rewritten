@@ -1223,8 +1223,9 @@ pub fn update_narrow(
         // 0xEE9AF0: high profile, Legs pressed, the stick > 0.35 within 60° of the facing; tested before the jumps.
         // Guard `CanWallRun` 0xF77DC0 = the wall test 0xE18390 (1.5·h ahead), fill 0xB263B0 → Walling.
         // 0xB263B0 warps beam entries in 0.13 s; Ground retains its action-length warp.
+        // the impulsion accepts it too (`sub_F7A740` case 15 → `sub_F79FE0`, the same wall test; RE/24 NARROW-9)
         if n.kind == NarrowKind::Beam
-            && matches!(n.state, BeamState::Start | BeamState::Walk)
+            && matches!(n.state, BeamState::Start | BeamState::Walk | BeamState::ImpulseIn | BeamState::ImpulseWait)
             && pad.high_profile
             && pad.jump_buffered()
             && stick
@@ -1242,9 +1243,10 @@ pub fn update_narrow(
         // ------------------------------------------------ the corner hop (event 7, Walk above walking speed)
         // 0xEE9AF0: vt232 (event 7 accepted: Walk, speed above the walk band, 0xF7F150) and the stick 40°–140° from
         // the facing; the target search (vt288) → vt236 → `StartCornerHop` 0xF7D2F0.
+        // the hop's end accepts another hop after half its action (state +157, guard `sub_F6FA50`; RE/24 NARROW-12)
+        let hop_end_ready = n.state == BeamState::HopEnd && n.t / dur.max(1e-4) > 0.5;
         if n.kind == NarrowKind::Beam
-            && matches!(n.state, BeamState::Start | BeamState::Walk)
-            && n.speed > beam_bands()[1]
+            && ((matches!(n.state, BeamState::Start | BeamState::Walk) && n.speed > beam_bands()[1]) || hop_end_ready)
             && stick
             && a > 40f32.to_radians()
             && a < 140f32.to_radians()
@@ -1267,7 +1269,15 @@ pub fn update_narrow(
             || (!BEAM_COMPLETION && n.state == BeamState::Stop);
         // 0xF7A740 gates events 4 / 5 / 6 on the timer, independently of the entry clip. The jog stop accepts no
         // event at all (`Main_CanHandleEvent` 0xF7FB60 returns 1 for sub-state +97, `PlayJogStop` 0xF6EE90).
-        if jump && can_jump && (!BEAM_COMPLETION || !impulsion || impulse_ready) {
+        // Events 5 / 6, the jump on the spot, fire when Legs is **not held** (BeamState 0xEEAFEF–0xEEB0E1: `Pad__IsPressed`
+        // (0) false): press or hold Legs to crouch, let go after 0.2 s to jump; event 5 carries the standing request's
+        // hand target (IHuman vt64 + `Human__PickStaticReport` 0xE97720), event 6 none (RE/24 NARROW-10)
+        if impulsion && impulse_ready && !pad.legs_held && n.state != BeamState::JumpOnPlace {
+            let feet = n.stand();
+            n.hand_target = super::ground::static_hand_target(feet, facing, &guidance, &collision, true);
+            let id = if n.hand_target.is_some() { BEAM_IMPULSE_TO_JUMP } else { BEAM_IMPULSE_TO_CLEAR };
+            n.play(BeamState::JumpOnPlace, item(id, 0, &[]));
+        } else if jump && can_jump && (!BEAM_COMPLETION || !impulsion || impulse_ready) {
             let feet = n.stand();
             // event 4: a target in the stick direction → free-step jump (kind 1)
             if stick {
@@ -1279,14 +1289,8 @@ pub fn update_narrow(
                     continue;
                 }
             }
-            if n.state == BeamState::ImpulseWait || (BEAM_COMPLETION && n.state == BeamState::ImpulseIn) {
-                // events 5 / 6 (+148, 0xF717D0): the jump on the spot, at a hand target when there is one
-                pad.consume_jump();
-                // the on-the-spot jump's target (events 5 / 6 carry it; 0xF717D0 takes it given): (hypothesis) the
-                // interpreter's standing request, as on the ground (0xE165D0, `ground::static_hand_target`)
-                n.hand_target = super::ground::static_hand_target(feet, facing, &guidance, &collision, true);
-                let id = if n.hand_target.is_some() { BEAM_IMPULSE_TO_JUMP } else { BEAM_IMPULSE_TO_CLEAR };
-                n.play(BeamState::JumpOnPlace, item(id, 0, &[]));
+            if impulsion {
+                // a press in the impulsion: only event 4 above (the jump on the spot is the release)
             } else if !stick {
                 // event 2 (pilotis, 0xE53850 → PilotisToBeam mode 8) / Main: the impulsion crouch (+145, 0xF738A0)
                 pad.consume_jump();

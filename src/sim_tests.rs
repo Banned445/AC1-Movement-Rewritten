@@ -1531,11 +1531,12 @@ fn pilotis_impulsion_and_jump_on_the_spot() {
     let mut s = Sim::new(top, -std::f32::consts::FRAC_PI_2);
     force(&mut s, crate::player::TransitionSetup::ToPilotis(PilotisEntry { top, from: top, facing: Vec3::X, kind: PilotisEntryType::FromInAir, foot: 0 }));
     assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::PilotisWait));
-    s.pad(Vec3::ZERO, 0.0, true, false);
+    // hold Legs: the impulsion; let go after 0.2 s: the jump on the spot (RE/24 NARROW-10)
+    s.pad(Vec3::ZERO, 0.0, true, true);
     s.press_legs();
     assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn), "no impulsion: {:?}", s.data().narrow.state);
     assert!(s.run_until(1.0, |s| s.data().narrow.state == BeamState::ImpulseWait));
-    s.press_legs();
+    s.pad(Vec3::ZERO, 0.0, true, false);
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "no jump on the spot: {:?}", s.data().narrow.state);
     let mut top_y: f32 = 0.0;
     for _ in 0..120 {
@@ -1600,10 +1601,10 @@ fn beam_jump_at_a_ledge_above() {
     let (p0, p1) = (Vec3::new(84.5, 4.0, 70.0), Vec3::new(90.5, 4.0, 70.0));
     force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::X }));
     s.run(0.2);
-    s.pad(Vec3::ZERO, 0.0, true, false);
+    s.pad(Vec3::ZERO, 0.0, true, true);
     s.press_legs();
     assert!(s.run_until(1.0, |s| s.data().narrow.state == BeamState::ImpulseWait), "no impulsion: {:?}", s.data().narrow.state);
-    s.press_legs();
+    s.pad(Vec3::ZERO, 0.0, true, false);
     assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::JumpOnPlace));
     assert!(s.data().narrow.action.is_some_and(|a| a.id == BEAM_IMPULSE_TO_JUMP), "hand target found");
     assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::InAir));
@@ -1827,11 +1828,12 @@ fn beam_impulsion_keeps_side_and_back_input_but_resumes_forward() {
     s.pad(Vec3::ZERO, 0.0, true, true);
     s.press_legs();
     assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::ImpulseWait));
-    s.pad(Vec3::Z, 1.0, true, false); s.run(0.3);
+    // Legs held: letting go would jump on the spot (RE/24 NARROW-10)
+    s.pad(Vec3::Z, 1.0, true, true); s.run(0.3);
     assert_eq!(s.data().narrow.state, BeamState::ImpulseWait);
-    s.pad(Vec3::NEG_X, 1.0, true, false); s.run(0.3);
+    s.pad(Vec3::NEG_X, 1.0, true, true); s.run(0.3);
     assert_eq!(s.data().narrow.state, BeamState::ImpulseWait);
-    s.pad(Vec3::X, 1.0, true, false);
+    s.pad(Vec3::X, 1.0, true, true);
     assert!(s.run_until(0.2, |s| s.data().narrow.state == BeamState::Walk));
 }
 
@@ -1843,7 +1845,7 @@ fn beam_impulsion_resumes_after_timer_before_entry_clip_end() {
     assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
     let duration = s.data().narrow.action.unwrap().duration();
     assert!(duration > 0.25, "fixture must distinguish the timer from clip completion");
-    s.pad(Vec3::X, 1.0, true, false);
+    s.pad(Vec3::X, 1.0, true, true);
     s.run(0.18);
     assert_eq!(s.data().narrow.state, BeamState::ImpulseIn, "forward stays gated before 0.2 s");
     assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::Walk), "forward remains blocked after the deadline");
@@ -1858,9 +1860,10 @@ fn beam_impulsion_jump_obeys_timer_during_entry_clip() {
     let mut s = on_free_beam(87.0);
     s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
     assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
-    s.run(0.1); s.press_legs(); s.run(0.08);
+    // let go at 0.1 s: the jump on the spot waits for the 0.2 s deadline (RE/24 NARROW-10)
+    s.run(0.1); s.pad(Vec3::ZERO, 0.0, true, false); s.run(0.08);
     assert_eq!(s.data().narrow.state, BeamState::ImpulseIn, "jump stays gated before 0.2 s");
-    assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::JumpOnPlace), "buffered jump must enter on the timer, before clip end");
+    assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::JumpOnPlace), "the release must jump on the timer, before clip end");
 }
 
 #[test]
@@ -1870,7 +1873,7 @@ fn beam_impulsion_deadline_resets_on_reentry() {
     for _ in 0..2 {
         s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
         assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::ImpulseIn));
-        s.pad(Vec3::X, 1.0, true, false); s.run(0.18);
+        s.pad(Vec3::X, 1.0, true, true); s.run(0.18);
         assert_eq!(s.data().narrow.state, BeamState::ImpulseIn);
         assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::Walk));
         s.pad(Vec3::ZERO, 0.0, false, false);
@@ -1884,7 +1887,7 @@ fn beam_jump_release_waits_until_the_item_has_positive_leftover_time() {
     let mut s = on_free_beam(87.0);
     s.pad(Vec3::ZERO, 0.0, true, true); s.press_legs();
     assert!(s.run_until(1.0, |s| s.data().narrow.state == BeamState::ImpulseWait));
-    s.press_legs();
+    s.pad(Vec3::ZERO, 0.0, true, false);
     assert!(s.run_until(0.1, |s| s.data().narrow.state == BeamState::JumpOnPlace));
     let duration = s.data().narrow.action.unwrap().duration();
     let dt = s.app.world().resource::<Time>().delta_secs();
