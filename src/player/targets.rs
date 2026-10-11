@@ -128,8 +128,12 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             }
             let e = &guidance.edges[c.edge?];
             let on_edge = guidance.fit_hands(c.pos, e.n1);
-            let hang = if ty == TARGET_LEDGE { LedgeHangType::Wall } else { LedgeHangType::Free };
-            Some(JumpTarget { position: hang_root(on_edge, on_edge, e.n1, hang), hang: Some((on_edge, e.n1)), ..base })
+            // the aim (0xB1EC40 0xB1F60E, RE/24 AIR-3): the edge + 0.5·n, 1.1 m down for a wall hang (the wall-hang
+            // root) and only 0.5 m down for a free hang (0x80); the swing reception then interpolates the root to the
+            // free-hang pose (0xE09662). PORT: the game takes this aim only for a target with an owner entity (world
+            // geometry has one), else the pulled-back point
+            let position = if ty == TARGET_LEDGE { hang_root(on_edge, on_edge, e.n1, LedgeHangType::Wall) } else { on_edge + e.n1 * 0.5 - Vec3::Y * 0.5 };
+            Some(JumpTarget { position, hang: Some((on_edge, e.n1)), ..base })
         }
         TARGET_LADDER => {
             let e = &guidance.edges[c.edge?];
