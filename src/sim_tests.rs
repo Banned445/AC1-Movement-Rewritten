@@ -2587,6 +2587,15 @@ fn walking_at_a_ladder_mounts_it_automatically_unless_free_running() {
         s.pad(d, 1.0, free_run, free_run);
         let mounted = s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder);
         assert_eq!(mounted, !free_run, "free run {free_run}: {:?} {:?}", s.loco().current, s.body().feet);
+        if mounted {
+            // the entry starts in the approach facing and turns onto the ladder by half its clip (RE/24 LADDER-6)
+            let face = crate::player::heading_of(Vec3::Z);
+            let off = |h: f32| crate::player::ground::heading_delta(h, face).abs();
+            assert!(off(s.body().heading) > 0.3, "still the approach facing at the start: {}", s.body().heading);
+            s.pad(Vec3::ZERO, 0.0, false, false);
+            assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(crate::player::ladder::LadderPhase::Wait)));
+            assert!(off(s.body().heading) < 1e-3, "facing the ladder: {}", s.body().heading);
+        }
     }
 }
 

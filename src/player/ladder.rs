@@ -322,6 +322,8 @@ impl HumanLadderData {
             let k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
             self.height = 0.5 * k + if e.high { 0.5 } else { 0.0 };
             let to = self.root_at(self.height);
+            // the clip plays in the character's frame at the entry (start matrix +592, RE/24 LADDER-6)
+            self.fwd = Vec3::new(e.facing.x, 0.0, e.facing.z).normalize_or(-self.n);
             self.play(LadderPhase::EnterGround, blend(ENTER_GROUND[hi][e.foot], 0, &w), e.from, to, true);
         }
     }
@@ -606,7 +608,9 @@ pub fn update_ladder(
             let d = l.action.map(|a| a.disp(k)).unwrap_or([0.0; 3]);
             let dend = l.action.map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
             let w = |d: [f32; 3]| super::right_of(l.fwd) * d[0] + l.fwd * d[1] + Vec3::Y * d[2];
-            l.from + w(d) + (l.to - (l.from + w(dend))) * k
+            // the ground entry drives the correction by min(2s, 1) (`sub_E1EF50`; RE/24 LADDER-6), the others linearly
+            let c = if phase == LadderPhase::EnterGround { (2.0 * k).min(1.0) } else { k };
+            l.from + w(d) + (l.to - (l.from + w(dend))) * c
         } else {
             l.from.lerp(l.to, k)
         };
@@ -623,6 +627,12 @@ pub fn update_ladder(
         } else {
             body.feet = p;
             body.heading = super::heading_of(l.heading);
+            if phase == LadderPhase::EnterGround {
+                // the turn onto the ladder by min(2s, 1) from the start facing (`sub_E1EF50`, RE/24 LADDER-6)
+                let (h0, h1) = (super::heading_of(l.fwd), super::heading_of(-l.n));
+                let d = (h1 - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                body.heading = h0 + d * (2.0 * k).min(1.0);
+            }
             if let (LadderPhase::Revolve(0), Some(a)) = (phase, l.action) {
                 // the clip's root yaw turns the body half round
                 body.heading = super::heading_of(l.fwd) + a.yaw(k);
@@ -656,7 +666,14 @@ pub fn update_ladder(
                                 if matches!(a.id,CATCH_AIR|ARRIVE_TARGET) { l.blend_time=0.0; } // DataPC item blend NONE.
                             }
                         }
-                        None => { if phase == LadderPhase::EnterGround { l.foot_from_entry(); } l.wait() }
+                        None => {
+                            if phase == LadderPhase::EnterGround {
+                                l.foot_from_entry();
+                                // the climb frame again (the entry played in the character's start frame)
+                                l.fwd = -l.n;
+                            }
+                            l.wait()
+                        }
                     }
                 }
             }
