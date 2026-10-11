@@ -416,14 +416,34 @@ fn exit(seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, c: &LedgeCandidate,
     e
 }
 
-/// Pull-up from the wall run: `…_tr_hangknee_{low,high}` blended by `b`, then hangknee → free-step entry (the
-/// Ledge pull-up state's stand-up, 0xDE2EE0 lists both walling → hangknee actions), ending on top. The entry ends
-/// on footl, step1 on footr.
+/// Pull-up from the wall run (A 0xE37B25 / D 0xE38EC8): `…_tr_hangknee_{low,high}` blended by `b` while the root follows
+/// the clip, corrected onto the edge + 0.1 m into the wall at the edge's height, over that clip only (`sub_711130` in anim
+/// mode, 0xE37BBD / 0xE38DD6, RE/24 WALL-22); the Ledge then enters Pullup (LedgeData +76 = 4, WALL-21) and stands up:
+/// hangknee → free-step entry (0xDE2EE0) onto the top. The entry ends on footl, step1 on footr.
 fn pullup_exit(id: u32, b: f32, root: Vec3, c: &LedgeCandidate) -> LedgeEntry {
-    let top = c.point - c.normal * PULLUP_IN;
-    let stand = ledge_moves::ACT_KNEE_TO_FREESTEP[(id == STEP1_TO_KNEE) as usize];
-    let seq = [blended(id, 0, &[1.0 - b, b]), single(stand, 0), None, None];
-    exit(seq, root, Vec3::new(top.x, c.point.y, top.z), c, (false, false, true))
+    let into = -Vec3::new(c.normal.x, 0.0, c.normal.z).normalize_or_zero();
+    let knee = c.point + into * 0.1;
+    let mut e = exit([blended(id, 0, &[1.0 - b, b]), None, None, None], root, knee, c, (false, false, false));
+    e.sub_state = LedgeSubState::Pullup;
+    if let Some(mv) = e.entry_move {
+        let stand_id = ledge_moves::ACT_KNEE_TO_FREESTEP[(id == STEP1_TO_KNEE) as usize];
+        let seq = [single(stand_id, 0), None, None, None];
+        let d = seq.map(|a| a.map(|a| a.duration()).unwrap_or(0.0));
+        let top = c.point + into * PULLUP_IN;
+        let stand = LedgeMove {
+            kind: MoveKind::Pullup,
+            seq,
+            durations: if d[0] > 0.0 { d } else { [0.4, 0.0, 0.0, 0.0] },
+            t: 0.0,
+            from: knee,
+            to: Vec3::new(top.x, c.point.y, top.z),
+            follow_disp: false,
+            end_stand: true,
+            ..mv
+        };
+        e.entry_rest = [Some(stand), None];
+    }
+    e
 }
 
 /// Probes after EntryB (UpdateWallingSubState 0xE37590, command 0): A = pull-up, B = free hang.
@@ -446,7 +466,9 @@ fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Collisio
         // clips: 250 min, 350 min, 250 max, 350 max (swing back)
         let w = [(1.0 - hb) * (1.0 - near), hb * (1.0 - near), (1.0 - hb) * near, hb * near];
         let (hl, hr) = hands(&c);
-        // the root goes straight under the edge, 2.4 m down (0xE37F70); hang type Free (0xE3807F)
+        // the root goes straight under the edge, 2.4 m down (0xE37F70); hang type Free (0xE3807F). LedgeData +76 = 0, +108 = 3
+        // (HangFreeReceptionType), +112 = w₂ + w₃ (0xE3807F–0xE380D7). PORT: +108 / +112 have no consumer in the port
+        // (SwingStrength is undecoded, RE/24 WALL-21)
         let to = hang_root(hl, hr, c.normal, LedgeHangType::Free);
         return Some(exit([blended(ENTRY_TO_HANGFREE, 0, &w), None, None, None], root, to, &c, (true, false, false)));
     }
@@ -652,6 +674,20 @@ mod wall_entry_tests {
         for t in [[a, b, cc], [a, cc, d]] {
             c.triangles.push(Triangle::new(t, crate::layers::STATIC).unwrap());
         }
+    }
+
+    /// RE/24 WALL-22 / WALL-21: the wall run's pull-up warps over the walling clip only, onto the edge 0.1 m in at the
+    /// edge's height, as Ledge Pullup; the stand-up follows as its own move onto the top.
+    #[test]
+    fn the_wall_run_pull_up_ends_its_clip_at_the_edge() {
+        let c = LedgeCandidate { point: Vec3::new(0.0, 2.0, 0.0), normal: Vec3::Z, edge_dir: Vec3::X, height: 2.0, dist: 0.3 };
+        let e = pullup_exit(ENTRY_TO_KNEE, 0.5, Vec3::new(0.0, 0.0, 0.6), &c);
+        assert_eq!(e.sub_state, LedgeSubState::Pullup);
+        let mv = e.entry_move.expect("the walling clip");
+        assert!((mv.to - Vec3::new(0.0, 2.0, -0.1)).length() < 1e-5, "0.1 m in at the edge: {}", mv.to);
+        assert!(mv.seq[1].is_none() && !mv.end_stand, "the walling clip alone");
+        let stand = e.entry_rest[0].expect("the stand-up");
+        assert!(stand.end_stand && stand.from == mv.to);
     }
 
     /// RE/24 WALL-18: the wall ray (filter 47) sees fuzzy zones, and a fuzzy zone in front of a wall is no wall
