@@ -235,10 +235,12 @@ pub struct HumanLedgeData {
     pub jump_off: Option<super::air::InAirEntry>,
     /// The last lateral move that was blocked went right (picks `PlayIdleOrBlocked`'s blocked action, 0xDD3A10).
     pub blocked_right: bool,
-    /// LedgeData +108 = 3 (HangFreeReceptionType) and +112 (SwingStrength): the swing back's `_b` (`PlayHopUpSecondPart`
-    /// 0xDDAB00) stores h = w[2] + w[3]; the free idle after it plays its two clips (`xx_h_hangfree_wait`,
-    /// `xx_h_hangwallfree_wait`) at [1 − h, h] (0xDE1FE0 → `sub_502E30`) (RE/24 LEDGE-24).
-    pub swing_strength: Option<f32>,
+    /// LedgeData +108 = 3 (HangFreeReceptionType) and +112 (SwingStrength), with the `step_seq` it was stored at: the swing
+    /// back's `_b` (`PlayHopUpSecondPart` 0xDDAB00) and walling's free hangs B / C (0xE3807F–0xE380D7, 0xE3898C–0xE389E8)
+    /// store h = w[2] + w[3]; the free idle that follows (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0) plays its two clips
+    /// (`xx_h_hangfree_wait`, `xx_h_hangwallfree_wait`) at [1 − h, h] (`sub_502E30`) until the next move (RE/24 LEDGE-24,
+    /// WALL-21).
+    pub swing_strength: Option<(f32, u32)>,
     moves: Vec<RootInterp>,
     after: Option<After>,
     /// Running corner turn / ledge jump / swing back (`ledge_moves`).
@@ -262,6 +264,11 @@ pub struct HumanLedgeData {
 }
 
 impl HumanLedgeData {
+    /// The swing strength for the free idle, while no move has started since it was stored.
+    pub fn swing_idle(&self) -> Option<f32> {
+        self.swing_strength.filter(|(_, seq)| *seq == self.step_seq).map(|(s, _)| s)
+    }
+
     pub fn enter(&mut self, e: LedgeEntry) {
         self.hand_l = e.hand_l;
         self.hand_r = e.hand_r;
@@ -288,6 +295,11 @@ impl HumanLedgeData {
         self.queue = e.entry_rest.iter().flatten().copied().collect();
         self.then_climb = None;
         self.then_ladder = None;
+        // walling's free hangs B / C: +108 = 3, +112 = w₂ + w₃ of their 4-way blend (WALL-21)
+        let walling_free = |a: &super::jump_blend::ActionBlend| [super::walling::ENTRY_TO_HANGFREE, super::walling::STEP1_TO_HANGFREE].contains(&a.id);
+        if let Some(a) = e.entry_move.and_then(|m| m.seq[0]).filter(walling_free) {
+            self.swing_strength = Some((a.w[2] + a.w[3], self.step_seq));
+        }
         if let Some(m) = e.entry_move {
             // the game's reception for the jump that arrived (0xE07D00), or the pull-down's first stage
             self.mv = Some(m);
@@ -687,7 +699,9 @@ pub fn update_ledge(
                 d.hang_set = true;
                 d.mv = None;
                 d.sub_state = LedgeSubState::Movement;
-                d.swing_strength = (mv.kind == ledge_moves::MoveKind::SwingBack).then(|| mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0));
+                if mv.kind == ledge_moves::MoveKind::SwingBack {
+                    d.swing_strength = Some((mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0), d.step_seq));
+                }
                 if let ledge_moves::MoveKind::SideJump { .. } = mv.kind {
                     // the table jump into a hang: +133 = the hand targets 0.3 m or more apart (`sub_DCBCD0`, RE/24 LEDGE-14)
                     d.alt_flag = (mv.hand_l - mv.hand_r).length() >= 0.3;

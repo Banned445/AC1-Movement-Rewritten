@@ -968,8 +968,11 @@ fn swing_back_catches_the_beam_behind_into_a_free_hang() {
     assert!((s.body().feet.y - (3.2 - 2.4)).abs() < 0.05, "free-hang root: {:?}", s.body().feet);
     // LEDGE-24: the free idle after it keeps the swing (0xDDAB00: +112 = w[2] + w[3], read by 0xDE1FE0)
     let b = mv.seq[1].expect("`_b`");
-    assert_eq!(l.swing_strength, Some(b.w[2] + b.w[3]));
-    assert_eq!(l.last_action, "swing back");
+    assert_eq!(l.swing_idle(), Some(b.w[2] + b.w[3]));
+    // it lasts through the idle (no stick: last_action "idle") until the next move
+    s.run(0.5);
+    assert_eq!(s.data().ledge.last_action, "idle");
+    assert_eq!(s.data().ledge.swing_idle(), Some(b.w[2] + b.w[3]));
 }
 
 /// Walk into a wall (facing +Z) with high profile + Legs from `feet`; return once the straight jump started.

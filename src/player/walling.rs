@@ -467,8 +467,8 @@ fn probe_entry(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Collisio
         let w = [(1.0 - hb) * (1.0 - near), hb * (1.0 - near), (1.0 - hb) * near, hb * near];
         let (hl, hr) = hands(&c);
         // the root goes straight under the edge, 2.4 m down (0xE37F70); hang type Free (0xE3807F). LedgeData +76 = 0, +108 = 3
-        // (HangFreeReceptionType), +112 = w₂ + w₃ (0xE3807F–0xE380D7). PORT: +108 / +112 have no consumer in the port
-        // (SwingStrength is undecoded, RE/24 WALL-21)
+        // (HangFreeReceptionType), +112 = w₂ + w₃ (0xE3807F–0xE380D7): the free idle after it blends by them
+        // (`HumanLedgeData::swing_strength`, RE/24 WALL-21 / LEDGE-24)
         let to = hang_root(hl, hr, c.normal, LedgeHangType::Free);
         return Some(exit([blended(ENTRY_TO_HANGFREE, 0, &w), None, None, None], root, to, &c, (true, false, false)));
     }
@@ -688,6 +688,21 @@ mod wall_entry_tests {
         assert!(mv.seq[1].is_none() && !mv.end_stand, "the walling clip alone");
         let stand = e.entry_rest[0].expect("the stand-up");
         assert!(stand.end_stand && stand.from == mv.to);
+    }
+
+    /// RE/24 WALL-21 / LEDGE-24: walling's free hang B stores +112 = w₂ + w₃ of its 4-way blend; the free idle after it
+    /// blends by it until the next move.
+    #[test]
+    fn a_walling_free_hang_hands_its_swing_strength_to_the_idle() {
+        let c = LedgeCandidate { point: Vec3::new(0.0, 3.0, 0.0), normal: Vec3::Z, edge_dir: Vec3::X, height: 3.0, dist: 0.3 };
+        let w = [0.1, 0.2, 0.3, 0.4];
+        let e = exit([blended(ENTRY_TO_HANGFREE, 0, &w), None, None, None], Vec3::new(0.0, 0.0, 0.6), Vec3::new(0.0, 0.6, 0.3), &c, (true, false, false));
+        let a = e.entry_move.and_then(|m| m.seq[0]).expect("the 4-way blend");
+        let mut l = crate::player::ledge::HumanLedgeData::default();
+        l.enter(e);
+        assert_eq!(l.swing_idle(), Some(a.w[2] + a.w[3]));
+        l.step_seq += 1;
+        assert_eq!(l.swing_idle(), None, "a new move ends it");
     }
 
     /// RE/24 WALL-18: the wall ray (filter 47) sees fuzzy zones, and a fuzzy zone in front of a wall is no wall

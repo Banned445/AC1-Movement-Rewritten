@@ -983,12 +983,12 @@ fn choose_clip(
                         };
                         action(&lib, &ids, false, token, Some(0.1), None)
                     }
-                    // the free idle after the swing back (Entry end 0xDE1FE0, HangFreeReceptionType 3): its two clips
-                    // `xx_h_hangfree_wait` / `xx_h_hangwallfree_wait` at [1 − SwingStrength, SwingStrength] (`sub_502E30`,
-                    // RE/24 LEDGE-24). PORT: the second set (0x503040 → 0x726280, [1, 0]) goes to the running transition's
-                    // blend node (hypothesis) and is not played.
-                    _ if !wall && l.last_action == "swing back" && l.swing_strength.is_some() => {
-                        let s = l.swing_strength.unwrap_or(0.0).clamp(0.0, 1.0);
+                    // the free idle after the swing back or a walling free hang (Entry end 0xDE1FE0, HangFreeReceptionType
+                    // 3), until the next move: its two clips `xx_h_hangfree_wait` / `xx_h_hangwallfree_wait` at
+                    // [1 − SwingStrength, SwingStrength] (`sub_502E30`, RE/24 LEDGE-24). PORT: the second set (0x503040 →
+                    // 0x726280, [1, 0]) goes to the running transition's blend node (hypothesis) and is not played.
+                    _ if !wall && l.swing_idle().is_some() => {
+                        let s = l.swing_idle().unwrap_or(0.0).clamp(0.0, 1.0);
                         action(&lib, &[ACT_HANG_FREE], true, 0, Some(0.15), Some("hang_free")).map(|mut r| {
                             if let Some(it) = r.items.first_mut().filter(|it| it.layers.len() == 2) {
                                 let mut w = [1.0 - s, s];
