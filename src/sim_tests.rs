@@ -4537,6 +4537,26 @@ fn an_air_catch_holds_the_hang_for_its_locked_catch_action() {
     }
 }
 
+/// RE/24 LEDGE-22: `HumanLedge__Pullup_Tick` 0xDE2EE0 re-poses the hands from the hand bones when
+/// `hangwallfree_tr_hangwall` is released into the wall hang (the contacts are set at once).
+#[test]
+fn the_switch_onto_the_wall_ends_with_the_hands_under_the_hand_bones() {
+    let mut s = hang_on_jump_up_wall();
+    if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ledge.mv.is_some()));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    let set = |s: &Sim| s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap().contact_set;
+    let before = set(&s);
+    assert!(s.run_until(2.0, |s| s.data().ledge.mv.is_none()), "the switch never ended");
+    assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Wall);
+    assert_eq!(set(&s), before.wrapping_add(1), "the hands re-posed from the bones");
+}
+
 #[test]
 fn a_wall_free_hang_swings_onto_the_wall_before_it_pulls_up() {
     // HumanLedge__Pullup_Start 0xDDBE80: the wall-free hang (free with a wall below) does not pull up; it plays

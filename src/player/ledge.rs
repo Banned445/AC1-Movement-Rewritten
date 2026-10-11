@@ -733,9 +733,11 @@ pub fn update_ledge(
                 // the Entry state's end (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0, RE/24 LEDGE-22): the entries in the
                 // Entry state (+76 = 0: walling's hangs, the climb's jump up, the swing back's second part) re-pose the
                 // hands from the hand bones, unless `step1_to_hangwall` plays. The bones are last frame's pose at the root
-                // where it stands now (`bone_pose`); without the install the move's own hand points stay (PORT)
-                let entry_end = std::mem::take(&mut d.repose_at_entry_end) || mv.kind == ledge_moves::MoveKind::SwingBack;
+                // where it stands now (`bone_pose`); without the install the move's own hand points stay (PORT).
+                // `HumanLedge__Pullup_Tick` 0xDE2EE0 re-poses the same way when `hangwallfree_tr_hangwall` is released
+                // into the wall hang (its pass-over twins 0x0109BB58 / 59 follow walling pass-overs, which never happen)
                 let last = mv.seq.iter().flatten().last().map(|a| a.id);
+                let entry_end = std::mem::take(&mut d.repose_at_entry_end) || mv.kind == ledge_moves::MoveKind::SwingBack || last == Some(ledge_moves::WALLFREE_TO_WALL);
                 if entry_end && last != Some(super::walling::STEP1_TO_HANGWALL) {
                     use crate::bone_pose::{LEFT_HAND, RIGHT_HAND};
                     let bones = skeleton.as_deref().zip(pose).and_then(|(s, p)| Some([p.world_pos(s, LEFT_HAND, &body)?, p.world_pos(s, RIGHT_HAND, &body)?]));
