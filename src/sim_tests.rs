@@ -263,9 +263,10 @@ fn eight_metre_drop_lands_at_the_band_edge() {
     s.pad(Vec3::X, 0.0, false, false);
     s.run(0.2);
     let l = s.ground().last_landing.expect("landed");
-    // the step off the rim (event 68) is a small free jump: its rise puts the fall just over the 8 m band edge
-    // (0xED6280: 8 m and more is SmallDamage). LIVE (RE/20 #3): the game's fall height after a step off (RE/18 §9)
-    assert!((7.95..8.15).contains(&l.fall_height), "{l:?}");
+    // the step off the rim (event 68) is a small free jump whose takeoff (word 0x1000) already descends: the apex is
+    // recorded only after the takeoff (0xE0DF99, RE/24 AIR-31), so the fall stays under the 8 m band edge (0xED6280:
+    // 8 m and more is SmallDamage). LIVE (RE/20 #3): the game's fall height after a step off (RE/18 §9)
+    assert!((7.45..7.75).contains(&l.fall_height), "{l:?}");
     assert!(l.damage <= 10, "{l:?}");
     assert!(s.body().feet.x < -5.0, "unexpected respawn: {:?}", s.body().feet);
 }

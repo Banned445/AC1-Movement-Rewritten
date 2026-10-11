@@ -880,7 +880,6 @@ pub fn try_swing_back(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: Led
     if let Some([a, b]) = found {
         let (hl, hr) = (a.point, b.point);
         let nn = a.wall_normal;
-        let point = (hl + hr) * 0.5;
         let to = hang_root_at(hl, hr, nn, LedgeHangType::Free, _collision);
         let w = swing_back_weights(hl, hr, nn, mid, root);
         let a = jump_blend::action_items(SWING_BACK).map(|_| ActionBlend::new(SWING_BACK, 0, &w));

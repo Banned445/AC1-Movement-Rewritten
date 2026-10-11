@@ -447,6 +447,14 @@ impl HumanInAirData {
 }
 
 impl HumanInAirData {
+    /// The item word of the jump's playing item (the takeoff, then the flight; `item+60`). PORT: `None` outside a jump
+    /// (the falls' loops are not in the table's movement blocks).
+    pub fn playing_word(&self) -> Option<u16> {
+        let AirMode::Jump { t, t_takeoff, .. } = self.mode else { return None };
+        let b = if t < t_takeoff { self.takeoff } else { self.flight }?;
+        super::anim_gate::word(&b)
+    }
+
     /// `HumanInAir__IsLeapOfFaithDiveAnim` 0xDFEFC0 (IHumanInAir slot 18): slot 0 plays a faith action, the takeoffs
     /// 0x23A949B1 / 0x23A949B7, the flight 0x23A949B2 or the fall 0x23A949B5. The port's faith jump and let-go dive hold
     /// the flight in `flight` (the Fall mode plays the faith fall from it, anim.rs); the let-go's own item before the
@@ -728,8 +736,10 @@ pub fn update_air(
         air.time_in_air += dt;
         if GAME_FALLS {
             air.speed_ratio = super::falls::speed_ratio(&pad, body.forward());
-            // Record current feet before integration, on the first descending update (0xE0DFC7 / 0xE0DD15).
-            if !air.apex_reached && body.velocity.y < -0.001 {
+            // Record current feet before integration, on the first descending update (0xE0DFC7 / 0xE0DD15), not while
+            // the playing item is a takeoff (word 0x1000, 0xE0DF99): a takeoff that already descends (the step off an
+            // edge) records the apex after it (RE/24 AIR-31)
+            if !air.apex_reached && body.velocity.y < -0.001 && !air.playing_word().is_some_and(|w| w & super::anim_gate::TAKEOFF != 0) {
                 air.apex_reached = true;
                 air.apex_y = body.feet.y;
             }
@@ -1327,6 +1337,19 @@ mod fall_tests {
             assert_eq!(air.apex_y,from.y);
         }
     }
+    /// RE/24 AIR-31: the takeoff item carries word bit 0x1000 (no apex record while it plays); the flight does not.
+    #[test]
+    fn the_takeoff_item_holds_the_apex_record() {
+        let mut air = HumanInAirData::default();
+        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
+        let takeoff = |air: &HumanInAirData| air.playing_word().is_some_and(|w| w & super::super::anim_gate::TAKEOFF != 0);
+        assert!(takeoff(&air), "{:?}", air.playing_word());
+        let AirMode::Jump { t_takeoff, .. } = &mut air.mode else { panic!() };
+        let t1 = *t_takeoff;
+        if let AirMode::Jump { t, .. } = &mut air.mode { *t = t1 + 0.01 }
+        assert!(!takeoff(&air), "{:?}", air.playing_word());
+    }
+
     /// RE/24 AIR-32: the faith jump and the let-go's dive are `IsLeapOfFaithDiveAnim`; a plain fall and the let-go's
     /// own item before the dive are not.
     #[test]
