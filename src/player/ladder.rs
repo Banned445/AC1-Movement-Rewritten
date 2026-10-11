@@ -230,6 +230,15 @@ impl HumanLadderData {
         }
     }
 
+    /// The wait after an entry takes its column from the entry item's feet after (`sub_E1D7C0` 0xE1D7F6: 2·((word &
+    /// 0xC) != 4), LEFTAHEAD → column l; RE/24 LADDER-7): 1 after 0x010A34A7 / 0x010A251E and the top entries, 0 after
+    /// 0x010A34A6 / 0x010A2520.
+    fn foot_from_entry(&mut self) {
+        if let Some(w) = self.action.and_then(|a| super::anim_gate::word(&a)) {
+            self.foot = ((w & 0xC) != 4) as usize;
+        }
+    }
+
     fn wait(&mut self) {
         let h = self.height;
         let p = self.root_at(h);
@@ -619,7 +628,7 @@ pub fn update_ladder(
                                 if matches!(a.id,CATCH_AIR|ARRIVE_TARGET) { l.blend_time=0.0; } // DataPC item blend NONE.
                             }
                         }
-                        None => l.wait(),
+                        None => { if phase == LadderPhase::EnterGround { l.foot_from_entry(); } l.wait() }
                     }
                 }
             }
@@ -637,6 +646,7 @@ pub fn update_ladder(
                             continue;
                         }
                     }
+                    l.foot_from_entry();
                     l.wait();
                 }
             }

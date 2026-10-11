@@ -2531,6 +2531,24 @@ fn walk_to_a_ladder_climb_it_and_step_onto_the_top() {
     assert!((f.y - 5.0).abs() < 0.05 && f.z > 63.6, "on the wall top: {f:?}");
 }
 
+/// RE/24 LADDER-7: after a ground entry the wait's column is the entry item's feet after (LEFTAHEAD → column l), not
+/// the foot the entry started on.
+#[test]
+fn the_wait_after_a_ground_entry_follows_the_entry_items_feet() {
+    use crate::player::ladder::LadderPhase;
+    for foot in [0usize, 1] {
+        let mut s = Sim::new(Vec3::new(50.0, 0.0, 62.0), FACE_PZ);
+        s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().ground.blend.foot = foot;
+        s.pad(Vec3::Z, 1.0, false, false);
+        assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ladder), "no entry");
+        let entry = s.data().ladder.action.expect("the entry action");
+        let after = crate::player::anim_gate::word(&entry).map(|w| ((w & 0xC) != 4) as usize).expect("the entry item's word");
+        s.pad(Vec3::ZERO, 0.0, false, false);
+        assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never waited");
+        assert_eq!(s.data().ladder.foot, after, "entry {:#x} item {}", entry.id, entry.item);
+    }
+}
+
 /// RE/24 LADDER-1 / LADDER-2: the ground entry is automatic: walking at the ladder 55° off its front mounts it once
 /// within 0.6 m (no 45° front test); free running (high profile with Legs held) never takes it.
 #[test]
