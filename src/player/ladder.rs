@@ -557,7 +557,7 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
                 let entry = super::climb::ClimbEntry {
                     // `HumanLadder__FillClimb_SideJump` 0xE20650 writes EntryType 2 (RE/19 §6.1, RE/24 CLIMB-24)
                     entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
-                    pose_2m: None,
+                    pose_2m: None, end_action: None,
                     hand_l: hl,
                     hand_r: hr,
                     foot_l: fl,

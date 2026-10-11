@@ -444,7 +444,7 @@ pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang:
     let (foot, hand) = (rows[fi]?, rows[hi]?);
     Some(super::climb::ClimbEntry {
         entry_type: super::climb::ClimbEntryType::FromLedge,
-        pose_2m: None,
+        pose_2m: None, end_action: None,
         hand_l: hand.point,
         hand_r: hand.point,
         foot_l: foot.point,
@@ -601,7 +601,7 @@ pub fn try_side_jump(
                 continue;
             }
             let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][long as usize * 4 + 2 + right as usize];
-            let [st, lp, _end] = entry.1;
+            let [st, lp, end] = entry.1;
             // category 0 (RE/24 LEDGE-14): the start in the Ledge context on its own displacement, the loop in the Climb
             // context with the linear interpolation to the climb pose (0xDD8290, as `try_jump_up_to_climb`)
             let seq = [single(st, 0), None, None, None];
@@ -632,7 +632,7 @@ pub fn try_side_jump(
             let _ = target;
             let climb = super::climb::ClimbEntry {
                 entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
-                pose_2m: None,
+                pose_2m: None, end_action: single(end, 0).map(|_| end),
                 hand_l: hl,
                 hand_r: hr,
                 foot_l: fl,
@@ -962,11 +962,11 @@ pub fn try_jump_up_to_climb(
         return None;
     }
     let entry = LEDGE_JUMP_TABLE[0][0];
-    let [start, lp, _end] = entry.1;
+    let [start, lp, end] = entry.1;
     // category 0 (RE/24 LEDGE-14): the start plays in the Ledge context, its own displacement moving the root
     // (`StartLedgeJump` 0xDDCE40 sets no interpolator); `FillClimb_AfterLedgeJump` 0xDD8290 then plays the loop in the
-    // Climb context, interpolating the root linearly to the climb pose (the climb entry's action). PORT: the end action
-    // (the climb wait's entry, ClimbData+96) is not played.
+    // Climb context, interpolating the root linearly to the climb pose (the climb entry's action); the end (ClimbData+108,
+    // `end_action`) plays in the climb's Wait state when that ends (+2916, `PlayReachEnd` 0xDE9B50; RE/24 CLIMB-24).
     let seq = [single(start, 0), None, None, None];
     let durations = seq_durations(&seq);
     let found = durations.iter().sum::<f32>() > 0.0;
@@ -994,7 +994,7 @@ pub fn try_jump_up_to_climb(
     mv.to = mv.natural_end();
     let climb = super::climb::ClimbEntry {
         entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
-        pose_2m: None,
+        pose_2m: None, end_action: single(end, 0).map(|_| end),
         hand_l: upper.point,
         hand_r: upper.point,
         foot_l: lower.point,
@@ -1049,7 +1049,7 @@ pub fn try_free_hang_drop(
         let to = super::climb::climb_root_at(upper.point, upper.point, lower.point, lower.point, nn);
         let e = ClimbEntry {
             entry_type: ClimbEntryType::FromLedge,
-            pose_2m: None,
+            pose_2m: None, end_action: None,
             hand_l: upper.point,
             hand_r: upper.point,
             foot_l: lower.point,

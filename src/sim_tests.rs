@@ -598,7 +598,7 @@ fn climb_at(x: f32, feet_y: f32, face_z: f32) -> Sim {
         let mut q = w.query::<(&mut Locomotion, &mut HumanDataBundle)>();
         let (mut loco, mut data) = q.get_mut(w, player).unwrap();
         let (hands, feet) = (Vec3::new(x, feet_y + 1.2, face_z), Vec3::new(x, feet_y, face_z));
-        let e = ClimbEntry { entry_type: ClimbEntryType::Default, pose_2m: None, hand_l: hands, hand_r: hands, foot_l: feet, foot_r: feet, normal: Vec3::NEG_Z, from_feet: from, foot_right: false, action: None };
+        let e = ClimbEntry { entry_type: ClimbEntryType::Default, pose_2m: None, end_action: None, hand_l: hands, hand_r: hands, foot_l: feet, foot_r: feet, normal: Vec3::NEG_Z, from_feet: from, foot_right: false, action: None };
         switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
     }
     s.run(0.5);
@@ -3437,7 +3437,7 @@ fn a_wall_hang_jumps_up_to_climb_holds_above() {
     s.pad(Vec3::Z, 1.0, false, false); // up
     let jumped = s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::JumpUpToClimb));
     assert!(jumped, "no jump up to climb: {}", s.data().ledge.last_action);
-    let [start, lp, _end] = LEDGE_JUMP_TABLE[0][0].1;
+    let [start, lp, end] = LEDGE_JUMP_TABLE[0][0].1;
     let mv = s.data().ledge.mv.unwrap();
     // the start plays in the Ledge context on its own displacement, the loop in the Climb context with the linear
     // interpolation to the climb pose (0xDDCE40 / 0xDD8290, RE/24 LEDGE-14)
@@ -3453,6 +3453,8 @@ fn a_wall_hang_jumps_up_to_climb_holds_above() {
     // the root reaches the climb pose
     assert!(s.run_until(2.0, |s| s.data().climb.moving.is_none()));
     assert!((s.body().feet - want).length() < 0.05, "root {:?} want {want:?}", s.body().feet);
+    // CLIMB-24: EntryType 2 (+2916) → `PlayReachEnd` 0xDE9B50 plays the end (ClimbData+108) in the Wait state
+    assert_eq!(s.data().climb.settle.map(|(id, _)| id), Some(end), "the end plays in the wait");
 }
 
 #[test]
@@ -4655,7 +4657,7 @@ fn climbing_down_past_the_lowest_holds_grabs_a_hang() {
         let foot = Vec3::new(hands.x, feet_y, hands.z);
         let e = ClimbEntry {
             entry_type: ClimbEntryType::Default,
-            pose_2m: None,
+            pose_2m: None, end_action: None,
             hand_l: hands,
             hand_r: hands,
             foot_l: foot,

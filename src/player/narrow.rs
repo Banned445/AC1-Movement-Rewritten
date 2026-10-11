@@ -1136,7 +1136,7 @@ fn climb_from_beam(feet: Vec3, facing: Vec3, foot_right: bool, guidance: &Guidan
             if !collision.capsule_cast_free(feet + Vec3::Y * 0.02, 1.8, 0.35, root - feet) { continue; }
             return Some(super::climb::ClimbEntry { entry_type: super::climb::ClimbEntryType::FromGround,
                 hand_l: hand.point, hand_r: hand.point, foot_l: foot.point, foot_r: foot.point,
-                normal: hand.wall_normal, from_feet: feet, foot_right, action: None, pose_2m: None });
+                normal: hand.wall_normal, from_feet: feet, foot_right, action: None, pose_2m: None, end_action: None });
         }
     }
     None

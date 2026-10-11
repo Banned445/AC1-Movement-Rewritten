@@ -112,7 +112,7 @@ pub fn ledge_search(
                 // the catch's Ledge fill (SubState 13) enters with type 1 and ClimbData+40 = the hands 0.3 m or more
                 // apart (0xE0CCC7; RE/24 AIR-15 / CLIMB-24). PORT: the Ledge step is skipped
                 entry_type: super::climb::ClimbEntryType::FromLedge,
-                pose_2m: Some((hl - hr).length() >= 0.3),
+                pose_2m: Some((hl - hr).length() >= 0.3), end_action: None,
                 hand_l: hl,
                 hand_r: hr,
                 foot_l: fl.point,

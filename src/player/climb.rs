@@ -47,6 +47,10 @@ pub struct ClimbEntry {
     /// ClimbData+40, the filler's pose flag (EntryPoseType): entry types 1 / 3 take pose 3 when set, else 0 (EnterCommon
     /// 0xDE97B0). `None`: the filler is not decoded; PORT: the feet more than 0.45 m apart stand in for it.
     pub pose_2m: Option<bool>,
+    /// ClimbData+108, an EntryType 2 entry's end action: `EnterCommon` sets +2916 for type 2, so when the entry's Move ends
+    /// `PlayReachEnd` 0xDE9B50 plays it in the Wait state (the ledge jumps' fill `FillClimb_AfterLedgeJump` 0xDD8290 copies
+    /// LedgeData+312..+327 to ClimbData+96..+111: +108 = the table entry's end; RE/24 CLIMB-24).
+    pub end_action: Option<u32>,
 }
 
 /// `HumanLedge__TryTransitionToClimb` 0xDD46A0: the hang → climb transition, by direction (table 0x1A2C520 up,
@@ -361,6 +365,8 @@ pub struct HumanClimbData {
     pub reach: Option<ClimbReach>,
     /// The reach's end action, playing in the Wait state (`HumanClimb__PlayReachEnd` 0xDE9B50), and its time left.
     pub settle: Option<(u32, f32)>,
+    /// +2916 with ClimbData+108 from an EntryType 2 entry: the end action played when the entry's Move ends.
+    pub entry_end: Option<u32>,
 }
 
 /// A reach from the climb onto other climb holds (type 0) or a ladder (type 3): the reach table entry's start plays in
@@ -399,6 +405,7 @@ impl HumanClimbData {
         self.pose = entry_pose(&e);
         self.last_action = "enter";
         self.look = None;
+        self.entry_end = e.end_action.filter(|_| e.entry_type == ClimbEntryType::FromLedgeParallelJump);
         if e.entry_type == ClimbEntryType::Default {
             // EnterCommon 0xDE97B0, EntryType 0: the Wait state with the pose-0 wait (`dword_1A2CC08`), the limb IK released
             // (+84 = 0), no root interpolation. PORT: the root is put on the pose at once (the game's callers place it)
@@ -465,6 +472,7 @@ impl HumanClimbData {
         self.hand_r = e.hand_r;
         self.hold_n = [e.normal; 4];
         self.hold_edge = [None; 4];
+        self.entry_end = None;
         self.tilt_from = Quat::IDENTITY;
         self.turn = None;
         self.ground_follow = None;
@@ -1407,6 +1415,12 @@ pub fn update_climb(
                     switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry.starting_at(body.feet)));
                     continue;
                 }
+                if let Some(end) = d.entry_end.take() {
+                    // EntryType 2 (+2916): PlayReachEnd 0xDE9B50 plays ClimbData+108 in the Wait state
+                    d.move_seq += 1;
+                    d.settle = Some((end, move_time(Some(end))));
+                    continue;
+                }
                 if let Some(r) = d.reach.as_mut() {
                     if r.stage == 0 {
                         // the start is done (State3_Update 0xDF5A70 → StartReachLoop 0xDEEE60): the loop and the root to
@@ -1837,6 +1851,7 @@ mod tests {
             foot_right: false,
             action: None,
             pose_2m,
+            end_action: None,
         };
         assert_eq!(entry_pose(&e(ClimbEntryType::FromLedge, Some(true))), 3);
         assert_eq!(entry_pose(&e(ClimbEntryType::FromLedge, Some(false))), 0, "the flag, not the spacing");
