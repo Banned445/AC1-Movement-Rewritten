@@ -973,7 +973,10 @@ pub fn update_air(
                         }
                     }
                     None => {
-                        // Non-target drift 0xE0F643–0xE0F707, constants 0x19BA434/438.
+                        // Non-target drift 0xE0F643–0xE0F707, constants 0x19BA434/438. PORT: the game drifts only while
+                        // `sub_503800`(0) == 1 (the low 3 bits of +36 of the main slot's ActionPlayer state, not the
+                        // item's displacement mode, which sits at item +56) and no BounceOffHuman deadline runs
+                        // (`sub_DFEEE0`, HumanInAir+0x1A8); what sets that field is not decoded (RE/24 AIR-21).
                         // 0x4F8C40: decay only without controller contacts. PORT: use the proxy manifold
                         // as the native contact-list adapter.
                         // PORT: a fall entered faster than the cap (a free jump at sprint speed, 6.3 m/s) decays onto it
@@ -1082,7 +1085,10 @@ pub fn update_air(
                     // `HumanInAir__AntiStuckNudge` 0xE0B1E0: after every landing check failed, a body held still (or
                     // sliding sideways on a contact) for 0.5 s is pushed out
                     let has_contacts = !body.proxy.manifold.is_empty();
-                    air.anti_stuck.update(dt, moved, air.target.is_some(), has_contacts, body.feet, body.forward(), |p| collision.capsule_fits(p))
+                    // the sideways case reads Data+505 (0xE0B73D), the target-driven part of a jump, which the flight's
+                    // end clears (0xE0F268): never set in the Fall mode, even with the target kept for the tail
+                    // (RE/24 AIR-21)
+                    air.anti_stuck.update(dt, moved, false, has_contacts, body.feet, body.forward(), |p| collision.capsule_fits(p))
                 }) {
                     body.velocity = v;
                 } else if !AIR_CATCHES && grasp && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
