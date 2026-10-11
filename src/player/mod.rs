@@ -137,16 +137,20 @@ pub struct RootInterp {
     pub to: Vec3,
     pub t: f32,
     pub duration: f32,
+    /// The root arrives at `to` after this long and holds there for the rest of `duration` (the game's RootInterp has its
+    /// own length, shorter than the action it runs under: the catches' item 0 + 0.2 s, 0xE0DB5C). `duration` by default.
+    pub reach: f32,
 }
 
 impl RootInterp {
     pub fn new(from: Vec3, to: Vec3, duration: f32) -> Self {
-        Self { from, to, t: 0.0, duration: duration.max(1e-3) }
+        let duration = duration.max(1e-3);
+        Self { from, to, t: 0.0, duration, reach: duration }
     }
     /// Advance; returns (position, progress 0..1).
     pub fn advance(&mut self, dt: f32) -> (Vec3, f32) {
         self.t = (self.t + dt).min(self.duration);
-        let s = self.t / self.duration;
+        let s = (self.t / self.reach.clamp(1e-3, self.duration)).min(1.0);
         (self.from.lerp(self.to, s), s)
     }
     pub fn done(&self) -> bool {

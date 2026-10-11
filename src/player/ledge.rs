@@ -139,6 +139,17 @@ pub fn action_time(id: u32) -> f32 {
 /// How long a catch holds the hang: both items of the catch action are locked (word 0x0FE0), and
 /// `HumanLedge__Movement_ChooseAction` 0xDE29E0 starts no move while the playing item is locked. The wall catch
 /// takes its straight clips (PORT: the port's ledges are straight, as the animator plays them).
+/// The catches' root interpolation (`HumanInAir__CheckAirCatch` 0xE0DB5C): the length of the item playing once the catch
+/// starts (`sub_502590`(0), item 0) + 0.2 s, linear (mode 0). The catch action itself plays on to its end.
+pub fn catch_root_time(id: u32) -> f32 {
+    use super::jump_blend::{action_items, ActionBlend};
+    let t = action_items(id).and_then(|items| items.first().map(|c| {
+        let w: Vec<f32> = (0..c.len()).map(|k| if k == 0 { 1.0 } else { 0.0 }).collect();
+        ActionBlend::new(id, 0, &w).duration()
+    })).unwrap_or(0.0);
+    if t > 0.0 { t + 0.2 } else { GRAB_TIME }
+}
+
 pub fn catch_time(wall: bool, long: bool) -> f32 {
     use super::jump_blend::{action_items, ActionBlend};
     let id = if wall { ACT_CATCH_WALL[long as usize] } else { ACT_CATCH_FREE[long as usize] };
@@ -513,12 +524,16 @@ pub fn update_ledge(
             d.hang_set = true;
         }
         if let Some(long) = d.catch.take() {
+            let id = d.catch_action.unwrap_or(if d.hang_type == LedgeHangType::Wall { ACT_CATCH_WALL[long as usize] } else { ACT_CATCH_FREE[long as usize] });
             let t = match d.catch_action {
                 Some(id) => action_time(id),
                 None => catch_time(d.hang_type == LedgeHangType::Wall, long),
             };
             if let Some(m) = d.moves.first_mut() {
+                // the catch lasts its action; the root arrives after item 0 + 0.2 s (0xE0DB5C), not over the whole action
+                // (it slid onto the hold for a second, bug-1791711526)
                 m.duration = t;
+                m.reach = catch_root_time(id).min(t);
             }
         }
         // the limb IK runs only in some sub-states (`sub_DCD910` from `HumanLedge__Update` 0xDE3EC8): elsewhere the
@@ -815,7 +830,12 @@ pub fn update_ledge(
                     let first_left = !d.alt_flag;
                     d.alt_flag = !d.alt_flag;
                     if first_left { d.hand_l = tl } else { d.hand_r = tr }
-                    let mid_root = (body.feet + hang_root_at(tl, tr, n, d.hang_type, &collision)) * 0.5;
+                    // the root from the two hand targets as they stand after the first hand (`ComputeRootFromHandTargets`
+                    // 0xDD6730): a free hang hangs from the higher hand (max − 2.4), so a step up lifts the body the
+                    // whole step and the reaching hand gets to its hold; a wall hang's vertical step reads the lower hand
+                    // (min − 1.1) and waits for the second. The halfway root left the reaching arm 0.4 m short of its hold
+                    // (bug-1791711547)
+                    let mid_root = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
                     d.vstep = Some((first_left, false));
                     let first_time = match (d.hang_type, sign > 0.0) {
                         (LedgeHangType::Wall, true) => VSTEP_TIME,

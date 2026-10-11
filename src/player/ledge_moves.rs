@@ -78,6 +78,7 @@ pub fn rebound_move(from: Vec3, n: Vec3, jd: Vec3, hand_l: Vec3, hand_r: Vec3) -
         follow_disp: false,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: false,
         end_wall: true,
         end_stand: false,
@@ -220,6 +221,9 @@ pub struct LedgeMove {
     /// (`sub_DD8550` → `sub_711130` in spline mode over the loop's blended duration); any later item holds it there
     /// (the end action is the hang idle's entry, `sub_DCF280`). None: `follow_disp` / the interpolator as usual.
     pub table: Option<(usize, usize)>,
+    /// The receptions' root (`HumanInAir__PlayLedgeReception` 0xE02BA0, `sub_711130` mode 0): linear onto `to` over this
+    /// long, then held while the actions play on (overrides `follow_disp` and the interpolator). None: as above.
+    pub root_time: Option<f32>,
     /// The move ends in a free hang whatever the wall below (the hop, 0xDDAB00 sets LedgeHangType 1).
     pub end_free: bool,
     /// The move ends in a wall hang (free → wall switch, wall receptions).
@@ -273,7 +277,9 @@ impl LedgeMove {
         let total = self.duration();
         self.t = (self.t + dt).min(total);
         let s = self.t / total;
-        let p = if let Some((k, m)) = self.table {
+        let p = if let Some(rt) = self.root_time {
+            self.from.lerp(self.to, (self.t / rt.max(1e-3)).min(1.0))
+        } else if let Some((k, m)) = self.table {
             let to_world = |d: [f32; 3]| right_of(self.facing_from) * d[0] + self.facing_from * d[1] + Vec3::Y * d[2];
             let t_start: f32 = self.durations.iter().take(k).sum();
             let t_loop: f32 = self.durations.iter().skip(k).take(m).sum();
@@ -525,6 +531,7 @@ pub fn try_corner(
         follow_disp: false,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: hang == LedgeHangType::Free,
         end_wall: hang == LedgeHangType::Wall,
         end_stand: false,
@@ -600,6 +607,7 @@ pub fn try_side_jump(
                 follow_disp: false,
                 lead: 0.0,
                 table: Some((1, 0)),
+                root_time: None,
                 end_free: false,
                 end_wall: false,
                 end_stand: false,
@@ -648,6 +656,7 @@ pub fn try_side_jump(
             follow_disp: false,
             lead: 0.0,
             table: found.then_some((1, 1)),
+            root_time: None,
             end_free: new_hang == LedgeHangType::Free,
             end_wall: new_hang == LedgeHangType::Wall,
             end_stand: false,
@@ -751,6 +760,7 @@ pub fn try_climb_reach(
         follow_disp: found,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: ty == 2,
         end_wall: ty == 1,
         end_stand: false,
@@ -807,6 +817,7 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
         follow_disp: false,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: true,
         hand_l: hl,
         hand_r: hr,
@@ -867,6 +878,7 @@ pub fn try_swing_back(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: Led
             follow_disp: false,
             lead: da,
             table: None,
+            root_time: None,
             end_free: true,
             end_wall: false,
             end_stand: false,
@@ -941,6 +953,7 @@ pub fn try_jump_up_to_climb(
         follow_disp: false,
         lead: 0.0,
         table: Some((1, 0)),
+        root_time: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1051,6 +1064,7 @@ pub fn try_free_hang_drop(
         follow_disp: false,
         lead: da,
         table: None,
+        root_time: None,
         end_free: false,
         end_wall: true,
         end_stand: false,
@@ -1116,6 +1130,7 @@ pub fn try_side_jump_to_ladder(
         follow_disp: false,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1181,6 +1196,7 @@ pub fn try_side_to_ladder(
             follow_disp: false,
             lead: 0.0,
             table: None,
+            root_time: None,
             end_free: false,
             end_wall: false,
             end_stand: false,
@@ -1251,6 +1267,7 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
         follow_disp: found,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1294,6 +1311,7 @@ pub fn knee_catch_moves(action: u32, from: Vec3, edge: Vec3, n: Vec3) -> (LedgeM
         follow_disp: false,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1408,8 +1426,8 @@ pub fn hang_jump_in_beam(dz: f32, wall: bool) -> Option<HangJumpIn> {
 
 /// The free-hang jump (0x80) that finds foot holds (0xE07D00 → `HumanInAir__PlayLedgeReception` 0xE02BA0 with
 /// `RECEPTION_WALL_OTHER` instead of `RECEPTION_SURFACE_WALL`): the wall reception's actions swapped for it, same clip
-/// weights (`wall_reception_weights`). PORT: the game times the reception's root interpolation to 0.1666 s; the port
-/// keeps the clips' own durations.
+/// weights (`wall_reception_weights`). The action plays with a 0.1666 s blend and the root goes linearly onto the hang
+/// in those 0.1666 s (0xE0949A -> 0xE02BA0 a12; bug-1791711526).
 pub fn use_free_jump_wall_reception(m: &mut LedgeMove, w: [f32; 6]) {
     let item = |i: usize| jump_blend::action_items(RECEPTION_WALL_OTHER).filter(|it| it.len() > i).map(|_| ActionBlend::new(RECEPTION_WALL_OTHER, i, &w));
     let seq = [item(0), item(1), None, None];
@@ -1418,6 +1436,7 @@ pub fn use_free_jump_wall_reception(m: &mut LedgeMove, w: [f32; 6]) {
         m.seq = seq;
         m.durations = durations;
     }
+    m.root_time = Some(0.1666);
 }
 
 /// How a jump at a ledge is received when it arrives (CheckJumpTargetArrival 0xE07D00).
@@ -1492,6 +1511,13 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
     };
     let durations = seq_durations(&seq);
     let found = durations.iter().sum::<f32>() > 0.0;
+    // the running jump's receptions move the root linearly over the first item (0xE02BA0 with a12 = -1: item 0's weighted
+    // clip length; the swing: `sub_501C90`(0), 0xE09623), not along the clips over the whole action (bug-1791711526).
+    // The straight jump's receptions keep the clip path (0xE08DD7: anim mode over the playing item).
+    let root_time = match arr {
+        LedgeArrival::Surface { .. } if found => Some(durations[0].max(1e-3)),
+        _ => None,
+    };
     LedgeMove {
         kind: MoveKind::Arrival,
         seq,
@@ -1504,6 +1530,7 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
         follow_disp: found,
         lead: 0.0,
         table: None,
+        root_time,
         end_free,
         end_wall: false,
         end_stand,
@@ -1541,6 +1568,7 @@ pub fn climb_jump_move(from: Vec3, cur_hands: Vec3, hand_l: Vec3, hand_r: Vec3, 
         follow_disp: found,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: true,
         end_wall: false,
         end_stand: false,
@@ -1577,6 +1605,7 @@ pub fn climb_to_hang_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, actio
         follow_disp: false,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: hang != LedgeHangType::Wall,
         end_wall: hang == LedgeHangType::Wall,
         end_stand: false,
@@ -1632,6 +1661,7 @@ pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3
             follow_disp: found,
             lead: 0.0,
             table: None,
+            root_time: None,
             end_free: false,
             end_wall: false,
             end_stand,
@@ -1690,6 +1720,7 @@ pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec
         follow_disp: false,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: !to_wall,
         end_wall: to_wall,
         end_stand: false,
@@ -1724,6 +1755,7 @@ pub fn wallfree_to_wall_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) ->
         follow_disp: d > 0.0,
         lead: 0.0,
         table: None,
+        root_time: None,
         end_free: false,
         end_wall: true,
         end_stand: false,
@@ -1825,6 +1857,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
             follow_disp: false,
             lead: 0.0,
             table: None,
+            root_time: None,
             end_free: false,
             end_wall: false,
             end_stand: false,
@@ -1849,6 +1882,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
             follow_disp: false,
             lead: 0.0,
             table: None,
+            root_time: None,
             end_free,
             end_wall,
             end_stand: false,
