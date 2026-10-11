@@ -136,6 +136,17 @@ fn refs_in(payload: &[u8], pred: impl Fn(u32) -> bool) -> Vec<u32> {
     out
 }
 
+/// Only the movement skeleton (`UCMA_Altair` in Rank 9), the same bones `load_altair` returns, without the meshes and
+/// textures: the simulation's pose (`bone_pose`).
+pub fn load_skeleton(game_dir: &Path) -> Result<Vec<SkelBone>, String> {
+    let path = game_dir.join("DataPC.forge");
+    let mut forge = Forge::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let entry = forge.find("Rank 9").cloned().ok_or("file 'Rank 9' not found in DataPC.forge")?;
+    let res = forge.resources(&entry).map_err(|e| e.to_string())?;
+    let r = res.iter().find(|r| r.name == "UCMA_Altair" && r.class_hash == crc32("Skeleton")).ok_or("skeleton UCMA_Altair not found")?;
+    Ok(parse_skeleton(&r.payload))
+}
+
 pub fn load_altair(game_dir: &Path) -> Result<AltairModel, String> {
     let path = game_dir.join("DataPC.forge");
     let mut forge = Forge::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;

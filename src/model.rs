@@ -36,7 +36,7 @@ pub struct ModelPlugin;
 impl Plugin for ModelPlugin {
     fn build(&self, app: &mut App) {
         crate::character_material::install(app);
-        app.init_resource::<ModelStatus>().add_systems(PostStartup, attach_altair)
+        app.init_resource::<ModelStatus>().init_resource::<crate::bone_pose::PoseSkeleton>().add_systems(PostStartup, attach_altair)
             .add_systems(PostUpdate, crate::cloth::update_cloth.after(bevy::transform::TransformSystems::Propagate));
         // PORT: use the final Bevy leg pose for secondary targets; native task ordering remains unported.
         const ROBE_POSE_AFTER_IK: bool = true;
@@ -65,6 +65,7 @@ fn attach_altair(
     mut images: ResMut<Assets<Image>>,
     mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
     mut status: ResMut<ModelStatus>,
+    mut pose_skeleton: ResMut<crate::bone_pose::PoseSkeleton>,
     player: Query<Entity, With<Player>>,
     mut placeholders: Query<&mut Visibility, With<PlaceholderBody>>,
 ) {
@@ -83,6 +84,8 @@ fn attach_altair(
     };
 
     // ---------------------------------------------------------------- skeleton → joint entities
+    // the animation step poses these bones as data (`bone_pose`); the joints below copy that pose
+    *pose_skeleton = crate::bone_pose::PoseSkeleton::from_bones(&model.skeleton);
     let root_t = skeleton_root(model.min_z);
     let root = commands.spawn((root_t, Visibility::default(), Name::new("skeleton_root"))).id();
     commands.entity(player).add_child(root);

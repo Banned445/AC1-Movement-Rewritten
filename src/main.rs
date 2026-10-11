@@ -5,6 +5,7 @@
 //! code or assets are included. Game assets will be loaded at runtime from the user's own install.
 
 mod anim;
+mod bone_pose;
 mod assets;
 mod camera;
 mod collision;

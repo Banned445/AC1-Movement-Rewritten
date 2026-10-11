@@ -15,6 +15,7 @@ use crate::assets::ac_actions::{ActBlend, ActionGraph, DisplacementMode};
 use crate::assets::ac_anim::{AnimEvent, EventKind, CONTACT_HUMAN};
 use crate::assets::anims::load_locomotion;
 use crate::assets::game_dir;
+use crate::bone_pose::{BonePose, PoseSkeleton};
 use crate::model::Rig;
 use crate::player::move_blend::ACT_GROUND_LOCOMOTION;
 use crate::player::{ground::speed_band, ground::SpeedBand, ActorContextId, HumanDataBundle, Locomotion};
@@ -268,8 +269,9 @@ fn extend_next_on<'a>(s: &mut ContactState, cur: &AnimClip, later: impl Iterator
     }
 }
 
-/// Playback state on the player.
+/// Playback state on the player. Its pose goes to the `BonePose` beside it (`animate_pose`).
 #[derive(Component, Default)]
+#[require(crate::bone_pose::BonePose)]
 pub struct AnimPlayer {
     /// Identity of what is playing (clip name or `act_xxxxxxxx`).
     pub clip: Option<String>,
@@ -425,9 +427,9 @@ impl AnimPlayer {
 }
 
 /// Blend the overlay's pose over the full-body pose on its bones; advances it by `dt`.
-fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, rig: &Rig, pose: &mut [(Quat, Vec3)], dt: f32) {
-    if o.mask.len() != rig.bone_ids.len() {
-        o.mask = rig.bone_ids.iter().map(|b| o.bones.contains(b)).collect();
+fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, skel: &PoseSkeleton, pose: &mut [(Quat, Vec3)], dt: f32) {
+    if o.mask.len() != skel.bone_ids.len() {
+        o.mask = skel.bone_ids.iter().map(|b| o.bones.contains(b)).collect();
     }
     let Some(it) = o.items.get(o.item).cloned() else { return };
     let duration = lib.item_duration(&it).max(1e-3);
@@ -446,7 +448,7 @@ fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, rig: &Rig, pose: &mut [(Qua
     }
     o.weight = if o.ending { (o.weight - dt / OVERLAY_FADE).max(0.0) } else { (o.weight + dt / OVERLAY_FADE).min(1.0) };
     let mut ov = Vec::new();
-    sample_layers(lib, rig, &o.items[o.item].layers, o.items[o.item].clip_phase(o.phase), &mut ov);
+    sample_layers(lib, skel, &o.items[o.item].layers, o.items[o.item].clip_phase(o.phase), &mut ov);
     blend_masked(pose, &ov, &o.mask, o.weight);
 }
 
@@ -483,8 +485,9 @@ pub struct AnimPlugin;
 impl Plugin for AnimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AnimLibrary>()
+            .init_resource::<crate::bone_pose::PoseSkeleton>()
             .add_systems(Startup, load_library)
-            .add_systems(Update, (choose_clip, apply_clip).chain().after(crate::player::PlayerSet));
+            .add_systems(Update, (choose_clip, animate_pose, apply_clip).chain().after(crate::player::PlayerSet));
     }
 }
 
@@ -1257,9 +1260,9 @@ pub fn root_motion_offset(clip: &AnimClip, phase: f32) -> Vec3 {
 /// Weighted pose of a layer set at normalised phase `phase`: per bone (rotation, translation). The item evaluator
 /// (`sub_777AE0` 0x777DD3–0x777EF8) blends the active clips pairwise in index order, clip i in with the factor
 /// wᵢ / Σⱼ≤ᵢ wⱼ (rotations by `qinterp`); clips of weight ≤ 0.0005 are skipped (0x777B5C) (RE/24 ANIM-15 / ANIM-9).
-fn sample_layers(lib: &AnimLibrary, rig: &Rig, layers: &[(String, f32)], phase: f32, out: &mut Vec<(Quat, Vec3)>) {
+fn sample_layers(lib: &AnimLibrary, skel: &PoseSkeleton, layers: &[(String, f32)], phase: f32, out: &mut Vec<(Quat, Vec3)>) {
     out.clear();
-    out.extend(rig.rest.iter().map(|r| (r.rotation, r.translation)));
+    out.extend(skel.rest.iter().map(|r| (r.rotation, r.translation)));
     let mut total = 0.0f32;
     for (name, w) in layers {
         if *w <= 0.0005 {
@@ -1269,9 +1272,9 @@ fn sample_layers(lib: &AnimLibrary, rig: &Rig, layers: &[(String, f32)], phase: 
         let t = phase * c.duration;
         total += *w;
         let f = *w / total;
-        for (i, bone) in rig.bone_ids.iter().enumerate() {
-            let r = c.rotations.get(bone).map(|k| sample_rot(k, t)).unwrap_or(rig.rest[i].rotation);
-            let p = c.translations.get(bone).map(|k| sample_vec(k, t)).unwrap_or(rig.rest[i].translation);
+        for (i, bone) in skel.bone_ids.iter().enumerate() {
+            let r = c.rotations.get(bone).map(|k| sample_rot(k, t)).unwrap_or(skel.rest[i].rotation);
+            let p = c.translations.get(bone).map(|k| sample_vec(k, t)).unwrap_or(skel.rest[i].translation);
             let acc = &mut out[i];
             if f >= 1.0 {
                 *acc = (r, p);
@@ -1282,15 +1285,21 @@ fn sample_layers(lib: &AnimLibrary, rig: &Rig, layers: &[(String, f32)], phase: 
     }
 }
 
-pub fn apply_clip(
+/// The animation step: advances each player's actions and samples the pose into its `BonePose` (the renderer copies
+/// it in `apply_clip`; the simulation reads it the next frame, `bone_pose`).
+pub fn animate_pose(
     time: Res<Time>,
     lib: Res<AnimLibrary>,
-    mut q: Query<(&Rig, &mut AnimPlayer, &crate::player::Body)>,
-    mut joints: Query<&mut Transform>,
+    skel: Res<PoseSkeleton>,
+    mut q: Query<(&mut AnimPlayer, &crate::player::Body, &mut BonePose)>,
     mut cur: Local<Vec<(Quat, Vec3)>>,
 ) {
     let dt = time.delta_secs();
-    for (rig, mut p, body) in &mut q {
+    if skel.is_empty() {
+        return;
+    }
+    let skel = &*skel;
+    for (mut p, body, mut bone) in &mut q {
         if p.clip.is_none() || p.items.is_empty() {
             continue;
         }
@@ -1400,12 +1409,13 @@ pub fn apply_clip(
             if let Some((items, ai, aph, _)) = p.a_roll.as_ref() {
                 if let Some(it) = items.get(*ai) {
                     let mut a_pose = Vec::new();
-                    sample_layers(&lib, rig, &it.layers, it.clip_phase(*aph), &mut a_pose);
+                    sample_layers(&lib, skel, &it.layers, it.clip_phase(*aph), &mut a_pose);
                     p.prev = Some(a_pose);
                 }
             }
         }
-        if let Ok(mut root) = joints.get_mut(rig.root) {
+        {
+            let root = &mut bone.root;
             *root = anim_root();
             if !p.looping && item.root_motion {
                 let mut off = Vec3::ZERO;
@@ -1430,12 +1440,12 @@ pub fn apply_clip(
             }
             p.last_root = root.translation;
         }
-        sample_layers(&lib, rig, &item.layers, item.clip_phase(p.phase), &mut cur);
+        sample_layers(&lib, skel, &item.layers, item.clip_phase(p.phase), &mut cur);
         let prev = if fading { p.prev.take() } else { None };
         let empty = Vec::new();
         let prev_pose = prev.as_ref().filter(|v| v.len() == cur.len()).unwrap_or(&empty);
         let mut shown = std::mem::take(&mut p.last_pose);
-        let mut base: Vec<(Quat, Vec3)> = (0..rig.joints.len())
+        let mut base: Vec<(Quat, Vec3)> = (0..skel.bone_ids.len())
             .map(|i| {
                 let (rot, pos) = cur[i];
                 match prev_pose.get(i) {
@@ -1445,7 +1455,7 @@ pub fn apply_clip(
             })
             .collect();
         if let Some(o) = p.overlay.as_mut() {
-            apply_overlay(o, &lib, rig, &mut base, dt);
+            apply_overlay(o, &lib, skel, &mut base, dt);
         }
         if p.overlay.as_ref().is_some_and(|o| o.ending && o.weight <= 0.0) {
             p.overlay = None;
@@ -1454,22 +1464,41 @@ pub fn apply_clip(
         if let Some(th) = std::env::var("AC_POP_LOG").ok().and_then(|v| v.parse::<f32>().ok()) {
             let worst = shown.iter().zip(&base).enumerate().map(|(i, (a, b))| (i, a.0.angle_between(b.0).to_degrees())).fold((0, 0.0f32), |m, x| if x.1 > m.1 { x } else { m });
             if shown.len() == base.len() && worst.1 > th {
-                info!("pop {:.1} deg joint {} (bone {:08x}) clip {:?} item {} phase {:.3} fade {:.2}", worst.1, worst.0, rig.bone_ids[worst.0], p.clip, p.item, p.phase, p.fade);
+                info!("pop {:.1} deg joint {} (bone {:08x}) clip {:?} item {} phase {:.3} fade {:.2}", worst.1, worst.0, skel.bone_ids[worst.0], p.clip, p.item, p.phase, p.fade);
             }
         }
         shown.clear();
-        for (i, e) in rig.joints.iter().enumerate() {
-            let (rot, pos) = base[i];
+        for (i, &(rot, pos)) in base.iter().enumerate() {
             shown.push((rot, pos));
-            let Ok(mut tr) = joints.get_mut(*e) else { continue };
             if !(rot.is_finite() && pos.is_finite()) && std::env::var_os("AC_NAN_LOG").is_some() {
-                warn!("non-finite joint {i} (bone {:08x}) clip {:?} item {} phase {:.3} fade {:.3} layers {:?}", rig.bone_ids[i], p.clip, p.item, p.phase, p.fade, item.layers);
+                warn!("non-finite joint {i} (bone {:08x}) clip {:?} item {} phase {:.3} fade {:.3} layers {:?}", skel.bone_ids[i], p.clip, p.item, p.phase, p.fade, item.layers);
             }
-            tr.rotation = rot;
-            tr.translation = pos;
         }
+        bone.locals.clear();
+        bone.locals.extend_from_slice(&base);
+        bone.compute_model(skel);
+        bone.seq += 1;
         p.last_pose = shown;
         p.prev = if p.fade >= 1.0 { None } else { prev };
+    }
+}
+
+/// The render step: copies the animation step's pose onto the rig's joints (IK, the bone modifiers and the sounds run
+/// after it).
+pub fn apply_clip(q: Query<(&Rig, &BonePose)>, mut joints: Query<&mut Transform>) {
+    for (rig, bone) in &q {
+        if bone.seq == 0 {
+            continue;
+        }
+        if let Ok(mut root) = joints.get_mut(rig.root) {
+            *root = bone.root;
+        }
+        for (e, &(rot, pos)) in rig.joints.iter().zip(&bone.locals) {
+            if let Ok(mut tr) = joints.get_mut(*e) {
+                tr.rotation = rot;
+                tr.translation = pos;
+            }
+        }
     }
 }
 
@@ -1713,3 +1742,7 @@ mod tests {
         assert_eq!(contact_state(&c, 0.4).bits >> 4 & 1, 1);
     }
 }
+
+#[cfg(test)]
+#[path = "anim_pose_tests.rs"]
+mod pose_tests;
