@@ -1819,6 +1819,9 @@ pub fn update_climb(
                 d.look = None;
                 d.last_action = "jump up";
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
+                // `HumanClimb__FillLedge_JumpToOverhang` 0xDF9650 enters the Entry state (+76 = 0): its end re-poses the
+                // hands from the hand bones (RE/24 LEDGE-22)
+                data.ledge.repose_at_entry_end = true;
                 continue;
             }
         }

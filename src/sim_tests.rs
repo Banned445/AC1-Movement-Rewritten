@@ -546,6 +546,37 @@ fn climb_jumps_up_to_an_overhang_when_the_holds_run_out() {
     assert!((hands.y - 3.5).abs() < 0.05 && (hands.z - 26.0).abs() < 0.05, "hands on the slab's outer edge: {hands:?}");
 }
 
+/// RE/24 LEDGE-22: the climb's jump up enters the Ledge's Entry state (+76 = 0, 0xDF9650), whose end re-poses the hands
+/// onto the edge under the animated hand bones (`HumanLedge__RePoseHandsFromBones` 0xDE1970): the clip's own grip, wider
+/// than the jump's two search hits.
+#[test]
+fn the_jump_up_ends_with_the_hands_under_the_hand_bones() {
+    use crate::bone_pose::{BonePose, PoseSkeleton, LEFT_HAND, RIGHT_HAND};
+    let mut s = Sim::new(Vec3::new(-22.0, 0.0, 26.5), FACE_PZ);
+    if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    walk_to_wall(&mut s, Vec3::Z, 2.0);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.press_hand();
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Climb));
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ledge), "never jumped");
+    let mv = s.data().ledge.mv.expect("the jump");
+    s.pad(Vec3::Z, 0.0, false, false);
+    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_none()), "jump never ended");
+    // the bones the re-pose read: last frame's pose at the root where it stands now (the pose is not stepped since)
+    let (pose, skel, b) = (s.app.world().get::<BonePose>(s.player).unwrap(), s.app.world().resource::<PoseSkeleton>(), s.body());
+    let (bl, br) = (pose.world_pos(skel, LEFT_HAND, b).unwrap(), pose.world_pos(skel, RIGHT_HAND, b).unwrap());
+    let (hl, hr) = (s.data().ledge.hand_l, s.data().ledge.hand_r);
+    for (h, bone) in [(hl, bl), (hr, br)] {
+        assert!((h.y - 3.5).abs() < 0.02 && (h.z - 26.0).abs() < 0.02, "on the slab's outer edge: {h:?}");
+        assert!((h.x - bone.x).abs() < 0.02, "under its bone: {h:?} {bone:?}");
+    }
+    assert!((hl - hr).length() > (mv.hand_l - mv.hand_r).length() + 0.05, "the clip's grip, not the search hits");
+}
+
 #[test]
 fn climb_grid_finds_holds_that_stick_out() {
     // BuildHoldGrid 0xDF6A40: the cell probe reaches 1.0 m both ways along the facing, so with the hands on wall K's
