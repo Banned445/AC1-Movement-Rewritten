@@ -526,14 +526,24 @@ fn pilotis_weights(l: f32) -> [f32; 3] {
     if l >= 0.0 { [1.0 - l, 0.0, l] } else { [1.0 + l, -l, 0.0] }
 }
 
-/// Movement event 72's guard 0xD9F4C0: a beam (guidance) in the box ahead of the feet: ±0.75 m sideways,
-/// 0–1.0 m ahead, ±0.53 m vertically (`sub_116E1A0`); the facing within 30° of the beam axis (straight entry,
-/// mode 2: |dot| ≥ 0.866, `TryMountBeam` 0xE52AD0). Side entries (mode 3) are not ported.
-pub fn try_mount_beam(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<BeamEntry> {
-    let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+/// Movement event 72's guard `HumanGround__Guard_Event72_MountBeam` 0xD9F4C0 (RE/24 NARROW-3), along the event's
+/// direction `dir` (the stick):
+/// - the query `sub_116E1A0`: the beams in the box ±0.75 m across, 0–1 m ahead, ±0.53 m up in the frame of `dir`,
+///   pieces within 90° of it, clipped to the box; the nearest piece;
+/// - the entry: the clipped piece's closest point to the root + 0.5 m along it (0xD9F640–0xD9F752);
+/// - clearance `sub_B2A070`: a box from the root to the entry, 1.1 m above the entry, half 0.25 across / 0.5 up / half
+///   the distance (0.1 when none);
+/// - the root within the beam's width + 0.5·(1 − clamp((beam − feet) / 0.53)) of the beam's vertical plane;
+/// - the root in the box (−(w + 0.5), −0.5, −0.5)…(w + 0.5, 1.0, 0.5) of the beam's frame (across, along, up) at the
+///   closest point (`sub_527EC0`).
+/// No facing / axis angle test: every angle is a mode-1 mount. PORT: the beam's width (`sub_116C8F0`) is 0.
+pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<BeamEntry> {
+    let f = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+    if f == Vec3::ZERO {
+        return None;
+    }
     let r = super::right_of(f);
-    // 0xD9F4C0's query box (sub_116E1A0 over HumanGuidance's report, the same query as 0xE0B890): ±0.75 m sideways,
-    // 0–1 m ahead, ±0.53 m vertically.
+    // 0xD9F4C0's query (sub_116E1A0 over HumanGuidance's report, the same query as 0xE0B890)
     let segments: Vec<(Vec3, Vec3)> = if NATIVE_BEAM_MOUNT && crate::tuning::AIR_CATCHES && !collision.triangles.is_empty() {
         let centre = feet + f * 0.5;
         crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs() * 0.75 + f.abs() * 0.5 + Vec3::Y * 0.53)
@@ -541,24 +551,67 @@ pub fn try_mount_beam(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, colli
     } else {
         guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::Beam).map(|e| (e.p0, e.p1)).collect()
     };
+    const W: f32 = 0.0;
+    let mut best: Option<(f32, Vec3, Vec3, Vec3, Vec3)> = None;
     for (p0, p1) in segments {
-        let e = crate::guidance::GuidanceEdge { p0, p1, n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::Beam };
-        let axis = Vec3::new(e.p1.x - e.p0.x, 0.0, e.p1.z - e.p0.z).normalize_or_zero();
-        let along = axis.dot(f);
-        if along.abs() < 0.866 {
+        let v = p1 - p0;
+        let flat = Vec3::new(v.x, 0.0, v.z);
+        if flat.length_squared() < 1e-8 || flat.dot(f).abs() < 1e-4 {
             continue;
         }
-        // the beam end nearest to the feet, a little onto the beam
-        let (start, toward_p1) = if along > 0.0 { (e.p0, true) } else { (e.p1, false) };
-        let d = start - feet;
-        let ahead = d.dot(f);
-        if !(0.0..=1.0).contains(&ahead) || d.dot(r).abs() > 0.75 || d.y.abs() > 0.53 {
+        // clip the piece to the box: x across ±0.75, y ahead 0..1, z up ±0.53 (relative to the feet)
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        for (axis, lo, hi) in [(r, -0.75f32, 0.75f32), (f, 0.0, 1.0), (Vec3::Y, -0.53, 0.53)] {
+            let a = (p0 - feet).dot(axis);
+            let d = v.dot(axis);
+            if d.abs() < 1e-6 {
+                if a < lo || a > hi {
+                    t0 = 1.0;
+                    t1 = 0.0;
+                }
+                continue;
+            }
+            let (ta, tb) = ((lo - a) / d, (hi - a) / d);
+            t0 = t0.max(ta.min(tb));
+            t1 = t1.min(ta.max(tb));
+        }
+        if t0 > t1 {
             continue;
         }
-        let point = start + if toward_p1 { axis } else { -axis } * 0.2;
-        return Some(BeamEntry { p0: e.p0, p1: e.p1, point, from: feet, toward_p1, mode: BeamEntryMode::Ground, foot: 0, action: None, facing: f });
+        let (c0, c1) = (p0 + v * t0, p0 + v * t1);
+        let seg = c1 - c0;
+        let k = if seg.length_squared() < 1e-10 { 0.0 } else { ((feet - c0).dot(seg) / seg.length_squared()).clamp(0.0, 1.0) };
+        let q = c0 + seg * k;
+        let dist = q.distance(feet);
+        if best.is_none_or(|b| dist < b.0) {
+            best = Some((dist, q, p0, p1, flat.normalize()));
+        }
     }
-    None
+    let (_, q, p0, p1, axis) = best?;
+    // the piece oriented along the event's direction
+    let along = if axis.dot(f) >= 0.0 { axis } else { -axis };
+    let point = q + along * 0.5;
+    // the clearance box from the root to the entry
+    let delta = Vec3::new(point.x - feet.x, 0.0, point.z - feet.z);
+    let (box_dir, half_len) = if delta.length() > 0.0005 { (delta.normalize(), delta.length() * 0.5) } else { (f, 0.1) };
+    let centre = Vec3::new(feet.x + delta.x * 0.5, point.y + 1.1, feet.z + delta.z * 0.5);
+    if !collision.obb_free(centre, [super::right_of(box_dir), Vec3::Y, box_dir], Vec3::new(0.25, 0.5, half_len)) {
+        return None;
+    }
+    // the root near the beam's vertical plane (the bound narrows as the beam rises above the feet)
+    let across = super::right_of(along);
+    let rel = feet - q;
+    let rise = ((q.y - feet.y) / 0.53).clamp(0.0, 1.0);
+    if rel.dot(across).abs() >= (1.0 - rise) * 0.5 + W {
+        return None;
+    }
+    // the root in the beam frame's box
+    let (x, y, z) = (rel.dot(across), rel.dot(along), rel.y);
+    if x.abs() > W + 0.5 || !(-0.5..=1.0).contains(&y) || z.abs() > 0.5 {
+        return None;
+    }
+    let toward_p1 = along.dot(p1 - p0) >= 0.0;
+    Some(BeamEntry { p0, p1, point, from: feet, toward_p1, mode: BeamEntryMode::Ground, foot: 0, action: None, facing: f })
 }
 
 /// 0xE0B890 (the beam test of `CheckAirCatch`, also used for the free-step arrival): a Beam edge in the box

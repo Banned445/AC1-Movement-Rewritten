@@ -1373,6 +1373,18 @@ fn a_released_stick_rebounds_only_if_it_last_pointed_at_the_wall() {
 }
 
 /// RE/24 NARROW-1: the beam walk's speed ramps toward the profile's band at 2 m/s² (the jog weight follows it); let go
+/// RE/24 NARROW-3: event 72 has no axis angle test: walking at the beam's start 45° off its axis still mounts it, at the
+/// closest point + 0.5 m along the beam.
+#[test]
+fn walking_at_a_beam_at_45_degrees_mounts_it() {
+    let d = Vec3::new(1.0, 0.0, 1.0).normalize();
+    let mut s = Sim::new(Vec3::new(70.6, 4.0, 68.8), crate::player::heading_of(d));
+    s.pad(d, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted: {:?} {:?}", s.loco().current, s.body().feet);
+    let n = &s.data().narrow;
+    assert!(n.toward_p1 && (n.p0.z - 70.0).abs() < 0.01, "on the beam, heading along it: {:?}", n.p0);
+}
+
 /// while jogging it plays the jog stop, while walking it settles into the wait.
 #[test]
 fn the_beam_walk_ramps_its_speed_and_stops_by_it() {

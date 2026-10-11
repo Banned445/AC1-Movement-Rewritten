@@ -1132,10 +1132,11 @@ pub fn update_ground(
         }
 
         // ---------------------------------------------------------------- beam (NarrowObject, event 72)
-        // Guard 0xD9F4C0: a beam in the box ahead (±0.75 m, 0–1 m, ±0.53 m). PORT trigger: walking at it (the
+        // Guard 0xD9F4C0 along the event's direction (the stick, RE/24 NARROW-3). PORT trigger: walking at it (the
         // decision layer's event 72 sender is not traced).
         if moving && !busy {
-            if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, body.forward(), &guidance, &collision) {
+            let event_dir = if pad.dir != Vec3::ZERO { pad.dir } else { body.forward() };
+            if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, event_dir, &guidance, &collision) {
                 // Mode 1 plays the beam walk (`sub_F7B3B0` 0xF7B619: 0x28A3A8E4), keeping the playing locomotion item's
                 // index (the foot), jog weights [0, 1] when the Ground runs (NarrowObjectData+228 = Ground+1500), else
                 // walk [1, 0] (RE/24 NARROW-2; RE/05 §2.12's "retains the incoming locomotion" was wrong). PORT: the
