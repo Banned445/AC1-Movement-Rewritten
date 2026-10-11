@@ -1299,6 +1299,30 @@ fn pressing_legs_on_the_wall_rebounds() {
     assert!(s.body().feet.z < z0 - 2.0, "pushed off away from the wall: {:?}", s.body().feet);
 }
 
+/// RE/24 WALL-10 / AIR-5: the push-off turns away from the wall and takes off with the rebound takeoff (jump kind 2);
+/// pushed off to the side, its side groups turn the character toward the push during the takeoff (no snap at takeoff).
+#[test]
+fn the_wall_rebound_takes_off_with_the_rebound_clips_and_turns_with_them() {
+    use crate::player::walling::WallingSubState;
+    let mut s = wall_run_at(82.0);
+    assert!(s.run_until(1.0, |s| s.data().walling.sub_state == WallingSubState::Vertical), "no vertical step");
+    // facing the wall (+Z); push off back and to the right of the facing-away direction (-Z), 45° toward -X
+    let push = (Vec3::NEG_Z + Vec3::NEG_X).normalize();
+    s.pad(push, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir), "no rebound");
+    assert!(crate::player::jump_blend::TAKEOFF_REBOUND.contains(&s.data().air.takeoff.unwrap().id), "takeoff {:#x}", s.data().air.takeoff.unwrap().id);
+    // the first frame faces away from the wall, not the push
+    let away = crate::player::heading_of(Vec3::NEG_Z);
+    let d = |h: f32| crate::player::ground::heading_delta(h, away).abs();
+    assert!(d(s.body().heading) < 0.3, "turned away from the wall at takeoff: {}", s.body().heading);
+    let toward = |h: f32| crate::player::ground::heading_delta(h, crate::player::heading_of(push)).abs();
+    let h0 = s.body().heading;
+    s.run(0.3);
+    assert!(d(s.body().heading) > 0.4 && toward(s.body().heading) < toward(h0) - 0.3, "the takeoff turned toward the push: {} -> {}", h0, s.body().heading);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
+}
+
 #[test]
 fn pressing_legs_with_the_stick_at_the_wall_rebounds_straight_back() {
     use crate::player::walling::WallingSubState;

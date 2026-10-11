@@ -15,6 +15,9 @@ pub const TAKEOFF_RUN: [u32; 2] = [0x0A4C_8C0E, 0x0A4C_8C0F];
 /// Free-step takeoff (jump kind 1: from a beam / pilotis / roof edge), [footl, footr]: same 40-clip layout,
 /// `xx_h_freestep_front_*_foot{l,r}_to_air` (0xB1EC40; pilotis jumps pass kind 1 to 0xB20200, 0xE4D950).
 pub const TAKEOFF_FREESTEP: [u32; 2] = [0x0112_B589, 0x0112_B5AC];
+/// The rebound takeoff (jump kind 2: `HumanWalling__ReboundJump` 0xE365C0, the ledge / climb rebounds), [footl, footr]
+/// (0xB1EC40 0xB1EE09: 0x1157C6A + (foot != 1) + 1; RE/24 AIR-5).
+pub const TAKEOFF_REBOUND: [u32; 2] = [0x0115_7C6B, 0x0115_7C6C];
 /// Flights by target type, [footl, footr].
 pub const FLIGHT_FREESTEP: [u32; 2] = [0x010D_DAFA, 0x010D_F0D8]; // 1, 0x10000, 0x100, 0x200, 0x400, haystack
 /// `Human__UseBeamFreestepJumpVariants` 0xB145B0 (from 0xB1EC40): a target more than 0.4 m below the start and a
@@ -52,7 +55,7 @@ pub const LAND_DAMAGE: u32 = 0x010D_D707;
 pub const LAND_DAMAGE_ROLL: u32 = 0x010D_D70B;
 
 pub const DUMPED_ACTIONS: &[u32] = &[
-    TAKEOFF_RUN[0], TAKEOFF_RUN[1], TAKEOFF_FREESTEP[0], TAKEOFF_FREESTEP[1],
+    TAKEOFF_RUN[0], TAKEOFF_RUN[1], TAKEOFF_FREESTEP[0], TAKEOFF_FREESTEP[1], TAKEOFF_REBOUND[0], TAKEOFF_REBOUND[1],
     FLIGHT_FREESTEP[0], FLIGHT_FREESTEP[1],
     // the flights to hang targets (wall hang / ladder: `…_to_surface`; free hang and the rest: `…_to_swing`)
     FLIGHT_SURFACE[0], FLIGHT_SURFACE[1], FLIGHT_SWING[0], FLIGHT_SWING[1],
@@ -189,12 +192,13 @@ pub struct JumpBlend {
 /// (hypothesis: character scale, 1 for Altaïr).
 #[allow(dead_code)]
 pub fn compute(dz: f32, dist: f32, target_type: u32, foot_left: bool, scale: f32) -> JumpBlend {
-    compute_kind(dz, dist, target_type, foot_left, scale, 0)
+    compute_kind(dz, dist, target_type, foot_left, scale, 0, 0.0)
 }
 
-/// `compute` for a jump kind (0 run, 1 free step): only the takeoff action differs for kinds 0 / 1 (both
-/// force the side angle to 0 and use the same band offset `o`, 0xB1EC40).
-pub fn compute_kind(dz: f32, dist: f32, target_type: u32, foot_left: bool, scale: f32, kind: u8) -> JumpBlend {
+/// `compute` for a jump kind (0 run, 1 free step, 2 rebound, 3 swing). `angle` = the signed angle from the start
+/// facing to the flat direction to the target, positive to the right (0xB1F593); kinds 0 and 4 force it to 0
+/// (0xB1F54B), kind 2 clamps it to ±89.94° (0xB1FAD4). It picks and blends the takeoff's side groups (RE/24 AIR-5).
+pub fn compute_kind(dz: f32, dist: f32, target_type: u32, foot_left: bool, scale: f32, kind: u8, angle: f32) -> JumpBlend {
     if target_type == TARGET_HAYSTACK && dz <= -FAITH_MIN_DROP {
         return faith(dz, dist, foot_left);
     }
@@ -224,8 +228,14 @@ pub fn compute_kind(dz: f32, dist: f32, target_type: u32, foot_left: bool, scale
     let mut fw = vec![0.0f32; n_flight.max(16)];
     let takeoff = match kind {
         1 => TAKEOFF_FREESTEP[(!foot_left) as usize],
+        2 => TAKEOFF_REBOUND[(!foot_left) as usize],
         3 => super::swing::TAKEOFF_SWING,
         _ => TAKEOFF_RUN[(!foot_left) as usize],
+    };
+    let angle = match kind {
+        0 | 4 => 0.0,
+        2 => angle.clamp(-1.569_796_3, 1.569_796_3),
+        _ => angle,
     };
     let mut tw = vec![0.0f32; 40];
     if target_type == 2 {
@@ -235,7 +245,7 @@ pub fn compute_kind(dz: f32, dist: f32, target_type: u32, foot_left: bool, scale
         return JumpBlend { takeoff, flight, takeoff_w: tw, flight_w: fw, h, d, class, down };
     }
     flight_weights(&mut fw, d, h, down, class, deep);
-    takeoff_weights(&mut tw, &fw, down, 0.0, class, deep);
+    takeoff_weights(&mut tw, &fw, down, angle, class, deep, kind);
     if kind == 3 {
         // the swing takeoff is one 8-clip group (0xB1EC40 kind 3 maps both side groups onto the front one)
         tw.truncate(8);
@@ -330,41 +340,88 @@ pub fn flight_weights(w: &mut [f32], d: f32, h: f32, down: bool, class: u8, deep
     }
 }
 
-/// 0xB13A60 for the front/right quadrant pair (angle ∈ [0, π/2)): the takeoff mirrors the flight's
-/// height/distance blend on its own 8-clip family, split between the front group (slots 0–7) and the
-/// right group (16–23) by the side angle. Group slots: 0–2 front 050/300/550, 3–5 down, 6–7 up.
-pub fn takeoff_weights(w: &mut [f32], f: &[f32], down: bool, angle: f32, class: u8, deep: bool) {
+/// 0xB1EC40's takeoff slots (0xB1FB09–0xB1FDB4): groups A and B of four slots by the distance class, the side angle's
+/// quadrant and the down flag; the 40-clip takeoffs hold five 8-clip groups (front, left, right, back-left, back-right;
+/// each front 050 / 300 / 550, down 050 / 300 / 550, up 050 / 300). Kind 2 (the 32-clip rebound takeoff: front-left,
+/// front-right, left, right) shifts B by 8, and A too for an angle ≥ 0; kind 3 (the swing) copies A into B.
+pub fn takeoff_slots(class: u8, down: bool, angle: f32, kind: u8) -> ([usize; 4], [usize; 4]) {
+    use std::f32::consts::FRAC_PI_2;
+    let (mut a, mut b): ([usize; 4], [usize; 4]) = match class {
+        0 => {
+            let (lo, hi) = if down { (3, 4) } else { (6, 7) };
+            let g = |base: usize| [base, base + 1, base + lo, base + hi];
+            if angle >= 0.0 {
+                if angle >= FRAC_PI_2 { (g(16), g(32)) } else { (g(0), g(16)) }
+            } else if angle <= -FRAC_PI_2 {
+                (g(8), g(24))
+            } else {
+                (g(0), g(8))
+            }
+        }
+        1 => {
+            let g = |base: usize| [base + 1, base + 2, base + 7, base + 7];
+            if angle < 0.0 {
+                if angle <= -FRAC_PI_2 { (g(8), g(24)) } else { (g(0), g(8)) }
+            } else if angle < FRAC_PI_2 {
+                (g(0), g(16))
+            } else {
+                (g(16), g(32))
+            }
+        }
+        _ => {
+            let g = |base: usize| [base + 1, base + 2, base + 4, base + 5];
+            if angle < 0.0 {
+                if angle <= -FRAC_PI_2 { (g(8), g(24)) } else { (g(0), g(8)) }
+            } else if angle < FRAC_PI_2 {
+                (g(0), g(16))
+            } else {
+                (g(16), g(32))
+            }
+        }
+    };
+    match kind {
+        2 => {
+            b.iter_mut().for_each(|s| *s += 8);
+            if angle >= 0.0 {
+                a.iter_mut().for_each(|s| *s += 8);
+            }
+        }
+        3 => b = a,
+        _ => {}
+    }
+    (a, b)
+}
+
+/// `Human__ComputeJumpTakeoffWeights` 0xB13A60: the takeoff mirrors the flight's height / distance blend on its own
+/// clip family, split between groups A and B (`takeoff_slots`) by t = (|angle| mod 90°) / 90°. A's slots are set, B's
+/// added to (so a kind-3 takeoff, B = A, sums back). Class 0: (f0, f1, then down f3 / f4 or up f7 / f8), with f9 / f10
+/// for f0 / f1 when deep and down; other classes: (f1, f2 + f6, then class 1 f8 twice, else f4 / f5). RE/24 AIR-5.
+pub fn takeoff_weights(w: &mut [f32], f: &[f32], down: bool, angle: f32, class: u8, deep: bool, kind: u8) {
     w.iter_mut().for_each(|x| *x = 0.0);
     let mut a = angle.abs();
     if a >= std::f32::consts::FRAC_PI_2 {
         a -= std::f32::consts::FRAC_PI_2;
     }
     let t = a / std::f32::consts::FRAC_PI_2;
-    let (ga, gb) = (0usize, 16usize); // front, right (port: kind 0 only)
+    let (sa, sb) = takeoff_slots(class, down, angle, kind);
     let (v18, v19, v20) = if deep && down { (9, 10, 11) } else { (0, 1, 2) };
-    let mut put = |slot: usize, v: f32| {
-        w[ga + slot] = v * (1.0 - t);
-        w[gb + slot] += v * t;
-    };
-    if class != 0 {
-        // A = (front300, front550, up300/up300 or down300/down550)
-        put(1, f[v19]);
-        put(2, f[v20] + f[6]);
-        if class == 1 {
-            put(7, f[8]);
-        } else {
-            put(4, f[4]);
-            put(5, f[5]);
-        }
+    let vals: [f32; 4] = if class != 0 {
+        if class == 1 { [f[v19], f[v20] + f[6], f[8], f[8]] } else { [f[v19], f[v20] + f[6], f[4], f[5]] }
+    } else if down {
+        [f[v18], f[v19], f[3], f[4]]
     } else {
-        put(0, f[v18]);
-        put(1, f[v19]);
-        if down {
-            put(3, f[3]);
-            put(4, f[4]);
-        } else {
-            put(6, f[7]);
-            put(7, f[8]);
+        [f[v18], f[v19], f[7], f[8]]
+    };
+    for k in 0..4 {
+        // class 1 copies slot 2 into slot 3 (the same clip): written once
+        if class == 1 && k == 3 {
+            break;
+        }
+        if sa[k] < w.len() {
+            w[sa[k]] = vals[k] * (1.0 - t);
+        }
+        if sb[k] < w.len() {
+            w[sb[k]] += vals[k] * t;
         }
     }
 }
@@ -541,6 +598,28 @@ pub fn item_disp(clips: &[&str], w: &[f32], phase: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RE/24 AIR-5: 0xB1EC40's takeoff groups. A run jump (angle 0) blends front and right, a side angle to the left
+    /// picks front and left, beyond 90° the back groups; the rebound (kind 2) shifts to its front-right / right groups for
+    /// a target to the right and keeps front-left / left (B + 8) to the left; the swing (kind 3) copies A into B.
+    #[test]
+    fn the_takeoff_groups_follow_the_side_angle_and_the_kind() {
+        assert_eq!(takeoff_slots(0, false, 0.0, 0), ([0, 1, 6, 7], [16, 17, 22, 23]));
+        assert_eq!(takeoff_slots(0, true, -0.5, 1), ([0, 1, 3, 4], [8, 9, 11, 12]));
+        assert_eq!(takeoff_slots(2, false, 2.0, 1), ([17, 18, 20, 21], [33, 34, 36, 37]));
+        assert_eq!(takeoff_slots(1, false, -2.0, 1), ([9, 10, 15, 15], [25, 26, 31, 31]));
+        assert_eq!(takeoff_slots(0, false, 0.5, 2), ([8, 9, 14, 15], [24, 25, 30, 31]));
+        assert_eq!(takeoff_slots(0, false, -0.5, 2), ([0, 1, 6, 7], [16, 17, 22, 23]));
+        assert_eq!(takeoff_slots(2, false, 0.5, 3), ([1, 2, 4, 5], [1, 2, 4, 5]));
+        // the weights split by t = |angle| / 90°: 30° to the right puts a third on the right group
+        let f = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut w = vec![0.0f32; 40];
+        takeoff_weights(&mut w, &f, false, 30f32.to_radians(), 0, false, 1);
+        assert!((w[1] - 2.0 / 3.0).abs() < 1e-5 && (w[17] - 1.0 / 3.0).abs() < 1e-5, "{w:?}");
+        // kind 3 (B = A) sums back to the flight weight
+        takeoff_weights(&mut w, &f, false, 30f32.to_radians(), 0, false, 3);
+        assert!((w[1] - 1.0).abs() < 1e-5);
+    }
 
     /// RE/24 AIR-6: the ladder arrival's triplet: a ladder 2 m below and 4 m away (after the pull-back) blends
     /// v = (2.5 + 2) / 5.5, l = 4 / (v · 7.5); free-step targets keep the flight's weights.

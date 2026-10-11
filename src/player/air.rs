@@ -126,6 +126,11 @@ pub enum InAirEntry {
     /// The swing jump from a bar (Ledge SwingReception event 7 -> `sub_DCD0B0`: `Human__SetupJumpToTarget` with jump
     /// kind 3, the `swing_cycle_*_to_air` takeoff).
     SwingJump { from: Vec3, target: JumpTarget },
+    /// The rebound off a wall (jump kind 2, the `xx_h_rebound_*_to_air` takeoff: `HumanWalling__ReboundJump` 0xE365C0,
+    /// `HumanLedge__ReboundEndJump` 0xDD0A40, `HumanClimb__ReboundEndJump` 0xDEAE30 via 0xB27180), the character
+    /// already turned away from the wall. Without a target: 7 m along `dir`, 3 m down, type 1 (0xE36883), ended by the
+    /// ground contact like the free jump (RE/24 AIR-5).
+    ReboundJump { from: Vec3, target: Option<JumpTarget>, dir: Vec3, foot_left: bool },
     Fall { from: Vec3, velocity: Vec3, origin: FallOrigin, speed_param: f32 },
 }
 
@@ -138,6 +143,7 @@ impl InAirEntry {
             InAirEntry::FreeStepJump { target, foot_left, .. } => InAirEntry::FreeStepJump { from: p, target, foot_left },
             InAirEntry::OnPlace { fwd, action, fall, .. } => InAirEntry::OnPlace { from: p, fwd, action, fall },
             InAirEntry::SwingJump { target, .. } => InAirEntry::SwingJump { from: p, target },
+            InAirEntry::ReboundJump { target, dir, foot_left, .. } => InAirEntry::ReboundJump { from: p, target, dir, foot_left },
             InAirEntry::Fall { velocity, origin, speed_param, .. } => InAirEntry::Fall { from: p, velocity, origin, speed_param },
         }
     }
@@ -259,6 +265,9 @@ pub struct HumanInAirData {
     down_check: Option<(Vec3, Vec3)>,
     /// InAirData+452: the arrival reception's [up, down, long] weights (`sub_B1EAA0`), `None` = the flight's.
     pub arrival_w: Option<[f32; 3]>,
+    /// A side-takeoff jump (kinds 1 / 2 / 3) set up again on the first update, when the start facing is known:
+    /// (from, aim, target type, fall target, kind).
+    side_setup: Option<(Vec3, Vec3, u32, Option<Vec3>, u8)>,
 }
 
 impl HumanInAirData {
@@ -268,6 +277,7 @@ impl HumanInAirData {
         self.turn = None;
         self.down_check = None;
         self.arrival_w = None;
+        self.side_setup = None;
         self.apex_reached = false;
         self.fall_origin = FallOrigin::Ground;
         self.target_flags = 0;
@@ -336,6 +346,29 @@ impl HumanInAirData {
                 let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
                 self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 3);
             }
+            InAirEntry::ReboundJump { from, target, dir, foot_left } => {
+                self.speed_ratio = 0.0;
+                self.foot_left = foot_left;
+                self.start_y = from.y;
+                self.start = from;
+                self.apex_y = from.y;
+                self.prev_y = from.y;
+                match target {
+                    Some(target) => {
+                        self.target_flags = target.type_flags;
+                        self.target = Some(target);
+                        let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
+                        self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 2);
+                    }
+                    None => {
+                        let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
+                        let aim = from + flat * 7.0 - Vec3::Y * FREE_JUMP_DOWN;
+                        self.target_flags = TARGET_FREESTEP;
+                        self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 2);
+                        self.free_target = true;
+                    }
+                }
+            }
             InAirEntry::OnPlace { from, fwd, action, fall } => {
                 self.speed_ratio = 0.0;
                 self.start_y = from.y;
@@ -385,13 +418,28 @@ impl HumanInAirData {
     /// Human__SetupJumpToTarget 0xB20200 for a ground running jump (kind 0): pick and weight the takeoff and
     /// flight items (0xB1EC40), T₁/T₂ = their Σw·T durations, anim end = their summed displacement.
     fn real_jump(&mut self, from: Vec3, aim: Vec3, target_type: u32, then_fall_to: Option<Vec3>, kind: u8) -> AirMode {
+        if matches!(kind, 1 | 2 | 3) {
+            // set up again on the first update with the start facing (the side angle, `begin_turn`)
+            self.side_setup = Some((from, aim, target_type, then_fall_to, kind));
+        }
+        self.jump_setup(from, aim, target_type, then_fall_to, kind, None)
+    }
+
+    /// 0xB20200 / 0xB1EC40 with the start facing `heading` when known: the side angle (kinds 1 / 2 / 3) picks the
+    /// takeoff's side groups and the clips play in the character's own frame (no destination turn); kind 0 turns
+    /// toward the target over the takeoff (`begin_turn`). Without the heading: the provisional set-up, angle 0.
+    fn jump_setup(&mut self, from: Vec3, aim: Vec3, target_type: u32, then_fall_to: Option<Vec3>, kind: u8, heading: Option<f32>) -> AirMode {
         // the distance to the pulled-back target, the height of the target itself (0xB1F502 / 0xB1FAA6)
         let to = Vec3::new(aim.x - from.x, 0.0, aim.z - from.z).length();
         self.arrival_w = jump_blend::arrival_weights(target_type, kind, aim.y - from.y, (to - 0.5).max(0.0));
         let aim = pull_back(from, aim, target_type);
         let flat = Vec3::new(aim.x - from.x, 0.0, aim.z - from.z);
-        let fwd = flat.normalize_or(Vec3::NEG_Z);
-        let b = jump_blend::compute_kind(aim.y - from.y, flat.length(), target_type, self.foot_left, 1.0, kind);
+        let dir = flat.normalize_or(Vec3::NEG_Z);
+        // the side angle: from the start facing to the target, positive to the right (0xB1F593)
+        let start_fwd = heading.map(|h| Vec3::new(-h.sin(), 0.0, -h.cos()));
+        let angle = start_fwd.map_or(0.0, |f| dir.dot(super::right_of(f)).atan2(dir.dot(f)));
+        let fwd = start_fwd.unwrap_or(dir);
+        let b = jump_blend::compute_kind(aim.y - from.y, flat.length(), target_type, self.foot_left, 1.0, kind, angle);
         let (takeoff_id, flight_id) = (b.takeoff, b.flight);
         if aim.y - from.y < -jump_blend::DOWN_VARIANT_DROP && jump_blend::down_variants(takeoff_id, flight_id) != (takeoff_id, flight_id) {
             self.down_check = Some((from, aim));
@@ -401,7 +449,7 @@ impl HumanInAirData {
         let (t1, t2) = (takeoff.duration(), flight.duration());
         self.takeoff = Some(takeoff);
         self.flight = Some(flight);
-        let end = add(takeoff.disp(1.0), flight.disp(1.0));
+        let end = compose(&takeoff, &flight);
         let clip_end = from + to_world(end, fwd);
         // 0xB20200 keeps the character's own matrix as the jump frame (InAirData +16 / +320) and stores a destination
         // orientation (+256, flag +507) only for run jumps (kind 0 / 4) and the Leap of Faith; 0xE0ECDC slerps toward
@@ -457,7 +505,7 @@ impl HumanInAirData {
             let (t1, t2) = (takeoff.duration(), flight.duration());
             *duration = (t1 + t2).max(1e-3);
             *t_takeoff = t1;
-            *clip_end = *from + to_world(add(takeoff.disp(1.0), flight.disp(1.0)), *fwd);
+            *clip_end = *from + to_world(compose(&takeoff, &flight), *fwd);
         }
     }
 
@@ -465,6 +513,10 @@ impl HumanInAirData {
     /// takeoff facing, the linear correction carries it onto the target, and the facing turns to the destination.
     /// PORT: the destination orientation (InAirData +256, from 0xB1EC40) is taken as the direction to the target.
     fn begin_turn(&mut self, heading: f32) {
+        if let Some((from, aim, ty, then_fall_to, kind)) = self.side_setup.take() {
+            self.mode = self.jump_setup(from, aim, ty, then_fall_to, kind, Some(heading));
+            return;
+        }
         if !std::mem::take(&mut self.turn_pending) {
             return;
         }
@@ -472,7 +524,7 @@ impl HumanInAirData {
         let dest = super::heading_of(*fwd);
         let start_fwd = Vec3::new(-heading.sin(), 0.0, -heading.cos());
         let end = match (self.takeoff, self.flight) {
-            (Some(a), Some(b)) => add(a.disp(1.0), b.disp(1.0)),
+            (Some(a), Some(b)) => compose(&a, &b),
             _ => return,
         };
         *clip_end = *from + to_world(end, start_fwd);
@@ -481,8 +533,10 @@ impl HumanInAirData {
     }
 
     /// Facing during the jump (0xE0EF30): slerp(takeoff, destination, t / min(T₁, 0.4)), 1 once the takeoff item ends.
+    /// Without the turn (kinds 1 / 2 / 3) the start facing turned by the clips' root yaw (the flight composed after
+    /// the takeoff's end matrix, 0xB20D0C / 0xE0EB9E; RE/24 AIR-5).
     fn jump_heading(&self, t: f32, t_takeoff: f32, fwd: Vec3) -> f32 {
-        let Some((h0, h1)) = self.turn else { return super::heading_of(fwd) };
+        let Some((h0, h1)) = self.turn else { return super::heading_of(fwd) + self.jump_yaw(t, t_takeoff) };
         let s = if t_takeoff <= 0.0 || t >= t_takeoff { 1.0 } else { (t / t_takeoff.min(0.4)).min(1.0) };
         let d = (h1 - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         h0 + d * s
@@ -519,7 +573,32 @@ fn jump_disp_clips(air: &HumanInAirData, t: f32, t1: f32, duration: f32) -> [f32
     if t < t1 {
         to.disp(t / t1.max(1e-4))
     } else {
-        add(to.disp(1.0), fl.disp((t - t1) / (duration - t1).max(1e-4)))
+        add(to.disp(1.0), rotate_yaw(fl.disp((t - t1) / (duration - t1).max(1e-4)), to.yaw(1.0)))
+    }
+}
+
+/// An animation-space displacement turned by a root yaw (+ = left; x right, y forward).
+fn rotate_yaw(d: [f32; 3], yaw: f32) -> [f32; 3] {
+    let (s, c) = yaw.sin_cos();
+    [d[0] * c - d[1] * s, d[0] * s + d[1] * c, d[2]]
+}
+
+/// The takeoff then the flight, composed after the takeoff's end matrix (0xB20D0C `start·takeoff·flight`): the flight's
+/// displacement turned by the takeoff's end yaw (a side takeoff carries up to 90°, RE/24 AIR-5).
+fn compose(takeoff: &ActionBlend, flight: &ActionBlend) -> [f32; 3] {
+    add(takeoff.disp(1.0), rotate_yaw(flight.disp(1.0), takeoff.yaw(1.0)))
+}
+
+impl HumanInAirData {
+    /// The clips' root yaw at jump time `t` (takeoff, then its end yaw plus the flight's).
+    fn jump_yaw(&self, t: f32, t1: f32) -> f32 {
+        let (Some(to), Some(fl)) = (self.takeoff, self.flight) else { return 0.0 };
+        if t < t1 {
+            to.yaw(t / t1.max(1e-4))
+        } else {
+            let d = fl.duration().max(1e-4);
+            to.yaw(1.0) + fl.yaw(((t - t1) / d).min(1.0))
+        }
     }
 }
 
@@ -587,8 +666,9 @@ pub fn update_air(
         if loco.just_switched {
             if let Some(v) = data.air.entry_velocity.take() { body.velocity = v; }
             loco.just_switched = false;
-            data.air.apply_down_variants(&collision);
+            // the side set-up first (it re-picks the actions), then the down variants' sweep
             data.air.begin_turn(body.heading);
+            data.air.apply_down_variants(&collision);
             if loco.switched_this_frame {
                 // the controller keeps integrating the take-off velocity; the jump's path shifts with it so the
                 // linear correction (0xE0DEF0) still ends on the target

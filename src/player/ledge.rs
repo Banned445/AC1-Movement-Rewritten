@@ -576,9 +576,9 @@ pub fn update_ledge(
                 continue;
             }
             if done && mv.kind == ledge_moves::MoveKind::Rebound {
-                // `sub_DD0A40` 0xDD0A40: the rebound done → face away from the wall and jump (`sub_B27180` kind 2, the
-                // playing item's leading foot), presentation event 67. PORT: the jump uses the port's kind-0 takeoff until
-                // jump kind 2 (`xx_h_rebound_*_to_air`, RE/24 AIR-5) is ported.
+                // `HumanLedge__ReboundEndJump` 0xDD0A40: the rebound done → face away from the wall and jump (`sub_B27180`
+                // kind 2, the `xx_h_rebound_*_to_air` takeoff, RE/24 AIR-5), presentation event 67. PORT: the left foot
+                // leads (the game reads the playing item's word).
                 d.mv = None;
                 limbs.hands = None;
                 limbs.feet = None;
