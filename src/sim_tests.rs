@@ -1837,6 +1837,25 @@ fn walking_a_bent_beam_carries_on_round_the_bend() {
 }
 
 #[test]
+fn the_impulsion_steps_back_to_the_wait_toward_a_next_segment() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    // RE/24 NARROW-9: event 3 (BeamState 0xEEB178): in the impulsion, the stick toward a next beam segment (the bend at
+    // (105, 76)) leaves it for the wait at once (`sub_F7A740` case 3, `sub_F7FDB0`)
+    let point = Vec3::new(105.0, 4.0, 75.5);
+    let mut s = Sim::new(point, std::f32::consts::PI);
+    let (p0, p1) = (Vec3::new(105.0, 4.0, 70.3), Vec3::new(105.0, 4.0, 76.0));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::Z }));
+    s.run(0.2);
+    s.pad(Vec3::ZERO, 0.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::ImpulseWait), "no impulsion: {:?}", s.data().narrow.state);
+    s.pad(Vec3::new(1.5, 0.0, 2.6).normalize(), 1.0, true, true);
+    assert!(s.run_until(0.05, |s| s.data().narrow.state == BeamState::Wait), "event 3 → the wait: {:?}", s.data().narrow.state);
+    // then the stick starts the walk from the wait (not the impulsion's jog resume)
+    assert!(s.run_until(0.1, |s| s.data().narrow.state == BeamState::Start));
+}
+
+#[test]
 fn beam_support_loss_enters_air_and_descends() {
     let mut s = on_free_beam(87.0);
     s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>().edges

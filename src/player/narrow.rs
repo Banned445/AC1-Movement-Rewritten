@@ -1641,6 +1641,20 @@ pub fn update_narrow(
                     }
                 }
             }
+            // event 3 (BeamState 0xEEB178: the stick past 0.35 and a next beam segment along it, INarrow vt180 →
+            // `DetectBeamSegments` 0xF753A0 with the stick's direction): the impulsion accepts it at any time (`sub_F7A740`
+            // case 3, no timer) and goes back to Main idle, or the 90° wait when it stands across (`sub_F7FDB0`: +1728 =
+            // (+1040 == 2) + 1) (RE/24 NARROW-9)
+            BeamState::ImpulseIn | BeamState::ImpulseWait
+                if n.kind == NarrowKind::Beam && stick && next_segment(n.stand(), pad.dir, (n.p0, n.p1), &guidance).is_some() =>
+            {
+                if n.across.is_some() {
+                    n.speed = 0.0;
+                    n.play(BeamState::Wait90, item(BEAM_WAIT_90, 0, &[]));
+                } else {
+                    n.wait_state();
+                }
+            }
             BeamState::ImpulseIn => {
                 // 0xF80560 can resume Main before the entry clip ends, once the 0.2 s timer expires.
                 if BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward && n.impulse_elapsed >= 0.2 {
