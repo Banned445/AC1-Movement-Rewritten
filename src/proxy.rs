@@ -611,6 +611,13 @@ pub fn stick_to_ground_height(world:&CollisionWorld,feet:Vec3,lift:f32,reach:f32
     Some((rest.y, h.normal.y))
 }
 
+/// The same cast's hit as the controller keeps it (`sub_579BE0` → controller +320, flag +312; read by `sub_57ABD0`):
+/// (contact point, contact normal).
+pub fn stick_contact(world: &CollisionWorld, feet: Vec3, lift: f32, reach: f32) -> Option<(Vec3, Vec3)> {
+    let hits = linear_cast(world, crate::layers::MAIN_CHARACTER, feet + Vec3::Y * lift, Vec3::NEG_Y * (reach + lift), lift, CAPSULE_HEIGHT);
+    hits.iter().find(|h| h.normal.y >= STICK_MIN_UP).map(|h| (h.pos, h.normal))
+}
+
 /// The controller's contact class (`sub_71B840`, contact +40): 1 ground (normal up > 0.707), 8 ceiling (< −0.707), else 4
 /// wall.
 pub fn contact_class(c: &Contact) -> u32 {

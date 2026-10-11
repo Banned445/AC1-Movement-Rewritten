@@ -27,6 +27,9 @@ use crate::tuning::*;
 pub const MAX_SLOPE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// `Human__ShouldFallOffSupport` 0xB23CB0: with no contact flatter than 45°, a ray straight down of 0.8 m.
 pub const OFF_SUPPORT_RAY: f32 = 0.8;
+/// `CharacterController__PostIntegrate` 0x57D6FC: an entity below `dword_18CF194` (−200 m) is put back at −200 (the body
+/// matrix through `sub_1074F80`; the velocity is kept), RE/24 GUIDE-16.
+pub const KILL_PLANE: f32 = -200.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Aabb3 {
@@ -327,7 +330,10 @@ impl CollisionWorld {
         let lift = if grounded { STEP_HEIGHT } else { 0.0 };
         let dt = dt.max(1e-4);
         let (p, velocity, t) = crate::proxy::integrate(self, proxy, feet + Vec3::Y * lift, delta / dt, dt, lift);
-        MoveResult { position: p - Vec3::Y * lift, velocity, hit_wall: t.wall, hit_ceiling: t.ceiling, landed: t.floor }
+        let mut position = p - Vec3::Y * lift;
+        // PostIntegrate's kill plane
+        position.y = position.y.max(KILL_PLANE);
+        MoveResult { position, velocity, hit_wall: t.wall, hit_ceiling: t.ceiling, landed: t.floor }
     }
 
     /// The stick-to-ground cast (`CharacterController__StickToGround` 0x57D240, `crate::proxy::stick_to_ground`): the
@@ -336,6 +342,11 @@ impl CollisionWorld {
     /// contact normal.
     pub fn support(&self, feet: Vec3) -> Option<Support> {
         crate::proxy::stick_to_ground(self, feet, STEP_HEIGHT, SNAP_DOWN).map(|(y, normal_y)| Support { y, normal_y })
+    }
+
+    /// The stick-to-ground cast's contact (point, normal) for feet at `feet` (`sub_57ABD0`).
+    pub fn support_contact(&self, feet: Vec3) -> Option<(Vec3, Vec3)> {
+        crate::proxy::stick_contact(self, feet, STEP_HEIGHT, SNAP_DOWN)
     }
 
     /// Same stick/fall rule with the live shape height (crouch 0xD859D0).
@@ -594,6 +605,16 @@ mod tests {
             }
         }
         f
+    }
+
+    /// RE/24 GUIDE-16: nothing falls below −200 m; the velocity is kept.
+    #[test]
+    fn the_kill_plane_holds_a_fall_at_minus_200() {
+        let w = CollisionWorld::default();
+        let mut proxy = crate::proxy::ProxyState::default();
+        let r = w.move_capsule(&mut proxy, Vec3::new(0.0, -199.9, 0.0), Vec3::new(0.1, -1.0, 0.0), false, 1.0 / 60.0);
+        assert_eq!(r.position.y, KILL_PLANE);
+        assert!((r.position.x - 0.1).abs() < 1e-4 && r.velocity.y < 0.0, "{:?} {:?}", r.position, r.velocity);
     }
 
     #[test]
