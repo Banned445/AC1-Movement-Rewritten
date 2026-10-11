@@ -812,6 +812,8 @@ pub const PROBE_STEP: f32 = 0.1;
 pub const MASK_CLIMB_HOLDS: u32 = 50;
 /// Ladder edges only (mask 8): the ladder searches (0xDD4CD0, 0xDD55F0, 0xDF10C0, 0xE04100).
 pub const MASK_LADDER: u32 = 8;
+/// The knee catch's edges (mask 386 = 0x182: LedgeGrab, Quadruped, Kiosk; `FindKneeCatchEdge` 0xE04630).
+pub const MASK_KNEE: u32 = 386;
 
 pub(crate) fn closest_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
     let d = b - a;

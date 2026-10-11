@@ -181,7 +181,8 @@ pub const KNEE_CATCH: [u32; 2] = [0x1F0C_05A7, 0x1F0C_05A6];
 /// one facing the character within 70° (`sub_116FF40`, step 0.1, mask 386); no jump target may be ahead, and the drop
 /// in front of the edge (`Human__MeasureDropBeyondEdge` 0.7 / 0.3) must exceed 0.5 m. `sub_B2E240` then wants room on
 /// the top (two sweeps from 1.075 m and 0.95 m above it, 0.3 m clear past 1.0 / 0.6 m). Returns the edge point and its
-/// wall normal. PORT: the drop is one ray down 0.3 m out from the edge.
+/// wall normal. No vertical-velocity gate: a rising body catches too (RE/24 AIR-34). PORT: the drop is one ray down
+/// 0.3 m out from the edge.
 pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
     let r = super::right_of(f);
@@ -189,7 +190,8 @@ pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidance
     let eye = feet + Vec3::Y * 0.15 - f * 0.2;
     let reference = feet + Vec3::Y * 0.5 - f * 0.2;
     let mut best: Option<(f32, Vec3, Vec3)> = None;
-    for e in guidance.edges.iter().filter(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab) {
+    // mask 386: LedgeGrab, Quadruped and Kiosk edges (RE/24 AIR-34)
+    for e in guidance.edges.iter().filter(|e| (1u32 << e.subtype as u32) & crate::guidance::MASK_KNEE != 0) {
         let n = Vec3::new(e.n1.x, 0.0, e.n1.z);
         if n.length_squared() < 1e-6 {
             continue;
@@ -335,5 +337,22 @@ mod ray_tests {
         assert!(target_ahead(root,Some(target(Vec3::Z*1.0004,0x10000)),&world));
         world.layers.push(crate::layers::NOTHING);
         assert!(target_ahead(root,Some(target(Vec3::Z*3.0,1)),&world));
+    }
+
+    /// RE/24 AIR-34: the knee catch takes the edges of mask 386 (LedgeGrab, Quadruped, Kiosk), not a beam's.
+    #[test]
+    fn the_knee_catch_reads_mask_386() {
+        use crate::guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld};
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(-1.0, 0.0, -2.0), max: Vec3::new(1.0, 1.0, 0.0) });
+        let found = |subtype| {
+            let mut g = GuidanceWorld::default();
+            g.edges.push(GuidanceEdge { p0: Vec3::new(-1.0, 1.0, 0.0), p1: Vec3::new(1.0, 1.0, 0.0), n0: Vec3::Y, n1: Vec3::Z, subtype });
+            knee_catch(Vec3::new(0.0, 0.9, 0.3), Vec3::NEG_Z, &g, &c).is_some()
+        };
+        for s in [GuidanceSubType::LedgeGrab, GuidanceSubType::Quadruped, GuidanceSubType::Kiosk] {
+            assert!(found(s), "{s:?}");
+        }
+        assert!(!found(GuidanceSubType::Beam));
     }
 }
