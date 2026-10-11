@@ -1983,6 +1983,29 @@ fn beam_step_off_travels_instead_of_teleporting_to_ground() {
     assert!((s.body().feet.x - start.x - 0.8).abs() < 0.06);
 }
 
+/// RE/24 NARROW-13: standing at a beam end with room beyond, the stick steps off at once (Idle → step-off state), no
+/// walk start first.
+#[test]
+fn standing_at_a_beam_end_steps_off_without_walking() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    let point = Vec3::new(77.86, 4.0, 70.0);
+    let mut s = Sim::new(point, crate::player::heading_of(Vec3::X));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0: Vec3::new(72.0,4.0,70.0), p1: Vec3::new(78.0,4.0,70.0),
+        point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::X }));
+    assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Wait), "never waited: {:?}", s.data().narrow.state);
+    s.pad(Vec3::X, 1.0, false, false);
+    let mut walked = false;
+    for _ in 0..60 {
+        s.run(1.0 / 60.0 + 1e-4);
+        walked |= matches!(s.data().narrow.state, BeamState::Start | BeamState::Walk);
+        if s.data().narrow.state == BeamState::StepOff {
+            assert!(!walked, "no walk start before the step off");
+            return;
+        }
+    }
+    panic!("never stepped off: {:?}", s.data().narrow.state);
+}
+
 #[test]
 fn beam_bend_heading_changes_over_multiple_frames() {
     use crate::player::narrow::{BeamEntry, BeamEntryMode};

@@ -1500,7 +1500,21 @@ pub fn update_narrow(
                 continue;
             }
             BeamState::Wait => {
-                // Idle (0xF808D0 +91), in order: turn around, turn to the 90° wait, walk / step off
+                // Idle (0xF808D0 +91), in order: turn around, turn to the 90° wait, step off, walk (RE/24 NARROW-13):
+                // - at an end with room beyond (`CanStepOffBeamEnd` 0xF77C00) the step off starts at once (`sub_F708F0`,
+                //   the step-off state +118: the root 0.8 m on);
+                // - `Idle_WantsWalk` 0xF77450: no end-clamp bit (the clamp fires within 0.31 m of the end, 0xF7C3A0) and
+                //   no obstacle contact ahead (0xB25230; PORT: event 17 handles the obstacle);
+                // - `StateIdle_PreUpdate` 0xF7D650 corrects the lateral drift at 2 m/s (`ConstrainRootMotionToBeam`(…, 1, 1)).
+                if BEAM_COMPLETION && n.kind == NarrowKind::Beam {
+                    n.lateral = constrain_lateral(n.lateral, n.lateral, true, dt);
+                }
+                let last = next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance).is_none();
+                let step_off_end = last && can_step_off(n, &collision);
+                let at_end = step_off_end && n.to_end() <= BEAM_STEP_OFF + 1e-3;
+                // the clamp holds the root 0.3 m before an end with no room beyond (an end with room lets it on to the
+                // step off)
+                let clamped = last && !step_off_end && n.to_end() <= BEAM_END_STOP + 0.01;
                 if back {
                     let t = item(BEAM_TURN180[n.foot], 0, &[]);
                     n.play(BeamState::Turn, t);
@@ -1508,7 +1522,10 @@ pub fn update_narrow(
                     n.turn_left = left;
                     let t = item(BEAM_TO_90[!left as usize][n.foot], 0, &[]);
                     n.play(BeamState::TurnTo90, t);
-                } else if forward && (n.to_end() > BEAM_END_STOP + 0.05 || can_step_off(n, &collision)) {
+                } else if BEAM_COMPLETION && forward && n.kind == NarrowKind::Beam && at_end {
+                    n.step_off_to = n.stand() + n.facing() * 0.8;
+                    n.play(BeamState::StepOff, n.ground_step(false));
+                } else if forward && !clamped {
                     // the start seeds the speed at band 0 (0xF724C4)
                     n.speed = beam_bands()[0];
                     let st = item(BEAM_START[n.foot], 0, &speed_weights(n.speed));
