@@ -1245,21 +1245,11 @@ pub fn update_air(
             // A free-step arrival continues in NarrowObject (0xE07D00: SubState 6 → Movement); its Movement state
             // tries a pilotis first (`TryPilotisFreeStep` 0xE50190), then a beam (`TryMountBeam` 0xE52AD0), and
             // returns to Ground on wide support (0xE51190, the port's default).
-            if on_target && matches!(air.target_flags, 1 | 0x10000) {
-                let fwd = body.forward();
-                let foot = (!air.foot_left) as usize;
-                let stick = (pad.speed01 > 0.0).then_some(pad.dir);
-                if let Some(top) = super::narrow::find_pilotis(body.feet, body.feet, fwd, false, &guidance, &collision) {
-                    let e = super::narrow::PilotisEntry { top, from: body.feet, facing: fwd, kind: super::narrow::PilotisEntryType::FromFreeStep, foot };
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToPilotis(e));
-                    continue;
-                }
-                if let Some(e) = super::narrow::free_step_beam_entry(body.feet, fwd, stick, foot, landing.action, pad.high_profile, &guidance, &collision) {
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(e));
-                    continue;
-                }
-            }
+            // Both mounts wait for the reception's end (IHumanNarrowObject vt152 0xE4C670: the playing action done;
+            // RE/24 NARROW-4): the port plays the reception in Ground and tries them there (`ground::narrow_pending`).
+            let pending = (on_target && matches!(air.target_flags, 1 | 0x10000)).then(|| ((!air.foot_left) as usize, body.forward(), body.feet));
             switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: Some(landing) });
+            data.ground.narrow_pending = pending;
         }
     }
 }

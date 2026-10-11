@@ -86,6 +86,10 @@ pub struct HumanGroundData {
     pub landing_seq: u32,
     /// `HumanGround__UpdateMoveBlend` state: blend weights, timers, lean/bank, step cycle.
     pub blend: MoveBlend,
+    /// The free-step arrival's narrow mount, tried when its reception ends (NarrowObject Movement 0xE534B0:
+    /// `TryPilotisFreeStep` then `TryMountBeam`, gated by the action done; RE/24 NARROW-4): (the foot, the arrival's
+    /// forward, the arrival point).
+    pub narrow_pending: Option<(usize, Vec3, Vec3)>,
     /// LedgeStop sub-state (38): the edge it stopped at.
     pub ledge_stop: Option<LedgeStop>,
     /// PORT: no new ledge stop until the stick lets go or turns away from this edge normal (the game's event 69
@@ -526,6 +530,7 @@ impl HumanGroundData {
         self.turn_k = PLAYER_TURN_BAND_K0;
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
+        self.narrow_pending = None;
         self.collide = None;
         self.look_down = None;
         self.extra = None;
@@ -616,6 +621,29 @@ pub fn update_ground(
                 // the controller keeps integrating the velocity the switch left (no one-frame freeze)
                 super::coast(&mut body, &collision, dt);
                 continue;
+            }
+        }
+
+        // ---------------------------------------------------------------- the free-step arrival's narrow mount
+        // NarrowObject Movement (0xE534B0) after the reception: `TryPilotisFreeStep` 0xE50190 (from the air box along
+        // −support normal, `find_pilotis(…, true)`, RE/24 NARROW-8), then `TryMountBeam` 0xE52AD0 (RE/24 NARROW-4).
+        // PORT: the beam segment comes from `beam_at`, not the StateMovement_Enter query (0xE4FE20)
+        if let Some((foot, fwd, arrival)) = g.narrow_pending {
+            let reception = g.oneshot.is_some_and(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id));
+            if !reception {
+                g.narrow_pending = None;
+                // PORT: the search runs around the arrival point: the game passes the root (after the reception's root
+                // motion, which the port's post landing does not reproduce)
+                if let Some(top) = super::narrow::find_pilotis(arrival, arrival, fwd, true, &guidance, &collision) {
+                    let e = super::narrow::PilotisEntry { top, from: body.feet, facing: fwd, kind: super::narrow::PilotisEntryType::FromFreeStep, foot };
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToPilotis(e));
+                    continue;
+                }
+                let stick = (pad.speed01 > 0.0).then_some(pad.dir);
+                if let Some(e) = super::narrow::free_step_beam_entry(body.feet, fwd, stick, foot, None, pad.high_profile, &guidance, &collision) {
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(e));
+                    continue;
+                }
             }
         }
 
@@ -1134,7 +1162,8 @@ pub fn update_ground(
         // ---------------------------------------------------------------- beam (NarrowObject, event 72)
         // Guard 0xD9F4C0 along the event's direction (the stick, RE/24 NARROW-3). PORT trigger: walking at it (the
         // decision layer's event 72 sender is not traced).
-        if moving && !busy {
+        // not while a free-step arrival's narrow mount is pending: the game is in NarrowObject then (RE/24 NARROW-4)
+        if moving && !busy && g.narrow_pending.is_none() {
             let event_dir = if pad.dir != Vec3::ZERO { pad.dir } else { body.forward() };
             if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, event_dir, &guidance, &collision) {
                 // Mode 1 plays the beam walk (`sub_F7B3B0` 0xF7B619: 0x28A3A8E4), keeping the playing locomotion item's

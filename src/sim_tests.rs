@@ -4642,19 +4642,20 @@ fn falling_against_a_haystacks_side_enters_it_from_the_air() {
 #[test]
 fn free_running_onto_a_narrow_rim_drops_into_the_haystack_from_the_beam() {
     use crate::player::hay::HayEntry;
-    // A2 yard: the cart's 0.3 m rim pairs into a runtime beam; the free run lands on it in NarrowObject and the
-    // arrival's support search (0xE51190) drops in as FreeStep
+    // A2 yard: the cart's 0.3 m rim; the free run lands on it and the arrival's support search (0xE51190) drops in as
+    // FreeStep during the reception, before any beam mount (RE/24 NARROW-4: the mounts wait for the reception's end;
+    // the port plays that NarrowObject Movement stay in Ground)
     let mut s = Sim::new(Vec3::new(-112.0, 0.0, -119.5), 0.0);
     s.pad(Vec3::NEG_Z, 1.0, true, true);
     let on_rim = std::cell::Cell::new(false);
     let ok = s.run_until(5.0, |s| {
-        if s.loco().current == ActorContextId::NarrowObject {
+        if matches!(s.loco().current, ActorContextId::NarrowObject | ActorContextId::Ground) && s.body().feet.y > 1.1 {
             on_rim.set(true);
         }
         s.loco().current == ActorContextId::HayStack
     });
     assert!(ok, "never got in: {:?} {:?}", s.loco().current, s.body().feet);
-    assert!(on_rim.get(), "landed on the rim's beam first");
+    assert!(on_rim.get(), "landed on the rim first");
     assert_eq!(s.data().hay.kind, HayEntry::FreeStep);
 }
 
@@ -4756,5 +4757,6 @@ fn a_ladder_leaning_over_the_climber_swings_him_onto_its_top_side() {
     assert!(s.run_until(10.0, |s| s.loco().current == ActorContextId::Ground), "never reached the top: {:?} {:?}", s.data().ladder.phase, s.body().feet);
     assert!((s.body().feet.y - 4.5).abs() < 0.1 && s.body().feet.z < -122.6, "on the block: {:?}", s.body().feet);
 }
+
 
 
