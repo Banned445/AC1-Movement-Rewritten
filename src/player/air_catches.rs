@@ -55,8 +55,10 @@ pub enum CatchFound {
 }
 
 /// `CheckAirCatch` 0xE0BB70 after the ladder (RE/19 §2): the order and the rules.
+/// The automatic catch centres all three searches on the Hips bone (0xDED10611, `hips`, from the simulation's pose) +
+/// 0.2 m up, half height 0.9 (RE/24 AIR-12); without a pose (no install) the PORT centres below stand in.
 /// 1. `FindLedgeCatch` 0xE0A990 → `FindHandholdPair` 0xE0A150 (`GuidanceWorld::handhold_pair`): a hand pair on the
-///    chains in a box around the feet + 1.4 m (a hand bone + 0.2 m on the automatic catch) + `along` m along the reach
+///    chains in a box around the feet + 1.4 m (the Hips + 0.2 m on the automatic catch) + `along` m along the reach
 ///    (0.25, 0.5 on a manual grab), facing it, half extents 0.4 / along / 0.3; walls within 70°, mask 306; the hand
 ///    references (∓0.25, −0.4, +0.3) in the box frame, margin 0.1. Then
 ///    - feet holds (`FindCatchFeetHolds` 0xE0A810: the same search from the feet at the higher hand − 1.2 m, along
@@ -79,6 +81,7 @@ pub fn ledge_search(
     facing: Vec3,
     fall_height: f32,
     manual: bool,
+    hips: Option<Vec3>,
     release_hold: Option<Vec3>,
     guidance: &crate::guidance::GuidanceWorld,
     collision: &CollisionWorld,
@@ -88,18 +91,20 @@ pub fn ledge_search(
     let dir = Vec3::new(reach.x, 0.0, reach.z).normalize_or(Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z));
     let below_release = |y: f32| release_hold.is_none_or(|r| r.y - 0.5 > y);
     let angle = 70f32.to_radians();
-    // the box: manual, the feet + 1.4 m, 0.5 m along the reach, half height 0.3; automatic, the hand bone (0xDED10611)
-    // + 0.2 m up + 0.5 m along, half height 0.9 (0xE0A9C8–0xE0AA6D, RE/24 AIR-12). PORT: the hand bone is taken at the
-    // feet + 1.4 m (the simulation has no bone positions)
+    // the box: manual, the feet + 1.4 m, 0.5 m along the reach, half height 0.3; automatic, the Hips bone (0xDED10611)
+    // + 0.2 m up + 0.5 m along, half height 0.9 (0xE0A9C8–0xE0AA6D, RE/24 AIR-12). PORT without a pose: the Hips at the
+    // feet + 1.4 m (the ledge and free-hang searches) or + 1.75 m (the climb catch's)
     let along = 0.5;
-    let (half_z, lift) = if manual { (0.3, 0.0) } else { (0.9, 0.2) };
+    let half_z = if manual { 0.3 } else { 0.9 };
+    let auto = |stand_in: f32| hips.map_or(feet + Vec3::Y * stand_in, |h| h) + Vec3::Y * 0.2;
     let pair_along = |base: Vec3, dir: Vec3, half_z: f32| {
         let refs = [Vec3::new(-0.25, -0.4, 0.3), Vec3::new(0.25, -0.4, 0.3)];
         guidance.handhold_pair(base + dir * along, dir, Vec3::new(0.4, along, half_z), refs, angle, 0.1, crate::guidance::MASK_CATCH)
     };
     let catch_pair = |base: Vec3| pair_along(base, dir, half_z);
     // 1. the ledge catch: a hand pair at the feet + 1.4 m
-    if let Some([a, b]) = catch_pair(feet + Vec3::Y * (1.4 + lift)).filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y)) {
+    let ledge_base = if manual { feet + Vec3::Y * 1.4 } else { auto(1.4) };
+    if let Some([a, b]) = catch_pair(ledge_base).filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y)) {
         let n = a.wall_normal;
         let (hl, hr) = (a.point, b.point);
         let mid = (hl + hr) * 0.5;
@@ -141,7 +146,7 @@ pub fn ledge_search(
     if long {
         // sub_DFFE30: manual, the feet + 1.95 m, half (0.4, 0.5, 0.25); automatic, the hand bone + 0.2 m, half (0.4, 0.5,
         // 0.9) (v21 / v22); 0.5 m along the reach; reference (0, −0.4, 0.25) local; 70°, mask 306 (RE/24 AIR-12 / AIR-13)
-        let centre = if manual { feet + Vec3::Y * 1.95 } else { feet + Vec3::Y * (1.4 + 0.2) } + dir * along;
+        let centre = if manual { feet + Vec3::Y * 1.95 } else { auto(1.4) } + dir * along;
         let half = Vec3::new(0.4, along, if manual { 0.25 } else { 0.9 });
         let reference = centre - dir * 0.4 + Vec3::Y * 0.25;
         let hit = guidance
@@ -162,7 +167,7 @@ pub fn ledge_search(
             };
             return Some(CatchFound::Hang { mid, normal: n, wall: false, action, one_hand });
         }
-    } else if let Some((mid, n)) = catch_pair(feet + Vec3::Y * 1.95)
+    } else if let Some((mid, n)) = catch_pair(if manual { feet + Vec3::Y * 1.95 } else { auto(1.75) })
         .filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y))
         .and_then(|[a, b]| free(crate::guidance::GuidanceHit { point: (a.point + b.point) * 0.5, ..a }))
     {
@@ -305,6 +310,24 @@ pub fn edge_landing(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidan
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// RE/24 AIR-12: the automatic catch searches around the Hips bone + 0.2 m (half height 0.9), so a wall top 0.5 m
+    /// above the feet is caught from the Hips (0.65 m above the feet in a jump) and missed from the old stand-in centre.
+    #[test]
+    fn the_automatic_catch_searches_around_the_hips() {
+        let (min, max) = (Vec3::new(-2.0, 0.0, -1.5), Vec3::new(2.0, 1.6, -0.5));
+        let collision = CollisionWorld { boxes: vec![crate::collision::Aabb3 { min, max }], ..Default::default() };
+        let mut guidance = crate::guidance::GuidanceWorld::default();
+        crate::level::add_roof_edges(&mut guidance, min, max);
+        let feet = Vec3::new(0.0, 1.1, -0.1);
+        let catch = |hips| ledge_search(feet, Vec3::NEG_Z, Vec3::NEG_Z, 1.0, false, hips, None, &guidance, &collision);
+        let found = catch(Some(feet + Vec3::Y * 0.65));
+        assert!(matches!(found, Some(CatchFound::Hang { wall: true, .. })), "caught from the Hips: {found:?}");
+        if let Some(CatchFound::Hang { mid, .. }) = found {
+            assert!((mid.y - 1.6).abs() < 1e-3 && (mid.z + 0.5).abs() < 1e-3, "on the wall top's front edge: {mid}");
+        }
+        assert!(catch(None).is_none(), "the stand-in centre (feet + 1.6 m) misses it");
+    }
+
     #[test]
     fn height_timer_and_drop_boundaries() {
         assert!(!manual(true, 0.3, None)); assert!(manual(true, 0.30001, None));
