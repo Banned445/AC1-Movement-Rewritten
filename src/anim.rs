@@ -593,6 +593,18 @@ const ACT_PULLUP_FREE: u32 = 0x0127_19F2;
 const ACT_HANGKNEE_TO_WAIT: u32 = crate::player::ledge_moves::ACT_KNEE_TO_FREESTEP[0];
 /// [wall, free] × [left open, left close, right open, right close].
 const ACT_SHIMMY: [[u32; 4]; 2] = [[0x01B7_0B35, 0x01B7_0B36, 0x01B7_0B37, 0x01B7_0B38], [0x01A2_490A, 0x01A2_490B, 0x01A2_490C, 0x01A2_490D]];
+/// The `ACT_VSTEP` column for a vertical hand step (`PickVerticalHandAndAnim` 0xDCB3E0, tables `StaticInitTables`
+/// 0xDCC3E5..0xDCC403): up, left first → `1m_u_1lu`; down, left first → `1m_d_1ru` (the clips are named by the hand left
+/// up), and the second halves likewise (RE/24 LEDGE-6). Played the other way round, the clip's raised hand was the one
+/// the IK held low and the lowered one could not reach its hold (bug-1791714114).
+fn vstep_index(down: bool, second: bool, first_left: bool) -> usize {
+    if down {
+        4 + (second as usize) * 2 + first_left as usize
+    } else {
+        (second as usize) * 2 + (!first_left) as usize
+    }
+}
+
 /// [wall, free] × [up: 1m_u_1lu, 1m_u_1ru, 1lu_u_1m, 1ru_u_1m, down: 1m_d_1lu, 1m_d_1ru, 1lu_d_1m, 1ru_d_1m].
 const ACT_VSTEP: [[u32; 8]; 2] = [
     [0x01B7_0FAA, 0x01B7_0FAB, 0x01B7_0FAC, 0x01B7_0FAD, 0x01B7_0FAE, 0x01B7_0FAF, 0x01B7_0FB0, 0x01B7_0FB1],
@@ -972,7 +984,7 @@ fn choose_clip(
                     "hand step up" | "hand step down" if moving || l.pending_vstep.is_some() => {
                         let (first_left, second) = l.vstep.unwrap_or((true, false));
                         let down = l.last_action == "hand step down";
-                        let k = (down as usize) * 4 + (second as usize) * 2 + (!first_left) as usize;
+                        let k = vstep_index(down, second, first_left);
                         // a pending second hand holds the first half's last pose (0xDD3A2B plays nothing meanwhile)
                         let r = action(&lib, &[ACT_VSTEP[wi][k]], false, token, Some(0.1), None);
                         if l.pending_vstep.is_some() { r.map(|r| Request { hold: true, ..r }) } else { r }
@@ -1464,6 +1476,23 @@ fn load_library(mut lib: ResMut<AnimLibrary>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RE/24 LEDGE-6: the game's vertical step tables (0xDCC3E5..0xDCC403, free hang 0x01A279B9..C0). Down: left first
+    /// plays FAF / 79BE (`1m_d_1ru`), right first FAE / 79BD; the second hand after a left-first step FB1 / 79C0, after a
+    /// right-first step FB0 / 79BF. Up: left first FAA, right first FAB; the second hand after a left-first step FAC
+    /// (`1lu_u_1m`), after a right-first step FAD.
+    #[test]
+    fn vertical_hand_steps_pick_the_games_clips() {
+        let free = |down, second, first_left| ACT_VSTEP[1][vstep_index(down, second, first_left)];
+        assert_eq!(free(true, false, true), 0x01A2_79BE);
+        assert_eq!(free(true, false, false), 0x01A2_79BD);
+        assert_eq!(free(true, true, true), 0x01A2_79C0);
+        assert_eq!(free(true, true, false), 0x01A2_79BF);
+        assert_eq!(free(false, false, true), 0x01A2_79B9);
+        assert_eq!(free(false, false, false), 0x01A2_79BA);
+        assert_eq!(free(false, true, true), 0x01A2_79BB);
+        assert_eq!(free(false, true, false), 0x01A2_79BC);
+    }
 
     #[test]
     fn selected_action_is_none_through_an_action_transition_only() {
