@@ -2235,6 +2235,9 @@ fn a_free_hang_hand_step_lifts_the_body_with_the_first_hand() {
     let mut s = hang_at(Vec3::new(-30.1, 3.6, -11.4), Vec3::NEG_Z);
     assert_eq!(s.data().ledge.hang_type, LedgeHangType::Free, "a free hang under the bay");
     let y0 = s.body().feet.y;
+    // how far out from its hands' line the root hangs (the hands themselves move onto the bars' edge)
+    let out = |s: &Sim| crate::player::ledge::root_out(s.body().feet, s.data().ledge.hand_l, s.data().ledge.hand_r, Vec3::NEG_Z);
+    let out0 = out(&s);
     s.pad(Vec3::Z, 1.0, false, false); // up
     assert!(s.run_until(2.0, |s| s.data().ledge.last_action == "hand step up"), "no hand step: {}", s.data().ledge.last_action);
     s.pad(Vec3::ZERO, 0.0, false, false);
@@ -2244,6 +2247,14 @@ fn a_free_hang_hand_step_lifts_the_body_with_the_first_hand() {
     let top = l.hand_l.y.max(l.hand_r.y);
     assert!((top - y0 - 2.4 - 0.6).abs() < 0.05, "one hand on the bar above: {:?} {:?}", l.hand_l, l.hand_r);
     assert!((s.body().feet.y - (top - 2.4)).abs() < 0.02, "the root hangs from the higher hand: {} vs {}", s.body().feet.y, top - 2.4);
+    // bug-1791714696: the bar above has wall below it, but a hand step keeps the hang's distance from the wall (only a
+    // hang-type switch changes it); it moved 0.5 m out and both hands fell short
+    assert!((out(&s) - out0).abs() < 0.02, "stays as far out from the hands: {} vs {out0}", out(&s));
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(2.0, |s| s.data().ledge.pending_vstep.is_none()), "second hand never moved");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0);
+    assert!((out(&s) - out0).abs() < 0.02, "still as far out after the second hand: {} vs {out0}", out(&s));
 }
 
 // ---------------------------------------------------------------- swing bars (RE/03 §7.10)
