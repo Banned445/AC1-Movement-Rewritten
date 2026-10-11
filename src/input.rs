@@ -57,6 +57,9 @@ pub struct PadInput {
     /// Interpreter +0x1244: the signed angle from the stick to the facing, written only while the stick is past 0.35
     /// (`ReadInput` 0xEEE250 → 0xEEE2F3): with the stick released it keeps the last value (RE/24 WALL-13).
     pub stick_facing_angle: f32,
+    /// Interpreter +0x10E0: the snapped direction (+0x1250) copied whenever the stick is past 0.75 in the ground handler
+    /// (0xEE7DD3–0xEE7DEB); zero until then. The FreeRun sub-state's wall run aims by it (RE/24 WALL-15).
+    pub strong_dir: Vec3,
     pub band_prev: u8,
     /// The camera yaw `dir` was built with (camera manager +0xE0): the live yaw, or the one before a camera cut while
     /// the input latch holds. `None`: the live `CameraRig` yaw (scripted tests).

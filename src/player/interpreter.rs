@@ -214,6 +214,10 @@ pub fn update_interpreter(
     let (snap, moved) = tracker_dirs_of(pad.dir, stick, input_yaw);
     pad.dir_snap = snap;
     pad.dir_move = moved;
+    // +0x10E0 (0xEE7DE2): the ground handler keeps the last strong (> 0.75) stick direction
+    if loco.current == ActorContextId::Ground && pad.magnitude > 0.75 {
+        pad.strong_dir = snap;
+    }
 
     // the quick reversal (ground state only, `ProcessGroundMovement` 0xEE67FE–0xEE691E): on the frame the stick
     // enters band 1 or 2, raise the flag when it is clear and the curved direction is more than 120° from the facing;

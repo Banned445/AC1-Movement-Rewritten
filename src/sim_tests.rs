@@ -3964,6 +3964,28 @@ fn free_running_into_a_wall_starts_the_wall_run_without_a_press() {
     assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?} {:?}", s.loco().current, s.body().feet);
 }
 
+/// RE/24 WALL-15: standing in the FreeRun sub-state (high profile, Legs held, the stick released) in front of a wall,
+/// the last strong stick direction aims the wall run; it starts 0.2 s after the FreeRun start, not before. Without a
+/// strong push ever made, the stored direction is zero and nothing starts.
+#[test]
+fn the_free_run_stance_runs_up_a_wall_along_the_last_strong_stick() {
+    let mut s = Sim::new(Vec3::new(76.0, 0.0, 57.8), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, false, false);
+    s.run(0.3);
+    s.pad(Vec3::Z, 0.0, false, false);
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    s.pad(Vec3::Z, 0.0, true, true);
+    s.run(0.1);
+    assert_eq!(s.loco().current, ActorContextId::Ground, "the wall run came before the 0.2 s gate");
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Walling), "no wall run from the free-run stance: {:?} {:?}", s.loco().current, s.body().feet);
+
+    let mut s = Sim::new(Vec3::new(76.0, 0.0, 58.2), FACE_PZ);
+    s.pad(Vec3::Z, 0.0, true, true);
+    s.run(1.0);
+    assert_eq!(s.loco().current, ActorContextId::Ground, "a wall run with no stored direction");
+}
+
 #[test]
 fn the_empty_hand_press_starts_a_climb_and_holding_legs_does_not() {
     // climbing from the ground is the empty-hand press (event 50, 0xEE7255); Legs held at a standstill does not climb

@@ -684,6 +684,20 @@ pub fn update_ground(
                 if request && extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed+dt>=0.2 {
                     extra.target=static_hand_target(body.feet,body.forward(),&guidance,&collision,false);
                 }
+                // The wall run from the FreeRun sub-state (0xEE7E0F–0xEE7F0D, RE/24 WALL-15): high profile and the last strong
+                // stick direction (+0x10E0) within 60° of the facing start it with no Legs, lock or stick test; event 49
+                // is refused until 0.2 s after the FreeRun start (0xDA4890 → `sub_DA2DD0` / `sub_DA2BF0`, HG+520).
+                if extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed>=0.2 && g.high_profile
+                    && pad.strong_dir.length()>0.75 && pad.strong_dir.angle_between(body.forward())<60f32.to_radians()
+                    && ab.allows(Ability::Walling)
+                {
+                    if let Some((contact,normal))=super::walling::wall_ahead(body.feet,body.forward(),&collision) {
+                        g.extra=None;
+                        let from=body.feet;
+                        switch_context(&mut loco,&mut data,TransitionSetup::ToWalling(super::walling::WallingEntry{contact,normal,from,warp_duration:None}));
+                        continue;
+                    }
+                }
                 let (out,delta)=extra.advance(dt,pad.magnitude>0.35,request,g.blend.foot);
                 match out {
                     super::ground_extras::ExtraResult::Inactive=>{g.extra=None;},
