@@ -240,8 +240,8 @@ pub struct HumanLedgeData {
     /// The last lateral move that was blocked went right (picks `PlayIdleOrBlocked`'s blocked action, 0xDD3A10).
     pub blocked_right: bool,
     /// LedgeData +108 = 3 (HangFreeReceptionType) and +112 (SwingStrength), with the `step_seq` it was stored at: the swing
-    /// back's `_b` (`PlayHopUpSecondPart` 0xDDAB00) and walling's free hangs B / C (0xE3807F–0xE380D7, 0xE3898C–0xE389E8)
-    /// store h = w[2] + w[3]; the free idle that follows (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0) plays its two clips
+    /// back's `_b` (`PlayHopUpSecondPart` 0xDDAB00), walling's free hangs B / C (0xE3807F–0xE380D7, 0xE3898C–0xE389E8)
+    /// and the climb's jump up (0xDF9650) store h = w[2] + w[3]; the free idle that follows (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0) plays its two clips
     /// (`xx_h_hangfree_wait`, `xx_h_hangwallfree_wait`) at [1 − h, h] (`sub_502E30`) until the next move (RE/24 LEDGE-24,
     /// WALL-21).
     pub swing_strength: Option<(f32, u32)>,
@@ -303,6 +303,11 @@ impl HumanLedgeData {
         // walling's free hangs B / C: +108 = 3, +112 = w₂ + w₃ of their 4-way blend (WALL-21)
         let walling_free = |a: &super::jump_blend::ActionBlend| [super::walling::ENTRY_TO_HANGFREE, super::walling::STEP1_TO_HANGFREE].contains(&a.id);
         if let Some(a) = e.entry_move.and_then(|m| m.seq[0]).filter(walling_free) {
+            self.swing_strength = Some((a.w[2] + a.w[3], self.step_seq));
+        }
+        // the climb's jump up the same way: +108 = 3, +112 = w₂ + w₃ of the swingback's 4-way blend
+        // (`HumanClimb__FillLedge_JumpToOverhang` 0xDF9A9A–0xDF9AD1)
+        if let Some(a) = e.entry_move.and_then(|m| m.seq[1]).filter(|a| a.id == super::climb::CLIMB_JUMP_SWINGBACK) {
             self.swing_strength = Some((a.w[2] + a.w[3], self.step_seq));
         }
         if let Some(m) = e.entry_move {

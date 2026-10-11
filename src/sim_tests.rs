@@ -642,6 +642,9 @@ fn the_jump_up_ends_with_the_hands_under_the_hand_bones() {
         assert!((h.x - bone.x).abs() < 0.02, "under its bone: {h:?} {bone:?}");
     }
     assert!((hl - hr).length() > (mv.hand_l - mv.hand_r).length() + 0.05, "the clip's grip, not the search hits");
+    // the free idle after it blends by the jump's swing strength (0xDF9650: +112 = w[2] + w[3], read by 0xDE1FE0)
+    let b = mv.seq[1].expect("the swingback");
+    assert_eq!(s.data().ledge.swing_idle(), Some(b.w[2] + b.w[3]));
 }
 
 #[test]
