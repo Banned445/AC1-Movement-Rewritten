@@ -3670,6 +3670,25 @@ fn a_climb_hold_that_disappears_drops_the_climber() {
 }
 
 #[test]
+fn a_climb_hold_off_its_edge_line_keeps_the_grip_while_the_edge_exists() {
+    // RE/24 CLIMB-18: `LimbIK__AllHoldsAlive` 0xE55A10 only checks the object behind each hold, not where on it the hold
+    // lies; a hand put 0.15 m off the edge line (fit_hands, corner holds) keeps the climber on the wall
+    let mut s = Sim::new(Vec3::new(-20.0, 0.0, 26.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Climb));
+    s.pad(Vec3::Z, 0.0, true, false);
+    assert!(s.run_until(2.0, |s| s.data().climb.moving.is_none()));
+    s.run(0.2);
+    assert!(s.data().climb.hold_edge[0].is_some(), "the left hand is bound to its band");
+    let mut q = s.app.world_mut().query::<&mut crate::player::HumanDataBundle>();
+    let mut data = q.single_mut(s.app.world_mut()).unwrap();
+    let n = data.climb.hold_n[0];
+    data.climb.hand_l += n * 0.15 + Vec3::Y * 0.05;
+    s.run(0.2);
+    assert_eq!(s.loco().current, ActorContextId::Climb, "still climbing: {}", s.data().climb.last_action);
+}
+
+#[test]
 fn climbing_up_to_a_top_edge_climbs_out_onto_the_roof() {
     use crate::player::ledge_moves::{MoveKind, ACT_KNEE_TO_FREESTEP, CLIMB_OUT};
     // climb the tower's middle column to the top (9.6 m): TryReachLedgeAbove 0xDF1730, hangknee, then the free step

@@ -293,6 +293,26 @@ pub fn quantize(stick: Vec3, facing: Vec3) -> usize {
     }
 }
 
+/// The edge behind a climb hold: its slot in `GuidanceWorld::edges` and the end points it had. Streaming parks or reuses a
+/// slot when its object unloads, so a changed slot is the port's dead object.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HoldEdge {
+    pub slot: usize,
+    pub p0: Vec3,
+    pub p1: Vec3,
+}
+
+impl HoldEdge {
+    fn of(guidance: &GuidanceWorld, slot: usize) -> Option<Self> {
+        guidance.edges.get(slot).filter(|e| e.subtype != crate::guidance::GuidanceSubType::None).map(|e| Self { slot, p0: e.p0, p1: e.p1 })
+    }
+
+    /// Does the object behind the hold still exist (`LimbIK__AllHoldsAlive` 0xE55A10)?
+    pub fn alive(&self, guidance: &GuidanceWorld) -> bool {
+        Self::of(guidance, self.slot) == Some(*self)
+    }
+}
+
 /// Runtime data of the Climb context (subset of reflected HumanClimbData, RE/03 §2.2).
 #[derive(Debug, Default)]
 pub struct HumanClimbData {
@@ -307,6 +327,9 @@ pub struct HumanClimbData {
     pub normal: Vec3,
     /// The holds' own flattened wall normals [L hand, R hand, L foot, R foot] (grid +1360 frames).
     pub hold_n: [Vec3; 4],
+    /// The guidance edge each hold was taken on and the point it was bound at (the game's hold handle: `LimbIK__AllHoldsAlive`
+    /// 0xE55A10 checks the object behind it). None: no edge found where the hold was put.
+    pub hold_edge: [Option<(HoldEdge, Vec3)>; 4],
     /// The root frame of the current (or target) pose (sub_B1CC20).
     pub frame: ClimbPose,
     /// The root's pitch at the start of the running move (it turns to `pose.tilt()` with the root interpolation).
@@ -441,6 +464,7 @@ impl HumanClimbData {
         self.hand_l = e.hand_l;
         self.hand_r = e.hand_r;
         self.hold_n = [e.normal; 4];
+        self.hold_edge = [None; 4];
         self.tilt_from = Quat::IDENTITY;
         self.turn = None;
         self.ground_follow = None;
@@ -1288,11 +1312,21 @@ pub fn update_climb(
         let n = d.normal;
         // Update 0xDFE7F0, every state: `sub_E55A10(human+1328)` checks that the objects behind the four limbs' holds
         // still exist (handle flag 0x10000000 and a live pointer, or no hold). A destroyed or unloaded hold drops the
-        // character (fill HumanClimb__FillInAirData_LostGrip 0xDF3300). PORT: the hold must still lie on a grab edge (the game
-        // loses a hold only when its object dies, RE/24 CLIMB-18).
+        // character (fill HumanClimb__FillInAirData_LostGrip 0xDF3300). Only the object matters, not where on it the
+        // hold lies (RE/24 CLIMB-18): each hold binds to the grab edge it was put on, and is lost when that edge's slot
+        // is parked or reused (streaming). PORT: the binding is found geometrically when a hold moves (the game's hold
+        // records carry the object); a hold put where no grab edge is found has no object and is never lost. The game
+        // also rewrites the records from the limbs' IK contacts every Wait frame (`sub_DED5A0`), which needs the
+        // animated bones (RE/24 Step 3).
+        let holds = [d.hand_l, d.hand_r, d.foot_l, d.foot_r];
+        for i in 0..4 {
+            if d.hold_edge[i].is_none_or(|(_, at)| at != holds[i]) {
+                let bound = guidance.on_edge(holds[i], d.hold_n[i], CLIMB_HOLD_TOL).and_then(|h| HoldEdge::of(&guidance, h.edge));
+                d.hold_edge[i] = bound.map(|e| (e, holds[i]));
+            }
+        }
         // (a reach to a ladder holds rungs, not grab edges)
-        let lost = d.reach.is_none_or(|r| r.ladder.is_none())
-            && [d.hand_l, d.hand_r, d.foot_l, d.foot_r].iter().zip(d.hold_n).any(|(p, hn)| guidance.on_edge(*p, hn, CLIMB_HOLD_TOL).is_none());
+        let lost = d.reach.is_none_or(|r| r.ladder.is_none()) && d.hold_edge.iter().flatten().any(|(e, _)| !e.alive(&guidance));
         if lost {
             limbs.hands = None;
             limbs.feet = None;
