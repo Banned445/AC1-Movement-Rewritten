@@ -136,6 +136,13 @@ pub fn load_locomotion(game_dir: &Path) -> Result<(Vec<RawClip>, ActionGraph, Ha
     for r in res.iter().filter(|r| r.class_hash == CLASS_ACTION_BLOCK) {
         graph.add_block(&r.name, &r.payload)?;
     }
+    // the player's animation remap (RE/24 ANIM-3)
+    if let Some(r) = res.iter().find(|r| r.id == super::ac_actions::ALTAIR_ANIM_SET) {
+        graph.remap = super::ac_actions::parse_anim_set(&r.payload)?
+            .into_iter()
+            .map(|(a, b)| (a, b, anim_names.get(&a).cloned().unwrap_or_default()))
+            .collect();
+    }
 
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();

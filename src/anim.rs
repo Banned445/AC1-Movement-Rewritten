@@ -532,9 +532,11 @@ fn named_blend(fade: f32) -> ActBlend {
 /// 2. the playing action's out-transition (Action +20);
 /// 3. `new`'s in-transition (Action +16) (the exe first checks the body-part channel priorities; the port's actions
 ///    share one channel);
-/// 4. the default transition (ASTOPBROLL 0.2 s, `sub_46A460`), unless `new` has flag bit 2 (hypothesis: the exe's
-///    last test, two node lookups compared, is taken as true).
-/// `None` means a cut.
+/// 4. the default transition (ASTOPBROLL 0.2 s, `sub_46A460`), unless `new` has flag bit 2, and only when the playing
+///    item and `new`'s item 0 differ in the player's animation remap (0x725A3E: `AnimItem__DominantAnimEntry` 0x5BC790
+///    of each, the remap entry of its heaviest remapped clip above 0.0005, or none; RE/24 ANIM-3). Altaïr's one set
+///    remaps only the twelve `xx_turn_on_spot_*` clips, so for him the default applies only into or out of those.
+/// `None` means a cut (SetAction 0x727F70 pushes the action with a default-constructed ActionBlend: type NONE).
 pub fn game_transition(lib: &AnimLibrary, cur: Option<&ItemPlay>, new: u32) -> Option<crate::assets::ac_actions::ActTransition> {
     use crate::assets::ac_actions::ActTransition;
     let new_action = lib.graph.actions.get(&new)?;
@@ -549,7 +551,13 @@ pub fn game_transition(lib: &AnimLibrary, cur: Option<&ItemPlay>, new: u32) -> O
     if let Some(t) = new_action.in_transition {
         return Some(t);
     }
-    (new_action.flags & 4 == 0).then_some(ActTransition { blend_a: ActBlend::DEFAULT, ..Default::default() })
+    let remapped = |it: &ItemPlay| it.layers.iter().any(|(n, w)| *w > 0.0005 && lib.graph.remap.iter().any(|r| r.2 == *n));
+    // the new action's item 0 with its authored weights (`sub_507CE0`)
+    let new_remapped = new_action.items.first().is_some_and(|it| {
+        it.animations.iter().enumerate().any(|(k, a)| it.weights.get(k).copied().unwrap_or(if k == 0 { 1.0 } else { 0.0 }) > 0.0005 && lib.graph.remap.iter().any(|r| r.0 == *a))
+    });
+    (new_action.flags & 4 == 0 && cur.is_some_and(|it| remapped(it)) != new_remapped)
+        .then_some(ActTransition { blend_a: ActBlend::DEFAULT, ..Default::default() })
 }
 
 /// The blend weight at linear progress `t` (`sub_773C30`): linear, or eased in (2t² − t³), out (t + t² − t³) or
@@ -1615,8 +1623,13 @@ mod tests {
         let t = game_transition(&lib, Some(&item(0x00D8_258E)), 0x00D8_37AE).expect("in-transition");
         assert_eq!((t.action_a, t.blend_a.kind, t.blend_a.disp_src), (0, 1, 2));
         assert!((t.blend_a.time - 0.2).abs() < 1e-6);
-        // 4. nothing authored: the default transition (A frozen, B playing, 0.2 s)
-        let t = game_transition(&lib, Some(&item(0x00D8_258E)), 0x00D8_243F).expect("default");
+        // 4. nothing authored: a cut, unless one side plays a clip of Altaïr's remap set (RE/24 ANIM-3): the twelve
+        //    `xx_turn_on_spot_*` clips, swapped for his `amaa_` ones
+        assert_eq!(lib.graph.remap.len(), 12);
+        assert!(lib.graph.remap.iter().all(|r| r.2.starts_with("xx_turn_on_spot_")));
+        assert!(game_transition(&lib, Some(&item(0x00D8_258E)), 0x00D8_243F).is_none(), "a cut");
+        let turning = ItemPlay { layers: vec![(lib.graph.remap[0].2.clone(), 1.0)], action: 0x00D8_258E, ..Default::default() };
+        let t = game_transition(&lib, Some(&turning), 0x00D8_243F).expect("default");
         assert_eq!(t.blend_a, ActBlend::DEFAULT);
         // the repeat count: idles loop, the pull-up plays once
         assert_eq!(lib.graph.actions[&0x0106_F2E8].repeat, 0);
