@@ -138,6 +138,42 @@ pub struct HumanGroundData {
     /// HG+1524: the stance-change wait plays (RE/24 GROUND-14); `stance_timer` is its time still to play (HG+736).
     pub stance_change: bool,
     pub stance_timer: f32,
+    /// Human+3056 … +3093: the step-up just made, while it holds (RE/24 GUIDE-15).
+    pub step_up: Option<StepUp>,
+}
+
+/// The step-up tracker (`Human__PostUpdate` 0xB2708D → `sub_B26A30`): a stick-to-ground snap up by more than 0.25 m
+/// (controller residual +384 < −0.25, step offset on) keeps the cast's contact (+3056 point, +3072 normal) and the flat
+/// distance to it (+3088). It holds (`sub_B26940`: +3092 / +3093) while the character is on the normal's side of the
+/// contact (horizontally) and no more than 5 cm further from it than its closest; while it holds, the step off an edge
+/// (event 68, `HumanGround__Guard_Event68_JumpToEdge` 0xD84190 via `sub_B0EBC0`) does not start.
+#[derive(Clone, Copy, Debug)]
+pub struct StepUp {
+    pub contact: Vec3,
+    pub normal: Vec3,
+    pub dist: f32,
+}
+
+impl StepUp {
+    const RESIDUAL: f32 = -0.25;
+    const SLACK: f32 = 0.05;
+
+    fn flat(v: Vec3) -> Vec3 {
+        Vec3::new(v.x, 0.0, v.z)
+    }
+
+    /// The snap of this frame: a new step-up when the feet were lifted more than 0.25 m.
+    pub fn capture(residual: f32, contact: Option<(Vec3, Vec3)>, feet: Vec3) -> Option<Self> {
+        let (contact, normal) = contact.filter(|_| residual < Self::RESIDUAL)?;
+        Some(Self { contact, normal, dist: Self::flat(feet - contact).length() })
+    }
+
+    /// One frame of `sub_B26A30` after the capture: the closest distance so far, then whether it still holds.
+    pub fn hold(mut self, feet: Vec3) -> Option<Self> {
+        let d = Self::flat(feet - self.contact);
+        self.dist = self.dist.min(d.length());
+        (Self::flat(self.normal).dot(d) >= 0.0 && d.length() <= self.dist + Self::SLACK).then_some(self)
+    }
 }
 
 /// The Movement child states that end a one-shot by their own rules (`HumanGround__Movement_Update` 0xDAD1C0).
@@ -533,6 +569,8 @@ impl HumanGroundData {
     /// `TransitionSetupDataToMovement::Apply` (0xC80310), simplified.
     pub fn enter(&mut self, landing: Option<Landing>) {
         self.pending_landing = landing;
+        // the other contexts run without the step offset: the tracker is off (0xB26A30's else branch)
+        self.step_up = None;
         self.turn_k = PLAYER_TURN_BAND_K0;
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
@@ -632,6 +670,8 @@ pub fn update_ground(
                 continue;
             }
         }
+        // the step-up tracker at last frame's end (`Human__PostUpdate` runs after the contexts; event 68 reads it)
+        g.step_up = g.step_up.and_then(|s| s.hold(body.feet));
 
         // ---------------------------------------------------------------- the free-step arrival's narrow mount
         // NarrowObject Movement (0xE534B0) after the reception: `TryPilotisFreeStep` 0xE50190 (from the air box along
@@ -1346,8 +1386,8 @@ pub fn update_ground(
                 // Event 68 `HumanGround__Guard_Event68_JumpToEdge` 0xD84190: a drop of 0.53 m or more, the feet 1 cm
                 // past the edge, room for the body beyond it (0xB2E7A0) → `ToInAir_JumpToEdge` 0xDA7A10 / 0xD9D1F0:
                 // the step off the edge. PORT: HG+609 bit 0 (set by some state enters) is taken to be clear outside
-                // one-shot actions.
-                if r.drop >= 0.53 && r.dist < -0.01 && super::jump_candidates::room_past_edge(&r, &collision) {
+                // one-shot actions. Not while a step-up holds (`sub_B0EBC0`, RE/24 GUIDE-15).
+                if r.drop >= 0.53 && r.dist < -0.01 && g.step_up.is_none() && super::jump_candidates::room_past_edge(&r, &collision) {
                     // the takeoff foot is the one opposite the leading foot: `sub_B27180`(…, 2 − (GetLeadingFoot() != 1))
                     // 0xD9D4B9, so a left foot ahead takes off on `footr` (RE/24 AIR-28). PORT: the leading foot is the
                     // locomotion's (MoveBlend foot 0 = left ahead), not the bone test of 0xB18850
@@ -1533,6 +1573,10 @@ pub fn update_ground(
                 let residual = body.feet.y - s.y;
                 body.stick_residual = if residual.abs() <= 0.0005 { 0.0 } else { residual };
                 body.stick_normal_y = Some(s.normal_y);
+                // a step up by more than 0.25 m starts the tracker (0xB26A30)
+                let contact = (body.stick_residual < -0.25).then(|| collision.support_contact(body.feet)).flatten();
+                let feet = Vec3::new(body.feet.x, s.y, body.feet.z);
+                g.step_up = StepUp::capture(body.stick_residual, contact, feet).or(g.step_up);
                 body.feet.y = s.y;
                 body.grounded = true;
             }
@@ -1904,6 +1948,24 @@ impl AnyHit for std::ops::RangeInclusive<f32> {
 #[cfg(test)]
 mod reanalysis_tests {
     use super::*;
+
+    /// RE/24 GUIDE-15: a step up of more than 0.25 m holds while the character stays on the contact's side, within 5 cm
+    /// of its closest approach.
+    #[test]
+    fn a_step_up_holds_until_the_character_moves_away_from_it() {
+        let contact = Some((Vec3::new(0.0, 0.3, 0.0), Vec3::new(0.0, 0.6, 0.8).normalize()));
+        assert!(StepUp::capture(-0.2, contact, Vec3::new(0.0, 0.3, 0.3)).is_none(), "0.2 m is no step-up");
+        let s = StepUp::capture(-0.3, contact, Vec3::new(0.0, 0.3, 0.3)).expect("0.3 m");
+        assert!((s.dist - 0.3).abs() < 1e-6);
+        // closer: still holding, the closest distance shrinks
+        let s = s.hold(Vec3::new(0.0, 0.3, 0.2)).expect("closer");
+        assert!((s.dist - 0.2).abs() < 1e-6);
+        // back out by 4 cm: holds; by 6 cm: ends
+        assert!(s.hold(Vec3::new(0.0, 0.3, 0.24)).is_some());
+        assert!(s.hold(Vec3::new(0.0, 0.3, 0.26)).is_none());
+        // across the contact against its normal: ends
+        assert!(s.hold(Vec3::new(0.0, 0.3, -0.01)).is_none());
+    }
 
     #[test]
     fn a_completed_landing_enters_move_without_the_stick() {
