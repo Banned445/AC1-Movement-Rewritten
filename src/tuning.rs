@@ -111,14 +111,6 @@ pub const ROLL_DROP: f32 = 3.0;
 pub const FREE_JUMP_AHEAD: f32 = 8.0;
 pub const FREE_JUMP_DOWN: f32 = 3.0;
 
-// ---------------------------------------------------------------- jump targets (RE/01 §7b)
-/// Candidate must lie within a 45° cone of the wanted direction and no lower than -3 m. 0xE96BF0
-pub const TARGET_CONE: f32 = std::f32::consts::FRAC_PI_4;
-pub const TARGET_MIN_DZ: f32 = -3.0;
-/// Ground-type target bands (max up, near, mid, far). Human__ComputeJumpAnimBlend 0xB1EC40
-pub const GROUND_MAX_UP: f32 = 1.3;
-pub const GROUND_FAR: f32 = 7.0;
-
 // ---------------------------------------------------------------- ledge (RE/03 §7)
 /// Wall hang: root (feet) 1.1 m below the hands and 0.5 m out from the wall. 0xDD6730 / 0xDE1060
 pub const WALL_HANG_DROP: f32 = 1.1;

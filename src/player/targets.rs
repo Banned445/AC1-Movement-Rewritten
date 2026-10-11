@@ -8,7 +8,6 @@ use super::ledge::{hang_root, LedgeHangType};
 use crate::collision::CollisionWorld;
 use crate::guidance::{GuidanceSubType, GuidanceWorld};
 use super::jump_candidates::{self, Candidate, Query};
-use crate::tuning::*;
 
 #[derive(Clone, Copy, Debug)]
 pub struct JumpTarget {
@@ -68,7 +67,7 @@ pub fn find_jump_target(
     guidance: &GuidanceWorld,
     collision: &CollisionWorld,
 ) -> Option<JumpTarget> {
-    find_target(feet, want_dir, want_dir, &Query::TAP, false, guidance, collision).or_else(|| haystack_target(feet, want_dir, guidance))
+    find_target(feet, want_dir, want_dir, &Query::TAP, false, guidance, collision).or_else(|| haystack_target(feet, want_dir, want_dir, guidance, collision))
 }
 
 /// Query + scorer + the port's target for the chosen candidate. `facing` = the actor's forward (the scorer's frame),
@@ -155,30 +154,12 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
     }
 }
 
-/// The Leap of Faith search (IHuman vt76, ability LeapOfFaith): a haystack's top in the 45-degree cone; a Leap of
-/// Faith when it lies 3 m or more below (bands -30 m / 7.5 m), else the haystack free-step bands (-3 m / 6 m)
-/// (0xB1EC40). PORT: vt76 itself is not traced (RE/04 §4.1.12).
-pub fn haystack_target(feet: Vec3, want_dir: Vec3, guidance: &GuidanceWorld) -> Option<JumpTarget> {
-    let want = Vec3::new(want_dir.x, 0.0, want_dir.z).normalize_or_zero();
-    if want == Vec3::ZERO {
-        return None;
-    }
-    for s in &guidance.haystacks {
-        let top = Vec3::new((s.min.x + s.max.x) * 0.5, s.max.y, (s.min.z + s.max.z) * 0.5);
-        let flat = Vec3::new(top.x - feet.x, 0.0, top.z - feet.z);
-        let dist = flat.length();
-        let dz = top.y - feet.y;
-        let faith = dz <= -super::jump_blend::FAITH_MIN_DROP;
-        let (far, min_dz) = if faith { (super::jump_blend::FAITH_NEAR, -super::jump_blend::FAITH_DOWN) } else { (6.0, TARGET_MIN_DZ) };
-        if !(0.6..=far).contains(&dist) || dz < min_dz || dz > 1.3 {
-            continue;
-        }
-        if flat.normalize().dot(want).clamp(-1.0, 1.0).acos() > TARGET_CONE {
-            continue;
-        }
-        return Some(JumpTarget { position: top, type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None });
-    }
-    None
+/// The Leap of Faith search (IHuman vt76 → `Human__sub_E15AA0` with `hay::LEAP_OF_FAITH`, RE/24 AIR-26 / CENSUS-1): the
+/// first haystack in the box / cone / height window with clear rays; the target is its top (entity origin + 1.6 m), type
+/// 0x800. A Leap of Faith when it lies 3 m or more below (bands −30 m / 7.5 m), else the haystack bands (0xB1EC40).
+pub fn haystack_target(feet: Vec3, want_dir: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+    let s = super::hay::search(feet, want_dir, facing, &super::hay::LEAP_OF_FAITH, &guidance.haystacks, collision)?;
+    Some(JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None })
 }
 
 /// True when there is no floor a short way ahead (approaching a roof edge).

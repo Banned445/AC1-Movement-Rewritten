@@ -1234,7 +1234,7 @@ pub fn update_ground(
             // the candidates, then the Leap of Faith search under its ability (0xEE8239: `sub_D32760`, IHuman vt76)
             let want = if moving && pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { forward };
             let found = super::targets::find_target(body.feet, want, want, &super::jump_candidates::Query::TAP, false, &guidance, &collision)
-                .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, &guidance)).flatten());
+                .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, forward, &guidance, &collision)).flatten());
             jump_log("tap jump", body.feet, found.as_ref());
             let entry = match found {
                 // leading foot: the playing locomotion item (footl item = left ahead) (hypothesis)
