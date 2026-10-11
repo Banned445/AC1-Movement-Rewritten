@@ -1567,14 +1567,17 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
 /// The climb's jump up to an overhang (`HumanClimb__TryBackEject` 0xDF2F50 → StartRelease 0xDE96A0 →
 /// `sub_DF9650`): `xx_h_climbing_1m_impultion` (0x1E380CEB) until it ends, then
 /// `xx_h_climbing_1m_impultion_to_swingback_{min,max}_{200,300}cm` (0x1EB21811) weighted
-/// [(1−h)(1−d), h(1−d), d(1−h), d·h] with h = clamp(target hands − root − 2.0, 0, 1) and d = the horizontal
-/// distance from the current hands to the target, clamped to [0, 1]; the root goes to the hang over that action
-/// (sub_711130) and the Ledge context starts in a free hang (the action's exit is the free-hang wait 0x012719F1).
+/// [(1−h)(1−d), h(1−d), d(1−h), d·h] with h = clamp(target hands − root − 2.0, 0, 1) and d = the flat length of the
+/// current hands' midpoint less the target's, projected onto the plane through it with normal S = F × U of the free-hang
+/// pose (`Vec_ProjectOntoPlane` 0xDF9847): the depth along F only, clamped to [0, 1]. The impulse plays in place (the
+/// Release state advances no interpolator, 0xDFA7E0); the root then goes linearly to the hang over the swingback
+/// (`sub_711130`(…, 0, 0, 0, 0, 0) 0xDF9A54) and the Ledge context starts in a free hang (the action's exit is the
+/// free-hang wait 0x012719F1) (RE/24 CLIMB-10).
 pub fn climb_jump_move(from: Vec3, cur_hands: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, collision: &CollisionWorld) -> LedgeMove {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mid = (hand_l + hand_r) * 0.5;
     let h = (hand_l.y.max(hand_r.y) - from.y - 2.0).clamp(0.0, 1.0);
-    let d = Vec2::new(mid.x - cur_hands.x, mid.z - cur_hands.z).length().clamp(0.0, 1.0);
+    let d = (mid - cur_hands).dot(facing).abs().clamp(0.0, 1.0);
     let w = [(1.0 - h) * (1.0 - d), h * (1.0 - d), d * (1.0 - h), d * h];
     let item = |id: u32, w: &[f32]| jump_blend::action_items(id).filter(|it| !it.is_empty()).map(|_| ActionBlend::new(id, 0, w));
     let seq = [item(crate::player::climb::CLIMB_IMPULSE, &[1.0]), item(crate::player::climb::CLIMB_JUMP_SWINGBACK, &w), None, None];
@@ -1589,8 +1592,8 @@ pub fn climb_jump_move(from: Vec3, cur_hands: Vec3, hand_l: Vec3, hand_r: Vec3, 
         to: hang_root_at(hand_l, hand_r, n, LedgeHangType::Free, collision),
         facing_from: facing,
         facing_to: facing,
-        follow_disp: found,
-        lead: 0.0,
+        follow_disp: false,
+        lead: if found { durations[0] } else { 0.0 },
         table: None,
         root_time: None,
         end_free: true,
@@ -1951,6 +1954,26 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RE/24 CLIMB-10: the jump up to an overhang weighs the depth only (a sideways offset changes nothing), plays the
+    /// impulse in place and moves the root linearly over the swingback.
+    #[test]
+    fn the_overhang_jump_weighs_the_depth_and_holds_the_root_through_the_impulse() {
+        let c = CollisionWorld::default();
+        let (from, cur) = (Vec3::new(0.0, 1.0, 0.5), Vec3::new(0.0, 2.2, 0.1));
+        let n = Vec3::Z; // the overhang's front faces +Z, 0.8 m out from the current hands
+        let mv = |dx: f32| climb_jump_move(from, cur, Vec3::new(dx - 0.2, 3.5, 0.9), Vec3::new(dx + 0.2, 3.5, 0.9), n, &c);
+        let (a, b) = (mv(0.0), mv(0.7));
+        assert_eq!(a.seq[1].map(|x| x.w), b.seq[1].map(|x| x.w), "a sideways offset leaves the weights");
+        let mut m = a;
+        assert!(m.seq[0].is_some() && m.durations[0] > 0.02, "the impulse clip is dumped");
+        {
+            let (p, _) = m.advance(m.durations[0] * 0.5);
+            assert_eq!(p, from, "the impulse plays in place");
+            let (p, _) = m.advance(m.durations[0] * 0.5 + m.durations[1] * 0.5);
+            assert!((p - from.lerp(m.to, 0.5)).length() < 1e-3, "linear over the swingback: {p}");
+        }
+    }
 
     /// RE/24 LEDGE-23: the swing back's horizontal weight counts the travel out from the wall only, not sideways.
     #[test]
