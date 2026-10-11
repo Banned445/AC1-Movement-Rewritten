@@ -1,5 +1,5 @@
 //! Jump targets: the game's candidate query 0xE18970 and scorer 0xE96BF0 (`jump_candidates`, RE/18 §1), turned into
-//! the port's `JumpTarget`s. Ground targets land `LAND_INSET` onto the roof; ledge targets hang from the edge (aim =
+//! the port's `JumpTarget`s. Ground targets are the candidate on the roof edge (the flight is pulled back, `air::pull_back`); ledge targets hang from the edge (aim =
 //! hang root).
 
 use bevy::prelude::*;
@@ -8,7 +8,6 @@ use super::ledge::{hang_root, LedgeHangType};
 use crate::collision::CollisionWorld;
 use crate::guidance::{GuidanceSubType, GuidanceWorld};
 use super::jump_candidates::{self, Candidate, Query};
-use crate::tuning::*;
 
 #[derive(Clone, Copy, Debug)]
 pub struct JumpTarget {
@@ -30,8 +29,9 @@ pub struct JumpTarget {
 /// `xx_h_air_*_to_freestep` and arrival plays the free-step reception, 0xB1EC40 / 0xE07D00). 0x8000 is the
 /// air-assassination target (its flight is `…_to_assassinate`), not plain ground.
 pub const TARGET_GROUND: u32 = super::jump_blend::TARGET_FREESTEP;
-/// Ledge hang targets: 0x40 = wall hang (flight `…_to_surface`, wall reception), 0x80 = free hang (flight
-/// `…_to_swing`, swing reception) (0xB1EC40 / 0xE07D00).
+/// Ledge hang targets: 0x40 = wall hang (flight `…_to_surface`), 0x80 = free hang (flight `…_to_swing`) (0xB1EC40).
+/// The arrival (0xE07D00) picks the reception by the foot holds, not the type: holds → the wall reception, none → the
+/// swing for 0x80 (RE/24 AIR-37).
 pub const TARGET_LEDGE: u32 = 0x40;
 /// PORT: thickest wall top offered as a pass-over target (type 2).
 pub const PASSOVER_MAX_THICKNESS: f32 = 1.0;
@@ -67,7 +67,7 @@ pub fn find_jump_target(
     guidance: &GuidanceWorld,
     collision: &CollisionWorld,
 ) -> Option<JumpTarget> {
-    find_target(feet, want_dir, want_dir, &Query::TAP, false, guidance, collision).or_else(|| haystack_target(feet, want_dir, guidance))
+    find_target(feet, want_dir, want_dir, &Query::TAP, false, guidance, collision).or_else(|| haystack_target(feet, want_dir, want_dir, guidance, collision))
 }
 
 /// Query + scorer + the port's target for the chosen candidate. `facing` = the actor's forward (the scorer's frame),
@@ -87,15 +87,18 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             if c.ty == 4 || (c.ty == 2 && c.sub == 1) {
                 return Some(base);
             }
-            // PORT: a roof edge's landing is `LAND_INSET` onto its top (the game aims at the edge and 0xB1EC40 pulls
-            // the target back); a narrower top (posts) takes a shallower inset
-            // a top narrower than two insets (a post) is landed on in its middle
-            let narrow = super::passover::far_edge(c.pos, -c.wall, guidance).map(|(_, t)| t).filter(|t| *t < 2.0 * LAND_INSET);
-            let insets: &[f32] = match narrow { Some(t) => &[t * 0.5][..], None => &[LAND_INSET, 0.25, 0.1][..] };
+            // the target is the candidate on the edge: 0xB1EC40 pulls the flight's aim 0.5 m back toward the jumper and
+            // the free-step arrival interpolates the root 0.5 m forward, onto the edge (`air::pull_back`, RE/24 AIR-2);
+            // the roof is checked just inside it.
+            // PORT: a top narrower than 0.9 m (a post) is landed on in its middle: the game's candidate point there
+            // (the pilotis search 0xE50190 from the arrival) is not decoded
+            let narrow = super::passover::far_edge(c.pos, -c.wall, guidance).map(|(_, t)| t).filter(|t| *t < 0.9);
+            let insets: &[f32] = match narrow { Some(t) => &[t * 0.5][..], None => &[0.1, 0.25, 0.45][..] };
             for &inset in insets {
-                let landing = c.pos - c.wall * inset;
-                if let Some(h) = collision.ground_height(landing + Vec3::Y * 0.05, 0.2) {
-                    let target = JumpTarget { position: Vec3::new(landing.x, h, landing.z), ..base };
+                let probe = c.pos - c.wall * inset;
+                if let Some(h) = collision.ground_height(probe + Vec3::Y * 0.05, 0.2) {
+                    let on = if narrow.is_some() { probe } else { c.pos };
+                    let target = JumpTarget { position: Vec3::new(on.x, h, on.z), ..base };
                     // PORT: a thin wall top is a pass-over (type 2). The query gives a railing type 1 | 2 like a
                     // roof; which of the two the game jumps at there is not established (LIVE:, RE/18 §9 item 2)
                     // PORT (live 2026-10-09, RE/18 §9): a haystack cart's rim is landed on, not vaulted, so no pass-over
@@ -107,7 +110,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
                     if c.flags & 2 != 0 && c.sub == 4 && !hay_beyond {
                         if let Some((_, t)) = super::passover::far_edge(c.pos, -c.wall, guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS) {
                             let _ = t;
-                            return Some(JumpTarget { position: c.pos + c.wall * 0.5, type_flags: 2, pass: Some((c.pos, c.wall)), ..base });
+                            return Some(JumpTarget { position: c.pos, type_flags: 2, pass: Some((c.pos, c.wall)), ..base });
                         }
                     }
                     return Some(target);
@@ -115,16 +118,21 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             }
             None
         }
-        2 => Some(JumpTarget { position: c.pos + c.wall * 0.5, pass: Some((c.pos, c.wall)), ..base }),
+        2 => Some(JumpTarget { position: c.pos, pass: Some((c.pos, c.wall)), ..base }),
         TARGET_LEDGE | TARGET_LEDGE_FREE => {
-            // hang targets need an edge (poles, type 32, are cut content in v1.02: RE/05 §3.5)
-            if c.ty == 32 {
+            // a Pole edge (type 32: the horizontal swing bars, subtype 4) is a free-hang target (the scorer's pole case
+            // 0xE96BF0 → 0x80, the swing flight); the cut content of RE/05 §3.5 is the vertical pole climb, not the bars
+            if c.ty == 32 && ty != TARGET_LEDGE_FREE {
                 return None;
             }
             let e = &guidance.edges[c.edge?];
             let on_edge = guidance.fit_hands(c.pos, e.n1);
-            let hang = if ty == TARGET_LEDGE { LedgeHangType::Wall } else { LedgeHangType::Free };
-            Some(JumpTarget { position: hang_root(on_edge, on_edge, e.n1, hang), hang: Some((on_edge, e.n1)), ..base })
+            // the aim (0xB1EC40 0xB1F60E, RE/24 AIR-3): the edge + 0.5·n, 1.1 m down for a wall hang (the wall-hang
+            // root) and only 0.5 m down for a free hang (0x80); the swing reception then interpolates the root to the
+            // free-hang pose (0xE09662). PORT: the game takes this aim only for a target with an owner entity (world
+            // geometry has one), else the pulled-back point
+            let position = if ty == TARGET_LEDGE { hang_root(on_edge, on_edge, e.n1, LedgeHangType::Wall) } else { on_edge + e.n1 * 0.5 - Vec3::Y * 0.5 };
+            Some(JumpTarget { position, hang: Some((on_edge, e.n1)), ..base })
         }
         TARGET_LADDER => {
             let e = &guidance.edges[c.edge?];
@@ -146,30 +154,12 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
     }
 }
 
-/// The Leap of Faith search (IHuman vt76, ability LeapOfFaith): a haystack's top in the 45-degree cone; a Leap of
-/// Faith when it lies 3 m or more below (bands -30 m / 7.5 m), else the haystack free-step bands (-3 m / 6 m)
-/// (0xB1EC40). PORT: vt76 itself is not traced (RE/04 §4.1.12).
-pub fn haystack_target(feet: Vec3, want_dir: Vec3, guidance: &GuidanceWorld) -> Option<JumpTarget> {
-    let want = Vec3::new(want_dir.x, 0.0, want_dir.z).normalize_or_zero();
-    if want == Vec3::ZERO {
-        return None;
-    }
-    for s in &guidance.haystacks {
-        let top = Vec3::new((s.min.x + s.max.x) * 0.5, s.max.y, (s.min.z + s.max.z) * 0.5);
-        let flat = Vec3::new(top.x - feet.x, 0.0, top.z - feet.z);
-        let dist = flat.length();
-        let dz = top.y - feet.y;
-        let faith = dz <= -super::jump_blend::FAITH_MIN_DROP;
-        let (far, min_dz) = if faith { (super::jump_blend::FAITH_NEAR, -super::jump_blend::FAITH_DOWN) } else { (6.0, TARGET_MIN_DZ) };
-        if !(0.6..=far).contains(&dist) || dz < min_dz || dz > 1.3 {
-            continue;
-        }
-        if flat.normalize().dot(want).clamp(-1.0, 1.0).acos() > TARGET_CONE {
-            continue;
-        }
-        return Some(JumpTarget { position: top, type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None });
-    }
-    None
+/// The Leap of Faith search (IHuman vt76 → `Human__sub_E15AA0` with `hay::LEAP_OF_FAITH`, RE/24 AIR-26 / CENSUS-1): the
+/// first haystack in the box / cone / height window with clear rays; the target is its top (entity origin + 1.6 m), type
+/// 0x800. A Leap of Faith when it lies 3 m or more below (bands −30 m / 7.5 m), else the haystack bands (0xB1EC40).
+pub fn haystack_target(feet: Vec3, want_dir: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+    let s = super::hay::search(feet, want_dir, facing, &super::hay::LEAP_OF_FAITH, &guidance.haystacks, collision)?;
+    Some(JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None })
 }
 
 /// True when there is no floor a short way ahead (approaching a roof edge).
@@ -192,11 +182,11 @@ pub fn jump_off_wall_dir(stick: Option<Vec3>, away: Vec3) -> Option<Vec3> {
 
 /// Its target (0xEEC89F): the guidance search along `dir`, else the free-jump target (vt68 -> 0xB1E7F0, 8 m along it,
 /// 3 m down). PORT: the Leap of Faith search in between (vt76) is not modelled for these jumps.
+/// The jump off a wall hang or a climb (event 2 → the rebound, then `HumanLedge__ReboundEndJump` 0xDD0A40 /
+/// `HumanClimb__ReboundEndJump` 0xDEAE30: jump kind 2 after turning away from the wall, RE/24 AIR-5). PORT: the leading
+/// foot is the left (the game reads the playing item's word).
 pub fn jump_off_wall_entry(from: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> super::air::InAirEntry {
-    match find_jump_target(from, dir, guidance, collision) {
-        Some(target) => super::air::InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true },
-        None => super::air::InAirEntry::FreeJump { from, dir, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true },
-    }
+    super::air::InAirEntry::ReboundJump { from, target: find_jump_target(from, dir, guidance, collision), dir, foot_left: true }
 }
 
 pub fn edge_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> bool {

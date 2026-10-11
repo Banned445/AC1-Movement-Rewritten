@@ -242,7 +242,7 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
             continue;
         }
         // the three sectors of 0x116CD50: facing the jumper (within 45 degrees of -dir) and the two sides
-        // (PORT: up to 135 degrees from -dir; the chain builder is not decoded)
+        // (the sets' ranges: the facing one within 45° of -dir, the side ones turned 0–45° from ±right)
         let ang = w.angle_between(-dir);
         let sector = if ang <= std::f32::consts::FRAC_PI_4 + 1e-4 {
             0
@@ -254,44 +254,31 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
         pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sector });
     }
 
-    // ---------------------------------------------------------------- chains (PORT: shared end points)
+    // ---------------------------------------------------------------- chains (sub_116CD50 × 3 → sub_678670)
+    // Each sector is one of the game's three chain sets (facing, right, left). Within a set the last candidate seeds a
+    // chain, which grows at its front, then at its back, by the first candidate with an end within 0.01 m of the free
+    // end (sub_678010 / sub_677E40); the game does not compare the subtypes.
     let mut chains: Vec<Vec<(usize, Vec3, Vec3)>> = Vec::new(); // (piece, start, end) in chain order
-    let mut used = vec![false; pieces.len()];
-    for s in 0..pieces.len() {
-        if used[s] || pieces[s].sector == 3 {
-            continue;
-        }
-        used[s] = true;
-        let mut chain = std::collections::VecDeque::from([(s, pieces[s].a, pieces[s].b)]);
-        loop {
-            let tail = chain.back().unwrap().2;
-            let head = chain.front().unwrap().1;
-            let mut grew = false;
-            for o in 0..pieces.len() {
-                if used[o] || pieces[o].sector != pieces[s].sector || pieces[o].subtype != pieces[s].subtype {
-                    continue;
-                }
+    for sector in 0..3u8 {
+        let mut cands: Vec<usize> = (0..pieces.len()).filter(|&i| pieces[i].sector == sector).collect();
+        while let Some(seed) = cands.pop() {
+            let mut chain = std::collections::VecDeque::from([(seed, pieces[seed].a, pieces[seed].b)]);
+            loop {
+                let head = chain.front().unwrap().1;
+                let Some(k) = cands.iter().position(|&o| pieces[o].a.distance(head) < 0.01 || pieces[o].b.distance(head) < 0.01) else { break };
+                let o = cands.remove(k);
                 let (a, b) = (pieces[o].a, pieces[o].b);
-                if a.distance(tail) < 0.01 {
-                    chain.push_back((o, a, b));
-                } else if b.distance(tail) < 0.01 {
-                    chain.push_back((o, b, a));
-                } else if b.distance(head) < 0.01 {
-                    chain.push_front((o, a, b));
-                } else if a.distance(head) < 0.01 {
-                    chain.push_front((o, b, a));
-                } else {
-                    continue;
-                }
-                used[o] = true;
-                grew = true;
-                break;
+                chain.push_front(if b.distance(head) < 0.01 { (o, a, b) } else { (o, b, a) });
             }
-            if !grew {
-                break;
+            loop {
+                let tail = chain.back().unwrap().2;
+                let Some(k) = cands.iter().position(|&o| pieces[o].a.distance(tail) < 0.01 || pieces[o].b.distance(tail) < 0.01) else { break };
+                let o = cands.remove(k);
+                let (a, b) = (pieces[o].a, pieces[o].b);
+                chain.push_back(if a.distance(tail) < 0.01 { (o, a, b) } else { (o, b, a) });
             }
+            chains.push(chain.into_iter().collect());
         }
-        chains.push(chain.into_iter().collect());
     }
 
     // ---------------------------------------------------------------- the main loop (grab point per chain)

@@ -4,8 +4,11 @@
 //! - exactly one *locomotion context* is active (AIActor extension slot 1);
 //! - contexts are identified by `ActorContextID` (values verbatim from the exe, desc 0x19640EC);
 //! - a switch is immediate (`AIActor::SwitchLocomotionContext` 0x55F7E0): old context exits, a
-//!   `TransitionSetup` object is applied to the destination's data block, the new context enters,
-//!   and the new context skips its first update (the `justSwitched` byte);
+//!   `TransitionSetup` object is applied to the destination's data block, the new context enters;
+//!   the `justSwitched` byte it sets is cleared right after the update that made the switch
+//!   (`AIActor__UpdateContexts` 0x55F6A9), so the new context's next update is the next frame's: a context later in
+//!   the port's chain skips the rest of the switching frame, one earlier in the chain runs on the next frame
+//!   (RE/24 INPUT-1);
 //! - every context's runtime data lives in one `HumanDataBundle` (HumanData+0x30 in the game).
 
 pub mod abilities;
@@ -21,6 +24,7 @@ pub mod ground_extras;
 pub mod ground_tree;
 pub mod falls;
 pub mod hay;
+pub mod interpreter;
 pub mod item_flags;
 pub mod jump_blend;
 pub mod jump_candidates;
@@ -69,7 +73,11 @@ pub struct Player;
 pub struct Locomotion {
     pub current: ActorContextId,
     pub previous: ActorContextId,
+    /// The new context's entry work is still to do (its first run after the switch).
     pub just_switched: bool,
+    /// The switch happened this frame: the context's update already ran for this frame (the old context's), so a
+    /// context later in the chain skips the rest of it. `player::interpreter` clears it at the start of every frame.
+    pub switched_this_frame: bool,
 }
 
 /// Kinematic body: feet position, facing (yaw, radians; 0 = facing -Z) and velocity.
@@ -117,6 +125,9 @@ pub struct LimbTargets {
     /// The limb-IK body adjustments switched on (LimbIK +656, `crate::ik::ADJUST_*`): the climb sets both on entry
     /// (`HumanClimb__EnterCommon` 0xDE97B0) and clears them on exit (`HumanClimb__ExitCleanup` 0xDE9A00).
     pub adjust: u8,
+    /// The limb IK is not run this frame (the context's update skips `LimbIK__PostUpdate`): nothing is applied and the
+    /// limbs' state is kept, so the animation alone shows, with no fade (the ledge's sub-state gate 0xDCD910).
+    pub suspended: bool,
 }
 
 /// Linear root interpolation used by all discrete moves (`sub_711130` / `sub_7113F0(human+80)`).
@@ -226,10 +237,11 @@ pub fn switch_context(loco: &mut Locomotion, data: &mut HumanDataBundle, setup: 
         }
     };
     loco.just_switched = true;
+    loco.switched_this_frame = true;
 }
 
-/// The skipped first update of a context just switched in (`AIActor::Update`, the `justSwitched` byte): the context's
-/// logic does not run, but the character controller still integrates the velocity it was left with
+/// The rest of the switching frame for a context later in the chain (`switched_this_frame`): the context's logic does
+/// not run, but the character controller still integrates the velocity it was left with
 /// (`CharacterController__Integrate` 0x57C7C0 runs every frame on +0x90). Without this the body would freeze for a
 /// frame at every switch (a visible hitch at each takeoff and landing).
 pub fn coast(body: &mut Body, collision: &crate::collision::CollisionWorld, dt: f32) {
@@ -257,7 +269,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(Startup, spawn_player)
             .add_systems(
                 Update,
-                (social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
+                (interpreter::update_interpreter, social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
                     .chain()
                     .in_set(PlayerSet),
             );
@@ -296,6 +308,9 @@ pub fn release_limbs(mut q: Query<(&Locomotion, &mut LimbTargets), With<Player>>
         if loco.current != ActorContextId::Climb {
             limbs.adjust = 0;
         }
+        if loco.current != ActorContextId::Ledge {
+            limbs.suspended = false;
+        }
     }
 }
 
@@ -306,10 +321,11 @@ pub fn player_components(feet: Vec3, heading: f32) -> impl Bundle {
     (
         Player,
         social::SocialHelper::default(),
-        Locomotion { current: ActorContextId::Ground, previous: ActorContextId::Ground, just_switched: false },
+        Locomotion { current: ActorContextId::Ground, previous: ActorContextId::Ground, just_switched: false, switched_this_frame: false },
         Body { feet, heading, grounded: true, ..default() },
         HumanDataBundle::default(),
         LimbTargets::default(),
+        interpreter::Interpreter::default(),
     )
 }
 

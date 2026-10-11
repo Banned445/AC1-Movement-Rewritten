@@ -22,8 +22,12 @@ pub fn target_ahead(root: Vec3, target: Option<JumpTarget>, world: &CollisionWor
     world.ray_distance(root, delta, distance, crate::layers::CHARACTER) >= distance - slack
 }
 
-pub fn automatic(elapsed: f32, drop: bool, target_flags: Option<u32>, facing: Vec3, normals: impl Iterator<Item = Vec3>) -> bool {
-    !drop && elapsed >= 0.2 && target_flags.is_some_and(|ty| matches!(ty, 1 | 0x10000 | 0x40 | 0x400))
+/// `CheckAirCatch` 0xE0BB70's automatic catch (0xE0C385–0xE0C702, RE/24 AIR-12): its timer run out, not a drop,
+/// **Data+505** (the target-driven part of a jump: `jumping`), a target of type 1 / 0x10000 / 0x40 / 0x400 and a
+/// controller contact whose flat normal faces the character (dot < −0.7071). PORT: the gate "target owner valid or fall
+/// height < 2 m" holds for world targets (they have an owner); the actor is always the player (entity +168 & 7 == 1).
+pub fn automatic(elapsed: f32, drop: bool, jumping: bool, target_flags: Option<u32>, facing: Vec3, normals: impl Iterator<Item = Vec3>) -> bool {
+    !drop && jumping && elapsed >= 0.2 && target_flags.is_some_and(|ty| matches!(ty, 1 | 0x10000 | 0x40 | 0x400))
         // PORT: the proxy's static contacts adapt native type-4 controller reports; this actor is always Human.
         && normals.map(|n| Vec3::new(n.x, 0.0, n.z).normalize_or_zero()).any(|n| facing.dot(n) < -std::f32::consts::FRAC_1_SQRT_2)
 }
@@ -50,24 +54,25 @@ pub enum CatchFound {
     Hang { mid: Vec3, normal: Vec3, wall: bool, action: u32, one_hand: Option<bool> },
 }
 
-/// `CheckAirCatch` 0xE0BB70 after the ladder (RE/19 §2): the order and the rules, with the port's guidance probes in
-/// place of `Guidance__ProbeBox` / `FindHandholdPair` 0xE0A150.
-/// 1. `FindLedgeCatch` 0xE0A990: a hand pair on ledge holds around the feet + 1.4 m (a hand bone + 0.2 m on the
-///    automatic catch), within 70° (box 0.4 m; mask 306, filter `dword_193417C`). Then
-///    - feet holds (`sub_E0A810`: the hands' midpoint − 1.2 m + 0.25 m along the reach, 0.5 m on a manual grab,
-///      ±0.25 m sideways, climb filter `dword_19341B0`) → **type 1, the climb catch** (`Human__ComputeClimbPoseFromHolds`);
+/// `CheckAirCatch` 0xE0BB70 after the ladder (RE/19 §2): the order and the rules.
+/// 1. `FindLedgeCatch` 0xE0A990 → `FindHandholdPair` 0xE0A150 (`GuidanceWorld::handhold_pair`): a hand pair on the
+///    chains in a box around the feet + 1.4 m (a hand bone + 0.2 m on the automatic catch) + `along` m along the reach
+///    (0.25, 0.5 on a manual grab), facing it, half extents 0.4 / along / 0.3; walls within 70°, mask 306; the hand
+///    references (∓0.25, −0.4, +0.3) in the box frame, margin 0.1. Then
+///    - feet holds (`FindCatchFeetHolds` 0xE0A810: the same search from the feet at the higher hand − 1.2 m, along
+///      −(the hands' wall normals)) → **type 1, the
+///      climb catch** (`Human__ComputeClimbPoseFromHolds`);
 ///    - else feet on the wall (two `sub_11718B0` probes 1 m below) → **type 3, the wall-hang catch**
 ///      `ACT_CATCH_WALL` (its 3-way angle blend snapped to the dominant class, 30° / 45°);
 ///    - else nothing here: the search goes on.
 /// 2. A fall of 3 m or more: `sub_DFFE30` (one hold, the feet + 1.95 m + 0.25 / 0.5 m along the reach, half
-///    0.4 / 0.25 or 0.5 / 0.25, 70°, climb filter) → **type 4**, the free hang: beyond 120° from the facing
+///    0.4 / 0.25 or 0.5 / 0.25, 70°, mask 50) → **type 4**, the free hang: beyond 120° from the facing
 ///    `hangfree_max` (both hands), else to the side `FREE_CATCH_SIDE` with one hand.
-///    Under 3 m: `FindClimbCatch` 0xE0AC70 (a hand pair at the feet + 1.95 m, climb filter) → **type 5**,
+///    Under 3 m: `FindClimbCatch` 0xE0AC70 (the ledge catch's search around the feet + 1.95 m) → **type 5**,
 ///    `hangfree_min`.
 /// Every search ignores holds less than 0.5 m below the last released hold (InAirData +0x190 / +0x1F4).
-/// PORT: the port's guidance has one edge type, so the ledge / climb filters are the same edges; the feet holds are
-/// edges other than the hands' one, 1.2 m below. The bodies' clearance tests (`sub_B2DC80` / `sub_B2DEB0`) are the
-/// port's hang boxes.
+/// PORT: the feet-on-wall test (`sub_11718B0`) is the collision foot rays (`hang_type_at`); the bodies' clearance tests
+/// (`sub_B2DC80` / `sub_B2DEB0`) are the port's hang boxes.
 pub fn ledge_search(
     feet: Vec3,
     reach: Vec3,
@@ -83,24 +88,26 @@ pub fn ledge_search(
     let dir = Vec3::new(reach.x, 0.0, reach.z).normalize_or(Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z));
     let below_release = |y: f32| release_hold.is_none_or(|r| r.y - 0.5 > y);
     let angle = 70f32.to_radians();
+    // the box: manual, the feet + 1.4 m, 0.5 m along the reach, half height 0.3; automatic, the hand bone (0xDED10611)
+    // + 0.2 m up + 0.5 m along, half height 0.9 (0xE0A9C8–0xE0AA6D, RE/24 AIR-12). PORT: the hand bone is taken at the
+    // feet + 1.4 m (the simulation has no bone positions)
+    let along = 0.5;
+    let (half_z, lift) = if manual { (0.3, 0.0) } else { (0.9, 0.2) };
+    let pair_along = |base: Vec3, dir: Vec3, half_z: f32| {
+        let refs = [Vec3::new(-0.25, -0.4, 0.3), Vec3::new(0.25, -0.4, 0.3)];
+        guidance.handhold_pair(base + dir * along, dir, Vec3::new(0.4, along, half_z), refs, angle, 0.1, crate::guidance::MASK_CATCH)
+    };
+    let catch_pair = |base: Vec3| pair_along(base, dir, half_z);
     // 1. the ledge catch: a hand pair at the feet + 1.4 m
-    if let Some(h) = guidance.probe(feet + Vec3::Y * 1.4 + dir * 0.3, 0.4, 0.3, Some(dir), angle).filter(|h| below_release(h.point.y)) {
-        let n = h.wall_normal;
-        let mid = guidance.fit_hands(h.point, n);
-        let r = super::right_of(-n);
-        let (hl, hr) = (mid - r * crate::tuning::HAND_SPACING * 0.5, mid + r * crate::tuning::HAND_SPACING * 0.5);
+    if let Some([a, b]) = catch_pair(feet + Vec3::Y * (1.4 + lift)).filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y)) {
+        let n = a.wall_normal;
+        let (hl, hr) = (a.point, b.point);
+        let mid = (hl + hr) * 0.5;
         let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-        // the feet holds (sub_E0A810)
-        let fc = mid - Vec3::Y * 1.2 + dir * if manual { 0.5 } else { 0.25 };
-        // PORT: the box depth along the reach is not decoded (FindHandholdPair's caller arguments are garbled); 0.75 m
-        // both ways reaches the holds when the reach points into the wall
-        let foot = |side: f32| {
-            let c = fc + r * 0.25 * side;
-            guidance
-                .probe_box(c, r, dir, Vec3::Y, Vec3::new(0.4, 0.75, 0.3), c - into * 0.2, angle, 0.1, crate::guidance::MASK_CLIMB_HOLDS)
-                .filter(|f| f.edge != h.edge && (f.point.y - (mid.y - 1.2)).abs() <= 0.3 && f.wall_normal.dot(n) > 0.7)
-        };
-        if let (Some(fl), Some(fr)) = (foot(-1.0), foot(1.0)) {
+        // the feet holds (FindCatchFeetHolds 0xE0A810): the same search from the feet's position at the higher hand's
+        // height − 1.2 m, along −(the two hands' wall normals) (into the wall)
+        let feet_dir = -Vec3::new(a.wall_normal.x + b.wall_normal.x, 0.0, a.wall_normal.z + b.wall_normal.z).normalize_or(-into);
+        if let Some([fl, fr]) = pair_along(Vec3::new(feet.x, hl.y.max(hr.y) - 1.2, feet.z), feet_dir, 0.3) {
             let entry = super::climb::ClimbEntry {
                 entry_type: super::climb::ClimbEntryType::Default,
                 hand_l: hl,
@@ -122,24 +129,23 @@ pub fn ledge_search(
             }
         }
     }
-    // 2. the free hangs at the feet + 1.95 m
+    // 2. the free hangs at the feet + 1.95 m: both hand records on the one hold (`sub_B15AD0`(…, &v137, &v137, …)
+    // 0xE0D2CA, RE/24 AIR-13)
     let free = |h: crate::guidance::GuidanceHit| {
         let n = h.wall_normal;
-        let mid = guidance.fit_hands(h.point, n);
-        let r = super::right_of(-n);
-        let (hl, hr) = (mid - r * crate::tuning::HAND_SPACING * 0.5, mid + r * crate::tuning::HAND_SPACING * 0.5);
-        let root = hang_root_at(hl, hr, n, LedgeHangType::Free, collision);
+        let mid = h.point;
+        let root = hang_root_at(mid, mid, n, LedgeHangType::Free, collision);
         let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
         super::climb::hang_boxes_free(collision, root, into, false).then_some((mid, n))
     };
     if long {
-        // sub_DFFE30
-        let along = if manual { 0.5 } else { 0.25 };
-        let centre = feet + Vec3::Y * 1.95 + dir * along;
-        let half = Vec3::new(0.4, along, 0.25);
+        // sub_DFFE30: manual, the feet + 1.95 m, half (0.4, 0.5, 0.25); automatic, the hand bone + 0.2 m, half (0.4, 0.5,
+        // 0.9) (v21 / v22); 0.5 m along the reach; reference (0, −0.4, 0.25) local; 70°, mask 306 (RE/24 AIR-12 / AIR-13)
+        let centre = if manual { feet + Vec3::Y * 1.95 } else { feet + Vec3::Y * (1.4 + 0.2) } + dir * along;
+        let half = Vec3::new(0.4, along, if manual { 0.25 } else { 0.9 });
         let reference = centre - dir * 0.4 + Vec3::Y * 0.25;
         let hit = guidance
-            .probe_box(centre, super::right_of(dir), dir, Vec3::Y, half, reference, angle, 0.1, crate::guidance::MASK_CLIMB_HOLDS)
+            .probe_box(centre, super::right_of(dir), dir, Vec3::Y, half, reference, angle, 0.1, crate::guidance::MASK_CATCH)
             .filter(|h| below_release(h.point.y));
         if let Some((mid, n)) = hit.and_then(free) {
             // the side by the angle between the facing and the hold (0xE0D322)
@@ -156,10 +162,9 @@ pub fn ledge_search(
             };
             return Some(CatchFound::Hang { mid, normal: n, wall: false, action, one_hand });
         }
-    } else if let Some((mid, n)) = guidance
-        .probe(feet + Vec3::Y * 1.95 + dir * 0.3, 0.4, 0.3, Some(dir), angle)
-        .filter(|h| below_release(h.point.y))
-        .and_then(free)
+    } else if let Some((mid, n)) = catch_pair(feet + Vec3::Y * 1.95)
+        .filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y))
+        .and_then(|[a, b]| free(crate::guidance::GuidanceHit { point: (a.point + b.point) * 0.5, ..a }))
     {
         // FindClimbCatch 0xE0AC70
         return Some(CatchFound::Hang { mid, normal: n, wall: false, action: super::ledge::ACT_CATCH_FREE[0], one_hand: None });
@@ -176,7 +181,7 @@ pub const KNEE_CATCH: [u32; 2] = [0x1F0C_05A7, 0x1F0C_05A6];
 /// one facing the character within 70° (`sub_116FF40`, step 0.1, mask 386); no jump target may be ahead, and the drop
 /// in front of the edge (`Human__MeasureDropBeyondEdge` 0.7 / 0.3) must exceed 0.5 m. `sub_B2E240` then wants room on
 /// the top (two sweeps from 1.075 m and 0.95 m above it, 0.3 m clear past 1.0 / 0.6 m). Returns the edge point and its
-/// wall normal. PORT: the drop is one ray down 0.3 m out from the edge; the room on top is the capsule fitting 0.35 m in.
+/// wall normal. PORT: the drop is one ray down 0.3 m out from the edge.
 pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
     let r = super::right_of(f);
@@ -216,7 +221,8 @@ pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidance
     if below <= 0.5 {
         return None;
     }
-    collision.capsule_fits(p - n * 0.35 + Vec3::Y * 0.05).then_some((p, n))
+    // `sub_B2E240` = `Human__KneeCatchRoomOnTop` (room above the edge, no floor test; RE/24 CLIMB-5)
+    super::ledge_moves::knee_room_on_top(p, -n, collision).then_some((p, n))
 }
 
 /// InAir sub-state 3, the edge landing (`CheckAirCatch` LABEL_140, 0xE0D684): at a flat ground contact
@@ -293,7 +299,9 @@ mod tests {
     }
     #[test]
     fn automatic_needs_target_timer_and_wall_contact() {
-        let check = |t, drop, ty, n| automatic(t, drop, ty, Vec3::Z, [n].into_iter());
+        let check = |t, drop, ty, n| automatic(t, drop, true, ty, Vec3::Z, [n].into_iter());
+        // only in the target-driven part of the jump (Data+505, RE/24 AIR-12)
+        assert!(!automatic(0.2, false, false, Some(1), Vec3::Z, [Vec3::NEG_Z].into_iter()));
         assert!(!check(0.199, false, Some(1), Vec3::NEG_Z));
         assert!(check(0.2, false, Some(1), Vec3::NEG_Z));
         assert!(!check(0.2, true, Some(1), Vec3::NEG_Z));

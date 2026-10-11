@@ -16,7 +16,7 @@ use super::jump_blend::{self, ActionBlend};
 use super::ledge::{hang_root_at, hang_root, hang_type_at, LedgeHangType};
 use super::right_of;
 use crate::collision::CollisionWorld;
-use crate::guidance::GuidanceWorld;
+use crate::guidance::{GuidanceWorld, MASK_CLIMB_HOLDS};
 use crate::tuning::*;
 
 /// Ledge-jump table (0x1A2C780 wall hang / 0x1A2C980 free hang; filled by HumanLedge__StaticInitTables
@@ -47,6 +47,45 @@ pub const LEDGE_JUMP_TABLE: [[(u8, [u32; 3]); 32]; 2] = [
     ],
 ];
 
+/// The jump off's rebound turn (0xDD2CA0): [`xx_h_hangwall_tr_rebound_footl` (the jump to the character's right),
+/// `…_footr` (to the left)].
+pub const REBOUND: [u32; 2] = [0x011F_FC1A, 0x011F_FC1B];
+
+/// `sub_DD2CA0` 0xDD2CA0, event 2's action on a wall hang (the jump off, RE/24 LEDGE-16): the rebound by the side of the
+/// jump direction `jd` (the signed angle from it to straight back ≥ 0, i.e. to the character's left → `_footr`), the
+/// root interpolated linearly over the action (`sub_711130` without an action) from the hang root to itself, lowered
+/// by 0.3·min(|angle|, 45°)/45° for a jump to the right.
+pub fn rebound_move(from: Vec3, n: Vec3, jd: Vec3, hand_l: Vec3, hand_r: Vec3) -> LedgeMove {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let away = -facing;
+    // angle ≥ 0 (the left, and straight back) → `_footr`
+    let left = jd.dot(right_of(facing)) <= 1e-6;
+    let a = away.angle_between(Vec3::new(jd.x, 0.0, jd.z).normalize_or(away));
+    let id = REBOUND[left as usize];
+    let seq = [single(id, 0), None, None, None];
+    let durations = seq_durations(&seq);
+    let drop = if left { 0.0 } else { 0.3 * a.min(std::f32::consts::FRAC_PI_4) / std::f32::consts::FRAC_PI_4 };
+    LedgeMove {
+        kind: MoveKind::Rebound,
+        seq,
+        durations: if durations.iter().sum::<f32>() > 0.0 { durations } else { [0.3, 0.0, 0.0, 0.0] },
+        t: 0.0,
+        from,
+        to: from - Vec3::Y * drop,
+        facing_from: facing,
+        facing_to: facing,
+        follow_disp: false,
+        lead: 0.0,
+        table: None,
+        end_free: false,
+        end_wall: true,
+        end_stand: false,
+        hand_l,
+        hand_r,
+        normal: n,
+    }
+}
+
 /// Corner actions (0xDD3BB0: 510126209 + k). Free hang: `hangfree_corner_{left,right}_090_{in,out}`; wall
 /// hang: the two-item strafe open + close actions with the hand targets on the new edge.
 /// [free, wall] × [left in, left out, right in, right out].
@@ -60,6 +99,7 @@ pub const HOP_UP: u32 = 0x4CD6_8F4F;
 pub const HOP_UP_B: u32 = 0x4CD6_8F50;
 
 pub const DUMPED_ACTIONS: &[u32] = &[
+    RECEPTION_WALL_OTHER, REBOUND[0], REBOUND[1],
     0x491228AE, 0x491228AF, 0x491228B0, 0x491228B1, 0x491228B2, 0x491228B3,
     0x491228C6, 0x491228C7, 0x491228C8, 0x491228C9, 0x491228CA, 0x491228CB,
     0x491228CC, 0x491228CD, 0x491228CE, 0x491228CF, 0x491228D0, 0x491228D1,
@@ -152,6 +192,8 @@ pub enum MoveKind {
     Pullup,
     /// Ground → hang over an edge (0xDDE4D0 / 0xDDE980): orientation, descent, reception.
     PullDown { stage: u8 },
+    /// The jump off a wall hang: the rebound turn before the jump (event 2 → 0xDD2CA0, SubState 5, state 10).
+    Rebound,
 }
 
 /// A running ledge move.
@@ -171,6 +213,11 @@ pub struct LedgeMove {
     pub follow_disp: bool,
     /// Interpolator only: the root holds still for this long first (the hop's `_a` item).
     pub lead: f32,
+    /// A table ledge jump's root path (RE/24 LEDGE-14): (start items, linear items). The start items' own displacement
+    /// moves the root (no interpolator, `StartLedgeJump` 0xDDCE40); the next items interpolate it linearly to `to`
+    /// (`sub_DD8550` → `sub_711130` in spline mode over the loop's blended duration); any later item holds it there
+    /// (the end action is the hang idle's entry, `sub_DCF280`). None: `follow_disp` / the interpolator as usual.
+    pub table: Option<(usize, usize)>,
     /// The move ends in a free hang whatever the wall below (the hop, 0xDDAB00 sets LedgeHangType 1).
     pub end_free: bool,
     /// The move ends in a wall hang (free → wall switch, wall receptions).
@@ -224,7 +271,17 @@ impl LedgeMove {
         let total = self.duration();
         self.t = (self.t + dt).min(total);
         let s = self.t / total;
-        let p = if self.follow_disp {
+        let p = if let Some((k, m)) = self.table {
+            let to_world = |d: [f32; 3]| right_of(self.facing_from) * d[0] + self.facing_from * d[1] + Vec3::Y * d[2];
+            let t_start: f32 = self.durations.iter().take(k).sum();
+            let t_loop: f32 = self.durations.iter().skip(k).take(m).sum();
+            if self.t < t_start {
+                self.from + to_world(self.disp(self.t))
+            } else {
+                let start_end = self.from + to_world(self.disp(t_start));
+                start_end.lerp(self.to, ((self.t - t_start) / t_loop.max(1e-4)).clamp(0.0, 1.0))
+            }
+        } else if self.follow_disp {
             let to_world = |d: [f32; 3]| right_of(self.facing_from) * d[0] + self.facing_from * d[1] + Vec3::Y * d[2];
             let end = self.from + to_world(self.disp(total));
             self.from + to_world(self.disp(self.t)) + (self.to - end) * s
@@ -288,9 +345,141 @@ pub(crate) fn seq_durations(seq: &[Option<ActionBlend>; 4]) -> [f32; 4] {
     d
 }
 
-/// `HumanLedge__FindCornerEdges` 0xDD0600 (same-height row) + `HumanLedge__TryTurnCorner` 0xDD3BB0.
-/// `right` = moving right. Probe: inner = hands mid + 0.6·move − 0.6·facing; outer = hands mid +
-/// 0.3·facing + 0.2·move; radius 0.25, vertical 0.4, edges whose wall the character would face within 50°.
+/// Five rows of edge hits at height offsets −1.8, −1.2, −0.6, 0, +0.6 m (the ledge searches' row layout: ProbeLateral
+/// 0xDD9640 at +288, FindCornerEdges 0xDD0600 at +1904 / +2304, 80 bytes each).
+pub type EdgeRows = [Option<crate::guidance::GuidanceHit>; 5];
+
+/// The row height offsets (from the lead hand or the hands' midpoint).
+pub const ROW_OFFSETS: [f32; 5] = [-1.8, -1.2, -0.6, 0.0, 0.6];
+
+/// `HumanLedge__FindCornerEdges` 0xDD0600: the five rows of the corner's other face. The box (0x1170A70 on the ledge
+/// report: half extents 0.25 / 0.4 / 0.3, 50°, the reference 0.2 m back, mask 50) faces that face: `inner` (near) =
+/// hands mid (lower hand) + 0.6·move − 0.6·facing, facing along the move; outer (far) = hands mid + 0.2·move +
+/// 0.3·facing, facing back against the move (base − move − 1.8 z, then + 0.3·forward + 1.2·move, 0xDD0797; RE/24
+/// LEDGE-12).
+pub fn corner_rows(inner: bool, right: bool, hand_l: Vec3, hand_r: Vec3, n: Vec3, guidance: &GuidanceWorld) -> EdgeRows {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let side = if right { right_of(facing) } else { -right_of(facing) };
+    let mut base = (hand_l + hand_r) * 0.5;
+    base.y = hand_l.y.min(hand_r.y);
+    let (p, zone_forward) = if inner { (base + side * 0.6 - facing * 0.6, side) } else { (base + facing * 0.3 + side * 0.2, -side) };
+    ROW_OFFSETS.map(|dy| guidance.probe_facing(p + Vec3::Y * dy, zone_forward, Vec3::new(0.25, 0.4, 0.3), 0.2, 0.872_664_6, MASK_CLIMB_HOLDS))
+}
+
+/// A capsule swept along `dir`: the nearest free distance of spheres (radius `r`) spaced at most 0.1 m along the segment
+/// `a`–`b` shortened by `r` at both ends (`sub_B18C30` 0xB18C30). PORT: sampled spheres stand in for the capsule cast.
+fn capsule_free_distance(a: Vec3, b: Vec3, dir: Vec3, r: f32, max: f32, collision: &CollisionWorld) -> f32 {
+    let axis = b - a;
+    let len = axis.length();
+    let (a, b) = if len > 2.0 * r { (a + axis / len * r, b - axis / len * r) } else { ((a + b) * 0.5, (a + b) * 0.5) };
+    let n = (((b - a).length() / 0.1).ceil() as usize).max(1);
+    (0..=n).map(|k| collision.sphere_free_distance(a.lerp(b, k as f32 / n as f32), dir, r, max)).fold(max, f32::min)
+}
+
+/// `HumanLedge__ProbeLateral` 0xDD9640 for a shimmy step (`closing` = the alternation flag +133: the trailing hand
+/// closes). The moving hand `mover`, the other one `other`, `dv` the move direction:
+/// - the reach (not closing): a capsule (r 0.15, `sub_B18C30` 0xB18C30) from the moving hand pulled 0.15 m back,
+///   0.75 m out from the wall and 0.2 m up, down to 1.1 m (wall hang) / 2.4 m (free hang) below the hand
+///   (0xDD996B..0xDD99F1), swept 1.55 m along the move, gives d = free distance − 0.15; d < 0.7 is blocked (no rows);
+///   the width w = min(d − 0.4, 1 − |handL − handR|) (RE/24 LEDGE-8: the body, not only the hands, must have room);
+/// - the closing step: w = |handL − handR| − 0.15.
+///
+/// Five rows (moving hand −1.8 … +0.6 m): a box from 0.1 m beyond the moving hand to w + 0.1 m (half extents w/2 /
+/// 0.5 / 0.3, 45°, mask 50, on the ledge report) with the reference at its far end, 0.2 m back from the wall: the
+/// farthest reachable point.
+///
+/// The shimmy target (row 3, the moving hand's height): reaching, the hit at least 0.15 m beyond moving hand + 0.1·move;
+/// closing, the hit unless it lies more than 0.3 m from the other hand, or none: then the other hand's own point (the
+/// hands come together).
+pub fn probe_lateral(mover: Vec3, other: Vec3, n: Vec3, dv: Vec3, closing: bool, hang: LedgeHangType, guidance: &GuidanceWorld, collision: &CollisionWorld) -> (EdgeRows, Option<Vec3>) {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let spacing = (mover - other).length();
+    let width = if closing {
+        spacing - 0.15
+    } else {
+        let top = mover - dv * SHIMMY_SWEEP_R + n * SHIMMY_SWEEP_OUT + Vec3::Y * SHIMMY_SWEEP_UP;
+        let drop = if hang == LedgeHangType::Wall { 1.1 } else { 2.4 };
+        let d = capsule_free_distance(top, top - Vec3::Y * (drop + SHIMMY_SWEEP_UP), dv, SHIMMY_SWEEP_R, SHIMMY_SWEEP_LEN, collision) - SHIMMY_SWEEP_R;
+        if d < SHIMMY_MIN_FREE {
+            return ([None; 5], None);
+        }
+        (d - SHIMMY_WALL_MARGIN).min(SHIMMY_MAX_SPACING - spacing)
+    };
+    if width <= 0.0 {
+        return ([None; 5], if closing { Some(other) } else { None });
+    }
+    let half = Vec3::new(width * 0.5, 0.5, 0.3);
+    let right = facing.cross(Vec3::Y);
+    let rows = ROW_OFFSETS.map(|dy| {
+        let centre = mover + dv * (width * 0.5 + 0.1) + Vec3::Y * dy;
+        let reference = centre + dv * (width * 0.5) - facing * 0.2;
+        guidance.probe_box(centre, right, facing, Vec3::Y, half, reference, 0.785_398_2, crate::guidance::PROBE_STEP, MASK_CLIMB_HOLDS)
+    });
+    let row = rows[3].map(|h| h.point);
+    let flat = |a: Vec3, b: Vec3| Vec2::new(a.x - b.x, a.z - b.z).length();
+    let target = if closing {
+        Some(row.filter(|&p| flat(other, p) <= 0.3).unwrap_or(other))
+    } else {
+        row.filter(|&p| (mover + dv * 0.1).distance(p) >= SHIMMY_MIN_STEP)
+    };
+    (rows, target)
+}
+
+/// `HumanLedge__TrySideMoveToClimbHolds` 0xDD48B0 on a row source (ProbeLateral's or a corner's): `band` 0 up (flag 4:
+/// feet row 2, hands row 4), 1 level (8: rows 1 / 3), 2 down (16: rows 0 / 2). Both hands go to the hand row's hit and
+/// both feet to the feet row's (climb pose 0), then the transition `LEDGE_SIDE_TO_CLIMB` plays. Not during a closing
+/// step (+133). PORT: the clearance tests (`Human__ClimbBodyBoxesFree` 0xB2DF90, `Human__LateralPathFree` 0xB2A410,
+/// 1.8 m) are not modelled.
+pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang: LedgeHangType, feet: Vec3) -> Option<super::climb::ClimbEntry> {
+    let (fi, hi) = [(2usize, 4usize), (1, 3), (0, 2)][band];
+    let (foot, hand) = (rows[fi]?, rows[hi]?);
+    Some(super::climb::ClimbEntry {
+        entry_type: super::climb::ClimbEntryType::FromLedge,
+        hand_l: hand.point,
+        hand_r: hand.point,
+        foot_l: foot.point,
+        foot_r: foot.point,
+        normal: hand.wall_normal,
+        from_feet: feet,
+        foot_right: false,
+        action: Some(super::climb::LEDGE_SIDE_TO_CLIMB[right as usize][band][(hang != LedgeHangType::Wall) as usize]),
+    })
+}
+
+/// `sub_DD8F70`'s three vertical searches (`GuidanceWorld::vertical_search`, 0.4 m wide, the ledge report of
+/// `sub_DDC620`: up −1.0 … +2.0 m, down −2.0 … 0 m around the higher hand), from the hands' midpoint at the lower hand
+/// (up) or the higher one (down):
+/// - `feet` (+688): up 0.3–0.9 m below, down 1.5–2.1 m below (the farthest along the step);
+/// - `hands` (+768): up 0.3–0.9 m above, down 0.3–0.9 m below;
+/// - `step` (+848, the hand step): up 0.1–0.8 m above, down 0.1–0.8 m below, the edge held cut out (capsule r 0.2 at
+///   the hands) and a ±30° wedge about the facing (up) or its opposite (down).
+///
+/// PORT: when the hands are within 0.1 m in height the game picks the height by the last vertical hand (+1844); the
+/// port keeps the lower / higher one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VerticalRows {
+    pub feet: Option<crate::guidance::GuidanceHit>,
+    pub hands: Option<crate::guidance::GuidanceHit>,
+    pub step: Option<crate::guidance::GuidanceHit>,
+}
+
+pub fn vertical_rows(hand_l: Vec3, hand_r: Vec3, n: Vec3, up: bool, guidance: &GuidanceWorld) -> VerticalRows {
+    use crate::guidance::Wedge;
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let mut mid = (hand_l + hand_r) * 0.5;
+    mid.y = if up { hand_l.y.min(hand_r.y) } else { hand_l.y.max(hand_r.y) };
+    let top = hand_l.y.max(hand_r.y);
+    let window = if up { (top - 1.0, top + 2.0) } else { (top - 2.0, top) };
+    let wedge = |cut_up: f32| Some(Wedge { angle: 0.523_598_8, cut_up });
+    let search = |dy: f32, lo: f32, hi: f32, w: Option<Wedge>| guidance.vertical_search(mid + Vec3::Y * dy, up, facing, lo, hi, 0.4, 0.0, w, false, window);
+    if up {
+        VerticalRows { feet: search(-0.9, 0.0, 0.6, None), hands: search(0.3, 0.0, 0.6, None), step: search(0.0, 0.1, 0.8, wedge(0.0)) }
+    } else {
+        VerticalRows { feet: search(-2.1, 0.0, 0.6, None), hands: search(-0.9, 0.0, 0.6, None), step: search(-0.8, 0.0, 0.7, wedge(0.8)) }
+    }
+}
+
+/// `HumanLedge__TryTurnCorner` 0xDD3BB0 on FindCornerEdges' same-height row (row 3). `right` = moving right.
 pub fn try_corner(
     inner: bool,
     right: bool,
@@ -303,26 +492,17 @@ pub fn try_corner(
     collision: &CollisionWorld,
 ) -> Option<LedgeMove> {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let side = if right { right_of(facing) } else { -right_of(facing) };
-    let mut base = (hand_l + hand_r) * 0.5;
-    base.y = hand_l.y.min(hand_r.y);
-    let (p, new_facing) = if inner {
-        (base + side * 0.6 - facing * 0.6, side)
-    } else {
-        (base + facing * 0.3 + side * 0.2, -side)
-    };
-    let hit = guidance.probe(p, 0.25, 0.4, Some(new_facing), 50f32.to_radians())?;
+    let hit = corner_rows(inner, right, hand_l, hand_r, n, guidance)[3]?;
     let nn = hit.wall_normal;
-    let new_hang = hang_type_at(hit.point, nn, collision);
-    // a wall hang needs foot holds on the new wall (sub_B16130)
-    if hang == LedgeHangType::Wall && new_hang != LedgeHangType::Wall {
+    // TryTurnCorner never changes the hang type (+104 is not written): a free hang turns as a free hang (pose
+    // `sub_B15AD0`); a wall hang needs foot holds on the new wall (`Human__FindWallHangFeetSupports` 0xB16130, pose
+    // `sub_B157B0`). Both hand targets are the corner row point (0xDD3C17..0xDD3CE1). PORT: the body boxes and
+    // `LateralPathFree` (2.4 / 1.1 m) are the capsule test at the target (RE/24 LEDGE-11).
+    if hang == LedgeHangType::Wall && !super::ledge::feet_supports(hit.point, nn, collision) {
         return None;
     }
-    // hands: both on the corner point during the turn; SecondHandGrab (state 17, ±0.25 m) re-spreads them
-    // (hypothesis: to the normal hand spacing around the point)
-    let r = right_of(-nn);
-    let (hl, hr) = (hit.point - r * HAND_SPACING * 0.5, hit.point + r * HAND_SPACING * 0.5);
-    let to = hang_root_at(hl, hr, nn, new_hang, collision);
+    let (hl, hr) = (hit.point, hit.point);
+    let to = hang_root_at(hl, hr, nn, hang, collision);
     if !collision.capsule_fits(to + Vec3::Y * 0.05) {
         return None;
     }
@@ -342,8 +522,9 @@ pub fn try_corner(
         facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
         follow_disp: false,
         lead: 0.0,
-        end_free: false,
-        end_wall: false,
+        table: None,
+        end_free: hang == LedgeHangType::Free,
+        end_wall: hang == LedgeHangType::Wall,
         end_stand: false,
         hand_l: hl,
         hand_r: hr,
@@ -351,11 +532,16 @@ pub fn try_corner(
     })
 }
 
-/// `HumanLedge__TrySideJumpToLedge` 0xDDD490 (table types 0 / 1 / 2): from the hands' midpoint (highest hand)
-/// + 0.9·move, search up to 1.6 m further at hand-height offsets 0, +0.6, −0.6 (radius 0.35, vertical 0.3) for an
-/// edge on the same side of the wall. `long` = distance / 1.6 ≥ 0.5. Feet on climb holds 1.2 m below the new edge →
-/// type 0: the start and loop play here, the end item in the Climb context (the returned `ClimbEntry`, as
-/// `try_jump_up_to_climb`); otherwise a hang (1 wall, 2 free).
+/// `HumanLedge__TrySideJumpToLedge` 0xDDD490 (table types 0 / 1 / 2): three passes from the hands' midpoint (highest
+/// hand) + 0.9·move, hand starts at height offsets 0, +0.6, −0.6 and the feet 1.2 m below them. Each pass is
+/// `sub_B153C0` (`GuidanceWorld::step_search`): 0.35 m boxes (half extents 0.175 / 0.3 / 0.3) stepped up to 1.6 m along
+/// the move, climb holds (feet, then hands 1.2 m above) before a hang (hands only). Feet on climb holds → type 0: the
+/// start and loop play here, the end item in the Climb context (the returned `ClimbEntry`, as `try_jump_up_to_climb`);
+/// otherwise a hang (1 wall, 2 free). A landing whose body sweep (`Human__CapsuleCastFree` 0xB136E0) fails moves on to
+/// the next pass. `long` = flat distance from the pass's hand start / 1.6 ≥ 0.5.
+///
+/// PORT: the hang's feet support (`sub_11718B0`, 1.0 m below the hand box) is the collision foot rays
+/// (`hang_type_at`); the hang's body sweep is the capsule test at the target.
 pub fn try_side_jump(
     right: bool,
     hand_l: Vec3,
@@ -372,118 +558,111 @@ pub fn try_side_jump(
     base.y = hand_l.y.max(hand_r.y);
     let start = base + side * 0.9;
     for dz in [0.0f32, 0.6, -0.6] {
-        let mut s = 0.0;
-        while s <= 1.6 {
-            let p = start + side * s + Vec3::Y * dz;
-            if let Some(hit) = guidance.probe(p, 0.35, 0.3, Some(facing), 45f32.to_radians()) {
-                // must be a different stretch of edge than the one we hang from (the shimmy would reach it)
-                let along = (hit.point - base).dot(side);
-                if along > 0.9 && guidance.on_edge(base + side * (along * 0.5), n, 0.1).is_none() {
-                    let nn = hit.wall_normal;
-                    let r = right_of(-nn);
-                    // both hands on the new edge (sub_B153C0 finds a hand pair): the first hand lands on the
-                    // nearest point, the other one HAND_SPACING further along the move
-                    let c = hit.point + side * HAND_SPACING * 0.5;
-                    let (hl, hr) = (c - r * HAND_SPACING * 0.5, c + r * HAND_SPACING * 0.5);
-                    // `TrySideJumpToLedge` 0xDDD490 classifies the landing by the feet search 1.2 m below the hands
-                    // (the three passes, feet −1.2 / −0.6 / −1.8 from the hand base): feet on climb holds → type 0
-                    // (the climb pose from the holds, `Human__ComputeClimbPoseFromHolds` 0xB1CC20), on a wall surface →
-                    // 1, none → 2 (RE/18 §7.2). PORT: the feet holds are a guidance probe, as in `try_climb_reach`.
-                    let feet_hold = guidance
-                        .probe(hit.point - Vec3::Y * 1.2, 0.35, 0.3, Some(facing), 45f32.to_radians())
-                        .filter(|f| (f.point.y - (hit.point.y - 1.2)).abs() <= 0.3 && f.wall_normal.dot(nn) > 0.9);
-                    if let Some(f) = feet_hold {
-                        let fc = f.point + side * HAND_SPACING * 0.5;
-                        let (fl, fr) = (fc - r * HAND_SPACING * 0.5, fc + r * HAND_SPACING * 0.5);
-                        let target = super::climb::climb_root_at(hl, hr, fl, fr, nn);
-                        if !collision.capsule_cast_free(root - facing * 0.15, 1.8, 0.35, target - root) {
-                            return None;
-                        }
-                        let dist = Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length();
-                        let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
-                        let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][long as usize * 4 + 2 + right as usize];
-                        let [st, lp, end] = entry.1;
-                        let seq = [single(st, 0), single(lp, 0), None, None];
-                        let durations = seq_durations(&seq);
-                        let found = durations.iter().sum::<f32>() > 0.0;
-                        // the end item plays in the climb (as `try_jump_up_to_climb`, 0xDD8CF0): the jump part ends
-                        // where the end item's own displacement starts
-                        let end_disp = single(end, 0).map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
-                        let fto = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
-                        let to = target - (right_of(fto) * end_disp[0] + fto * end_disp[1] + Vec3::Y * end_disp[2]);
-                        let mv = LedgeMove {
-                            kind: MoveKind::SideJump { long },
-                            seq,
-                            durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
-                            t: 0.0,
-                            from: root,
-                            to,
-                            facing_from: facing,
-                            facing_to: fto,
-                            follow_disp: found,
-                            lead: 0.0,
-                            end_free: false,
-                            end_wall: false,
-                            end_stand: false,
-                            hand_l: hl,
-                            hand_r: hr,
-                            normal: nn,
-                        };
-                        let climb = super::climb::ClimbEntry {
-                            entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
-                            hand_l: hl,
-                            hand_r: hr,
-                            foot_l: fl,
-                            foot_r: fr,
-                            normal: nn,
-                            from_feet: to,
-                            foot_right: false,
-                            action: Some(end),
-                        };
-                        return Some((mv, Some(climb)));
-                    }
-                    let new_hang = hang_type_at(c, nn, collision);
-                    let to = hang_root_at(hl, hr, nn, new_hang, collision);
-                    if !collision.capsule_fits(to + Vec3::Y * 0.05) {
-                        return None;
-                    }
-                    let dist = Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length();
-                    let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
-                    let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };
-                    let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][(ty * 2 + long as usize) * 4 + 2 + right as usize];
-                    let seq = [single(entry.1[0], 0), single(entry.1[1], 0), single(entry.1[2], 0), None];
-                    let durations = seq_durations(&seq);
-                    let found = durations.iter().sum::<f32>() > 0.0;
-                    return Some((LedgeMove {
-                        kind: MoveKind::SideJump { long },
-                        seq,
-                        durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
-                        t: 0.0,
-                        from: root,
-                        to,
-                        facing_from: facing,
-                        facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
-                        follow_disp: found,
-                        lead: 0.0,
-                        end_free: false,
-                        end_wall: false,
-                        end_stand: false,
-                        hand_l: hl,
-                        hand_r: hr,
-                        normal: nn,
-                    }, None));
-                }
+        let hs = start + Vec3::Y * dz;
+        let Some(found) = guidance.step_search(hs, hs - Vec3::Y * 1.2, side, facing, 1.6, 0.35, Vec2::new(0.3, 0.3), true, true) else { continue };
+        let hit = found.hands;
+        let nn = hit.wall_normal;
+        let r = right_of(-nn);
+        // both hands on the new edge: the first hand lands on the nearest point, the other one HAND_SPACING further
+        // along the move (PORT: the game puts both hand records on that one hold and derives the pose from it)
+        let c = hit.point + side * HAND_SPACING * 0.5;
+        let (hl, hr) = (c - r * HAND_SPACING * 0.5, c + r * HAND_SPACING * 0.5);
+        let dist = Vec2::new(hit.point.x - hs.x, hit.point.z - hs.z).length();
+        let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
+        // feet on climb holds → type 0 (the climb pose from the holds, `Human__ComputeClimbPoseFromHolds` 0xB1CC20), on
+        // a wall surface → 1, none → 2 (RE/18 §7.2)
+        if let Some(f) = found.feet {
+            let fc = f.point + side * HAND_SPACING * 0.5;
+            let (fl, fr) = (fc - r * HAND_SPACING * 0.5, fc + r * HAND_SPACING * 0.5);
+            let target = super::climb::climb_root_at(hl, hr, fl, fr, nn);
+            if !collision.capsule_cast_free(root - facing * 0.15, 1.8, 0.35, target - root) {
+                continue;
             }
-            s += 0.1;
+            let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][long as usize * 4 + 2 + right as usize];
+            let [st, lp, _end] = entry.1;
+            // category 0 (RE/24 LEDGE-14): the start in the Ledge context on its own displacement, the loop in the Climb
+            // context with the linear interpolation to the climb pose (0xDD8290, as `try_jump_up_to_climb`)
+            let seq = [single(st, 0), None, None, None];
+            let durations = seq_durations(&seq);
+            let found = durations.iter().sum::<f32>() > 0.0;
+            let fto = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
+            let mut mv = LedgeMove {
+                kind: MoveKind::SideJump { long },
+                seq,
+                durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME * 0.5, 0.0, 0.0, 0.0] },
+                t: 0.0,
+                from: root,
+                to: root,
+                facing_from: facing,
+                facing_to: fto,
+                follow_disp: false,
+                lead: 0.0,
+                table: Some((1, 0)),
+                end_free: false,
+                end_wall: false,
+                end_stand: false,
+                hand_l: hl,
+                hand_r: hr,
+                normal: nn,
+            };
+            mv.to = mv.natural_end();
+            let _ = target;
+            let climb = super::climb::ClimbEntry {
+                entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
+                hand_l: hl,
+                hand_r: hr,
+                foot_l: fl,
+                foot_r: fr,
+                normal: nn,
+                from_feet: mv.to,
+                foot_right: false,
+                action: single(lp, 0).map(|_| lp),
+            };
+            return Some((mv, Some(climb)));
         }
+        // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
+        let new_hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
+        let to = hang_root_at(hl, hr, nn, new_hang, collision);
+        if !collision.capsule_fits(to + Vec3::Y * 0.05) {
+            continue;
+        }
+        let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };
+        let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][(ty * 2 + long as usize) * 4 + 2 + right as usize];
+        // categories 1 / 2 (RE/24 LEDGE-14): the start on its own displacement, the loop interpolating the root linearly to
+        // the wall / free pose and setting +104 by it (`sub_DD8550` 0xDD8550), the end the hang idle's entry
+        // (`sub_DCF280`, the root held)
+        let seq = [single(entry.1[0], 0), single(entry.1[1], 0), single(entry.1[2], 0), None];
+        let durations = seq_durations(&seq);
+        let found = durations.iter().sum::<f32>() > 0.0;
+        return Some((LedgeMove {
+            kind: MoveKind::SideJump { long },
+            seq,
+            durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
+            t: 0.0,
+            from: root,
+            to,
+            facing_from: facing,
+            facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
+            follow_disp: false,
+            lead: 0.0,
+            table: found.then_some((1, 1)),
+            end_free: new_hang == LedgeHangType::Free,
+            end_wall: new_hang == LedgeHangType::Wall,
+            end_stand: false,
+            hand_l: hl,
+            hand_r: hr,
+            normal: nn,
+        }, None));
     }
     None
 }
 
 /// The climb's reach sideways to another surface (`HumanClimb__TryReachOtherSurface` 0xDF9B30 → `sub_DF7850`, dirs
-/// 4–9; ChooseMove 0xDFDE90 tries it after the grid moves and the corner moves). `diag` = 0 level, 1 up (dirs 6 / 7), 2
-/// down (8 / 9). From the feet's midpoint (the lower foot's height) + 0.9·move, `sub_B153C0` searches 1.6 m along the
-/// move for a hand edge at foot offset + 1.2 m with the foot offsets 0, +0.6, −0.6 by `diag` (r 0.35, 0.3 / 0.3).
+/// 4–9). `diag` = 0 level, 1 up (dirs 6 / 7), 2 down (8 / 9). From the feet's midpoint (the lower foot's height) +
+/// 0.9·move, one pass of `sub_B153C0` (`GuidanceWorld::step_search`, 0.35 m boxes, half extents 0.175 / 0.3 / 0.3, up to
+/// 1.6 m along the move) with the (feet, hands) start offsets (0, +1.2) / (+0.6, +1.8) / (−0.6, +0.6) by `diag`.
+/// ChooseMove 0xDFDE90 calls it twice: `climb` (climb holds only) before `HumanClimb__TryLedgeGrab` 0xDF0980, `hang`
+/// (hangs only) after it.
 /// What it finds sets the type (+2944): feet on climb holds → 0, feet on a wall surface → 1 (wall hang, `sub_B157B0`),
 /// hands only → 2 (free hang, `sub_B15AD0`). A capsule (r 0.35, 1.8 / 1.0 / 2.0 m tall by type) from the root pulled
 /// 0.2625 m back from the target and 0.15 m out from the wall must sweep to the target root (`Human__CapsuleCastFree`
@@ -498,10 +677,10 @@ pub fn try_side_jump(
 /// climb pose of those holds (0xB1CC20); the start, then the loop while the root goes to that pose (`StartReachLoop`
 /// 0xDEEE60), then the end in the Wait state (0xDE9B50), `climb::ClimbReach`.
 ///
-/// PORT: the search is guidance probes stepped 0.1 m (as `try_side_jump`); the feet are a probe 1.2 m below the hand
-/// edge (a hit = climb holds, type 0); wall or free comes from the collision foot rays (`hang_type_at`), the greybox has
-/// no Surface guidance. For the hangs the root follows the clips' displacement plus a linear correction (hypothesis, as
-/// for the ledge jumps) instead of holding still through the start.
+/// PORT: a hang's wall or free comes from the collision foot rays (`hang_type_at`), standing in for the wall-support
+/// search `sub_11718B0` 1.0 m below the hand box. For the hangs the root follows the clips' displacement plus a linear
+/// correction (hypothesis, as for the ledge jumps) instead of holding still through the start.
+#[allow(clippy::too_many_arguments)]
 pub fn try_climb_reach(
     right: bool,
     diag: usize,
@@ -509,6 +688,8 @@ pub fn try_climb_reach(
     foot_r: Vec3,
     n: Vec3,
     root: Vec3,
+    climb: bool,
+    hang: bool,
     guidance: &GuidanceWorld,
     collision: &CollisionWorld,
 ) -> Option<ClimbReachTarget> {
@@ -516,72 +697,65 @@ pub fn try_climb_reach(
     let side = if right { right_of(facing) } else { -right_of(facing) };
     let mut base = (foot_l + foot_r) * 0.5;
     base.y = foot_l.y.min(foot_r.y);
-    let foot_off = [0.0f32, 0.6, -0.6][diag.min(2)];
-    let start = base + side * 0.9 + Vec3::Y * (foot_off + 1.2);
-    let mut s = 0.0;
-    while s <= 1.6 {
-        let p = start + side * s;
-        if let Some(hit) = guidance.probe(p, 0.35, 0.3, Some(facing), 45f32.to_radians()) {
-            // not the climb wall the feet are on (its holds are the grid's)
-            let off_wall = (hit.point - base).dot(side) > 0.9;
-            if off_wall {
-                let nn = hit.wall_normal;
-                let fc = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
-                let u_back = |to: Vec3| root - (to - root).normalize_or_zero() * 0.2625;
-                let dist = Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length();
-                let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
-                // feet on climb holds 1.2 m below → type 0: climb → climb
-                if let Some(f) = guidance.probe(hit.point - Vec3::Y * 1.2, 0.35, 0.3, Some(fc), 45f32.to_radians()) {
-                    let holds = [hit.point, hit.point, f.point, f.point];
-                    let normals = [nn, nn, f.wall_normal, f.wall_normal];
-                    let to = super::climb::climb_pose(holds, normals, fc).root;
-                    let from = u_back(to);
-                    if !collision.capsule_cast_free(from - facing * 0.15, 1.8, 0.35, to - from) {
-                        return None;
-                    }
-                    let ids = CLIMB_REACH_TABLE[0][long as usize][right as usize];
-                    return Some(ClimbReachTarget::Climb(super::climb::ClimbReach::new(ids, holds, normals, None)));
-                }
-                let r = right_of(-nn);
-                let c = hit.point + side * HAND_SPACING * 0.5;
-                let (hl, hr) = (c - r * HAND_SPACING * 0.5, c + r * HAND_SPACING * 0.5);
-                let hang = hang_type_at(c, nn, collision);
-                let to = hang_root_at(hl, hr, nn, hang, collision);
-                let ty = if hang == LedgeHangType::Wall { 1 } else { 2 };
-                // clearance: a capsule pulled back from the target and out from the wall, swept to the target root
-                let u = (to - root).normalize_or_zero();
-                let from = root - u * 0.2625 - facing * 0.15;
-                let height = [1.8, 1.0, 2.0][ty];
-                if !collision.capsule_cast_free(from, height, 0.35, to - (root - u * 0.2625)) {
-                    return None;
-                }
-                let ids = CLIMB_REACH_TABLE[ty][long as usize][right as usize];
-                let seq = [single(ids[0], 0), single(ids[1], 0), single(ids[2], 0), None];
-                let durations = seq_durations(&seq);
-                let found = durations.iter().sum::<f32>() > 0.0;
-                return Some(ClimbReachTarget::Hang(LedgeMove {
-                    kind: MoveKind::ClimbReach { long },
-                    seq,
-                    durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
-                    t: 0.0,
-                    from: root,
-                    to,
-                    facing_from: facing,
-                    facing_to: fc,
-                    follow_disp: found,
-                    lead: 0.0,
-                    end_free: ty == 2,
-                    end_wall: ty == 1,
-                    end_stand: false,
-                    hand_l: hl,
-                    hand_r: hr,
-                    normal: nn,
-                }));
-            }
+    let (foot_off, hand_off) = [(0.0f32, 1.2f32), (0.6, 1.8), (-0.6, 0.6)][diag.min(2)];
+    let feet_start = base + side * 0.9 + Vec3::Y * foot_off;
+    let start = base + side * 0.9 + Vec3::Y * hand_off;
+    let found = guidance.step_search(start, feet_start, side, facing, 1.6, 0.35, Vec2::new(0.3, 0.3), climb, hang)?;
+    let hit = found.hands;
+    let nn = hit.wall_normal;
+    let fc = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
+    let u_back = |to: Vec3| root - (to - root).normalize_or_zero() * 0.2625;
+    let dist = Vec2::new(hit.point.x - start.x, hit.point.z - start.z).length();
+    let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
+    // feet on climb holds → type 0: climb → climb
+    if let Some(f) = found.feet {
+        let holds = [hit.point, hit.point, f.point, f.point];
+        let normals = [nn, nn, f.wall_normal, f.wall_normal];
+        let to = super::climb::climb_pose(holds, normals, fc).root;
+        let from = u_back(to);
+        if !collision.capsule_cast_free(from - facing * 0.15, 1.8, 0.35, to - from) {
+            return None;
         }
-        s += 0.1;
+        let ids = CLIMB_REACH_TABLE[0][long as usize][right as usize];
+        return Some(ClimbReachTarget::Climb(super::climb::ClimbReach::new(ids, holds, normals, None)));
     }
-    None
+    // both hand records are the hit (`ReachOtherSurfaceSide` 0xDF7FBC copies it into +3280 and +3360; RE/24 CLIMB-8); the
+    // second hand's reach (state 17) spreads them
+    let (hl, hr) = (hit.point, hit.point);
+    // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
+    let hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
+    let to = hang_root_at(hl, hr, nn, hang, collision);
+    let ty = if hang == LedgeHangType::Wall { 1 } else { 2 };
+    // clearance: a capsule pulled back from the target and out from the wall, swept to the target root
+    let u = (to - root).normalize_or_zero();
+    let from = root - u * 0.2625 - facing * 0.15;
+    let height = [1.8, 1.0, 2.0][ty];
+    if !collision.capsule_cast_free(from, height, 0.35, to - (root - u * 0.2625)) {
+        return None;
+    }
+    let ids = CLIMB_REACH_TABLE[ty][long as usize][right as usize];
+    let seq = [single(ids[0], 0), single(ids[1], 0), single(ids[2], 0), None];
+    let durations = seq_durations(&seq);
+    let found = durations.iter().sum::<f32>() > 0.0;
+    Some(ClimbReachTarget::Hang(LedgeMove {
+        kind: MoveKind::ClimbReach { long },
+        seq,
+        durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
+        t: 0.0,
+        from: root,
+        to,
+        facing_from: facing,
+        facing_to: fc,
+        follow_disp: found,
+        lead: 0.0,
+        table: None,
+        end_free: ty == 2,
+        end_wall: ty == 1,
+        end_stand: false,
+        hand_l: hl,
+        hand_r: hr,
+        normal: nn,
+    }))
 }
 
 /// What the climb's sideways reach found: climb holds (type 0, the climb keeps the move) or a hang (types 1 / 2, the
@@ -630,6 +804,7 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
         facing_from: mv.facing_to,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: true,
         hand_l: hl,
         hand_r: hr,
@@ -640,28 +815,38 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
     (mv, Some(tail))
 }
 
-/// `HumanLedge__TryWallJumpUp` 0xDD62A0 (wall hang, up): an edge above the reach of a hand step, then the
-/// blended hop (0xDDCE40): weights over `swingback_up_{min,max}_{200,300}` by v = clamp(targetZ − rootZ −
-/// 2.0) and h = clamp(horizontal distance of the hands). (hypothesis) the search: edges 1.3–1.9 m above the
-/// hands within 0.6 m horizontally (the box query's arguments are not fully recovered).
+/// `HumanLedge__TryWallJumpUp` 0xDD62A0 (wall hang, no pending step, stick up): the hop up and back to the front edge
+/// of an overhang, then the blended hop (0xDDCE40): weights over `swingback_up_{min,max}_{200,300}` by
+/// v = clamp(targetZ − rootZ − 2.0) and h = clamp(horizontal distance of the hands).
+///
+/// The search (`sub_1171050`, mask 50, 45°, pieces shortened 0.1 m): a box out from the wall, whose edges must face
+/// the same way as the wall hung from (the overhang's front), and the nearest edge to a reference for each hand:
+/// 1. centre at the hands' x / z, root + 1.0 m up, 1.0 m out from the wall; half extents 0.375 / 0.3 / 0.5; hand
+///    references (∓0.2, −0.5, −0.5) in the box frame (right, forward, up);
+/// 2. else root + 2.25 m up, 0.75 m out; half extents 0.375 / 0.55 / 0.75; references (∓0.2, −0.5, −0.75).
+///
+/// Both hands must find an edge; the free-hang pose from them (sub_B15AD0) and its body boxes (sub_B2DD50) follow.
+/// PORT: the body boxes are not tested.
 pub fn try_hop_up(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHangType, guidance: &GuidanceWorld, _collision: &CollisionWorld) -> Option<LedgeMove> {
     if hang != LedgeHangType::Wall {
         return None;
     }
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mid = (hand_l + hand_r) * 0.5;
-    for k in [1.3f32, 1.6, 1.9] {
-        let Some(hit) = guidance.probe(mid + Vec3::Y * k, 0.6, 0.15, Some(facing), 45f32.to_radians()) else { continue };
-        let dy = hit.point.y - mid.y;
-        if dy <= VSTEP_MAX {
-            continue;
-        }
-        let nn = hit.wall_normal;
-        let r = right_of(-nn);
-        let (hl, hr) = (hit.point - r * HAND_SPACING * 0.5, hit.point + r * HAND_SPACING * 0.5);
+    let right = facing.cross(Vec3::Y);
+    let zones = [(1.0f32, 1.0f32, Vec3::new(0.375, 0.3, 0.5), -0.5f32), (2.25, 0.75, Vec3::new(0.375, 0.55, 0.75), -0.75)];
+    let found = zones.iter().find_map(|&(up, out, half, ref_up)| {
+        let centre = Vec3::new(mid.x, root.y + up, mid.z) - facing * out;
+        let local = |x: f32| centre + right * x - facing * 0.5 + Vec3::Y * ref_up;
+        guidance.probe_facing_pair(centre, facing, half, [local(-0.2), local(0.2)], 0.785_398_2, crate::guidance::PROBE_STEP, MASK_CLIMB_HOLDS)
+    });
+    if let Some([a, b]) = found {
+        let (hl, hr) = (a.point, b.point);
+        let nn = a.wall_normal;
+        let point = (hl + hr) * 0.5;
         let to = hang_root_at(hl, hr, nn, LedgeHangType::Free, _collision);
-        let v = (hit.point.y - root.y - 2.0).clamp(0.0, 1.0);
-        let h = Vec2::new(hit.point.x - mid.x, hit.point.z - mid.z).length().clamp(0.0, 1.0);
+        let v = (point.y - root.y - 2.0).clamp(0.0, 1.0);
+        let h = Vec2::new(point.x - mid.x, point.z - mid.z).length().clamp(0.0, 1.0);
         let w = [(1.0 - h) * (1.0 - v), (1.0 - h) * v, h * (1.0 - v), h * v];
         let a = jump_blend::action_items(HOP_UP).map(|_| ActionBlend::new(HOP_UP, 0, &w));
         let b = jump_blend::action_items(HOP_UP_B).map(|_| ActionBlend::new(HOP_UP_B, 0, &w));
@@ -679,6 +864,7 @@ pub fn try_hop_up(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHa
             // `_a` plays in place, `_b` moves the root with the interpolator (0xDDAB00 → sub_711130)
             follow_disp: false,
             lead: da,
+            table: None,
             end_free: true,
             end_wall: false,
             end_stand: false,
@@ -691,8 +877,8 @@ pub fn try_hop_up(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHa
 }
 
 /// `HumanLedge__TryJumpUpToClimb` 0xDD5E10 (wall hang only, no pending hand step): a hold row 1.2 m above the
-/// hands (the hands' midpoint at the higher hand) and a second row 1.2 m below that hit (sub_11713A0: r 0.4,
-/// 0.5 / 0.3, 45°, filter dword_193419C). Then the climb pose (sub_B1CC20), a body clearance sweep (r 0.35, from
+/// hands (the hands' midpoint at the higher hand) and a second row 1.2 m below that hit (sub_11713A0: half extents
+/// 0.4 / 0.5 / 0.3, 45°, mask 50). Then the climb pose (sub_B1CC20), a body clearance sweep (r 0.35, from
 /// root − 1.1 z and 0.65 m back, 1.8 m up, sub_B136E0) and the table ledge jump type 0, short, side up (wall
 /// table entry 0: `0x491228AE` start, `…AF` loop, `…B0` end, landing category 0).
 ///
@@ -701,8 +887,8 @@ pub fn try_hop_up(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHa
 /// climb pose over the end item's blended duration). Returns the start + loop part (in the Ledge context) and
 /// the climb entry carrying the end action.
 ///
-/// PORT: both hands go to the upper hit and both feet to the lower one (as the side moves into the climb); the
-/// rows are guidance probes (r 0.4, vertical 0.5), and the lower row may not be the edge hung from. The root follows the start and loop clips' displacement plus a
+/// PORT: both hands go to the upper hit and both feet to the lower one (as the side moves into the climb). The root
+/// follows the start and loop clips' displacement plus a
 /// linear correction onto the point the end item starts from (hypothesis, as for the other table jumps). The
 /// clearance sweep is the capsule test at the climb root (stand-in).
 #[allow(clippy::too_many_arguments)]
@@ -721,41 +907,38 @@ pub fn try_jump_up_to_climb(
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mut base = (hand_l + hand_r) * 0.5;
     base.y = hand_l.y.max(hand_r.y);
-    let upper = guidance.probe(base + Vec3::Y * JUMP_TO_CLIMB_UP, JUMP_TO_CLIMB_R, JUMP_TO_CLIMB_VTOL, Some(facing), 0.785)?;
-    if upper.point.y - base.y <= VSTEP_MAX {
-        return None;
-    }
-    let lower = guidance
-        .probe(upper.point - Vec3::Y * JUMP_TO_CLIMB_UP, JUMP_TO_CLIMB_R, JUMP_TO_CLIMB_VTOL, Some(facing), 0.785)
-        .filter(|h| upper.point.y - h.point.y > VSTEP_MIN)
-        // PORT: the game's filter (dword_193419C) only takes climb holds, so the ledge hung from never counts as the
-        // lower row; the port's guidance has one edge type, so that edge is excluded instead
-        .filter(|h| guidance.on_edge((hand_l + hand_r) * 0.5, n, 0.1).is_none_or(|cur| cur.edge != h.edge))?;
+    // the two rows (0xDD5E10, called with 0 = up by 0xDE05E0): boxes 1.2 m above the hands and 1.2 m below that hit,
+    // half extents 0.4 / 0.5 / 0.3, the reference 0.2 m back, 45°, mask 50. The lower row is usually the edge hung
+    // from: the feet go where the hands were.
+    let upper = guidance.probe_facing(base + Vec3::Y * JUMP_TO_CLIMB_UP, facing, JUMP_TO_CLIMB_HALF, 0.2, 0.785_398_2, MASK_CLIMB_HOLDS)?;
+    let lower = guidance.probe_facing(upper.point - Vec3::Y * JUMP_TO_CLIMB_UP, facing, JUMP_TO_CLIMB_HALF, 0.2, 0.785_398_2, MASK_CLIMB_HOLDS)?;
     let nn = upper.wall_normal;
     let target = super::climb::climb_root_at(upper.point, upper.point, lower.point, lower.point, nn);
     if !collision.capsule_fits(target + Vec3::Y * 0.05 + nn * 0.1) {
         return None;
     }
     let entry = LEDGE_JUMP_TABLE[0][0];
-    let [start, lp, end] = entry.1;
-    let seq = [single(start, 0), single(lp, 0), None, None];
+    let [start, lp, _end] = entry.1;
+    // category 0 (RE/24 LEDGE-14): the start plays in the Ledge context, its own displacement moving the root
+    // (`StartLedgeJump` 0xDDCE40 sets no interpolator); `FillClimb_AfterLedgeJump` 0xDD8290 then plays the loop in the
+    // Climb context, interpolating the root linearly to the climb pose (the climb entry's action). PORT: the end action
+    // (the climb wait's entry, ClimbData+96) is not played.
+    let seq = [single(start, 0), None, None, None];
     let durations = seq_durations(&seq);
     let found = durations.iter().sum::<f32>() > 0.0;
-    // the end item plays in the climb (sub_DD8290): the jump part ends where the end item's own displacement
-    // starts
-    let end_disp = single(end, 0).map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
-    let to = target - (right_of(facing) * end_disp[0] + facing * end_disp[1] + Vec3::Y * end_disp[2]);
-    let mv = LedgeMove {
+    let _ = target;
+    let mut mv = LedgeMove {
         kind: MoveKind::JumpUpToClimb,
         seq,
-        durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME, 0.0, 0.0, 0.0] },
+        durations: if found { durations } else { [SIDE_JUMP_FALLBACK_TIME * 0.5, 0.0, 0.0, 0.0] },
         t: 0.0,
         from: root,
-        to,
+        to: root,
         facing_from: facing,
         facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
-        follow_disp: found,
+        follow_disp: false,
         lead: 0.0,
+        table: Some((1, 0)),
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -763,6 +946,7 @@ pub fn try_jump_up_to_climb(
         hand_r: upper.point,
         normal: nn,
     };
+    mv.to = mv.natural_end();
     let climb = super::climb::ClimbEntry {
         entry_type: super::climb::ClimbEntryType::FromLedgeParallelJump,
         hand_l: upper.point,
@@ -770,16 +954,16 @@ pub fn try_jump_up_to_climb(
         foot_l: lower.point,
         foot_r: lower.point,
         normal: nn,
-        from_feet: to,
+        from_feet: mv.to,
         foot_right: false,
-        action: Some(end),
+        action: single(lp, 0).map(|_| lp),
     };
     Some((mv, climb))
 }
 
 /// `HumanLedge__TryFreeHangDropToClimb` 0xDDF390 (free hang, stick down, no pending step). From the hands' midpoint
-/// (higher hand) a hold row 1.2 m below and 0.65 m ahead (sub_11713A0: r 0.3, 0.65 / 0.6, 45°, filter
-/// dword_193419C), then a second row 1.2 m below that and 0.3 m further ahead (r 0.3, 0.65 / 0.3):
+/// (higher hand) a hold row 1.2 m below and 0.65 m ahead (sub_11713A0: half extents 0.3 / 0.65 / 0.6, 45°, mask
+/// 50), then a second row 1.2 m below that and 0.3 m further ahead (0.3 / 0.65 / 0.3):
 /// - both rows → climb pose (sub_B1CC20), clearance sub_B2DF90, action `FREE_DROP_TO_CLIMB`;
 /// - no second row but wall supports for the feet (sub_B16130) → wall-hang pose (sub_B157B0), clearance sub_B2DC80,
 ///   action `FREE_DROP_TO_HANG`.
@@ -790,8 +974,8 @@ pub fn try_jump_up_to_climb(
 /// while the root is interpolated to the pose over its length (0xDDA120 → sub_711130); then Climb (0xDE0870 →
 /// 0xDDFBF0, when the second action is the climb one) or the wall hang (0xDDA3D0).
 ///
-/// PORT: rows are guidance probes (r 0.3, vertical 0.65 / 0.3); hands both on the upper hit (the climb) or spread
-/// by HAND_SPACING (the hang); the lower row may not be the edge hung from; clearance = capsule test at the target.
+/// PORT: hands both on the upper hit (the climb) or spread by HAND_SPACING (the hang); clearance = capsule test at
+/// the target.
 pub fn try_free_hang_drop(
     hand_l: Vec3,
     hand_r: Vec3,
@@ -808,14 +992,12 @@ pub fn try_free_hang_drop(
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mut base = (hand_l + hand_r) * 0.5;
     base.y = hand_l.y.max(hand_r.y);
-    let current = guidance.on_edge((hand_l + hand_r) * 0.5, n, 0.1).map(|h| h.edge);
-    let upper = guidance
-        .probe(base - Vec3::Y * 1.2 + facing * 0.65, 0.3, 0.65, Some(facing), 0.785)
-        .filter(|h| Some(h.edge) != current && h.point.y < base.y - VSTEP_MIN)?;
+    // the rows (0xDDF390): boxes 1.2 m below the hands and 0.65 m ahead (half extents 0.3 / 0.65 / 0.6), then 1.2 m
+    // below that hit and 0.3 m further ahead (0.3 / 0.65 / 0.3); the reference 0.3 m back, 45°, mask 50. The edge
+    // hung from lies above the first box.
+    let upper = guidance.probe_facing(base - Vec3::Y * 1.2 + facing * 0.65, facing, Vec3::new(0.3, 0.65, 0.6), 0.3, 0.785_398_2, MASK_CLIMB_HOLDS)?;
     let nn = upper.wall_normal;
-    let lower = guidance
-        .probe(upper.point - Vec3::Y * 1.2 + facing * 0.3, 0.3, 0.3, Some(facing), 0.785)
-        .filter(|h| Some(h.edge) != current && h.point.y < upper.point.y - VSTEP_MIN);
+    let lower = guidance.probe_facing(upper.point - Vec3::Y * 1.2 + facing * 0.3, facing, Vec3::new(0.3, 0.65, 0.3), 0.3, 0.785_398_2, MASK_CLIMB_HOLDS);
     let new_facing = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
     let (ids, to, hl, hr, feet_z, climb) = if let Some(lower) = lower {
         let to = super::climb::climb_root_at(upper.point, upper.point, lower.point, lower.point, nn);
@@ -832,8 +1014,8 @@ pub fn try_free_hang_drop(
         };
         (FREE_DROP_TO_CLIMB, to, upper.point, upper.point, lower.point.y, Some(e))
     } else {
-        let (fl, fr) = super::ledge::feet_on_wall(upper.point, nn, collision);
-        if !(fl && fr) {
+        // wall supports for the feet (sub_B16130 under the hold)
+        if !super::ledge::feet_supports(upper.point, nn, collision) {
             return None;
         }
         let r = right_of(new_facing);
@@ -866,6 +1048,7 @@ pub fn try_free_hang_drop(
         facing_to: new_facing,
         follow_disp: false,
         lead: da,
+        table: None,
         end_free: false,
         end_wall: true,
         end_stand: false,
@@ -897,7 +1080,7 @@ pub fn try_side_jump_to_ladder(
     let side = if right { right_of(facing) } else { -right_of(facing) };
     let free = hang != LedgeHangType::Wall;
     let centre = root + side * 1.7 + if free { Vec3::Y * 0.5 - facing * 0.15 } else { -Vec3::Y * 0.5 + facing * 0.35 };
-    let hit = guidance.probe_box(centre, right_of(facing), facing, Vec3::Y, Vec3::new(0.8, 0.5, 0.5), centre, std::f32::consts::PI, 0.1, 8)?;
+    let hit = guidance.probe_box(centre, right_of(facing), facing, Vec3::Y, Vec3::new(0.8, 0.5, 0.5), centre, std::f32::consts::PI, 0.1, crate::guidance::MASK_LADDER)?;
     let e = &guidance.edges[hit.edge];
     let ln = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
     if ln.dot(facing).abs() <= std::f32::consts::FRAC_1_SQRT_2 {
@@ -930,6 +1113,7 @@ pub fn try_side_jump_to_ladder(
         facing_to: -ln,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -994,6 +1178,7 @@ pub fn try_side_to_ladder(
             facing_to: -ln,
             follow_disp: false,
             lead: 0.0,
+            table: None,
             end_free: false,
             end_wall: false,
             end_stand: false,
@@ -1016,6 +1201,31 @@ pub const CLIMB_OUT: [u32; 2] = [0x035F_11AF, 0x035F_11B0];
 /// keeps the interpolation running. The action is not in its list of follow-ups, so when it ends the default stand-up
 /// applies (flag 0x40 → NarrowObject with `hangknee_tr_freestep_entry`, PORT: Ground after `ACT_KNEE_TO_FREESTEP`).
 /// Returns the knee move and the free step onto the top.
+/// `Human__KneeCatchRoomOnTop` 0xB2E240 (the climb out, 0xDF1730, and the knee catch, 0xE0D58B; RE/24 CLIMB-5): room
+/// above an edge `target` for the kneeling body, `into` pointing over the top. No floor is required:
+/// 1. a box 0.35–1.8 m above the edge from 1.0 m out to 0.3 m in (centre target − 0.35·f + 1.075 up, half 0.3 / 0.65 /
+///    0.725) is empty (its first contact from the near face lies 1.3 m or more in, `sub_B2A070`);
+/// 2. a thin column 0.1–1.8 m straight above the edge (half 0.1 / 0.1 / 0.85) is empty;
+/// 3. a thin box tilted 30° about f × up (`sub_55E390` −0.5236 on both f and up), centred 0.4 m out from the edge along
+///    the tilted f (target − 0.4·f′), half 0.1 / 0.1 / 0.5 along (across, f′, up′), is empty (`Human__BoxQueryEmpty`).
+pub fn knee_room_on_top(target: Vec3, into: Vec3, collision: &CollisionWorld) -> bool {
+    let f = Vec3::new(into.x, 0.0, into.z).normalize_or_zero();
+    if f == Vec3::ZERO {
+        return false;
+    }
+    let across = f.cross(Vec3::Y).normalize_or_zero();
+    let axes = [across, f, Vec3::Y];
+    if !collision.obb_free(target - f * 0.35 + Vec3::Y * 1.075, axes, Vec3::new(0.3, 0.65, 0.725)) {
+        return false;
+    }
+    if !collision.obb_free(target + Vec3::Y * 0.95, axes, Vec3::new(0.1, 0.1, 0.85)) {
+        return false;
+    }
+    let tilt = Quat::from_axis_angle(across, -0.523_598_8);
+    let (tf, tu) = (tilt * f, tilt * Vec3::Y);
+    collision.obb_free(target - tf * 0.4, [across, tf, tu], Vec3::new(0.1, 0.1, 0.5))
+}
+
 pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) -> (LedgeMove, LedgeMove) {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mid = (hand_l + hand_r) * 0.5;
@@ -1024,6 +1234,7 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
     let durations = seq_durations(&seq);
     let durations = if durations.iter().sum::<f32>() > 0.0 { durations } else { [PULLUP_WALL_TIME * 0.5, 0.0, 0.0, 0.0] };
     let knee = mid + facing * 0.1;
+    let found = seq.iter().any(|a| a.is_some());
     let base = LedgeMove {
         kind: MoveKind::Pullup,
         seq,
@@ -1033,8 +1244,11 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
         to: knee,
         facing_from: facing,
         facing_to: facing,
-        follow_disp: false,
+        // target + 0.1·into, `sub_711130` with the action as its 11th argument: the hangknee clip's own root displacement
+        // plus a linear correction (0xDF1CBB → RootInterp+200, RE/24 CLIMB-5)
+        follow_disp: found,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1077,6 +1291,7 @@ pub fn knee_catch_moves(action: u32, from: Vec3, edge: Vec3, n: Vec3) -> (LedgeM
         facing_to: facing,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: false,
         end_stand: false,
@@ -1113,8 +1328,11 @@ pub const ACT_KNEE_TO_FREESTEP: [u32; 2] = [0x248E_9730, 0x248E_9731];
 /// Running jump onto a wall-hang ledge (target type 0x40): `air_surface_tr_hangwall_reception_{straight,
 /// 30_out,45_in}_{min,max}` then `hangwall_reception_*_{a,b}` (3 items × 6 clips; 0xE07D00 → 0xE02BA0).
 pub const RECEPTION_SURFACE_WALL: u32 = 0x011F_F16A;
-/// Running jump onto a free-hang ledge (type 0x80): the swing cycle (0xE07D00, Ledge SubState 8).
+/// Running jump onto a free-hang ledge (type 0x80) without foot holds: the swing cycle (0xE07D00, Ledge SubState 8).
 pub const SWING_RECEPTION: u32 = 0x023E_0C60;
+/// The wall reception of any other jump type with foot holds (0xE07D00 → 0xE02BA0, timed 0.1666 s; the free-hang jump
+/// 0x80 landing on a wall): `hangwall_reception_*_{a,b}` (2 items × 6 clips, then `0x8E5444F0` (c) by the graph).
+pub const RECEPTION_WALL_OTHER: u32 = 0x8E54_44EE;
 
 /// The bands of `Human__SetupJumpToHandTarget` 0xB21DA0 (standing straight jump at a hand target) by the
 /// hand height above the feet `dz`: flight action, its 2-clip blend weight, the root offset from the hand
@@ -1186,12 +1404,26 @@ pub fn hang_jump_in_beam(dz: f32, wall: bool) -> Option<HangJumpIn> {
     Some(j)
 }
 
+/// The free-hang jump (0x80) that finds foot holds (0xE07D00 → `HumanInAir__PlayLedgeReception` 0xE02BA0 with
+/// `RECEPTION_WALL_OTHER` instead of `RECEPTION_SURFACE_WALL`): the wall reception's actions swapped for it, same clip
+/// weights (`wall_reception_weights`). PORT: the game times the reception's root interpolation to 0.1666 s; the port
+/// keeps the clips' own durations.
+pub fn use_free_jump_wall_reception(m: &mut LedgeMove, w: [f32; 6]) {
+    let item = |i: usize| jump_blend::action_items(RECEPTION_WALL_OTHER).filter(|it| it.len() > i).map(|_| ActionBlend::new(RECEPTION_WALL_OTHER, i, &w));
+    let seq = [item(0), item(1), None, None];
+    let durations = seq_durations(&seq);
+    if durations.iter().sum::<f32>() > 0.0 {
+        m.seq = seq;
+        m.durations = durations;
+    }
+}
+
 /// How a jump at a ledge is received when it arrives (CheckJumpTargetArrival 0xE07D00).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LedgeArrival {
     /// From the standing straight jump (0xB21DA0).
     Straight(HangJumpIn),
-    /// From a running jump (0xB20200) onto a ledge: wall reception (type 0x40) or the swing (0x80).
+    /// From a running jump (0xB20200) onto a ledge: the wall reception with foot holds, else the swing (type 0x80).
     Surface { free: bool },
 }
 
@@ -1199,7 +1431,26 @@ pub enum LedgeArrival {
 /// the hang root (or onto the top for knee / waist heights), following the clips' displacement plus a
 /// correction (receptions are FROMANIM; the game interpolates the root over the action, 0xE07D00 →
 /// sub_711130).
-pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, collision: &CollisionWorld) -> LedgeMove {
+/// `sub_E02790` (from 0xE094D1, RE/24 AIR-8): the wall reception's six weights. The max set (slots 3–5) when the fall
+/// height is above 2.5 m or the jump started more than 6 m from the hold (squared distance > 36), else the min set
+/// (0–2); within the set the pose's lean a (its up about the lateral axis, from `sub_B157B0`): a ≥ 0 → [1 − w, w, 0],
+/// w = min(a / 30°, 1); a < 0 → [1 − w, 0, w], w = min(−a / 45°, 1). PORT: the port's wall-hang pose is upright (a = 0).
+pub fn wall_reception_weights(fall_height: f32, origin: Vec3, hold: Vec3, lean: f32) -> [f32; 6] {
+    let k = if fall_height > 2.5 || origin.distance_squared(hold) > 36.0 { 3 } else { 0 };
+    let mut w = [0.0f32; 6];
+    if lean >= 0.0 {
+        let t = (lean / 30f32.to_radians()).min(1.0);
+        w[k] = 1.0 - t;
+        w[k + 1] = t;
+    } else {
+        let t = (-lean / 45f32.to_radians()).min(1.0);
+        w[k] = 1.0 - t;
+        w[k + 2] = t;
+    }
+    w
+}
+
+pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, reception_w: [f32; 6], collision: &CollisionWorld) -> LedgeMove {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mid = (hand_l + hand_r) * 0.5;
     let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
@@ -1226,9 +1477,8 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
             }
         }
         LedgeArrival::Surface { free: false } => {
-            // 0xE02790 weights the 6 clips by the wall angle (straight / 30 out / 45 in) and min / max;
-            // the port's ledges are straight; (hypothesis) min
-            let w = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+            // 0xE02790 weights the 6 clips by min / max and the pose's lean (`wall_reception_weights`)
+            let w = reception_w;
             let to = hang_root(hand_l, hand_r, n, LedgeHangType::Wall);
             ([item(RECEPTION_SURFACE_WALL, 0, &w), item(RECEPTION_SURFACE_WALL, 1, &w), item(RECEPTION_SURFACE_WALL, 2, &w), None], to, false, false)
         }
@@ -1251,6 +1501,7 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
         facing_to: facing,
         follow_disp: found,
         lead: 0.0,
+        table: None,
         end_free,
         end_wall: false,
         end_stand,
@@ -1287,6 +1538,7 @@ pub fn climb_jump_move(from: Vec3, cur_hands: Vec3, hand_l: Vec3, hand_r: Vec3, 
         facing_to: facing,
         follow_disp: found,
         lead: 0.0,
+        table: None,
         end_free: true,
         end_wall: false,
         end_stand: false,
@@ -1322,6 +1574,7 @@ pub fn climb_to_hang_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, actio
         facing_to: facing,
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: hang != LedgeHangType::Wall,
         end_wall: hang == LedgeHangType::Wall,
         end_stand: false,
@@ -1376,6 +1629,7 @@ pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3
             facing_to: facing,
             follow_disp: found,
             lead: 0.0,
+            table: None,
             end_free: false,
             end_wall: false,
             end_stand,
@@ -1433,6 +1687,7 @@ pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec
         // the root interpolator over the action (0xDE1060 → sub_711130)
         follow_disp: false,
         lead: 0.0,
+        table: None,
         end_free: !to_wall,
         end_wall: to_wall,
         end_stand: false,
@@ -1466,6 +1721,7 @@ pub fn wallfree_to_wall_move(from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) ->
         facing_to: facing,
         follow_disp: d > 0.0,
         lead: 0.0,
+        table: None,
         end_free: false,
         end_wall: true,
         end_stand: false,
@@ -1566,6 +1822,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
             facing_to: facing_in,
             follow_disp: false,
             lead: 0.0,
+            table: None,
             end_free: false,
             end_wall: false,
             end_stand: false,
@@ -1589,6 +1846,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
             facing_to: ft,
             follow_disp: false,
             lead: 0.0,
+            table: None,
             end_free,
             end_wall,
             end_stand: false,
@@ -1602,7 +1860,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
     let orient = mk(1, [orient_action, None, None, None], from, p1, facing_out, facing_in, false, false);
     let p2 = mid + n * (1.0 - inset) - Vec3::Y * 0.8;
     let descent = mk(2, [descent_action, None, None, None], p1, p2, facing_in, facing_in, false, false);
-    let wall = hang_type_at(mid, n, collision) == LedgeHangType::Wall;
+    let wall = super::ledge::feet_supports(mid, n, collision);
     let w = pulldown_wall_weights(mid, n, collision);
     let reception = if wall {
         mk(
@@ -1628,4 +1886,71 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
         )
     };
     Ok([orient, descent, reception])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RE/24 AIR-8: min for a short jump, max for a fall above 2.5 m or a jump from more than 6 m away; the lean blends
+    /// toward the 30° clip (leaning back) or the 45° clip (leaning in).
+    #[test]
+    fn the_wall_reception_picks_min_or_max_and_the_lean() {
+        let o = Vec3::ZERO;
+        assert_eq!(wall_reception_weights(1.0, o, Vec3::new(0.0, 2.0, -3.0), 0.0), [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(wall_reception_weights(3.0, o, Vec3::new(0.0, 2.0, -3.0), 0.0), [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(wall_reception_weights(0.0, o, Vec3::new(0.0, 0.0, -6.5), 0.0)[3], 1.0);
+        let w = wall_reception_weights(0.0, o, Vec3::new(0.0, 0.0, -1.0), 15f32.to_radians());
+        assert!((w[0] - 0.5).abs() < 1e-5 && (w[1] - 0.5).abs() < 1e-5 && w[2] == 0.0);
+        let w = wall_reception_weights(0.0, o, Vec3::new(0.0, 0.0, -1.0), -90f32.to_radians());
+        assert_eq!([w[0], w[1], w[2]], [0.0, 0.0, 1.0]);
+    }
+    use crate::collision::Aabb3;
+    use crate::guidance::{GuidanceEdge, GuidanceSubType};
+
+    /// A 3 m wall (face z 0, normal -Z) with a ledge at 2.6 m, x -5..5, and optionally a crate at leg height beside the
+    /// hang (x 0.6..1.4, 0.5..1.6 m up, against the wall).
+    fn wall(crate_beside: bool) -> (CollisionWorld, GuidanceWorld) {
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(-5.0, 0.0, 0.0), max: Vec3::new(5.0, 2.6, 1.0) });
+        if crate_beside {
+            c.boxes.push(Aabb3 { min: Vec3::new(0.6, 0.5, -0.9), max: Vec3::new(1.4, 1.6, 0.0) });
+        }
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: Vec3::new(-5.0, 2.6, 0.0), p1: Vec3::new(5.0, 2.6, 0.0), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab });
+        (c, g)
+    }
+
+    /// RE/24 CLIMB-5: `Human__KneeCatchRoomOnTop` tests room above the edge, not a floor: a 0.2 m thin wall top has room
+    /// (the old floor test refused it); a wall rising 0.5 m above the top within 0.3 m of the edge refuses; one set 0.8 m
+    /// back does not.
+    #[test]
+    fn the_climb_out_needs_room_above_the_edge_not_a_floor() {
+        let wall = |extra: Option<Aabb3>| {
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, 0.0), max: Vec3::new(2.0, 3.0, 0.2) });
+            c.boxes.extend(extra);
+            c
+        };
+        let (edge, into) = (Vec3::new(0.0, 3.0, 0.0), Vec3::Z);
+        assert!(knee_room_on_top(edge, into, &wall(None)), "a thin wall top has room");
+        let close = Aabb3 { min: Vec3::new(-2.0, 3.5, 0.1), max: Vec3::new(2.0, 5.0, 0.2) };
+        assert!(!knee_room_on_top(edge, into, &wall(Some(close))), "a wall above the top within 0.3 m refuses");
+        let far = Aabb3 { min: Vec3::new(-2.0, 3.0, 0.8), max: Vec3::new(2.0, 5.0, 1.2) };
+        assert!(knee_room_on_top(edge, into, &wall(Some(far))), "a wall 0.8 m back leaves room");
+    }
+
+    /// RE/24 LEDGE-8: ProbeLateral's free-space test is a body-length capsule (0xDD996B, `sub_B18C30`): a crate at leg
+    /// height beside a wall hang blocks the shimmy toward it; the hands alone would pass over it.
+    #[test]
+    fn an_obstacle_at_leg_height_blocks_the_shimmy() {
+        let (mover, other, n) = (Vec3::new(0.15, 2.6, 0.0), Vec3::new(-0.15, 2.6, 0.0), Vec3::NEG_Z);
+        let (c, g) = wall(false);
+        assert!(probe_lateral(mover, other, n, Vec3::X, false, LedgeHangType::Wall, &g, &c).1.is_some(), "free wall: a step");
+        let (c, g) = wall(true);
+        assert!(probe_lateral(mover, other, n, Vec3::X, false, LedgeHangType::Wall, &g, &c).1.is_none(), "crate at the legs: blocked");
+        // the crate is below the hands and 0.75 m out reaches it: the old sphere at hand height found it free
+        let origin = mover - Vec3::X * SHIMMY_SWEEP_R + n * SHIMMY_SWEEP_OUT + Vec3::Y * SHIMMY_SWEEP_UP;
+        assert!(c.sphere_free_distance(origin, Vec3::X, SHIMMY_SWEEP_R, SHIMMY_SWEEP_LEN) >= SHIMMY_SWEEP_LEN - 1e-3);
+    }
 }

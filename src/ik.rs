@@ -38,6 +38,16 @@ pub const LIMB_CHAINS: [(u32, u32, u32); 4] = [
     (0x757f_1291, 0x863d_09fc, 0x9b14_362c), // RightUpLeg, RightLeg, RightFoot
 ];
 
+/// The bone each limb puts on its hold (`sub_E57450` 0xE574A8–0xE5751C: the HumanIK hand / foot effectors 18 / 19 /
+/// 11 / 12 via `IKRig__EffectorToHIK` 0x4FA910): the middle finger's knuckle and the toe joint under each foot. The
+/// goal is the hold point itself (RE/24 ANIM-8).
+pub const LIMB_EFFECTORS: [u32; 4] = [
+    0x911f_bacf, // LeftHandMiddle1
+    0x4544_5772, // RightHandMiddle1
+    0x058b_96dd, // the toe joint under LeftFoot
+    0xe556_c9be, // the toe joint under RightFoot
+];
+
 /// Per-limb runtime state (weight + travel between holds).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LimbState {
@@ -237,6 +247,8 @@ pub struct LimbIk {
     rng: u32,
     /// Joint indices of each chain (resolved once from the rig).
     chains: Option<[[usize; 3]; 4]>,
+    /// The `LIMB_EFFECTORS` bones' indices (`None` entries: not in the rig, the fallback offsets apply).
+    effectors: Option<[Option<usize>; 4]>,
 }
 
 impl LimbIk {
@@ -279,8 +291,9 @@ impl Iso {
     }
 }
 
-/// Where the IK end bone (wrist / ankle) goes for a contact point, in world space. The offsets come
-/// from the game's hang/climb clips (see tuning.rs): the wrist hangs 0.1 m below the edge point.
+/// Where the IK end bone (wrist / ankle) goes for a contact point, in world space, for a rig without the effector bones
+/// (`LIMB_EFFECTORS`). PORT fallback: offsets from the game's hang/climb clips (see tuning.rs); with the effector bones
+/// the end bone goes to the hold minus its animated offset to the effector (`end_goal`).
 pub fn effector_goal(limb: usize, contact: Vec3, normal: Vec3) -> Vec3 {
     if limb < 2 {
         contact + Vec3::Y * IK_HAND_DROP + normal * IK_HAND_OUT
@@ -292,6 +305,16 @@ pub fn effector_goal(limb: usize, contact: Vec3, normal: Vec3) -> Vec3 {
 /// Inverse of `effector_goal`: the contact point an end bone at `p` corresponds to.
 fn contact_of(limb: usize, p: Vec3, normal: Vec3) -> Vec3 {
     p - (effector_goal(limb, Vec3::ZERO, normal))
+}
+
+/// The end bone's goal for a hold: the hold minus the animated offset from the end bone to the effector bone (the end
+/// bone keeps its animated world orientation through the solve, so the effector lands on the hold), or the fallback
+/// offsets without the effector bones.
+fn end_goal(limb: usize, contact: Vec3, normal: Vec3, effector_offset: Option<Vec3>) -> Vec3 {
+    match effector_offset {
+        Some(o) => contact - o,
+        None => effector_goal(limb, contact, normal),
+    }
 }
 
 /// PORT: ankle height above the sole (xx_h_wait_hipm: ankles ~0.09 m above the animation origin).
@@ -513,6 +536,10 @@ pub(crate) fn solve_limbs(
         if chains.iter().any(|c| c[0] == usize::MAX) {
             continue;
         }
+        if ik.effectors.is_none() {
+            ik.effectors = Some(LIMB_EFFECTORS.map(|id| rig.bone_ids.iter().position(|b| *b == id)));
+        }
+        let effectors = ik.effectors.unwrap();
         if std::env::var_os("AC_NO_IK").is_some() {
             continue;
         }
@@ -537,13 +564,23 @@ pub(crate) fn solve_limbs(
             targets.feet.map(|f| f.1),
         ];
         let mut goals: [Option<(Vec3, f32)>; 4] = [None; 4];
+        let effector_offsets = |global: &[Iso]| -> [Option<Vec3>; 4] { std::array::from_fn(|l| effectors[l].map(|e| global[e].pos - global[chains[l][2]].pos)) };
         for i in 0..4 {
-            let anim_contact = contact_of(i, global[chains[i][2]].pos, n);
+            // the animated contact is the effector bone's position (the knuckle / toe), or the fallback from the end bone
+            let anim_contact = match effectors[i] {
+                Some(e) => global[e].pos,
+                None => contact_of(i, global[chains[i][2]].pos, n),
+            };
             // the clip's contact tags decide attach / travel / release when the clip has them (game);
             // otherwise the context's timing is used
-            let g = match limb_tag(&contacts, i) {
-                Some(tag) => ik.limbs[i].update_tagged(wanted[i], anim_contact, tag, dt),
-                None => ik.limbs[i].update(wanted[i], anim_contact, targets.transit, dt),
+            // a suspended IK (the context skipped LimbIK__PostUpdate) applies nothing and keeps the limb's state
+            let g = if targets.suspended {
+                None
+            } else {
+                match limb_tag(&contacts, i) {
+                    Some(tag) => ik.limbs[i].update_tagged(wanted[i], anim_contact, tag, dt),
+                    None => ik.limbs[i].update(wanted[i], anim_contact, targets.transit, dt),
+                }
             };
             goals[i] = g.map(|g| (g, ik.limbs[i].weight));
         }
@@ -673,7 +710,8 @@ pub(crate) fn solve_limbs(
         }
         let [_, spine, head] = ik.body_bones.unwrap();
         let forward = body_forward(body.heading);
-        let ends: [Vec3; 4] = std::array::from_fn(|l| goals[l].map(|(c, _)| effector_goal(l, c, n)).unwrap_or(global[chains[l][2]].pos));
+        let offs = effector_offsets(&global);
+        let ends: [Vec3; 4] = std::array::from_fn(|l| goals[l].map(|(c, _)| end_goal(l, c, n, offs[l])).unwrap_or(global[chains[l][2]].pos));
         let mut drop = 0.0;
         if targets.adjust & ADJUST_SLOPE != 0 {
             drop += slope_hips_drop(ends, body.feet, forward);
@@ -718,11 +756,12 @@ pub(crate) fn solve_limbs(
         }
 
         // ---------------------------------------------------------------- per-limb two-bone solve
+        let offs = effector_offsets(&global);
         for limb in 0..4 {
             let [ia, ib, ic] = chains[limb];
             let (a, b, c) = (global[ia].pos, global[ib].pos, global[ic].pos);
             let (target, w) = match (goals[limb], ground_fix[limb]) {
-                (Some((contact, w)), _) => (c.lerp(effector_goal(limb, contact, n), w), w),
+                (Some((contact, w)), _) => (c.lerp(end_goal(limb, contact, n, offs[limb]), w), w),
                 // the standing foot IK's ankle height
                 (None, Some(t)) if ground_goal[limb - 2].is_some() => (t, 1.0),
                 // the hips may have moved: re-check the foot against the surface
@@ -862,8 +901,11 @@ pub fn log_ik_error(q: Query<(&Rig, &LimbIk, &LimbTargets)>, globals: Query<&Glo
             if l.weight <= 0.0 {
                 continue;
             }
-            let Ok(g) = globals.get(rig.joints[chains[i][2]]) else { continue };
-            let want = effector_goal(i, l.goal, targets.normal);
+            let (bone, want) = match ik.effectors.and_then(|e| e[i]) {
+                Some(e) => (e, l.goal),
+                None => (chains[i][2], effector_goal(i, l.goal, targets.normal)),
+            };
+            let Ok(g) = globals.get(rig.joints[bone]) else { continue };
             parts.push(format!("{}={:.3}m(w{:.2})", ["LH", "RH", "LF", "RF"][i], (g.translation() - want).length(), l.weight));
         }
         if !parts.is_empty() {

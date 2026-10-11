@@ -36,16 +36,18 @@ use crate::player::{Body, HumanDataBundle, LimbTargets, Locomotion, Player, Play
 pub const RING_SECONDS: f32 = 10.0;
 
 /// Where bug folders go: `bugs/` in the crate root when started by cargo (`cargo run` / `cargo test` set
-/// `CARGO_MANIFEST_DIR` at run time), else `bugs/` next to the executable, like `game_dir.txt`. Read at run time so
-/// no build-machine path is baked into the binary.
+/// `CARGO_MANIFEST_DIR` at run time) or when the exe runs from a checkout's `target/` folder (the first ancestor with a
+/// `Cargo.toml` and `src/`, so a `cargo clean` cannot take the captures with it), else `bugs/` next to the
+/// executable, like `game_dir.txt`. Read at run time so no build-machine path is baked into the binary.
 pub fn bugs_dir() -> std::path::PathBuf {
     if let Some(root) = std::env::var_os("CARGO_MANIFEST_DIR") {
         return std::path::PathBuf::from(root).join("bugs");
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("bugs")))
-        .unwrap_or_else(|| std::path::PathBuf::from("bugs"))
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    if let Some(root) = exe_dir.as_ref().and_then(|d| d.ancestors().find(|a| a.join("Cargo.toml").is_file() && a.join("src").is_dir())) {
+        return root.join("bugs");
+    }
+    exe_dir.map(|d| d.join("bugs")).unwrap_or_else(|| std::path::PathBuf::from("bugs"))
 }
 
 /// One recorded frame of input.
@@ -64,12 +66,15 @@ pub struct InputFrame {
     pub hand_pressed_ago: f32,
     /// Held empty-hand input (13th field); older captures did not record it.
     pub hand_held: bool,
+    /// The camera yaw the stick was turned by (14th field; differs from `cam_yaw` while a camera cut's input latch
+    /// holds). Older captures read as `cam_yaw`.
+    pub input_yaw: f32,
 }
 
 impl InputFrame {
     pub fn to_line(&self) -> String {
         format!(
-            "{} {:?} {:?} {:?} {:?} {:?} {} {} {:?} {:?} {:?} {:?} {}",
+            "{} {:?} {:?} {:?} {:?} {:?} {} {} {:?} {:?} {:?} {:?} {} {:?}",
             self.dt_nanos,
             self.dir.x,
             self.dir.y,
@@ -82,13 +87,14 @@ impl InputFrame {
             self.cam_yaw,
             self.cam_pitch,
             self.hand_pressed_ago,
-            self.hand_held as u8
+            self.hand_held as u8,
+            self.input_yaw
         )
     }
 
     pub fn parse(line: &str) -> Option<Self> {
         let t: Vec<&str> = line.split_whitespace().collect();
-        if !(11..=13).contains(&t.len()) {
+        if !(11..=14).contains(&t.len()) {
             return None;
         }
         let f = |i: usize| t[i].parse::<f32>().ok();
@@ -105,6 +111,7 @@ impl InputFrame {
             hand_pressed_ago: if t.len() >= 12 { f(11)? } else { f32::INFINITY },
             // PORT: legacy captures used Legs for falling grab and have no empty-hand held field.
             hand_held: if t.len() >= 13 { t[12] == "1" } else { t[7] == "1" },
+            input_yaw: if t.len() >= 14 { f(13)? } else { f(9)? },
         })
     }
 
@@ -117,6 +124,7 @@ impl InputFrame {
         pad.legs_pressed_ago = self.legs_pressed_ago;
         pad.hand_pressed_ago = self.hand_pressed_ago;
         pad.hand_held = self.hand_held;
+        pad.input_yaw = Some(self.input_yaw);
         // the pad buttons the recording carries (A legs, B empty hand, RT high profile)
         pad.buttons = [false; 16];
         pad.buttons[0] = self.legs_held;
@@ -371,6 +379,7 @@ fn record_input(time: Res<Time>, pad: Res<PadInput>, rig: Res<CameraRig>, mut re
         cam_pitch: rig.pitch,
         hand_pressed_ago: pad.hand_pressed_ago,
         hand_held: pad.hand_held,
+        input_yaw: pad.input_yaw.unwrap_or(rig.yaw),
     };
     rec.inputs.push(f);
 }

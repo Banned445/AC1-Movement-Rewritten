@@ -74,6 +74,13 @@ pub const BEAM_LANDING: u32 = jump_blend::LAND_DAMAGE;
 /// `crouchwait_foot{l,r}_turn_{left,right}_to_crouchwait_90`), then waits in `crouchwait_90` (0xF702B0).
 pub const BEAM_TO_90: [[u32; 2]; 2] = [[0x350D_9386, 0x350D_9387], [0x350D_9388, 0x350D_9389]];
 pub const BEAM_WAIT_90: u32 = 0x02E4_A9DF;
+/// The side free-step arrival (mode 3, `sub_F76C70`): `xx_h_freestep_entry_foot{l,r}_tr_beam_air_90` [footl, footr]
+/// (RE/24 NARROW-5).
+pub const BEAM_SIDE_AIR90: [u32; 2] = [0x0481_85FA, 0x0481_85FC];
+/// Its walks off along the beam (`sub_F76F20`): `beam_air_90_tr_crouch{walk,jog}_footr_{left,right}` [left, right].
+pub const BEAM_AIR90_WALK: [u32; 2] = [0x0481_85FD, 0x0481_85FE];
+/// Its settle into the 90° wait (the graph: `beam_air_90_tr_crouchwait_90`).
+pub const BEAM_AIR90_TO_WAIT: u32 = 0x0481_85EB;
 /// From the 90° wait: the stick to a side turns back along the beam (`Play90TurnBack` 0xF78630:
 /// `crouchwait_90_turn_{left,right}`), the stick back turns around across it (`PlayTurn180` 0xF78740:
 /// `crouchwait_90_turn180`). Pushing forward (off the beam) does nothing for the player (0xF7BA60 is AI only).
@@ -95,6 +102,7 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     0x516D_52DB, 0x516D_52DC, 0x516D_52DD, 0x516D_52DE, 0x516D_52DF,
     BEAM_TO_90[0][0], BEAM_TO_90[0][1], BEAM_TO_90[1][0], BEAM_TO_90[1][1], BEAM_WAIT_90, BEAM_90_TURN_BACK[0], BEAM_90_TURN_BACK[1], BEAM_90_TURN180,
     BEAM_CORNER_HOP[0], BEAM_CORNER_HOP[1], BEAM_CORNER_HOP[2],
+    BEAM_SIDE_AIR90[0], BEAM_SIDE_AIR90[1], BEAM_AIR90_WALK[0], BEAM_AIR90_WALK[1], BEAM_AIR90_TO_WAIT,
 ];
 
 /// 0xF7C3A0: the root stops this far before a beam end.
@@ -332,6 +340,41 @@ pub struct HumanNarrowObjectData {
     pub hop: Option<CornerHop>,
     /// Mode 8 destination, independent of the beam segment.
     step_off_to: Vec3,
+    /// Beam +1716 / +1720: the walk's current and desired speed (m/s, RE/24 NARROW-1).
+    pub speed: f32,
+    pub desired: f32,
+    /// Beam +2224 bit 0: the root clamped at the beam's end this tick.
+    clamped: bool,
+}
+
+/// The beam's speed bands (beam +164, `sub_F7D3E0` 0xF7D600–0xF7D61B): [walk, walk, jog, jog, jog], each the walk
+/// action's clip root displacement over its duration (RE/24 NARROW-1); the 1.04 / 1.78 / 2.87 / 4.71 constants are the
+/// fallback only.
+pub fn beam_bands() -> [f32; 5] {
+    static BANDS: std::sync::OnceLock<[f32; 5]> = std::sync::OnceLock::new();
+    *BANDS.get_or_init(|| {
+        let speed = |w: [f32; 2]| {
+            let a = ActionBlend::new(BEAM_WALK, 0, &w);
+            let d = a.duration();
+            let v = a.disp(1.0);
+            if d > 1e-4 { Vec2::new(v[0], v[1]).length() / d } else { 0.0 }
+        };
+        let (walk, jog) = (speed([1.0, 0.0]), speed([0.0, 1.0]));
+        if walk > 0.0 && jog > walk { [walk, walk, jog, jog, jog] } else { [1.04, 1.78, 2.87, 4.71, 4.71] }
+    })
+}
+
+/// The speed a walk item's [walk, jog] weights stand for (the inverse of `speed_weights`).
+fn speed_from_weights(a: &ActionBlend) -> f32 {
+    let b = beam_bands();
+    b[0] + (b[4] - b[0]) * a.weights().get(1).copied().unwrap_or(0.0)
+}
+
+/// The walk / start items' [walk, jog] weights from the speed (0xF7D890): jog = clamp((speed − band0) / (band4 − band0)).
+fn speed_weights(speed: f32) -> [f32; 2] {
+    let b = beam_bands();
+    let j = ((speed - b[0]) / (b[4] - b[0]).max(1e-4)).clamp(0.0, 1.0);
+    [1.0 - j, j]
 }
 
 fn item(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -358,14 +401,25 @@ impl HumanNarrowObjectData {
         self.entry_mode = e.mode;
         self.foot = e.foot;
         self.hand_target = None;
-        self.across = None;
+        // mode 3 faces across the beam (+1040 = 2): the entry vector turned 90° about up, flipped toward the current
+        // forward (0xF76E30–0xF76E85, RE/24 NARROW-5)
+        self.across = (e.mode == BeamEntryMode::Side).then(|| {
+            let r = super::right_of(self.dir());
+            if r.dot(e.facing) >= 0.0 { r } else { -r }
+        });
         self.warp_from = e.from;
         self.warp_elapsed = 0.0;
         self.warp_heading = (super::heading_of(e.facing), super::heading_of(self.facing()));
         match e.mode {
-            BeamEntryMode::Ground => self.play(BeamState::Entry, if BEAM_COMPLETION { e.action.or_else(|| self.ground_step(false)) } else { item(BEAM_WAIT[0], 0, &[]) }),
-            // 0xF7AAA0 mode 2: standing → the wait by foot (table 0x1A353C0), moving → Main (the walk)
-            BeamEntryMode::Straight => self.play(BeamState::Wait, item(BEAM_WAIT[e.foot], 0, &[])),
+            BeamEntryMode::Ground => self.play(BeamState::Entry, if BEAM_COMPLETION { e.action.or_else(|| item(BEAM_WALK, e.foot, &[1.0, 0.0])) } else { item(BEAM_WAIT[0], 0, &[]) }),
+            // 0xF7AAA0 mode 2: standing → the wait by foot (table 0x1A353C0), moving → Main (the walk, RE/24 NARROW-6)
+            BeamEntryMode::Straight => match e.action.filter(|a| a.id == BEAM_WALK) {
+                Some(walk) => {
+                    self.speed = beam_bands()[0].max(speed_from_weights(&walk));
+                    self.play(BeamState::Walk, Some(walk));
+                }
+                None => self.play(BeamState::Wait, item(BEAM_WAIT[e.foot], 0, &[])),
+            },
             BeamEntryMode::Side | BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack => {
                 self.warp = e.action.map(|a| a.duration()).unwrap_or(0.3);
                 self.play(BeamState::Reception, e.action);
@@ -477,6 +531,8 @@ impl HumanNarrowObjectData {
     }
 
     fn wait_state(&mut self) {
+        // the wait seeds the speed at 0 (0xF708D7)
+        self.speed = 0.0;
         match self.kind {
             NarrowKind::Beam => {
                 let w = item(BEAM_WAIT[self.foot], 0, &[]);
@@ -495,14 +551,24 @@ fn pilotis_weights(l: f32) -> [f32; 3] {
     if l >= 0.0 { [1.0 - l, 0.0, l] } else { [1.0 + l, -l, 0.0] }
 }
 
-/// Movement event 72's guard 0xD9F4C0: a beam (guidance) in the box ahead of the feet: ±0.75 m sideways,
-/// 0–1.0 m ahead, ±0.53 m vertically (`sub_116E1A0`); the facing within 30° of the beam axis (straight entry,
-/// mode 2: |dot| ≥ 0.866, `TryMountBeam` 0xE52AD0). Side entries (mode 3) are not ported.
-pub fn try_mount_beam(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<BeamEntry> {
-    let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+/// Movement event 72's guard `HumanGround__Guard_Event72_MountBeam` 0xD9F4C0 (RE/24 NARROW-3), along the event's
+/// direction `dir` (the stick):
+/// - the query `sub_116E1A0`: the beams in the box ±0.75 m across, 0–1 m ahead, ±0.53 m up in the frame of `dir`,
+///   pieces within 90° of it, clipped to the box; the nearest piece;
+/// - the entry: the clipped piece's closest point to the root + 0.5 m along it (0xD9F640–0xD9F752);
+/// - clearance `sub_B2A070`: a box from the root to the entry, 1.1 m above the entry, half 0.25 across / 0.5 up / half
+///   the distance (0.1 when none);
+/// - the root within the beam's width + 0.5·(1 − clamp((beam − feet) / 0.53)) of the beam's vertical plane;
+/// - the root in the box (−(w + 0.5), −0.5, −0.5)…(w + 0.5, 1.0, 0.5) of the beam's frame (across, along, up) at the
+///   closest point (`sub_527EC0`).
+/// No facing / axis angle test: every angle is a mode-1 mount. PORT: the beam's width (`sub_116C8F0`) is 0.
+pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<BeamEntry> {
+    let f = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+    if f == Vec3::ZERO {
+        return None;
+    }
     let r = super::right_of(f);
-    // 0xD9F4C0's query box (sub_116E1A0 over HumanGuidance's report, the same query as 0xE0B890): ±0.75 m sideways,
-    // 0–1 m ahead, ±0.53 m vertically.
+    // 0xD9F4C0's query (sub_116E1A0 over HumanGuidance's report, the same query as 0xE0B890)
     let segments: Vec<(Vec3, Vec3)> = if NATIVE_BEAM_MOUNT && crate::tuning::AIR_CATCHES && !collision.triangles.is_empty() {
         let centre = feet + f * 0.5;
         crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs() * 0.75 + f.abs() * 0.5 + Vec3::Y * 0.53)
@@ -510,24 +576,67 @@ pub fn try_mount_beam(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, colli
     } else {
         guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::Beam).map(|e| (e.p0, e.p1)).collect()
     };
+    const W: f32 = 0.0;
+    let mut best: Option<(f32, Vec3, Vec3, Vec3, Vec3)> = None;
     for (p0, p1) in segments {
-        let e = crate::guidance::GuidanceEdge { p0, p1, n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::Beam };
-        let axis = Vec3::new(e.p1.x - e.p0.x, 0.0, e.p1.z - e.p0.z).normalize_or_zero();
-        let along = axis.dot(f);
-        if along.abs() < 0.866 {
+        let v = p1 - p0;
+        let flat = Vec3::new(v.x, 0.0, v.z);
+        if flat.length_squared() < 1e-8 || flat.dot(f).abs() < 1e-4 {
             continue;
         }
-        // the beam end nearest to the feet, a little onto the beam
-        let (start, toward_p1) = if along > 0.0 { (e.p0, true) } else { (e.p1, false) };
-        let d = start - feet;
-        let ahead = d.dot(f);
-        if !(0.0..=1.0).contains(&ahead) || d.dot(r).abs() > 0.75 || d.y.abs() > 0.53 {
+        // clip the piece to the box: x across ±0.75, y ahead 0..1, z up ±0.53 (relative to the feet)
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        for (axis, lo, hi) in [(r, -0.75f32, 0.75f32), (f, 0.0, 1.0), (Vec3::Y, -0.53, 0.53)] {
+            let a = (p0 - feet).dot(axis);
+            let d = v.dot(axis);
+            if d.abs() < 1e-6 {
+                if a < lo || a > hi {
+                    t0 = 1.0;
+                    t1 = 0.0;
+                }
+                continue;
+            }
+            let (ta, tb) = ((lo - a) / d, (hi - a) / d);
+            t0 = t0.max(ta.min(tb));
+            t1 = t1.min(ta.max(tb));
+        }
+        if t0 > t1 {
             continue;
         }
-        let point = start + if toward_p1 { axis } else { -axis } * 0.2;
-        return Some(BeamEntry { p0: e.p0, p1: e.p1, point, from: feet, toward_p1, mode: BeamEntryMode::Ground, foot: 0, action: None, facing: f });
+        let (c0, c1) = (p0 + v * t0, p0 + v * t1);
+        let seg = c1 - c0;
+        let k = if seg.length_squared() < 1e-10 { 0.0 } else { ((feet - c0).dot(seg) / seg.length_squared()).clamp(0.0, 1.0) };
+        let q = c0 + seg * k;
+        let dist = q.distance(feet);
+        if best.is_none_or(|b| dist < b.0) {
+            best = Some((dist, q, p0, p1, flat.normalize()));
+        }
     }
-    None
+    let (_, q, p0, p1, axis) = best?;
+    // the piece oriented along the event's direction
+    let along = if axis.dot(f) >= 0.0 { axis } else { -axis };
+    let point = q + along * 0.5;
+    // the clearance box from the root to the entry
+    let delta = Vec3::new(point.x - feet.x, 0.0, point.z - feet.z);
+    let (box_dir, half_len) = if delta.length() > 0.0005 { (delta.normalize(), delta.length() * 0.5) } else { (f, 0.1) };
+    let centre = Vec3::new(feet.x + delta.x * 0.5, point.y + 1.1, feet.z + delta.z * 0.5);
+    if !collision.obb_free(centre, [super::right_of(box_dir), Vec3::Y, box_dir], Vec3::new(0.25, 0.5, half_len)) {
+        return None;
+    }
+    // the root near the beam's vertical plane (the bound narrows as the beam rises above the feet)
+    let across = super::right_of(along);
+    let rel = feet - q;
+    let rise = ((q.y - feet.y) / 0.53).clamp(0.0, 1.0);
+    if rel.dot(across).abs() >= (1.0 - rise) * 0.5 + W {
+        return None;
+    }
+    // the root in the beam frame's box
+    let (x, y, z) = (rel.dot(across), rel.dot(along), rel.y);
+    if x.abs() > W + 0.5 || !(-0.5..=1.0).contains(&y) || z.abs() > 0.5 {
+        return None;
+    }
+    let toward_p1 = along.dot(p1 - p0) >= 0.0;
+    Some(BeamEntry { p0, p1, point, from: feet, toward_p1, mode: BeamEntryMode::Ground, foot: 0, action: None, facing: f })
 }
 
 /// 0xE0B890 (the beam test of `CheckAirCatch`, also used for the free-step arrival): a Beam edge in the box
@@ -653,8 +762,17 @@ pub fn free_step_beam_entry(
             let w = if jog { [0.0, 0.0, 1.0 - w90, w90] } else { [1.0 - w90, w90, 0.0, 0.0] };
             (toward, item(BEAM_SIDE_ENTRY[k], 0, &w))
         }
+        // mode 2 with the stick: Main / Walk at once, band 4 when running else band 0, no action of its own (EnterByMode
+        // 0xF7AC92–0xF7ACC4, RE/24 NARROW-6); the port carries the walk item to enter with
+        BeamEntryMode::Straight if stick.is_some() => {
+            let speed = if jog { beam_bands()[4] } else { beam_bands()[0] };
+            (axis.dot(f) >= 0.0, item(BEAM_WALK, foot, &speed_weights(speed)))
+        }
+        // mode 3: `freestep_entry_foot*_tr_beam_air_90` by the arriving foot (`sub_F76C70`; RE/24 NARROW-5). PORT: the
+        // foot index follows the port's foot (the exit-feet reading of NARROW-7 is not applied)
+        BeamEntryMode::Side => (axis.dot(f) >= 0.0, item(BEAM_SIDE_AIR90[foot.min(1)], 0, &[]).or(reception)),
         // the beam direction nearest the facing
-        _ => (axis.dot(f) >= 0.0, if mode == BeamEntryMode::Side { reception } else { None }),
+        _ => (axis.dot(f) >= 0.0, None),
     };
     Some(BeamEntry { p0, p1, point, from: feet, toward_p1, mode, foot, action, facing: f })
 }
@@ -1016,7 +1134,9 @@ pub fn update_narrow(
         }
         if loco.just_switched {
             loco.just_switched = false;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         let n = &mut data.narrow;
         n.t += dt;
@@ -1059,7 +1179,33 @@ pub fn update_narrow(
         let side = stick && !forward && !back;
         let left = pad.dir.dot(super::right_of(facing)) < 0.0;
         let jog = pad.high_profile;
-        let walk_w = if jog { [0.0, 1.0] } else { [1.0, 0.0] };
+        // the speed model (RE/24 NARROW-1): the interpreter's desired band (0xEE9AF0 → vt128 `GetSpeedBand` 0xE53090:
+        // band 2 in high profile, 1 in low, while the stick is within 120° of the facing, else 0; clamped to band 4 by
+        // vt120 0xE52E60); the ramp 0xF79E90 moves the speed toward it at +2 m/s² and −3 m/s², braking whenever the
+        // stick is not forward (`ClassifyStickDir` ≠ 0)
+        let bands = beam_bands();
+        n.desired = if stick && a < 120f32.to_radians() { if jog { bands[2] } else { bands[1] } } else { 0.0 }.clamp(0.0, bands[4]);
+        if matches!(n.state, BeamState::Start | BeamState::Walk | BeamState::Stop) {
+            n.speed = if !forward || n.speed > n.desired {
+                (n.speed - 3.0 * dt).max(if forward { n.desired } else { 0.0 })
+            } else {
+                (n.speed + 2.0 * dt).min(n.desired)
+            };
+            // the playing walk / start item's weights follow the speed (0xF7D890); the phase is kept
+            if matches!(n.state, BeamState::Start | BeamState::Walk) {
+                if let Some(act) = n.action.filter(|a| a.id == BEAM_WALK || BEAM_START.contains(&a.id)) {
+                    let d0 = act.duration().max(1e-4);
+                    let phase = (n.t / d0).min(1.0);
+                    if let Some(b) = item(act.id, act.item, &speed_weights(n.speed)) {
+                        // the new blend's curve takes over at the same phase: what was applied moves with it
+                        n.t = phase * b.duration();
+                        n.applied += Vec3::from_array(b.disp(phase)) - Vec3::from_array(act.disp(phase));
+                        n.action = Some(b);
+                    }
+                }
+            }
+        }
+        let walk_w = speed_weights(n.speed);
         let dur = n.action.map(|a| a.duration()).unwrap_or(0.3);
         // RE/05 §2.14: item advance 0x778010 marks completion only with positive leftover time.
         // PORT: these single-item, one-shot actions have no queued evaluator in the movement simulation.
@@ -1080,12 +1226,12 @@ pub fn update_narrow(
 
         // Event 17: walking into an obstacle with stick input searches a hand jump target before
         // pull-down / climb (0xEE9AF0 → 0xF7EF90 / 0xF7DB30 → 0xF70E50 → 0xB21DA0).
-        // PORT: the existing standing hand probe and an oriented contact box replace the native
-        // report classification/rays; exact obstacle target selection remains a parity task.
+        // The search is sub_F7DB30 (`ground::beam_obstacle_target`). PORT: an oriented contact box stands in for the
+        // obstacle contact (Human__GetObstacleContact 0xB25230).
         if BEAM_COMPLETION && n.kind == NarrowKind::Beam && matches!(n.state, BeamState::Start | BeamState::Walk)
             && stick && !collision.obb_free(n.stand() + pad.dir * 0.45 + Vec3::Y * 0.8,
                 [super::right_of(pad.dir), Vec3::Y, pad.dir], Vec3::new(0.2, 0.3, 0.1)) {
-            if let Some(target) = super::ground::straight_hand_target(n.stand(), pad.dir, &guidance, &collision, true) {
+            if let Some(target) = super::ground::beam_obstacle_target(n.stand(), pad.dir, &guidance, &collision) {
                 let entry = InAirEntry::JumpToTarget { from: n.stand(), target, speed_param: 0.0, foot_left: n.foot == 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 continue;
@@ -1098,7 +1244,8 @@ pub fn update_narrow(
         let can_pull_down = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::PilotisWait);
         if can_pull_down && pad.hand_just_pressed() {
             let camera_dir = Vec3::new(camera.yaw.sin(), 0.0, camera.yaw.cos());
-            if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), camera_dir, &guidance, &collision) {
+            // the pull-down report (`sub_DDCB20`, RE/24 GUIDE-2)
+            if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), camera_dir, &guidance.ledge_report(n.stand(), 2.5, true), &collision) {
                 pad.hand_pressed_ago = f32::INFINITY;
                 body.feet = n.stand();
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
@@ -1110,8 +1257,9 @@ pub fn update_narrow(
         // 0xEE9AF0: high profile, Legs pressed, the stick > 0.35 within 60° of the facing; tested before the jumps.
         // Guard `CanWallRun` 0xF77DC0 = the wall test 0xE18390 (1.5·h ahead), fill 0xB263B0 → Walling.
         // 0xB263B0 warps beam entries in 0.13 s; Ground retains its action-length warp.
+        // the impulsion accepts it too (`sub_F7A740` case 15 → `sub_F79FE0`, the same wall test; RE/24 NARROW-9)
         if n.kind == NarrowKind::Beam
-            && matches!(n.state, BeamState::Start | BeamState::Walk)
+            && matches!(n.state, BeamState::Start | BeamState::Walk | BeamState::ImpulseIn | BeamState::ImpulseWait)
             && pad.high_profile
             && pad.jump_buffered()
             && stick
@@ -1129,9 +1277,10 @@ pub fn update_narrow(
         // ------------------------------------------------ the corner hop (event 7, Walk above walking speed)
         // 0xEE9AF0: vt232 (event 7 accepted: Walk, speed above the walk band, 0xF7F150) and the stick 40°–140° from
         // the facing; the target search (vt288) → vt236 → `StartCornerHop` 0xF7D2F0.
+        // the hop's end accepts another hop after half its action (state +157, guard `sub_F6FA50`; RE/24 NARROW-12)
+        let hop_end_ready = n.state == BeamState::HopEnd && n.t / dur.max(1e-4) > 0.5;
         if n.kind == NarrowKind::Beam
-            && matches!(n.state, BeamState::Start | BeamState::Walk)
-            && jog
+            && ((matches!(n.state, BeamState::Start | BeamState::Walk) && n.speed > beam_bands()[1]) || hop_end_ready)
             && stick
             && a > 40f32.to_radians()
             && a < 140f32.to_radians()
@@ -1154,7 +1303,15 @@ pub fn update_narrow(
             || (!BEAM_COMPLETION && n.state == BeamState::Stop);
         // 0xF7A740 gates events 4 / 5 / 6 on the timer, independently of the entry clip. The jog stop accepts no
         // event at all (`Main_CanHandleEvent` 0xF7FB60 returns 1 for sub-state +97, `PlayJogStop` 0xF6EE90).
-        if jump && can_jump && (!BEAM_COMPLETION || !impulsion || impulse_ready) {
+        // Events 5 / 6, the jump on the spot, fire when Legs is **not held** (BeamState 0xEEAFEF–0xEEB0E1: `Pad__IsPressed`
+        // (0) false): press or hold Legs to crouch, let go after 0.2 s to jump; event 5 carries the standing request's
+        // hand target (IHuman vt64 + `Human__PickStaticReport` 0xE97720), event 6 none (RE/24 NARROW-10)
+        if impulsion && impulse_ready && !pad.legs_held && n.state != BeamState::JumpOnPlace {
+            let feet = n.stand();
+            n.hand_target = super::ground::static_hand_target(feet, facing, &guidance, &collision, true);
+            let id = if n.hand_target.is_some() { BEAM_IMPULSE_TO_JUMP } else { BEAM_IMPULSE_TO_CLEAR };
+            n.play(BeamState::JumpOnPlace, item(id, 0, &[]));
+        } else if jump && can_jump && (!BEAM_COMPLETION || !impulsion || impulse_ready) {
             let feet = n.stand();
             // event 4: a target in the stick direction → free-step jump (kind 1)
             if stick {
@@ -1166,12 +1323,8 @@ pub fn update_narrow(
                     continue;
                 }
             }
-            if n.state == BeamState::ImpulseWait || (BEAM_COMPLETION && n.state == BeamState::ImpulseIn) {
-                // events 5 / 6 (+148, 0xF717D0): the jump on the spot, at a hand target when there is one
-                pad.consume_jump();
-                n.hand_target = super::ground::straight_hand_target(feet, facing, &guidance, &collision, true);
-                let id = if n.hand_target.is_some() { BEAM_IMPULSE_TO_JUMP } else { BEAM_IMPULSE_TO_CLEAR };
-                n.play(BeamState::JumpOnPlace, item(id, 0, &[]));
+            if impulsion {
+                // a press in the impulsion: only event 4 above (the jump on the spot is the release)
             } else if !stick {
                 // event 2 (pilotis, 0xE53850 → PilotisToBeam mode 8) / Main: the impulsion crouch (+145, 0xF738A0)
                 pad.consume_jump();
@@ -1220,6 +1373,7 @@ pub fn update_narrow(
                 let limit_lo = if n.toward_p1 { 0.0 } else { stop };
                 let limit_hi = if n.toward_p1 { n.len() - stop } else { n.len() };
                 let over = if n.toward_p1 { s - limit_hi } else { limit_lo - s };
+                n.clamped = next.is_none() && over >= 0.0;
                 s = s.clamp(limit_lo.min(limit_hi), limit_hi.max(limit_lo));
                 n.s = s;
                 if let (Some((q0, q1)), true) = (next, over >= 0.0) {
@@ -1256,11 +1410,13 @@ pub fn update_narrow(
                     n.lateral = off - n.dir() * off.dot(n.dir());
                     if Vec2::new(body.feet.x - n.entry_from.x, body.feet.z - n.entry_from.z).length_squared() > 0.25
                         || n.to_end() <= BEAM_END_STOP || moved.hit_wall {
-                        if forward { n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w)); }
+                        if forward { n.speed = if jog { beam_bands()[4] } else { beam_bands()[0] }; n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed))); }
                         else { n.wait_state(); }
                     } else if done {
+                        // the next beam walk item, the same blend
+                        let w = n.action.map(|a| { let w = a.weights(); [w.first().copied().unwrap_or(1.0), w.get(1).copied().unwrap_or(0.0)] }).unwrap_or([1.0, 0.0]);
                         n.foot ^= 1;
-                        n.play(BeamState::Entry, n.ground_step(jog));
+                        n.play(BeamState::Entry, item(BEAM_WALK, n.foot, &w));
                     }
                     body.heading = super::heading_of(facing);
                     continue;
@@ -1290,9 +1446,27 @@ pub fn update_narrow(
                             continue;
                         }
                     }
+                    // mode 3's end (`StateSideEntry_Update` 0xF80390 → `sub_F76F20`): the stick along the beam (to a side of
+                    // the across facing) walks off that way with `beam_air_90_tr_crouch*_{left,right}` at band 4; else the
+                    // 90° wait (RE/24 NARROW-5)
+                    if n.entry_mode == BeamEntryMode::Side && n.kind == NarrowKind::Beam && n.across.is_some() {
+                        if side {
+                            let r = super::right_of(facing);
+                            let along = if left { -r } else { r };
+                            n.toward_p1 = along.dot(n.dir()) >= 0.0;
+                            n.across = None;
+                            n.speed = beam_bands()[4];
+                            let w = item(BEAM_AIR90_WALK[!left as usize], 0, &speed_weights(n.speed)).or_else(|| item(BEAM_WALK, n.foot, &speed_weights(n.speed)));
+                            n.play(BeamState::Walk, w);
+                        } else {
+                            n.speed = 0.0;
+                            n.play(BeamState::Wait90, item(BEAM_WAIT_90, 0, &[]));
+                        }
+                        continue;
+                    }
                     let walking = matches!(n.entry_mode, BeamEntryMode::SideWalk | BeamEntryMode::SideWalkBack) && n.kind == NarrowKind::Beam;
                     if walking && forward {
-                        let w = item(BEAM_WALK, n.foot, &walk_w);
+                        n.speed = if jog { beam_bands()[4] } else { beam_bands()[0] }; let w = item(BEAM_WALK, n.foot, &speed_weights(n.speed));
                         n.play(BeamState::Walk, w);
                     } else {
                         n.wait_state();
@@ -1309,25 +1483,30 @@ pub fn update_narrow(
                     n.turn_left = left;
                     let t = item(BEAM_TO_90[!left as usize][n.foot], 0, &[]);
                     n.play(BeamState::TurnTo90, t);
-                } else if forward && n.to_end() > BEAM_END_STOP + 0.05 {
-                    let st = item(BEAM_START[n.foot], 0, &walk_w);
-                    n.play(BeamState::Start, st);
-                } else if forward && can_step_off(n, &collision) {
-                    let st = item(BEAM_START[n.foot], 0, &walk_w);
+                } else if forward && (n.to_end() > BEAM_END_STOP + 0.05 || can_step_off(n, &collision)) {
+                    // the start seeds the speed at band 0 (0xF724C4)
+                    n.speed = beam_bands()[0];
+                    let st = item(BEAM_START[n.foot], 0, &speed_weights(n.speed));
                     n.play(BeamState::Start, st);
                 } else if done {
                     n.wait_state();
                 }
             }
             BeamState::Start | BeamState::Walk => {
-                if !forward {
-                    // released: the jog stops with its stop action, the walk settles into the wait
-                    if jog {
-                        let st = item(BEAM_JOG_STOP[n.foot], 0, &[]);
-                        n.play(BeamState::Stop, st);
-                    } else {
-                        n.wait_state();
-                    }
+                // Walk → Idle 0xF747B0 and Walk → JogStop 0xF749D0 by the speed (RE/24 NARROW-1). PORT: the obstacle
+                // contact branches (0xB25230) are not modelled here (event 17 handles the obstacle)
+                let b = beam_bands();
+                let walking = n.state == BeamState::Walk;
+                let phase = n.t / dur.max(1e-4);
+                let idle = n.clamped
+                    || (walking && n.speed < b[0])
+                    || (!walking && n.desired < b[0] && (phase < 0.5 || n.speed < b[0]));
+                let jog_stop = n.desired < b[0] && ((walking && n.speed > b[1]) || (!walking && n.speed > b[0] && phase > 0.5));
+                if idle {
+                    n.wait_state();
+                } else if jog_stop {
+                    let st = item(BEAM_JOG_STOP[n.foot], 0, &[]);
+                    n.play(BeamState::Stop, st);
                 } else if done {
                     if n.state == BeamState::Walk {
                         n.foot ^= 1;
@@ -1419,7 +1598,7 @@ pub fn update_narrow(
                     n.hop = None;
                     if forward {
                         n.foot ^= 1;
-                        let w = item(BEAM_WALK, n.foot, &walk_w);
+                        n.speed = n.speed.max(beam_bands()[1]); let w = item(BEAM_WALK, n.foot, &speed_weights(n.speed));
                         n.play(BeamState::Walk, w);
                     } else {
                         n.wait_state();
@@ -1430,7 +1609,7 @@ pub fn update_narrow(
                 // 0xF80560 can resume Main before the entry clip ends, once the 0.2 s timer expires.
                 if BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward && n.impulse_elapsed >= 0.2 {
                     n.across = None;
-                    n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w));
+                    n.speed = beam_bands()[4]; n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed)));
                 } else if done {
                     let w = item(BEAM_IMPULSE_WAIT, 0, &[]);
                     n.play(BeamState::ImpulseWait, w);
@@ -1441,7 +1620,7 @@ pub fn update_narrow(
                 if (BEAM_COMPLETION && n.kind == NarrowKind::Beam && forward && n.impulse_elapsed >= 0.2) || (!BEAM_COMPLETION && stick) {
                     if BEAM_COMPLETION {
                         n.across = None;
-                        n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &walk_w));
+                        n.speed = beam_bands()[4]; n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed)));
                     } else { n.wait_state(); }
                 }
             }

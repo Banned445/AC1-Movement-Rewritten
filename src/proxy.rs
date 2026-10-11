@@ -34,9 +34,10 @@ const MAX_SURFACE_VELOCITY: f32 = 10.0;
 const PENETRATION_RECOVERY: f32 = 1.0;
 /// Integrate 0x57C7C0: at most 10 cast rounds per frame.
 const MAX_ITERATIONS: usize = 10;
-/// PORT (hypothesis): the closest-point tolerance of the shape queries (the collision input's tolerance, read at
-/// 0x57C8A6 from the world; Havok's default 0.1).
-const COLLISION_TOLERANCE: f32 = 0.1;
+/// The closest-point tolerance of the shape queries: keep distance (+204, 0.05) + keep-contact tolerance (+208, 0.1),
+/// added at 0x57C891 and handed to `CharacterController__ShapeQuery` 0x57B200 as the collision input's tolerance
+/// (Havok's `m_tolerance = keepDistance + keepContactTolerance`; RE/24 GUIDE-7).
+const COLLISION_TOLERANCE: f32 = 0.15;
 /// StickToGround's collector (`MinAngleCdPointCollector` add 0x57AA00) keeps only hits whose normal points up at
 /// least this much (dword_18D81A0 = cos 55°).
 const STICK_MIN_UP: f32 = 0.573_576_4;

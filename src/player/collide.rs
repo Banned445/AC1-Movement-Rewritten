@@ -92,9 +92,9 @@ fn blend(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
 
 /// Event 42's contact (0xB25230) for the port's capsule: the obstacle face just ahead, ≥ 0.5 m above the feet and
 /// within 45° of the facing. Returns (contact on the face at the feet height, outward normal, obstacle height).
-/// The event is unreachable from player input in v1.02 (RE/02 §4.5), so only the tests use this. PORT: how the sender
-/// measures the height is not traced; this takes the top of the box it touches.
-#[allow(dead_code)]
+/// The port's stand-in sender uses it (high profile, the stick into a wall; ground.rs, owner's live check 2026-10-10;
+/// the interpreter's own event-42 path is dead, RE/02 §4.5). PORT: how the sender measures the height is not traced;
+/// this takes the top of the box it touches.
 pub fn obstacle_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> Option<(Vec3, Vec3, f32)> {
     let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let probe = feet + f * (crate::tuning::CAPSULE_RADIUS + 0.08) + Vec3::Y * 0.55;
@@ -109,13 +109,32 @@ pub fn obstacle_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> 
     (height >= 0.5).then_some((Vec3::new(c.x, feet.y, c.z), n, height))
 }
 
-/// `HumanGround__ObstacleCollision_Enter` 0xD9CB90.
-#[allow(dead_code)]
+/// `HumanGround__ObstacleCollision_Enter` 0xD9CB90. The game also turns the step offset off
+/// (`CharacterController__SetStepOffsetEnabled(0)`, RE/24 GUIDE-20); the port's state moves the root by its warp and never
+/// runs the capsule, so there is nothing to switch.
 pub fn enter(feet: Vec3, heading: f32, contact: Vec3, n: Vec3, height: f32, seq: u32) -> Option<Collide> {
     let (kind, lo, hi, id) = if height >= 0.7 * H { (CollideKind::Hand, 0.7 * H, 1.5 * H, COLLIDE_HAND) } else { (CollideKind::Foot, 0.5 * H, 0.7 * H, COLLIDE_FOOT) };
     let h = ((height - lo) / (hi - lo)).clamp(0.0, 1.0);
     let action = blend(id, 0, &[1.0 - h, h])?;
     Some(Collide { kind, h, normal: n, from: feet, to: contact + n * 0.4 * H, phase: CollidePhase::Entry(0), action, t: 0.0, seq: seq.wrapping_add(1), warp_t: 0.0, from_heading: heading })
+}
+
+/// The wanted direction while leaning: the interpreter's wall slide (0xEDD7C0) against the leaned-on wall. A stick
+/// facing the wall (its contact within 90°) and more than 45° off straight into it turns along the wall (so W + D with
+/// the camera square to the wall pushes away sideways); within 45° it points straight in (keep leaning); a stick away
+/// from the wall finds no contact and stays as it is (the back exit). PORT (hypothesis): the slide runs during the lean
+/// (its controller contact is the leaned-on wall); a keyboard diagonal sits on the 135° line, taken as sliding.
+pub fn lean_stick(stick: Vec3, normal: Vec3) -> Vec3 {
+    let d = Vec3::new(stick.x, 0.0, stick.z).normalize_or_zero();
+    let n = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
+    if d == Vec3::ZERO || n == Vec3::ZERO || (-d).dot(n) < 0.0 {
+        return stick;
+    }
+    if n.dot(d).clamp(-1.0, 1.0).acos() <= 135f32.to_radians() + 1e-3 {
+        (d - n * d.dot(n)).normalize_or(d)
+    } else {
+        -n
+    }
 }
 
 /// What `update` asks the ground context to do.
@@ -127,8 +146,9 @@ pub enum CollideOut {
     Leave { first: Option<ActionBlend>, then: Option<ActionBlend>, speed: f32, face: Option<Vec3> },
 }
 
-/// `HumanGround__ObstacleCollision_Update` 0xD9DA20. `stick` = wanted direction (None = released), `jog` = high
-/// profile (+1504, hypothesis). Moves `feet` / `heading` during the entry interpolation.
+/// `HumanGround__ObstacleCollision_Update` 0xD9DA20. `stick` = the wanted direction DestHeading (Data+80), i.e. the
+/// stick after the interpreter's wall slide (`lean_stick`), None = released; `jog` = high profile (+1504, hypothesis).
+/// Moves `feet` / `heading` during the entry interpolation.
 pub fn update(c: &mut Collide, dt: f32, stick: Option<Vec3>, jog: bool, feet: &mut Vec3, heading: &mut f32) -> CollideOut {
     c.t += dt;
     c.warp_t += dt;
@@ -143,26 +163,20 @@ pub fn update(c: &mut Collide, dt: f32, stick: Option<Vec3>, jog: bool, feet: &m
     }
     *heading = c.from_heading + d * k;
     let ended = c.t >= c.action.duration();
-    let decide = match c.phase {
-        CollidePhase::Entry(i) => {
-            if !ended {
-                return CollideOut::Stay;
-            }
-            if c.kind == CollideKind::Hand && i == 0 {
-                if let Some(a) = blend(COLLIDE_HAND, 1, &[1.0 - c.h, c.h]) {
-                    c.phase = CollidePhase::Entry(1);
-                    c.action = a;
-                    c.t = 0.0;
-                    c.seq = c.seq.wrapping_add(1);
-                    return CollideOut::Stay;
-                }
-            }
-            true
+    // the collide item (0) runs into its transition into the lean (item 1) inside the one action
+    if ended && c.kind == CollideKind::Hand && c.phase == CollidePhase::Entry(0) {
+        if let Some(a) = blend(COLLIDE_HAND, 1, &[1.0 - c.h, c.h]) {
+            c.phase = CollidePhase::Entry(1);
+            c.action = a;
+            c.t = 0.0;
+            c.seq = c.seq.wrapping_add(1);
+            return CollideOut::Stay;
         }
-        // the wait may be left at any time (its item is interruptible)
-        CollidePhase::Wait => true,
-    };
-    if !decide {
+    }
+    // 0xD9DAB1: the decisions run when the action ends this frame or the playing item is not locked (word 0x20). The
+    // collide items are locked (0x35); the transition into the lean (item 1) and the lean wait are not (0xFC5), so the
+    // character can push away or stand up as soon as the hands reach the wall.
+    if !ended && super::anim_gate::locked(&c.action) {
         return CollideOut::Stay;
     }
     let away = c.normal;
@@ -170,8 +184,8 @@ pub fn update(c: &mut Collide, dt: f32, stick: Option<Vec3>, jog: bool, feet: &m
         Some(s) => {
             let a = s.dot(away).clamp(-1.0, 1.0).acos();
             if a > 135f32.to_radians() {
-                // pushing into the obstacle: lean (the wait again)
-                if c.phase != CollidePhase::Wait || ended {
+                // pushing into the obstacle: the lean wait again when the action ends (0xD9E0F5), else keep playing
+                if ended {
                     let id = if c.kind == CollideKind::Hand { LEAN_WAIT } else { COLLIDE_FOOT_WAIT };
                     if let Some(w) = blend(id, 0, &[1.0 - c.h, c.h]) {
                         c.phase = CollidePhase::Wait;

@@ -31,6 +31,8 @@ use crate::input::PadInput;
 
 pub const HAYSTACK_FAITH_LANDING: u32 = 0x23A9_666C;
 pub const HAYSTACK_WAIT: u32 = 0x23A9_666D;
+/// The low wait (event 1 → `sub_E41B00` → `sub_E40970`: `xx_l_haystack_wait`, blend 0.1 s; RE/24 NARROW-19).
+pub const HAYSTACK_LOW_WAIT: u32 = 0x23A9_6674;
 pub const HAYSTACK_FROM_AIR: u32 = 0x7750_D212;
 pub const HAYSTACK_HOP_OUT: u32 = 0x2C4C_2431;
 
@@ -84,11 +86,14 @@ pub struct HumanHayStackData {
     pub face: Option<Vec3>,
     pub kind: HayEntry,
     rng: u32,
+    /// In the low wait (+126, event 1).
+    pub low: bool,
 }
 
 impl HumanHayStackData {
     pub fn enter(&mut self, e: HayStackEntry) {
         self.seq = self.seq.wrapping_add(1);
+        self.low = false;
         self.stack = Some(e.stack);
         self.phase = HayPhase::Entering;
         self.kind = e.kind;
@@ -116,19 +121,42 @@ impl HumanHayStackData {
     }
 }
 
-/// The haystack search that `HumanNarrowObject__CheckSupportAndFall` 0xE51190 runs while the free-step arrival plays
-/// (IHuman vt80 `IHuman__FindHayStackSupport` 0xB10A60 → `Human__FindHayStackSupport` 0xE17D20 → `Human__sub_E15AA0`
-/// with 3.0 / 3.0 / 2.5 / 2.5 / 0 / 0 / 1.5 m, 80° / 80°, 0.66; RE/19 §1.2). A haystack (or hiding place) qualifies when
-/// its top, the entity origin + 1.6 m, is
-/// - above the feet by more than 0 and less than 1.5 m (the blend b = (1.5 − dz) / 1.5 scales the limits, all equal
-///   here);
-/// - within ±3 m sideways and ±2.5 m along `dir` in the frame of `dir`;
-/// - in front of `facing` (the flat directions to it and the facing at least 90° apart is a reject);
-/// - within 80° of `dir` seen from 1.5 m behind the feet;
-/// - reachable: a clear ray from 0.4 m above the feet to 0.66 of the way to the top (0.4 m up), then from there to
-///   0.25 m above the top (`sub_E1C470`).
-/// The first one that qualifies is taken (the game walks its entity list in order).
-pub fn find_support(feet: Vec3, dir: Vec3, facing: Vec3, stacks: &[Aabb3], collision: &CollisionWorld) -> Option<Aabb3> {
+/// The parameters of `Human__sub_E15AA0` 0xE15AA0, the haystack search behind IHuman vt76 / vt80 / vt84 (RE/19 §1.2,
+/// RE/24 CENSUS-1 / CENSUS-2 / AIR-26): the box half width and half depth (near, far), the height window (dz_min < dz <
+/// dz_max, dz_far for the blend), the cone (near, far), the clearance rays' midpoint fraction and the forward ray.
+#[derive(Clone, Copy, Debug)]
+pub struct HaySearch {
+    pub width: (f32, f32),
+    pub depth: (f32, f32),
+    pub dz_min: f32,
+    pub dz_far: f32,
+    pub dz_max: f32,
+    pub cone: (f32, f32),
+    pub frac: f32,
+    pub pre_ray: bool,
+}
+
+/// vt76, the Leap of Faith search (`sub_B10A10` → 0xE17C90; floats 0xE17C94–0xE17D0A): 2 → 8 m wide, 9 → 20 m deep,
+/// −100 < dz < 1.2 (blend to −30), 40° → 70°, 0.66, the 3 m forward ray.
+pub const LEAP_OF_FAITH: HaySearch = HaySearch { width: (2.0, 8.0), depth: (9.0, 20.0), dz_min: -100.0, dz_far: -30.0, dz_max: 1.2, cone: (0.698_131_7, 1.221_730_5), frac: 0.66, pre_ray: true };
+/// vt84, the ledge let-go's search (`sub_B10AB0` → 0xE17DA0): 1 → 5 m wide, 2 → 10 m deep, −100 < dz < 0 (blend to
+/// −30), 90°, 0.1, no forward ray (RE/24 CENSUS-2).
+pub const LET_GO: HaySearch = HaySearch { width: (1.0, 5.0), depth: (2.0, 10.0), dz_min: -100.0, dz_far: -30.0, dz_max: 0.0, cone: (std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2), frac: 0.1, pre_ray: false };
+/// vt80, the free-step arrival's support search (`IHuman__FindHayStackSupport` 0xB10A60 → 0xE17D20): 3 m wide, 2.5 m
+/// deep, 0 < dz < 1.5, 80°, 0.66, no forward ray.
+pub const SUPPORT: HaySearch = HaySearch { width: (3.0, 3.0), depth: (2.5, 2.5), dz_min: 0.0, dz_far: 0.0, dz_max: 1.5, cone: (1.396_263_4, 1.396_263_4), frac: 0.66, pre_ray: false };
+
+/// `Human__sub_E15AA0` 0xE15AA0. A haystack (or hiding place) qualifies when its top, the entity origin + 1.6 m, is
+/// - within the height window: dz_min < dz < dz_max; the blend t = clamp((dz_max − dz) / (dz_max − dz_far), 0, 1) lerps
+///   the limits from near to far;
+/// - within ±width sideways and ±depth along `dir` in the frame of `dir`;
+/// - in front of `facing` (the flat direction to it and the facing at least 90° apart is a reject, 0xE160BA);
+/// - within the cone of `dir` seen from 1.5 m behind the feet (0xE1619B);
+/// - reachable: a clear ray from 0.4 m above the feet to the feet + frac·(the flat offset to the top) + 0.4 m (RE/24
+///   CENSUS-5: the midpoint has no height share), then to 0.25 m above the top (`sub_E1C470`, layer 5 / 21).
+/// With `pre_ray`, a 3 m ray from the feet + 1 m along `dir` pitched 20° down must be clear first, else nothing
+/// (0xE15DCD; the pitch's sign is a hypothesis). The first one that qualifies is taken (the entity list's order).
+pub fn search(feet: Vec3, dir: Vec3, facing: Vec3, p: &HaySearch, stacks: &[Aabb3], collision: &CollisionWorld) -> Option<Aabb3> {
     const TOP: f32 = 1.6;
     let d = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
@@ -141,28 +169,48 @@ pub fn find_support(feet: Vec3, dir: Vec3, facing: Vec3, stacks: &[Aabb3], colli
         let len = v.length();
         len < 1e-4 || collision.ray_distance(a, v / len, len, crate::layers::MAIN_CHARACTER) >= len - 1e-4
     };
+    if p.pre_ray {
+        let down = Quat::from_axis_angle(right, -20f32.to_radians()) * d;
+        let o = feet + Vec3::Y;
+        if collision.ray_distance(o, down, 3.0, crate::layers::MAIN_CHARACTER) < 3.0 - 1e-4 {
+            return None;
+        }
+    }
+    let lerp = |(a, b): (f32, f32), t: f32| a + (b - a) * t;
     stacks.iter().copied().find(|s| {
         let top = Vec3::new((s.min.x + s.max.x) * 0.5, s.min.y + TOP, (s.min.z + s.max.z) * 0.5);
         let dz = top.y - feet.y;
-        if !(dz > 0.0 && dz < 1.5) {
+        if !(dz > p.dz_min && dz < p.dz_max) {
             return false;
         }
+        let span = p.dz_max - p.dz_far;
+        let t = if span.abs() < 1e-6 { 0.0 } else { ((p.dz_max - dz) / span).clamp(0.0, 1.0) };
         let rel = top - feet;
-        if right.dot(rel).abs() >= 3.0 || d.dot(rel).abs() >= 2.5 {
+        if right.dot(rel).abs() >= lerp(p.width, t) || d.dot(rel).abs() >= lerp(p.depth, t) {
             return false;
         }
-        let flat = Vec3::new(rel.x, 0.0, rel.z).normalize_or_zero();
-        if flat.dot(f) < 0.0 {
+        let flat = Vec3::new(rel.x, 0.0, rel.z);
+        if flat.normalize_or_zero().dot(f) < 0.0 {
             return false;
         }
         let from_behind = Vec3::new(top.x - (feet.x - d.x * 1.5), 0.0, top.z - (feet.z - d.z * 1.5)).normalize_or_zero();
-        if from_behind == Vec3::ZERO || from_behind.dot(d).clamp(-1.0, 1.0).acos() >= 80f32.to_radians() {
+        if from_behind == Vec3::ZERO || from_behind.dot(d).clamp(-1.0, 1.0).acos() >= lerp(p.cone, t) {
             return false;
         }
         let a = feet + Vec3::Y * 0.4;
-        let mid = feet + (top - feet) * 0.66 + Vec3::Y * 0.4;
+        let mid = feet + flat * p.frac + Vec3::Y * 0.4;
         clear(a, mid) && clear(mid, top + Vec3::Y * 0.25)
     })
+}
+
+/// The free-step arrival's haystack search (`HumanNarrowObject__CheckSupportAndFall` 0xE51190 → vt80): `SUPPORT`.
+pub fn find_support(feet: Vec3, dir: Vec3, facing: Vec3, stacks: &[Aabb3], collision: &CollisionWorld) -> Option<Aabb3> {
+    search(feet, dir, facing, &SUPPORT, stacks, collision)
+}
+
+/// The haystack's top as the search reports it (the entity origin + 1.6 m).
+pub fn top_of(s: &Aabb3) -> Vec3 {
+    Vec3::new((s.min.x + s.max.x) * 0.5, s.min.y + 1.6, (s.min.z + s.max.z) * 0.5)
 }
 
 /// Ground event 122's guard (0xD8F0B0): a controller contact with a haystack (entity descriptor 8; 9 = hiding place),
@@ -225,7 +273,9 @@ pub fn update_hay(
         }
         if loco.just_switched {
             loco.just_switched = false;
-            continue;
+            if loco.switched_this_frame {
+                continue;
+            }
         }
         let h = &mut data.hay;
         h.t += dt;
@@ -247,9 +297,18 @@ pub fn update_hay(
             }
             HayPhase::Waiting => {
                 body.feet = h.to;
-                // PORT: event 3 (hop out) comes from the untraced decision layer; the port sends it when the
-                // stick is pushed after the wait started
-                if pad.speed01 > 0.0 && h.t > 0.2 {
+                // the interpreter's haystack state (`sub_EE08E0` from 0xEEE4E0, RE/24 NARROW-19): the stick released in
+                // the high wait → event 1, the low wait (0xE44020 / 0xE44080); the stick past 0.35 → the pass-over to a
+                // kind-2 jump candidate (event 2) if there is one, else the hop out (event 3, `Guard_HopOut`). PORT:
+                // event 2's pass-over (0x23A96673 with the root interpolated onto the candidate) is not modelled; the
+                // event 0 back to the high wait has no sender found
+                if pad.magnitude <= 0.35 && !h.low {
+                    h.low = true;
+                    h.action = single(HAYSTACK_LOW_WAIT).or(h.action);
+                    h.t = 0.0;
+                    h.seq = h.seq.wrapping_add(1);
+                }
+                if pad.magnitude > 0.35 {
                     let Some(stack) = h.stack else { continue };
                     if hop_out_exit(&stack, h.to, pad.dir, &collision).is_some() {
                         body.heading = super::heading_of(pad.dir);
@@ -262,5 +321,29 @@ pub fn update_hay(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    /// RE/24 AIR-26 / CENSUS-1: the Leap of Faith search finds a haystack 10 m below and 6 m ahead, not one 2 m above
+    /// (dz < 1.2), not one behind; a wall in the 3 m forward ray refuses everything.
+    #[test]
+    fn the_leap_of_faith_search_takes_the_box_the_window_and_the_rays() {
+        let stack = |x: f32, y: f32, z: f32| Aabb3 { min: Vec3::new(x - 1.5, y, z - 1.5), max: Vec3::new(x + 1.5, y + 1.5, z + 1.5) };
+        let c = CollisionWorld::default();
+        let feet = Vec3::new(0.0, 10.0, 0.0);
+        let below = [stack(0.0, 0.0, -6.0)];
+        assert!(search(feet, Vec3::NEG_Z, Vec3::NEG_Z, &LEAP_OF_FAITH, &below, &c).is_some());
+        assert!(search(feet, Vec3::NEG_Z, Vec3::NEG_Z, &LEAP_OF_FAITH, &[stack(0.0, 10.4, -4.0)], &c).is_none(), "too high");
+        assert!(search(feet, Vec3::Z, Vec3::Z, &LEAP_OF_FAITH, &below, &c).is_none(), "behind");
+        let mut wall = CollisionWorld::default();
+        wall.boxes.push(Aabb3 { min: Vec3::new(-3.0, 10.0, -1.5), max: Vec3::new(3.0, 14.0, -1.0) });
+        assert!(search(feet, Vec3::NEG_Z, Vec3::NEG_Z, &LEAP_OF_FAITH, &below, &wall).is_none(), "the forward ray is blocked");
+        // the first clearance ray's end has no height share (CENSUS-5): a haystack level with the feet just ahead
+        let level = [stack(0.0, -1.0, -2.0)];
+        assert!(search(Vec3::ZERO, Vec3::NEG_Z, Vec3::NEG_Z, &SUPPORT, &level, &c).is_some());
     }
 }

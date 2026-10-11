@@ -54,8 +54,8 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     (36.3, 47.15, 0.6, 6.3, 4.0),  // … part B rises above it at x 36, with a stone ledge at 2.6 m (WALL_LEDGES)
     (20.0, 50.0, 6.0, 0.6, 2.6),   // side-jump wall C (x 17..23) …
     (25.5, 50.0, 3.0, 0.6, 2.6),   // … and D (x 24..27): a 1 m gap in the same edge line
-    (42.0, 50.0, 4.0, 0.6, 2.6),   // hop-up wall E (x 40..44): hang at 2.6 m …
-    (42.0, 50.15, 4.0, 0.3, 4.2),  // … with a ledge 1.6 m higher, set back 0.3 m (E2)
+    (42.0, 50.0, 4.0, 0.6, 2.6),   // swing-back wall E (x 40..44): hang at 2.6 m, a beam behind it (BEAMS) …
+    (42.0, 50.15, 4.0, 0.3, 4.2),  // … and a wall rising above it, set back 0.3 m (E2): no room to pull up
     // --- standing straight jump bands (0xB21DA0) ---
     (50.0, 50.3, 3.0, 1.0, 1.6),   // knee height: jump, hangknee, stand on top
     (56.0, 50.3, 3.0, 1.0, 2.2),   // 2.0–2.5 m with a wall below: jump into a wall hang
@@ -83,7 +83,9 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     //     1.2 m rim 1.1 m wide (too wide to pair into a runtime beam): the free run hops onto the rim and the free-step
     //     arrival's support search drops it in (NarrowObject FreeStep, 0xE51190)
     (-104.0, -117.95, 5.2, 1.1, 1.2),
-    (-104.0, -122.05, 5.2, 1.1, 1.2),
+    // the near rim, run at by the tests, is 0.95 m wide: the arrival lands on its edge (RE/24 AIR-2) and the support
+    // search reaches the haystack's centre only within 2.5 m along the run
+    (-104.0, -121.975, 5.2, 0.95, 1.2),
     (-106.05, -120.0, 1.1, 3.0, 1.2),
     (-101.95, -120.0, 1.1, 3.0, 1.2),
     // the pass-over pull-down (type 4, 0xDE0220): a 4 m roof (x -122..-118, z -118..-113) with a 1 m parapet 0.3 m
@@ -173,6 +175,9 @@ pub const LADDERS: &[(Vec3, Vec3, Vec3)] = &[
 
 /// Beams (p0, p1 on the top centre line; 0.2 m wide, 0.2 m thick): solid, and guidance edges of sub-type Beam.
 pub const BEAMS: &[(Vec3, Vec3)] = &[
+    // behind wall E, 0.8 m out from its -Z face and 0.6 m above its top: the swing back from a wall hang
+    // (`HumanLedge__TryWallJumpUp` 0xDD62A0) catches its far side edge
+    (Vec3::new(40.0, 3.2, 48.9), Vec3::new(44.0, 3.2, 48.9)),
     (Vec3::new(72.0, 4.0, 70.0), Vec3::new(78.0, 4.0, 70.0)),
     // a free beam 2.5 m past platform B (x 82): reached by a running jump, a ledge 2.3 m above its far part
     (Vec3::new(84.5, 4.0, 70.0), Vec3::new(90.5, 4.0, 70.0)),
@@ -192,6 +197,8 @@ pub const HAYSTACKS: &[(f32, f32, f32, f32, f32)] = &[
     (-104.0, -120.0, 3.0, 3.0, 1.5),
     // the narrow-rimmed cart
     (-112.0, -125.0, 3.0, 3.0, 1.5),
+    // below the high block's +X face near its -Z corner: the ledge let-go's dive (RE/24 CENSUS-2)
+    (35.5, 23.5, 2.2, 2.2, 1.5),
 ];
 
 /// Kiosk frames (p0, p1 of the top bar, the side facing the roofs): guidance subtype Kiosk (8), not solid.
@@ -265,6 +272,8 @@ const CLIMB_WALLS_X: &[(f32, (f32, f32), f32, (i32, i32))] = &[
 const WALL_LEDGES: &[(Vec3, Vec3, Vec3)] = &[
     // along part B's -X face, meeting part A's ledge at the inner corner (x 36, z 49.7)
     (Vec3::new(35.92, 2.6, 44.0), Vec3::new(35.92, 2.6, 49.7), Vec3::NEG_X),
+    // a second stone ledge 0.6 m above it on the same face (z 44..47): the vertical hand step (RE/24 LEDGE-4)
+    (Vec3::new(35.92, 3.2, 44.0), Vec3::new(35.92, 3.2, 47.0), Vec3::NEG_X),
 ];
 
 /// Climb tower face: x range, face z (normal -Z), band heights 0.6 m apart, plus a missing patch.
@@ -314,6 +323,14 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
         let min = Vec3::new(x - sx * 0.5, top - t, z - sz * 0.5);
         let max = Vec3::new(x + sx * 0.5, top, z + sz * 0.5);
         collision.boxes.push(Aabb3 { min, max });
+        if sz <= 0.25 && t <= 0.25 {
+            // a swing bar: like Damascus's bars, a pair of horizontal Pole edges (subtype 4) along it, 0.1 m either side
+            // of its axis with opposite normals and no end edges (probe_damascus_guidance_subtypes, RE/24 LEDGE-17)
+            for (zz, n) in [(z - 0.05, Vec3::NEG_Z), (z + 0.05, Vec3::Z)] {
+                guidance.edges.push(GuidanceEdge { p0: Vec3::new(min.x, top, zz), p1: Vec3::new(max.x, top, zz), n0: Vec3::Y, n1: n, subtype: GuidanceSubType::Pole });
+            }
+            continue;
+        }
         add_roof_edges(&mut guidance, min, max);
     }
     for &(p0, p1, n) in LADDERS {

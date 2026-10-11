@@ -140,8 +140,11 @@ impl AnimLibrary {
             .iter()
             .map(|it| {
                 let mut layers = Vec::new();
+                // the authored weights through the evaluator's setup (0x777AE0, RE/24 ANIM-1)
+                let mut ws: Vec<f32> = (0..it.animations.len()).map(|k| it.weights.get(k).copied().unwrap_or(if k == 0 { 1.0 } else { 0.0 })).collect();
+                crate::player::jump_blend::normalize_item_weights(&mut ws);
                 for (k, anim) in it.animations.iter().enumerate() {
-                    let w = it.weights.get(k).copied().unwrap_or(if k == 0 { 1.0 } else { 0.0 });
+                    let w = ws[k];
                     if let Some(n) = self.anim_names.get(anim).filter(|n| self.clips.contains_key(*n)) {
                         layers.push((n.clone(), w));
                     }
@@ -222,6 +225,28 @@ fn contact_state(c: &AnimClip, t: f32) -> ContactState {
         s.next_on[b] = c.contacts.iter().find(|(kt, v)| *kt > t + 1e-4 && v >> b & 1 != 0).map(|k| k.0);
     }
     s
+}
+
+/// The next contact of a released limb is searched through the rest of the playing action, each later item in its
+/// dominant clip (`LimbIK__GetNextContactTime` 0xE56220 → `sub_5085C0` 0x50864E–0x50872D, forward to the action's last
+/// item, no wrap), not only in the current clip (RE/24 ANIM-7). `later`: the dominant clips of the action's following
+/// items, in order. Times stay in the current clip's seconds: the rest of this item, then each later clip's length.
+fn extend_next_on<'a>(s: &mut ContactState, cur: &AnimClip, later: impl Iterator<Item = &'a AnimClip>) {
+    if !s.tagged {
+        return;
+    }
+    let mut offset = cur.duration;
+    for c in later {
+        for b in 0..8 {
+            if s.bits >> b & 1 != 0 || s.next_on[b].is_some() {
+                continue;
+            }
+            if let Some(kt) = c.contacts.iter().find(|(_, v)| v >> b & 1 != 0).map(|k| k.0) {
+                s.next_on[b] = Some(offset + kt);
+            }
+        }
+        offset += c.duration;
+    }
 }
 
 /// Playback state on the player.
@@ -356,9 +381,11 @@ impl AnimPlayer {
 
     /// Set the layer weights of the overlay's current item (a blended action such as the fall-grasp blend).
     pub fn set_overlay_weights(&mut self, w: &[f32]) {
+        let mut w = w.to_vec();
+        crate::player::jump_blend::normalize_item_weights(&mut w);
         if let Some(it) = self.overlay.as_mut().and_then(|o| o.items.get_mut(o.item)) {
             if it.layers.len() == w.len() {
-                for (l, w) in it.layers.iter_mut().zip(w) {
+                for (l, w) in it.layers.iter_mut().zip(&w) {
                     l.1 = *w;
                 }
             }
@@ -554,6 +581,8 @@ pub fn fall_grasp_weights(smoothed: Vec3, facing: Vec3) -> [f32; 6] {
 
 // Action ids used by the exe (RE/13 §4). Ledge tables 0x1A2C490.. (shimmy), 0x1A2C4C0.. (vertical steps).
 const ACT_HANG_WALL: u32 = 0x0106_F2E8;
+/// `PlayIdleOrBlocked` 0xDD3A10's blocked actions (wall hang): [up, down, left, right].
+const ACT_LEDGE_BLOCKED: [u32; 4] = [0x5823_575D, 0x5823_575A, 0x5823_575B, 0x5823_575C];
 const ACT_HANG_FREE: u32 = 0x0127_19F1;
 const ACT_HANG_WALLFREE: u32 = 0x0106_F2E9;
 const ACT_PULLUP_WALL: u32 = 0x0106_D2C5;
@@ -614,6 +643,12 @@ fn sim_request(p: &mut AnimPlayer, lib: &AnimLibrary, b: &crate::player::jump_bl
         return None;
     }
     Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false, blend: None })
+}
+
+/// The seam from a queued transition action's last item into the requested action's first item (`loop_from`, on the
+/// first pass only: a loop back to `loop_from` comes from the action's own last item).
+fn queued_seam(loop_from: usize, from: usize, to: usize) -> bool {
+    loop_from > 0 && from + 1 == loop_from && to == loop_from
 }
 
 /// Both items (footl, footr) of the ground locomotion action with all 17 clips loaded.
@@ -761,8 +796,8 @@ fn choose_clip(
                     p.sim_phase = Some(ph.min(1.0));
                     sim_request(&mut p, &lib, &b, 2_000_000 + data.air.seq as u64, 0.05)
                 }
-                // a jump whose actions are not loaded: the pose carries on
-                AirMode::Jump { .. } => continue,
+                // a jump whose actions are not loaded, or the free-step arrival's few frames: the pose carries on
+                AirMode::Jump { .. } | AirMode::Arrive { .. } => continue,
                 // Leap of Faith free-fall tail: `faith_jump_fall` (0xB1EC40 third action)
                 AirMode::Fall { .. } if data.air.flight.is_some_and(|f| f.id == crate::player::jump_blend::FLIGHT_FAITH) => {
                     let b = crate::player::jump_blend::ActionBlend::new(crate::player::jump_blend::FALL_FAITH, 0, &[1.0]);
@@ -932,11 +967,13 @@ fn choose_clip(
                         };
                         action(&lib, &[ACT_SHIMMY[wi][k]], false, token, Some(0.08), None)
                     }
-                    "hand step up" | "hand step down" if moving => {
+                    "hand step up" | "hand step down" if moving || l.pending_vstep.is_some() => {
                         let (first_left, second) = l.vstep.unwrap_or((true, false));
                         let down = l.last_action == "hand step down";
                         let k = (down as usize) * 4 + (second as usize) * 2 + (!first_left) as usize;
-                        action(&lib, &[ACT_VSTEP[wi][k]], false, token, Some(0.1), None)
+                        // a pending second hand holds the first half's last pose (0xDD3A2B plays nothing meanwhile)
+                        let r = action(&lib, &[ACT_VSTEP[wi][k]], false, token, Some(0.1), None);
+                        if l.pending_vstep.is_some() { r.map(|r| Request { hold: true, ..r }) } else { r }
                     }
                     "pull-up" if moving => {
                         let ids: Vec<u32> = if wall {
@@ -953,7 +990,19 @@ fn choose_clip(
                     _ if !wall && crate::player::ledge::wall_below_hands((l.hand_l + l.hand_r) * 0.5, l.normal, &collision) => {
                         action(&lib, &[ACT_HANG_WALLFREE], true, 0, Some(0.15), Some("hang_free"))
                     }
-                    _ => action(&lib, &[if wall { ACT_HANG_WALL } else { ACT_HANG_FREE }], true, 0, Some(0.15), Some(if wall { "hang_wall" } else { "hang_free" })),
+                    // `PlayIdleOrBlocked` 0xDD3A10 (wall hang, no pending step): the stick held with no move possible plays
+                    // the blocked action of its direction (RE/24 LEDGE-20); the free hang plays nothing for it
+                    a if wall && matches!(a, "blocked up" | "blocked down" | "end of ledge" | "shimmy blocked (obstacle / inner corner)") => {
+                        let id = match a {
+                            "blocked up" => ACT_LEDGE_BLOCKED[0],
+                            "blocked down" => ACT_LEDGE_BLOCKED[1],
+                            _ if l.blocked_right => ACT_LEDGE_BLOCKED[3],
+                            _ => ACT_LEDGE_BLOCKED[2],
+                        };
+                        action(&lib, &[id], true, 0, Some(0.15), None)
+                    }
+                    // the wall hang's idle blends in over 0.5 s (0xDD3A10: 0x0106F2E8, 0x3F000000)
+                    _ => action(&lib, &[if wall { ACT_HANG_WALL } else { ACT_HANG_FREE }], true, 0, Some(if wall { 0.5 } else { 0.15 }), Some(if wall { "hang_wall" } else { "hang_free" })),
                 }
             }
             ActorContextId::Climb => {
@@ -1226,10 +1275,15 @@ pub fn apply_clip(
             // its own blend, or the game's transition where one action ends and another begins
             let a_state = (p.items.clone(), p.item, 1.0, false);
             let cur = p.items[p.item].clone();
+            let from = p.item;
             p.item = if p.item + 1 < p.items.len() { p.item + 1 } else { p.loop_from.min(p.items.len() - 1) };
             let nxt = &p.items[p.item];
             let nxt_switch = nxt.action != cur.action && nxt.action != 0;
-            let b = if nxt_switch {
+            // the requested action queued behind a transition action enters with the transition's blend B, stored on
+            // its first item (`AnimSlot__SetAction` 0x727F70 pushes the destination with blend B, 0x7286CA; it is not
+            // looked up again; RE/24 ANIM-2)
+            let queued_seam = queued_seam(p.loop_from, from, p.item);
+            let b = if nxt_switch && !queued_seam {
                 game_transition(&lib, Some(&cur), nxt.action).map(|t| t.blend_a).unwrap_or_default()
             } else {
                 nxt.blend
@@ -1263,7 +1317,15 @@ pub fn apply_clip(
         let item = p.items[p.item].clone();
 
         // contact tags of the dominant clip (for the limb IK); ACTBlendAcuatorMode FROMA keeps A's while blending
-        p.contacts = lib.dominant(&item).map(|c| contact_state(c, p.phase * c.duration)).unwrap_or_default();
+        p.contacts = lib
+            .dominant(&item)
+            .map(|c| {
+                let mut s = contact_state(c, p.phase * c.duration);
+                let later = p.items.iter().skip(p.item + 1).take_while(|it| item.action != 0 && it.action == item.action).filter_map(|it| lib.dominant(it));
+                extend_next_on(&mut s, c, later);
+                s
+            })
+            .unwrap_or_default();
 
         // event keys the dominant clip passed since the last frame
         p.events.clear();
@@ -1490,6 +1552,10 @@ mod tests {
         // the repeat count: idles loop, the pull-up plays once
         assert_eq!(lib.graph.actions[&0x0106_F2E8].repeat, 0);
         assert_eq!(lib.graph.actions[&0x0106_D2C5].repeat, 1);
+        // the wall hang's blocked actions (0xDD3A10, RE/24 LEDGE-20) are in the graph
+        for id in ACT_LEDGE_BLOCKED {
+            assert!(lib.graph.actions.contains_key(&id), "blocked action {id:#x}");
+        }
     }
 
     #[test]
@@ -1522,6 +1588,28 @@ mod tests {
         assert!(times(Some(0.167), 0.2).is_empty());
         // the loop wrapped: the tail of the cycle, then its start
         assert_eq!(times(Some(0.68), 0.05), vec![0.7, 0.0]);
+    }
+
+    #[test]
+    fn the_queued_destination_keeps_the_transitions_blend_b() {
+        // items [transition a, transition b, dest 0, dest 1], loop_from 2 (RE/24 ANIM-2)
+        assert!(queued_seam(2, 1, 2), "transition → destination: blend B");
+        assert!(!queued_seam(2, 0, 1), "inside the transition");
+        assert!(!queued_seam(2, 3, 2), "the destination looping back");
+        assert!(!queued_seam(0, 0, 1), "no queued transition");
+    }
+
+    #[test]
+    fn the_next_contact_is_found_in_the_actions_later_items() {
+        // a hand lets go in item a and grabs again 0.1 s into item b: the limb travels instead of releasing
+        let a = AnimClip { duration: 0.5, contacts: vec![(0.0, 0b110000), (0.3, 0b100000)], ..default() };
+        let b = AnimClip { duration: 0.6, contacts: vec![(0.0, 0b100000), (0.1, 0b110000)], ..default() };
+        let mut s = contact_state(&a, 0.4);
+        assert_eq!(s.next_on[4], None);
+        extend_next_on(&mut s, &a, [&b].into_iter());
+        assert!((s.next_on[4].unwrap() - 0.6).abs() < 1e-5, "{:?}", s.next_on[4]);
+        // a bit that comes back in the current clip keeps that time
+        assert_eq!(s.next_on[5], None, "bit 5 is on");
     }
 
     #[test]

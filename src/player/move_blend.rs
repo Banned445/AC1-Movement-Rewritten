@@ -120,7 +120,8 @@ impl Default for MoveBlend {
 }
 
 impl MoveBlend {
-    /// Speed parameter step (0xDA1700–0xDA18A2, script-forced speed HG+0x6C8 not modelled).
+    /// Speed parameter step (0xDA1700–0xDA18A2). The script-forced speed HG+0x6C8 (HG+1736 / +1516 through
+    /// `HumanGround__SetDestSpeedRatio` vt30 `sub_D83640`) is script-only: not needed for the player (RE/24 GROUND-31).
     pub fn update_speed(&mut self, target: f32, dt: f32) {
         let target = target.min(1.0);
         let s = self.speed_param;
@@ -161,7 +162,7 @@ impl MoveBlend {
                 (SLOT_WALK, SLOT_JOG, (s - 0.25) * 4.0)
             }
         } else {
-            // also calls sub_DC3FA0(1 − f, f) (not traced)
+            // also calls sub_DC3FA0(1 − f, f): the upper-body walking fidget's weights (RE/24 GROUND-18, not ported)
             self.slowdown = 0.0;
             self.settle = 1.0;
             (SLOT_SLOWWALK, SLOT_WALK, s * 4.0)
@@ -206,6 +207,9 @@ impl MoveBlend {
         w[upper as usize] = upper_mid;
         w[(lower + lower_k) as usize] = lower_side * (1.0 - f);
         w[(upper + upper_k) as usize] = upper_side * f;
+        // the evaluator renormalises what SetItemBlendWeights wrote (0x777AE0): in the walk → jog band the sides sum
+        // to less than 1 while turning, and the slow walk (slot 0, the item's clip 0) takes the rest (RE/24 ANIM-1)
+        super::jump_blend::normalize_item_weights(&mut w);
         self.weights = w;
     }
 
@@ -261,7 +265,9 @@ mod tests {
     }
 
     #[test]
-    fn weights_sum_to_one_except_walk_to_jog_sides() {
+    fn walk_to_jog_sides_hand_their_shortfall_to_the_slow_walk() {
+        // MoveBlend writes the side weights scaled by the band fraction twice in the walk → jog band, so they sum to
+        // less than 1 while turning; the evaluator gives the rest to clip 0, the slow walk (0x777AE0, RE/24 ANIM-1)
         let mut m = MoveBlend::default();
         for i in 0..=100 {
             m.speed_param = i as f32 / 100.0;
@@ -271,17 +277,32 @@ mod tests {
             m.update_weights(m.speed_param, 0.0);
             let sum: f32 = m.weights.iter().sum();
             let s = m.speed_param;
+            // a shortfall of 0.0005 or less is left as it is (0x777AE0)
+            assert!((sum - 1.0).abs() < 6e-4, "param {s} sum {sum}");
             if s > 0.25 && s <= 0.5 {
-                // the exe scales the side weights by the band fraction twice in this band
                 let f = (s - 0.25) * 4.0;
                 let (l, b) = (0.4 / FRAC_PI_2, 0.7 / FRAC_PI_2);
-                let side = (1.0 - f) * l + f * b;
-                let want = 1.0 - side + (1.0 - f) * (1.0 - f) * l + f * f * b;
-                assert!((sum - want).abs() < 1e-5, "param {s} sum {sum} want {want}");
-            } else {
-                assert!((sum - 1.0).abs() < 1e-5, "param {s} sum {sum}");
+                let shortfall = f * (1.0 - f) * (l + b);
+                if shortfall > 0.0005 {
+                    // (plus any weight of 0.0005 or less, which the evaluator drops)
+                    assert!((m.weights[SLOT_SLOWWALK as usize] - shortfall).abs() < 1e-3, "param {s}: {:?}", m.weights);
+                    assert!((sum - 1.0).abs() < 1e-5, "param {s} sum {sum}");
+                }
             }
         }
+    }
+
+    #[test]
+    fn turning_between_walk_and_jog_slows_the_step() {
+        // RE/24 ANIM-1: f = 0.5 with the bank at its full π/2 puts 0.25 of the weight on the slow walk (0.17 m in
+        // 1.667 s); the step takes ≈0.78 s and the root ≈1.45 m/s instead of ≈2.98 m/s
+        let speed = |bank: f32| {
+            let mut m = MoveBlend { speed_param: 0.375, bank, ..Default::default() };
+            m.update_weights(0.375, 0.0);
+            m.advance(0.0)
+        };
+        let (straight, turning) = (speed(0.0), speed(FRAC_PI_2));
+        assert!(turning < 0.6 * straight, "straight {straight} turning {turning}");
     }
 
     #[test]

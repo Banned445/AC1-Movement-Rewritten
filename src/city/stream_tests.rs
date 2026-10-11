@@ -86,7 +86,7 @@ impl CitySim {
             .init_resource::<Assets<Mesh>>().init_resource::<Assets<StandardMaterial>>().init_resource::<Assets<Image>>()
             .init_resource::<CollisionWorld>().init_resource::<crate::guidance::GuidanceWorld>()
             .init_resource::<super::stream::City>()
-            .add_systems(Update, (super::update_city, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,
+            .add_systems(Update, (super::update_city, crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,
                 crate::player::air::update_air, crate::player::ledge::update_ledge, crate::player::climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk,
                 crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, super::hold_player).chain());
         let player = app.world_mut().spawn((crate::player::player_components(prepared.spawn, prepared.heading), Transform::default())).id();
@@ -103,6 +103,9 @@ impl CitySim {
     pub fn press_legs(&mut self) { self.app.world_mut().resource_mut::<PadInput>().legs_pressed_ago = 0.0; }
     pub fn step(&mut self) {
         { let mut p = self.app.world_mut().resource_mut::<PadInput>(); p.legs_pressed_ago += 1.0 / 60.0; p.hand_pressed_ago += 1.0 / 60.0; }
+        // the camera behind the character: world-direction scripts keep their meaning for the actor-frame stick
+        let h = self.body().heading;
+        self.app.world_mut().resource_mut::<crate::camera::CameraRig>().yaw = h;
         self.app.update();
     }
     pub fn run(&mut self, seconds: f32) { for _ in 0..(seconds * 60.0) as usize { self.step(); } }
@@ -143,6 +146,13 @@ impl CitySim {
     pub fn place(&mut self, feet: Vec3, facing: Vec3) {
         let mut b = self.app.world_mut().get_mut::<Body>(self.player).unwrap();
         b.feet = feet; b.heading = crate::player::heading_of(facing); b.velocity = Vec3::ZERO; b.grounded = true; b.proxy.manifold.clear();
+        // back on the ground: a hang or climb left from an earlier attempt would otherwise keep its holds
+        let w = self.app.world_mut();
+        let mut q = w.query::<(&mut crate::player::Locomotion, &mut crate::player::HumanDataBundle)>();
+        let (mut loco, mut data) = q.get_mut(w, self.player).unwrap();
+        if loco.current != ActorContextId::Ground {
+            crate::player::switch_context(&mut loco, &mut data, crate::player::TransitionSetup::ToMovement { landing: None });
+        }
     }
     pub fn run_until(&mut self, max_s: f32, pred: impl Fn(&CitySim) -> bool) -> bool {
         for _ in 0..(max_s * 60.0) as usize { self.step(); if pred(self) { return true; } }
@@ -416,7 +426,7 @@ fn damascus_runs_up_and_climbs_a_tall_facade() {
         if on_wall && s.run_until(6.0, |s| s.body().feet.y > start_y + 2.0) {
             return;
         }
-        tried.push(format!("{q}: {:?} at {}", s.loco().current, s.body().feet));
+        tried.push(format!("{q}: {:?} at {} ledge {} hands {} {} walling {:?}", s.loco().current, s.body().feet, s.data().ledge.last_action, s.data().ledge.hand_l, s.data().ledge.hand_r, s.data().walling.sub_state));
         s.pad(n, 0.0, false, false); s.run(2.0);
     }
     panic!("no facade climbed: {tried:#?}");
@@ -481,4 +491,25 @@ fn damascus_lod_cross_fade_draws_the_next_lod_on_top() {
     s.app.world_mut().resource_mut::<super::stream::City>().0.as_mut().unwrap().lod_fade = false;
     s.run(0.5);
     assert_eq!(s.stats().fading, 0);
+}
+
+/// Debug: the guidance subtypes the city's cells carry around each spawn (RE/24 LEDGE-17: are the swing bars Pole
+/// edges, subtype 4?). `cargo test probe_damascus_guidance_subtypes -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn probe_damascus_guidance_subtypes() {
+    use crate::guidance::GuidanceSubType;
+    for spawn in SPAWNS {
+        let Some(s) = CitySim::new(spawn) else { return };
+        let g = s.guidance();
+        let mut counts = std::collections::BTreeMap::new();
+        for e in g.edges.iter().filter(|e| e.subtype != GuidanceSubType::None) {
+            *counts.entry(format!("{:?}", e.subtype)).or_insert(0usize) += 1;
+        }
+        let poles: Vec<_> = g.edges.iter().filter(|e| e.subtype == GuidanceSubType::Pole).take(8).map(|e| (e.p0, e.p1, e.n0, e.n1)).collect();
+        eprintln!("{spawn}: {counts:?}");
+        for p in poles {
+            eprintln!("  pole {:.2?} -> {:.2?} n0 {:.2?} n1 {:.2?} len {:.2} dy {:.2}", p.0, p.1, p.2, p.3, p.0.distance(p.1), (p.1.y - p.0.y).abs());
+        }
+    }
 }

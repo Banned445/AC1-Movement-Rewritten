@@ -50,11 +50,37 @@ pub const STICK_SPAN: f32 = 0.25;
 /// HumanGround__UpdateHeading 0xD95290 → RotateTowards 0xD94F30
 pub const PLAYER_TURN_RATE: f32 = std::f32::consts::TAU;
 /// The rates the player's interpreter writes every frame (GoAssassinActionInterpreter__ProcessGroundMovement
-/// 0xEE6D3F–0xEE6D91, IHumanGround vt952 / vt956 = HG+1752 / +1756): max 4.0 rad/s, 2.6 with Legs held. With the angle
-/// band left at 0 the max is always the rate (RE/02 §4.3). The 270 / 360 deg/s above is 0xD671C0's one-time default,
-/// overwritten every frame (GAME_GROUND_TREE comparison only).
+/// 0xEE6D3F–0xEE6D91, IHumanGround vt952 / vt956 = HG+1752 / +1756): min 1.5 / max 4.0 rad/s, with Legs held 0.975 /
+/// 2.6. The 270 / 360 deg/s above is 0xD671C0's one-time default, overwritten every frame (GAME_GROUND_TREE comparison
+/// only).
 pub const PLAYER_TURN_RATE_GAME: f32 = 4.0;
 pub const PLAYER_TURN_RATE_LEGS: f32 = 2.6;
+pub const PLAYER_TURN_RATE_MIN: f32 = 1.5;
+pub const PLAYER_TURN_RATE_MIN_LEGS: f32 = 0.975;
+/// The angle band `RotateTowards` 0xD94F30 scales the rate by (HG+1760 / +1764): below `lo` the min rate, above `hi`
+/// the max, linear between. The interpreter's Ground-state enter `sub_ED72E0` sets 10° / 60° (vt960 / vt964,
+/// 0.17453292 / 1.0471976) and never resets them; `UpdateHeading` 0xD95290 multiplies both by k (RE/24 INPUT-5).
+pub const PLAYER_TURN_BAND: (f32, f32) = (0.174_532_92, 1.047_197_6);
+/// k (Data+568) starts at the ToMovement setup's +24 and grows at its +28 per second up to 1 (`UpdateHeading`
+/// 0xD95290, `TransitionSetupDataToMovement::Apply` 0xC80310). PORT: 0 / 0.5 for every Ground entry, the values of the
+/// constructions checked (0xB0FCD0 spawn, 0xD7CC60, 0xE4D400 Narrow → Ground); the other ToMovement constructions
+/// (180 xrefs to vftable 0x16D9088) are not enumerated.
+pub const PLAYER_TURN_BAND_K0: f32 = 0.0;
+pub const PLAYER_TURN_BAND_RATE: f32 = 0.5;
+
+/// `HumanGround__RotateTowards` 0xD94F30: the turn rate for an angle (unsigned) to turn through, by the min / max rates
+/// and the band scaled by k.
+pub fn player_turn_rate(angle: f32, legs: bool, k: f32) -> f32 {
+    let (min, max) = if legs { (PLAYER_TURN_RATE_MIN_LEGS, PLAYER_TURN_RATE_LEGS) } else { (PLAYER_TURN_RATE_MIN, PLAYER_TURN_RATE_GAME) };
+    let (lo, hi) = (PLAYER_TURN_BAND.0 * k, PLAYER_TURN_BAND.1 * k);
+    if angle >= hi {
+        max
+    } else if angle >= lo {
+        (angle - lo) / (hi - lo) * (max - min) + min
+    } else {
+        min
+    }
+}
 
 /// Ground loss → InAir fall types by fall height 1 / 2 / 8 m and horizontal speed 2.5 m/s. 0xD8C380
 pub const FALL_TYPE_HEIGHTS: [f32; 3] = [1.0, 2.0, 8.0];
@@ -85,18 +111,6 @@ pub const ROLL_DROP: f32 = 3.0;
 pub const FREE_JUMP_AHEAD: f32 = 8.0;
 pub const FREE_JUMP_DOWN: f32 = 3.0;
 
-// ---------------------------------------------------------------- jump targets (RE/01 §7b)
-/// Candidate must lie within a 45° cone of the wanted direction and no lower than -3 m. 0xE96BF0
-pub const TARGET_CONE: f32 = std::f32::consts::FRAC_PI_4;
-pub const TARGET_MIN_DZ: f32 = -3.0;
-/// Ground-type target bands (max up, near, mid, far). Human__ComputeJumpAnimBlend 0xB1EC40
-pub const GROUND_MAX_UP: f32 = 1.3;
-pub const GROUND_FAR: f32 = 7.0;
-/// Landing point is placed this far inside a roof edge. PLACEHOLDER (game uses the guidance contact).
-/// Ground loss → fall type 0–6 (0xD8C380): height < 1 (or < 2 with probe type 1) → 0/1, 2..8 with probe
-/// type 1 → 2/3, else 4/6; the faster type at a horizontal speed ≥ 2.5 m/s.
-pub const LAND_INSET: f32 = 0.45;
-
 // ---------------------------------------------------------------- ledge (RE/03 §7)
 /// Wall hang: root (feet) 1.1 m below the hands and 0.5 m out from the wall. 0xDD6730 / 0xDE1060
 pub const WALL_HANG_DROP: f32 = 1.1;
@@ -118,13 +132,11 @@ pub const SHIMMY_MIN_FREE: f32 = 0.7;
 pub const SHIMMY_WALL_MARGIN: f32 = 0.4;
 pub const SHIMMY_MAX_SPACING: f32 = 1.0;
 pub const SHIMMY_MIN_STEP: f32 = 0.15;
-/// PLACEHOLDER: hand spacing after a closing step (the game re-snaps the trailing hand to the chain).
+/// PLACEHOLDER: the hand spacing of a new hang (entries, jumps, corners): the game puts both hand records on one hold
+/// and derives the pose from it (sub_B15AD0 / sub_B157B0). The shimmy's own spacing comes from ProbeLateral 0xDD9640.
 pub const HAND_SPACING: f32 = 0.4;
 /// Lost-ledge check radius = 0.25 + half the hand spacing. HasLostLedge 0xDD20D0
 pub const LOST_LEDGE_R: f32 = 0.25;
-/// Vertical hand-over-hand step to a ledge 0.6–1.2 m away (StartHandStep 0xDDE0C0).
-pub const VSTEP_MIN: f32 = 0.45;
-pub const VSTEP_MAX: f32 = 1.25;
 /// Pull-up: root ends 0.5 m inside the ledge (Pullup_Start 0xDDBE80).
 pub const PULLUP_IN: f32 = 0.5;
 /// Move durations = the game clips' lengths (RE/10): xx_h_hangwall_strafe_*_050cm_open 0.533 s /
@@ -141,11 +153,10 @@ pub const JUMP_UP_TIME: f32 = 0.6;
 /// PORT: corner / side-jump duration only when the clip table lacks the action (jump_clips.rs).
 pub const CORNER_FALLBACK_TIME: f32 = 0.8;
 pub const SIDE_JUMP_FALLBACK_TIME: f32 = 1.0;
-/// `HumanLedge__TryJumpUpToClimb` 0xDD5E10: hold rows 1.2 m above the hands and 1.2 m below that, sub_11713A0 radius
-/// 0.4 with 0.5 (PORT: used as the vertical tolerance).
+/// `HumanLedge__TryJumpUpToClimb` 0xDD5E10: hold rows 1.2 m above the hands and 1.2 m below that, sub_11713A0 box
+/// half extents 0.4 (right) / 0.5 (forward) / 0.3 (up).
 pub const JUMP_TO_CLIMB_UP: f32 = 1.2;
-pub const JUMP_TO_CLIMB_R: f32 = 0.4;
-pub const JUMP_TO_CLIMB_VTOL: f32 = 0.5;
+pub const JUMP_TO_CLIMB_HALF: bevy::math::Vec3 = bevy::math::Vec3::new(0.4, 0.5, 0.3);
 /// Pull-up = the game's clip chains (RE/11 §5): wall hang → hangknee → stand = 0.333+0.4+0.467+0.4 s;
 /// free hang → hangwaist → hangknee → stand = 0.8+0.2+0.733+0.467+0.4 s.
 pub const PULLUP_WALL_TIME: f32 = 1.6;
@@ -169,7 +180,9 @@ pub const CLIMB_PROBE_BACK: f32 = 0.2;
 pub const CLIMB_PROBE_STEP: f32 = 0.1;
 /// PORT (lost-grip check, 0xDFE7F0 → sub_E55A10): a climb hold counts as present while a grab edge lies within this.
 pub const CLIMB_HOLD_TOL: f32 = 0.1;
-/// Stick magnitude above which the LONG move table is tried first. ChooseMove 0xDFDE90
+/// `ChooseMove` 0xDFDE90 tries the LONG table first when ClimbData+0x2C > 0.5. The player's interpreter writes 1.0 there every
+/// frame (0xEE60E6), so the player always tries it (RE/24 CLIMB-2); kept for an AI writer, unused by the player.
+#[allow(dead_code)]
 pub const CLIMB_LONG_STICK: f32 = 0.5;
 /// Climb move duration = the game move clips xx_l_climb_* (0.533 s; StartMove 0xDFA0C0 uses the clip length, 0.5 s without one).
 pub const CLIMB_MOVE_TIME: f32 = 0.533;
@@ -222,7 +235,8 @@ pub const IK_RETARGET_DIST: f32 = 0.02;
 /// Wrist relative to the edge point it grips. Game data: the wall hang root is 1.1 m below / 0.5 m out
 /// from the hands (0xDD6730) while xx_h_hangwall_wait puts the wrists 1.0 m above / 0.45 m in front of
 /// its root (→ wrist ~0.1 m below / 0.05 m out), and every hang/climb clip curls the middle finger 0.07 m
-/// forward / 0.12 m up from the wrist. PORT: 0.08 / 0.04 so the curled fingers end over the lip.
+/// forward / 0.12 m up from the wrist. PORT fallback only (a rig without the knuckle / toe bones): the game puts the
+/// middle-finger knuckle and the toe joint on the hold (`ik::LIMB_EFFECTORS`, RE/24 ANIM-8).
 pub const IK_HAND_DROP: f32 = -0.08;
 pub const IK_HAND_OUT: f32 = 0.04;
 /// Ankle relative to the foot hold: level with it, 0.17 m out (xx_climb_wait_*: ankles 0.32 m in front
