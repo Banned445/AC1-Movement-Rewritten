@@ -104,13 +104,17 @@ fn single(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
     Some(ActionBlend::new(id, item, &v))
 }
 
-/// `sub_DCFBC0`: sweeps (0.5 m ahead along the facing) from 0.65 m (r 0.35) and 1.6 m (r 0.6) below the hands,
-/// pulled back 0.25 m: the legs blocked -> the legs impact (blend by how far they got, PORT: piecewise over
-/// [00, 50, 150 cm]); else the shoulders blocked -> the shoulder impact; else the elbow impact.
+/// `HumanLedge__PickSwingImpact` 0xDCFBC0: base = the hands (LedgeData+144) + 0.5·forward + 0.5·up; two box queries
+/// (`sub_B2A070` 0xB2A070: half 0.2 across, 0.5 along the flat forward, 0.35 / 0.6 up) centred at base lowered 0.65 m
+/// (shoulders) and 1.6 m (legs), pulled back 0.25 m along LedgeData+192; each returns the nearest geometry's distance from
+/// the box's rear face (local y + 0.5), 1000 with nothing in it. The legs blocked (< 1) → the legs impact (weight = that
+/// distance; PORT: piecewise over [00, 50, 150 cm]); else the shoulders → the shoulder impact; else the elbow impact
+/// (RE/24 NARROW-17). PORT: LedgeData+192 is taken as the swing's facing.
 fn impact(s: &Swing, collision: &CollisionWorld) -> (u32, f32) {
-    let back = s.hands_mid - s.fwd * 0.25;
-    let upper = collision.sphere_free_distance(back - Vec3::Y * 0.65, s.fwd, 0.35, 0.5) / 0.5;
-    let lower = collision.sphere_free_distance(back - Vec3::Y * 1.6, s.fwd, 0.6, 0.5) / 0.5;
+    let base = s.hands_mid + s.fwd * 0.5 + Vec3::Y * 0.5;
+    let probe = |drop: f32| base - Vec3::Y * drop - s.fwd * 0.25;
+    let upper = box_depth(collision, probe(0.65), s.fwd, 0.35);
+    let lower = box_depth(collision, probe(1.6), s.fwd, 0.6);
     if lower < 1.0 {
         (IMPACT_LEGS, lower)
     } else if upper < 1.0 {
@@ -118,6 +122,25 @@ fn impact(s: &Swing, collision: &CollisionWorld) -> (u32, f32) {
     } else {
         (IMPACT_ELBOW, 1.0)
     }
+}
+
+/// `sub_B2A070` 0xB2A070's result: the box (half 0.2 across, 0.5 along `dir`, `half_h` up) centred at `p`; the nearest
+/// geometry's distance from its rear face, 1000 when the box holds nothing. PORT: found by bisecting the box's length
+/// (the game reads the query's contact points).
+fn box_depth(collision: &CollisionWorld, p: Vec3, dir: Vec3, half_h: f32) -> f32 {
+    let dir = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
+    let axes = [super::right_of(dir), dir, Vec3::Y];
+    let rear = p - dir * 0.5;
+    let blocked = |l: f32| !collision.obb_free(rear + dir * (l * 0.5), axes, Vec3::new(0.2, l * 0.5, half_h));
+    if !blocked(1.0) {
+        return 1000.0;
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..16 {
+        let m = (lo + hi) * 0.5;
+        if blocked(m) { hi = m } else { lo = m }
+    }
+    hi
 }
 
 pub enum SwingOut {
@@ -242,6 +265,18 @@ fn legs_weights(f: f32) -> Vec<f32> {
 #[cfg(test)]
 mod stop_tests {
     use super::*;
+
+    /// RE/24 NARROW-17: `sub_B2A070`'s result is the nearest geometry's distance from the box's rear face (the box 1 m
+    /// long along the facing, centred on the probe), 1000 with nothing in it.
+    #[test]
+    fn the_impact_box_reports_the_depth_from_its_rear() {
+        use crate::collision::Aabb3;
+        let mut c = CollisionWorld::default();
+        assert_eq!(box_depth(&c, Vec3::ZERO, Vec3::NEG_Z, 0.35), 1000.0);
+        // a wall from z = −0.4 on: the rear face is at z = +0.5
+        c.boxes.push(Aabb3 { min: Vec3::new(-2.0, -2.0, -3.0), max: Vec3::new(2.0, 2.0, -0.4) });
+        assert!((box_depth(&c, Vec3::ZERO, Vec3::NEG_Z, 0.35) - 0.9).abs() < 1e-3);
+    }
 
     /// RE/24 NARROW-16: let go on front_down (item 1), the swing finishes the item, then plays the back stop's four
     /// items and hangs.
