@@ -983,6 +983,22 @@ fn choose_clip(
                         };
                         action(&lib, &ids, false, token, Some(0.1), None)
                     }
+                    // the free idle after the swing back (Entry end 0xDE1FE0, HangFreeReceptionType 3): its two clips
+                    // `xx_h_hangfree_wait` / `xx_h_hangwallfree_wait` at [1 − SwingStrength, SwingStrength] (`sub_502E30`,
+                    // RE/24 LEDGE-24). PORT: the second set (0x503040 → 0x726280, [1, 0]) goes to the running transition's
+                    // blend node (hypothesis) and is not played.
+                    _ if !wall && l.last_action == "swing back" && l.swing_strength.is_some() => {
+                        let s = l.swing_strength.unwrap_or(0.0).clamp(0.0, 1.0);
+                        action(&lib, &[ACT_HANG_FREE], true, 0, Some(0.15), Some("hang_free")).map(|mut r| {
+                            if let Some(it) = r.items.first_mut().filter(|it| it.layers.len() == 2) {
+                                let mut w = [1.0 - s, s];
+                                crate::player::jump_blend::normalize_item_weights(&mut w);
+                                it.layers[0].1 = w[0];
+                                it.layers[1].1 = w[1];
+                            }
+                            r
+                        })
+                    }
                     // free hang with a wall under it = LedgeHangType WallFree: `xx_h_hangwallfree_wait` (0x0106F2E9,
                     // played after the straight jump's wall-free reception, 0xE07D00 → 0xE09055; the wait update
                     // 0xDE1FE0 plays it for type 2), legs held clear of the wall

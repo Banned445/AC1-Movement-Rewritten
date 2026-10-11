@@ -235,6 +235,10 @@ pub struct HumanLedgeData {
     pub jump_off: Option<super::air::InAirEntry>,
     /// The last lateral move that was blocked went right (picks `PlayIdleOrBlocked`'s blocked action, 0xDD3A10).
     pub blocked_right: bool,
+    /// LedgeData +108 = 3 (HangFreeReceptionType) and +112 (SwingStrength): the swing back's `_b` (`PlayHopUpSecondPart`
+    /// 0xDDAB00) stores h = w[2] + w[3]; the free idle after it plays its two clips (`xx_h_hangfree_wait`,
+    /// `xx_h_hangwallfree_wait`) at [1 − h, h] (0xDE1FE0 → `sub_502E30`) (RE/24 LEDGE-24).
+    pub swing_strength: Option<f32>,
     moves: Vec<RootInterp>,
     after: Option<After>,
     /// Running corner turn / ledge jump / swing back (`ledge_moves`).
@@ -270,6 +274,7 @@ impl HumanLedgeData {
         self.blocked_up = false;
         self.pending_vstep = None;
         self.jump_off = None;
+        self.swing_strength = None;
         self.moves.clear();
         self.mv = None;
         self.hang_set = false;
@@ -681,6 +686,7 @@ pub fn update_ledge(
                 d.hang_set = true;
                 d.mv = None;
                 d.sub_state = LedgeSubState::Movement;
+                d.swing_strength = (mv.kind == ledge_moves::MoveKind::SwingBack).then(|| mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0));
                 if let ledge_moves::MoveKind::SideJump { .. } = mv.kind {
                     // the table jump into a hang: +133 = the hand targets 0.3 m or more apart (`sub_DCBCD0`, RE/24 LEDGE-14)
                     d.alt_flag = (mv.hand_l - mv.hand_r).length() >= 0.3;
