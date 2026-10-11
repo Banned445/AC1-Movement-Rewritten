@@ -368,13 +368,24 @@ impl HumanClimbData {
             return;
         }
         self.set_entry_holds(&e);
+        // the climb catch (`CheckAirCatch` 0xE0CC8A–0xE0CCF4): the hands 0.3 m or more apart → the 2 m pose
+        // 0x012DA3A2 (pose 3, ClimbData+40 = 1), else the 1 m pose 0x012DA39F (pose 0), the catch its entry; the root
+        // reaches the pose over the catch's item 0 + 0.2 s (0xE0DB5C) while the catch plays on (RE/24 AIR-15)
+        let catch = e.action.filter(|a| super::air_catches::CLIMB_CATCH.contains(a));
         // EnterCommon 0xDE97B0: pose 3 for a "2M" entry (sides one column apart), else pose 0.
-        self.pose = if (e.foot_r - e.foot_l).length() > CLIMB_COL * 0.6 { 3 } else { 0 };
+        self.pose = match catch {
+            Some(_) => if (e.hand_l - e.hand_r).length() >= 0.3 { 3 } else { 0 },
+            None => if (e.foot_r - e.foot_l).length() > CLIMB_COL * 0.6 { 3 } else { 0 },
+        };
         self.last_action = "enter";
         self.look = None;
         self.move_action = e.action;
         self.move_seq += 1;
-        self.moving = Some(RootInterp::new(e.from_feet, self.frame.root, move_time(e.action)));
+        let mut m = RootInterp::new(e.from_feet, self.frame.root, move_time(e.action));
+        if let Some(id) = catch {
+            m.reach = super::ledge::catch_root_time(id).min(m.duration);
+        }
+        self.moving = Some(m);
         if e.action.is_none() && e.from_feet.distance(self.frame.root) < 1e-3 {
             // the Ledge context already brought the root onto the pose (free-hang drop, 0xDE0870 → 0xDDFBF0)
             self.moving = None;

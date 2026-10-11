@@ -4626,6 +4626,12 @@ fn falling_past_climb_holds_with_the_hand_held_catches_into_the_climb() {
     let c = &s.data().climb;
     assert!((c.hand_l.y - c.foot_l.y - 1.2).abs() < 0.05, "hands 1.2 m above the feet: {:?} {:?}", c.hand_l, c.foot_l);
     assert!(c.move_action.is_some_and(|a| CLIMB_CATCH.contains(&a)), "the climb catch plays: {:?}", c.move_action);
+    // RE/24 AIR-15: the pose by the hands' spacing (0.3 m), the root at the pose after the catch's item 0 + 0.2 s
+    let want = if (c.hand_l - c.hand_r).length() >= 0.3 { 3 } else { 0 };
+    assert_eq!(c.pose, want, "pose by the hands' spacing");
+    let m = c.moving.expect("the catch's root interpolation");
+    let reach = crate::player::ledge::catch_root_time(c.move_action.unwrap());
+    assert!((m.reach - reach.min(m.duration)).abs() < 1e-4 && m.reach < m.duration, "reach {} of {}", m.reach, m.duration);
 }
 
 #[test]
