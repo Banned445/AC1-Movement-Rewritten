@@ -1380,6 +1380,9 @@ pub const ACT_KNEE_TO_WAIT: u32 = 0x0106_C58B;
 /// item's leading foot (+60 & 0xC == 4 → left), then NarrowObject SubState 6 (the transient free-step stay, back to
 /// Ground on wide support). [footl, footr].
 pub const ACT_KNEE_TO_FREESTEP: [u32; 2] = [0x248E_9730, 0x248E_9731];
+/// The items a stand-up hands over to the free-step stay with (NarrowObject SubState 6, RE/05 §2.15): the knee's free
+/// step (two hands / one hand, 0xDD2A50) and the step-up's reception (0xE09752).
+pub const FREE_STEP_STAY: [u32; 4] = [ACT_KNEE_TO_FREESTEP[0], ACT_KNEE_TO_FREESTEP[1], ACT_KNEE_ONEHAND_TO_FREESTEP, RECEPTION_STEP_UP];
 /// Running jump onto a wall-hang ledge (target type 0x40): `air_surface_tr_hangwall_reception_{straight,
 /// 30_out,45_in}_{min,max}` then `hangwall_reception_*_{a,b}` (3 items × 6 clips; 0xE07D00 → 0xE02BA0).
 pub const RECEPTION_SURFACE_WALL: u32 = 0x011F_F16A;

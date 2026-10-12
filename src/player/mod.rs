@@ -23,6 +23,7 @@ pub mod ground;
 pub mod ground_extras;
 pub mod ground_tree;
 pub mod falls;
+pub mod free_step;
 pub mod hay;
 pub mod interpreter;
 pub mod item_flags;
@@ -188,6 +189,8 @@ pub enum TransitionSetup {
     ToWalling(walling::WallingEntry),
     ToBeam(narrow::BeamEntry),
     ToPilotis(narrow::PilotisEntry),
+    /// NarrowObject SubState 6: the free-step stay (RE/05 §2.15).
+    ToFreeStep(free_step::FreeStepEntry),
     ToPassOver(passover::PassOverEntry),
     ToLadder(ladder::LadderEntry),
     ToKiosk(kiosk::KioskEntry),
@@ -250,6 +253,10 @@ pub fn switch_context(loco: &mut Locomotion, data: &mut HumanDataBundle, setup: 
         }
         TransitionSetup::ToPilotis(entry) => {
             data.narrow.enter_pilotis(entry);
+            ActorContextId::NarrowObject
+        }
+        TransitionSetup::ToFreeStep(entry) => {
+            data.narrow.enter_free_step(entry);
             ActorContextId::NarrowObject
         }
         TransitionSetup::ToDebug => ActorContextId::Debug,

@@ -665,6 +665,34 @@ pub fn update_ledge(
             body.feet = p;
             body.heading = heading_of(mv.facing());
             limbs.hands = None;
+            // the stand-up's last item plays in NarrowObject: at the hangknee item's release `Pullup_Tick` 0xDE2EE0 calls
+            // `HumanLedge__SwitchToNarrowObject_Enter` 0xDD2A50 (`hangknee_tr_freestep_entry`, SubState 6, +0xF0 = the root,
+            // +0x100 = −the facing); the step-up's reception 0x012B33F1 likewise (0xE09752). The free-step stay
+            // (RE/05 §2.15) then hands over to the Ground. PORT: the root keeps the move's path onto the top over the rest
+            // of the item (the game's follows the clip; the pull-up's root path is RE/25 #47)
+            if mv.end_stand {
+                if let Some((b, ph)) = mv.current().filter(|(b, _)| ledge_moves::FREE_STEP_STAY.contains(&b.id)) {
+                    let facing = mv.facing();
+                    let e = super::free_step::FreeStepEntry {
+                        action: b,
+                        t: ph * b.duration(),
+                        from: body.feet,
+                        to: mv.to,
+                        root_time: (mv.duration() - mv.t).max(0.0),
+                        follow_clip: false,
+                        point: body.feet,
+                        normal: -Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero(),
+                        small_box: false,
+                        heading: body.heading,
+                    };
+                    d.mv = None;
+                    d.queue.clear();
+                    limbs.hands = None;
+                    limbs.feet = None;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToFreeStep(e));
+                    continue;
+                }
+            }
             if done && !d.queue.is_empty() {
                 // next queued stage (pull-down: orientation → descent → reception)
                 let mut next = d.queue.remove(0);
@@ -714,8 +742,7 @@ pub fn update_ledge(
                 continue;
             }
             if done && mv.end_stand {
-                // knee / waist arrivals end standing on top (Ledge SubState 4 → pull-up). Game: NarrowObject
-                // on the edge; PORT: Ground
+                // a stand-up without its free-step item (not loaded): Ground
                 d.mv = None;
                 limbs.hands = None;
                 limbs.feet = None;
@@ -860,7 +887,7 @@ pub fn update_ledge(
                 .flatten();
             let entry = match dive {
                 Some(s) => {
-                    let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None };
+                    let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
                     InAirEntry::LetGoDive { from: body.feet, target, origin }
                 }
                 None => InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 },

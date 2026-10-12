@@ -323,7 +323,12 @@ fn damascus_climbs_a_street_wall_onto_the_roof() {
         let grabbed = s.run_until(3.0, |s| matches!(s.loco().current, ActorContextId::Ledge | ActorContextId::Climb));
         if !grabbed { tried.push(format!("{q}: no grab ({:?} at {})", s.loco().current, s.body().feet)); s.pad(n, 0.0, false, false); s.run(1.0); continue; }
         s.pad(-n, 1.0, false, false);
-        let up = s.run_until(8.0, |s| s.loco().current == ActorContextId::Ground);
+        // the climb-up ends in the free-step stay; let go there (pushing on over a narrow top jumps down its far side,
+        // RE/05 §2.15), then the Ground or the beam the stay mounted
+        let stay = s.run_until(8.0, |s| s.loco().current == ActorContextId::NarrowObject || s.loco().current == ActorContextId::Ground);
+        s.pad(-n, 0.0, false, false);
+        let up = stay && s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground
+            || (s.loco().current == ActorContextId::NarrowObject && s.data().narrow.kind != crate::player::narrow::NarrowKind::FreeStep));
         s.pad(-n, 0.0, false, false);
         s.run(0.5);
         let f = s.body().feet;

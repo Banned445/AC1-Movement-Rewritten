@@ -86,10 +86,6 @@ pub struct HumanGroundData {
     pub landing_seq: u32,
     /// `HumanGround__UpdateMoveBlend` state: blend weights, timers, lean/bank, step cycle.
     pub blend: MoveBlend,
-    /// The free-step arrival's narrow mount, tried when its reception ends (NarrowObject Movement 0xE534B0:
-    /// `TryPilotisFreeStep` then `TryMountBeam`, gated by the action done; RE/24 NARROW-4): (the foot, the arrival's
-    /// forward, the arrival point).
-    pub narrow_pending: Option<(usize, Vec3, Vec3)>,
     /// LedgeStop sub-state (38): the edge it stopped at.
     pub ledge_stop: Option<LedgeStop>,
     /// PORT: no new ledge stop until the stick lets go or turns away from this edge normal (the game's event 69
@@ -539,6 +535,35 @@ impl HumanGroundData {
         self.owner = TreeState::RollEnding;
     }
 
+    /// The free-step stay's Ground setup (`HumanNarrowObject__CheckSupportAndFall` 0xE51914 →
+    /// `TransitionSetupDataToMovement::Apply` 0xC80310 → `Movement_EnterBody` 0xD92C40, RE/05 §2.15): entry mode 0 / 1 →
+    /// Idle in the low / high profile, the wait through the stay's item's authored transition
+    /// (`freestep_entry_tr_{l,h}_wait`); 3 / 4 / 6 → Move with s 0.25 / 0.5 / 1.0, the locomotion through
+    /// `freestep_entry_tr_{l_walk, h_jog, h_sprint_impultion}` (layout 1, promoted to 5 by mode 6). The transition starts
+    /// at once, also from the middle of the stay's action (live RE/25 roof_jogoff_high: mode 1 at its phase 0.5;
+    /// crate_probe: mode 0; freerun_north: mode 3).
+    pub fn enter_from_free_step(&mut self, from: ActionBlend, mode: u8) {
+        match mode {
+            0 | 1 => {
+                let high = mode == 1;
+                self.high_profile = high;
+                self.wait_high = high;
+                self.enter_wait(from, high);
+            }
+            _ => {
+                let s = match mode {
+                    3 => 0.25,
+                    4 => 0.5,
+                    _ => 1.0,
+                };
+                self.high_profile = mode != 3;
+                self.speed_param = s;
+                self.blend.speed_param = s;
+                self.enter_move(from, if mode == 6 { 5 } else { 1 });
+            }
+        }
+    }
+
     /// `HumanGround__Move_EnterBody` 0xD94A60 on every Move entry: the MoveBlend slowdown (HG+1740) and settle (HG+1744)
     /// timers and the lean (Data+212) start from 0 (RE/24 GROUND-13).
     fn reset_move_entry(&mut self) {
@@ -607,19 +632,6 @@ impl HumanGroundData {
             // state 21 (0xDA8F50): when the landing completes, the landings that end in the wait go to Idle (high
             // profile, 0xDA26C0); the others enter Move with layout 6 and s 0.25 / 0.5 / 1.0 by the wanted profile and
             // Sprint (0xD990A0). A released stick then leaves Move for Idle at once (0xD7ED30).
-            TreeState::Landing if ended.id == jump_blend::RECEPTION_FREESTEP[0] || ended.id == jump_blend::RECEPTION_FREESTEP[1] => {
-                // PORT: the game continues a free-step reception in NarrowObject; its exits lead to the same waits and
-                // locomotion. The exit into the locomotion (`freestep_entry_tr_{l_walk, h_jog, h_sprint_impultion}`)
-                // plays at the band of the profile and Sprint, as the landings do (layout 5, the three-clip pair):
-                // live 2026-10-08 the high-profile run played the jog (797 ms) and free run the sprint (516 / 532 ms).
-                if stick {
-                    self.speed_param = if !high { 0.25 } else if !self.sprint { 0.5 } else { 1.0 };
-                    self.blend.speed_param = self.speed_param;
-                    self.enter_move(ended, 5);
-                } else {
-                    self.enter_wait(ended, high);
-                }
-            }
             // the landings' authored endings run into the high-profile wait only (e.g. 0x6E9C754A → 0x6E9C754B
             // `…_tr_h_wait_*` → 0x00D82508): the wait is the high one, and in low profile Idle's wait update changes back
             // through the stance-change wait (live RE/25: a low-profile landing off the ladder played `…_tr_h_wait_*_b`,
@@ -726,7 +738,6 @@ impl HumanGroundData {
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
         self.wall_start = None;
-        self.narrow_pending = None;
         self.collide = None;
         self.look_down = None;
         self.extra = None;
@@ -856,29 +867,6 @@ pub fn update_ground(
             g.ik_state.switch(ik_now, sw, dt);
         }
         g.ik_state = ik_now;
-
-        // ---------------------------------------------------------------- the free-step arrival's narrow mount
-        // NarrowObject Movement (0xE534B0) after the reception: `TryPilotisFreeStep` 0xE50190 (from the air box along
-        // −support normal, `find_pilotis(…, true)`, RE/24 NARROW-8), then `TryMountBeam` 0xE52AD0 (RE/24 NARROW-4).
-        // PORT: the beam segment comes from `beam_at`, not the StateMovement_Enter query (0xE4FE20)
-        if let Some((foot, fwd, arrival)) = g.narrow_pending {
-            let reception = g.oneshot.is_some_and(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id));
-            if !reception {
-                g.narrow_pending = None;
-                // PORT: the search runs around the arrival point: the game passes the root (after the reception's root
-                // motion, which the port's post landing does not reproduce)
-                if let Some(top) = super::narrow::find_pilotis(arrival, arrival, fwd, true, &guidance, &collision) {
-                    let e = super::narrow::PilotisEntry { top, from: body.feet, facing: fwd, kind: super::narrow::PilotisEntryType::FromFreeStep, foot };
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToPilotis(e));
-                    continue;
-                }
-                let stick = (pad.speed01 > 0.0).then_some(pad.dir);
-                if let Some(e) = super::narrow::free_step_beam_entry(body.feet, fwd, stick, foot, None, pad.high_profile, &guidance, &collision) {
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(e));
-                    continue;
-                }
-            }
-        }
 
         if GAME_GROUND_EXTRAS {
             if g.crouch.is_none() && g.crouch_requested && !pad.high_profile && g.extra.is_none()
@@ -1520,8 +1508,7 @@ pub fn update_ground(
         // ---------------------------------------------------------------- beam (NarrowObject, event 72)
         // Guard 0xD9F4C0 along the event's direction (the stick, RE/24 NARROW-3). PORT trigger: walking at it (the
         // decision layer's event 72 sender is not traced).
-        // not while a free-step arrival's narrow mount is pending: the game is in NarrowObject then (RE/24 NARROW-4)
-        if moving && !busy && g.narrow_pending.is_none() {
+        if moving && !busy {
             let event_dir = if pad.dir != Vec3::ZERO { pad.dir } else { body.forward() };
             if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, event_dir, &guidance, &collision) {
                 // Mode 1 plays the beam walk (`sub_F7B3B0` 0xF7B619: 0x28A3A8E4), keeping the playing locomotion item's
@@ -1681,24 +1668,8 @@ pub fn update_ground(
         // The interpreter's last request (0xEE8E08, either profile): the stick past the dead zone and IHumanGround
         // vt1592 (event 122's guard 0xD8F0B0: touching a haystack, facing it within 100 degrees, the stick within 45
         // degrees into it) → vt1596 → HumanHayStack, entry Ground (0xD84F80).
-        // `HumanNarrowObject__CheckSupportAndFall` 0xE51190's haystack branch: the free-step arrival (a NarrowObject
-        // Movement stay in the game; PORT: its reception plays in Ground) past 0.6 of its action with a haystack found
-        // by the support search → HumanHayStack, entry FreeStep (0xE5146A). Live: the way into a rimmed haystack. The
-        // search runs along −the support normal (0xE51308; PORT: the arrival's forward) and only here, not in the beam /
-        // pilotis catch receptions (RE/24 NARROW-21).
-        if let Some(os) = g.oneshot.filter(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id)) {
-            if os.t / os.duration.max(1e-4) > 0.6 {
-                if let Some(stack) = super::hay::find_support(body.feet, body.forward(), body.forward(), &guidance.haystacks, &collision) {
-                    let e = super::hay::HayStackEntry { stack, kind: super::hay::HayEntry::FreeStep, from: body.feet, speed: 0.0 };
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
-                    continue;
-                }
-            }
-        }
-        // not during the free-step reception: the game is in NarrowObject then (PORT: the reception plays in Ground)
-        let free_step = g.oneshot.is_some_and(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id));
         // the interpreter sends it with the stick past the dead zone (0xEE8E08), also when the haystack has stopped the walk
-        if pad.speed01 > 0.0 && !busy && !free_step {
+        if pad.speed01 > 0.0 && !busy {
             if let Some(e) = super::hay::ground_entry(body.feet, body.forward(), pad.dir, &body.proxy.manifold, &guidance.haystacks, &collision) {
                 switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
                 continue;
@@ -2047,7 +2018,7 @@ fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bo
     if std::env::var_os("AC_ANIM_LOG").is_some() {
         info!("straight target: hands {point:.2} n {n:.2} dz {dz:.2} wall {wall} -> out {:.2} down {:.2}", j.out, j.down);
     }
-    Some(JumpTarget { position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None, ladder: None })
+    Some(JumpTarget { position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None, ladder: None, support: None })
 }
 
 /// The standing request's hand targets (`Human__EvaluateStaticHandTargets` 0xE165D0; the box initialised by

@@ -57,7 +57,7 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     (42.0, 50.0, 4.0, 0.6, 2.6),   // swing-back wall E (x 40..44): hang at 2.6 m, a beam behind it (BEAMS) …
     (42.0, 50.15, 4.0, 0.3, 4.2),  // … and a wall rising above it, set back 0.3 m (E2): no room to pull up
     // --- standing straight jump bands (0xB21DA0) ---
-    (50.0, 50.3, 3.0, 1.0, 1.6),   // knee height: jump, hangknee, stand on top
+    (50.0, 50.5, 3.0, 1.4, 1.6),   // knee height: jump, hangknee, stand on top (deeper than 1 m: not a beam)
     (56.0, 50.3, 3.0, 1.0, 2.2),   // 2.0–2.5 m with a wall below: jump into a wall hang
     // --- hang-type switch (0xDE1060): wall F (x 60..63) continues as an overhang slab (SLABS) with no wall below
     (61.5, 50.0, 3.0, 0.6, 2.6),
@@ -216,7 +216,7 @@ const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
     (60.0, 3.4, 90.0, 3.0, 0.2, 0.2), // swing bars 3.5 m apart
     (60.0, 3.4, 93.5, 3.0, 0.2, 0.2),
     (60.0, 3.4, 97.0, 3.0, 0.2, 0.2),
-    (89.0, 6.3, 70.0, 2.0, 1.0, 0.3), // above the free beam: the beam's straight jump at a hand target (2.3 m)
+    (89.0, 6.3, 70.0, 2.0, 1.4, 0.3), // above the free beam: the beam's straight jump at a hand target (2.3 m); deeper than 1 m: not a beam
     // an overhang 1 m out from the climb tower over its left gap: the climb's jump up to it (TryBackEject 0xDF2F50)
     (-22.0, 3.5, 26.5, 1.2, 1.0, 0.2),
     // overhang H: free hang at its -Z edge (3.6 m), 0.9 m in front of wall H's 2.4 m ledge (TryFreeHangDropToClimb 0xDDF390)

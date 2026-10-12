@@ -255,8 +255,10 @@ fn free_run_jumps_a_rooftop_gap_and_lands_on_target() {
     // roof A: x 5..11, h 3.5 ; roof B: x 14.5..20.5, h 3.0  (3.5 m gap)
     let mut s = Sim::new(Vec3::new(7.0, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, true, true); // sprint toward +X
+    let mut stay = false;
     for _ in 0..240 {
         s.run(1.0 / 60.0 + 1e-4);
+        stay |= s.loco().current == ActorContextId::NarrowObject && s.data().narrow.kind == crate::player::narrow::NarrowKind::FreeStep;
         if s.saw_air && s.loco().current == ActorContextId::Ground {
             s.pad(Vec3::X, 0.0, false, false); // let go once landed
             s.run(1.0);
@@ -267,8 +269,9 @@ fn free_run_jumps_a_rooftop_gap_and_lands_on_target() {
     assert_eq!(s.loco().current, ActorContextId::Ground);
     let f = s.body().feet;
     assert!(f.x > 14.5 && (f.y - 3.0).abs() < 0.05, "should be standing on roof B, feet {f:?}");
-    let l = s.ground().last_landing.expect("landing recorded");
-    assert_eq!(l.kind, LandingType::Safe);
+    // a free-step target: the arrival passes through the free-step stay, not a ground landing (RE/05 §2.15)
+    assert!(stay, "no free-step stay");
+    assert!(s.ground().last_landing.is_none_or(|l| l.kind == LandingType::Safe));
 }
 
 #[test]
@@ -831,6 +834,16 @@ fn climb_moves_last_as_long_as_their_actions() {
 }
 
 /// Jump-up wall: top edge 2.6 m, face z = 41.7 (normal -Z), x 8..16, pillar at x 15.5..16.5.
+/// Standing after a climb-up or a free step: the Ground, or the beam / pilotis the free-step stay mounted (NarrowObject
+/// Movement, RE/05 §2.15). The 0.6 m greybox walls are beams to the game's pairing (half-width ≤ 0.5 m).
+fn stood_up(s: &Sim) -> bool {
+    match s.loco().current {
+        ActorContextId::Ground => true,
+        ActorContextId::NarrowObject => s.data().narrow.kind != crate::player::narrow::NarrowKind::FreeStep,
+        _ => false,
+    }
+}
+
 fn hang_on_jump_up_wall() -> Sim {
     // the standing straight jump: walk up to the wall, then high profile + Legs, still, facing it
     let mut s = Sim::new(Vec3::new(12.0, 0.0, 40.6), FACE_PZ);
@@ -858,8 +871,10 @@ fn jump_up_to_a_ledge_then_pull_up() {
     let f = s.body().feet;
     assert!((f.y - 0.2).abs() < 0.05, "free-hang root 2.4 m below the hands: {f:?}");
     s.pad(Vec3::Z, 1.0, false, false); // hold up at the top edge → pull-up
-    let on_top = s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground);
+    let on_top = s.run_until(3.0, stood_up);
     assert!(on_top && (s.body().feet.y - 2.6).abs() < 0.05, "pull-up failed: {:?} ledge {}", s.body().feet, s.data().ledge.last_action);
+    // the free-step stay found the wall top's far edge (`StateMovement_Enter` 0xE4FE20): `TryMountBeam` 0xE52AD0
+    assert_eq!(s.data().narrow.kind, crate::player::narrow::NarrowKind::Beam, "the 0.6 m wall top is a beam");
 }
 
 #[test]
@@ -977,7 +992,7 @@ fn the_ledge_reads_the_stick_in_the_characters_frame() {
     s.app.world_mut().resource_mut::<CameraRig>().yaw = yaw;
     let away_from_camera = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
     s.pad(away_from_camera, 1.0, false, false);
-    let on_top = s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground);
+    let on_top = s.run_until(3.0, stood_up);
     assert!(on_top && (s.body().feet.y - 2.6).abs() < 0.05, "no pull-up: {:?} ledge {}", s.body().feet, s.data().ledge.last_action);
 }
 
@@ -1034,12 +1049,13 @@ fn rooftop_jump_plays_the_game_items_and_free_step_reception() {
     assert!(duration > 0.3 && duration < 1.2, "jump lasts {duration}");
     let sum: f32 = fl.weights().iter().sum();
     assert!((sum - 1.0).abs() < 1e-4);
-    // arrival → Ground with the free-step reception playing, then free movement
-    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "never landed");
-    let os = s.ground().oneshot.expect("reception playing");
-    assert!(RECEPTION_FREESTEP.contains(&os.blend.id));
-    assert!(os.duration > 0.1);
-    assert!(s.run_until(2.0, |s| s.ground().oneshot.is_none()), "reception never ended");
+    // arrival → the free-step stay (NarrowObject SubState 6) with the reception playing, then the Ground (RE/05 §2.15)
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::NarrowObject), "never arrived");
+    let fs = s.data().narrow.free_step.expect("the free-step stay");
+    assert!(RECEPTION_FREESTEP.contains(&fs.e.action.id));
+    assert!(fs.e.action.duration() > 0.1);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "the stay never ended");
+    // sprinting on (high profile, the stick, Legs held): entry mode 6, s 1.0 (0xE51897)
     assert!(s.ground().speed_param > 0.75, "kept the sprint speed: {}", s.ground().speed_param);
 }
 
@@ -1522,7 +1538,7 @@ fn pull_up_does_not_cut_through_the_wall() {
     }
     assert!(frames > 10, "pull-up ran {frames} frames");
     assert_eq!(worst, 0, "body inside the wall on {worst} samples");
-    assert_eq!(s.loco().current, ActorContextId::Ground);
+    assert!(s.run_until(1.0, stood_up));
     assert!((s.body().feet.y - 2.6).abs() < 0.05);
 }
 
@@ -1564,7 +1580,10 @@ fn wall_run_pulls_up_onto_a_low_wall() {
     assert!(s.run_until(0.5, |s| s.data().walling.sub_state == WallingSubState::EntryB));
     let f = s.body().feet;
     assert!((f.y - 1.0).abs() < 0.05 && (59.25 - f.z - 0.5).abs() < 0.05, "entry root: {f:?}");
-    // probe A (ledge 0.8 m above the root): entry_footl_tr_hangknee → hangknee → wait, standing on top
+    // probe A (ledge 0.8 m above the root): entry_footl_tr_hangknee → hangknee → the free-step stay, standing on top;
+    // let go there (with the stick and Legs held the stay jumps on over the far edge: kind 0, RE/05 §2.15)
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::NarrowObject), "no free-step stay: {:?}", s.loco().current);
+    s.pad(Vec3::ZERO, 0.0, true, false);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never on top: {:?}", s.loco().current);
     assert!((s.body().feet.y - 1.8).abs() < 0.05, "on the 1.8 m top: {:?}", s.body().feet);
 }
@@ -1804,7 +1823,7 @@ fn the_over_drop_tail_steers_onto_the_true_target() {
     use crate::player::targets::JumpTarget;
     let mut s = Sim::new(Vec3::new(30.0, 9.5, 23.5), 0.0);
     s.run(0.2);
-    let target = JumpTarget { position: Vec3::new(30.0, 0.0, 17.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None };
+    let target = JumpTarget { position: Vec3::new(30.0, 0.0, 17.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
     let from = s.body().feet;
     force(&mut s, crate::player::TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
     assert!(s.run_until(1.5, |s| matches!(s.data().air.mode, crate::player::air::AirMode::Fall { steer_to: Some(_) })), "no tail: {:?}", s.data().air.mode);
@@ -1817,9 +1836,14 @@ fn the_over_drop_tail_steers_onto_the_true_target() {
 fn free_run_onto_a_pilotis_and_hop_along_the_posts() {
     use crate::player::narrow::{BeamState, NarrowKind};
     let mut s = on_pilotis_row();
+    // the free-step stay plays the reception, then `TryPilotisFreeStep` 0xE50190 (RE/05 §2.15)
     assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never reached a post: {:?} {:?}", s.loco().current, s.body().feet);
-    assert_eq!(s.data().narrow.kind, NarrowKind::Pilotis);
+    assert_eq!(s.data().narrow.kind, NarrowKind::FreeStep);
+    // let go: with the stick and Legs held the stay jumps on to the next post (kind 0 at the post's far edge, as the
+    // live free-run chains do)
     s.pad(Vec3::X, 0.0, true, false);
+    assert!(s.run_until(1.0, |s| s.data().narrow.kind != NarrowKind::FreeStep), "the stay never ended");
+    assert_eq!(s.data().narrow.kind, NarrowKind::Pilotis);
     assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::PilotisWait), "no wait: {:?}", s.data().narrow.state);
     let f = s.body().feet;
     assert!((f - Vec3::new(74.5, 3.0, 80.0)).length() < 0.05, "on the first post top: {f:?}");
@@ -1831,7 +1855,9 @@ fn free_run_onto_a_pilotis_and_hop_along_the_posts() {
         s.pad(Vec3::X, 0.0, true, false);
         assert!(
             s.run_until(3.0, |s| s.data().narrow.state == BeamState::PilotisWait && s.loco().current == ActorContextId::NarrowObject),
-            "no arrival at {x}: {:?} {:?}",
+            "no arrival at {x}: {:?} {:?} {:?} {:?}",
+            s.data().narrow.kind,
+            s.data().narrow.state,
             s.loco().current,
             s.body().feet
         );
@@ -1885,6 +1911,9 @@ fn running_jump_onto_a_beam_targets_it_and_mounts_on_arrival() {
     s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().ground.blend.foot = 1;
     s.pad(Vec3::X, 1.0, true, true);
     assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never reached the beam: {:?} {:?}", s.loco().current, s.body().feet);
+    // the free-step stay plays the reception, then `TryMountBeam` 0xE52AD0 on the piece it found (RE/05 §2.15)
+    assert_eq!(s.data().narrow.kind, NarrowKind::FreeStep);
+    assert!(s.run_until(1.0, |s| s.data().narrow.kind != NarrowKind::FreeStep), "the stay never ended: {:?} {:?} {:?} {:?}", s.loco().current, s.data().air.target.map(|t| (t.position, t.type_flags)), s.body().feet, s.data().narrow.free_step.map(|f| (f.t, f.edge)));
     let n = &s.data().narrow;
     assert_eq!(n.kind, NarrowKind::Beam);
     // the query offers the beam as a type 4 / sub-type 1 candidate and the scorer jumps at it as 0x10000 (RE/18
@@ -2487,7 +2516,11 @@ fn pushing_on_in_the_lean_climbs_the_low_wall() {
     assert!(s.run_until(3.0, |s| s.ground().collide.is_some_and(|c| c.phase == CollidePhase::Wait)), "no lean wait");
     assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::InAir), "no climb from the lean");
     assert!(s.ground().lean_push_t == 0.0);
-    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y > 1.0), "not on the wall top: {:?} {:?}", s.loco().current, s.body().feet);
+    // let go on top: still pushing across the narrow top, the stay's interpreter jumps down the far side (low profile,
+    // a drop edge under 2 m ahead: kind 1, 0xEE95F8); the 0.4 m wall's top is a beam: the stay mounts it (RE/05 §2.15)
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::NarrowObject), "no free-step stay: {:?}", s.loco().current);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| stood_up(s) && s.body().feet.y > 1.0), "not on the wall top: {:?} {:?}", s.loco().current, s.body().feet);
 }
 
 #[test]
@@ -3309,7 +3342,6 @@ fn trace_frames(s: &mut Sim, label: &str, seconds: f32, mut each: impl FnMut(&mu
         let mode = match s.data().air.mode {
             air::AirMode::Jump { t, .. } => format!("jump t={t:.2}"),
             air::AirMode::Fall { .. } => "fall".into(),
-            air::AirMode::Arrive { .. } => "arrive".into(),
             air::AirMode::Idle => "idle".into(),
         };
         let os = s.ground().oneshot.map(|o| format!("os {:08x} {:.2}/{:.2}", o.blend.id, o.t, o.duration)).unwrap_or_default();
@@ -3435,20 +3467,51 @@ fn moving_again_during_a_run_stop_waits_for_the_locked_stop_then_leaves_its_sett
 }
 
 #[test]
-fn pushing_the_stick_after_a_pull_up_leaves_its_end_clip_at_once() {
-    use crate::player::anim_gate;
-    // the pull-up ends with `hangknee_foot*_tr_freestep_entry` (0x248E9730 / 31, word 0xfc4 / 0xfc8): every mode exit
-    // allowed, so the stick leaves it for the locomotion straight away (this wall top is narrow: the walk itself then
-    // halts at its far edge, 0xEE7BDA)
+fn the_pull_up_ends_in_the_free_step_stay() {
+    use crate::player::ledge_moves::ACT_KNEE_TO_FREESTEP;
+    use crate::player::narrow::NarrowKind;
+    // the pull-up's `hangknee_foot*_tr_freestep_entry` (0x248E9730 / 31) plays in NarrowObject (0xDD2A50, SubState 6);
+    // pushing on does not cut it (the stay waits for the action, 0xE515E4), then the stay mounts the narrow wall top
+    // (`TryMountBeam` 0xE52AD0, RE/05 §2.15)
     let mut s = hang_on_jump_up_wall();
     s.pad(Vec3::Z, 1.0, false, false);
-    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::Ground), "never pulled up");
-    let os = s.ground().oneshot;
-    if let Some(o) = os {
-        assert!(anim_gate::allows_mode_exit(&o.blend, true, false), "{:#x}", o.blend.id);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never pulled up");
+    let fs = s.data().narrow.free_step.expect("the free-step stay");
+    assert!(ACT_KNEE_TO_FREESTEP.contains(&fs.e.action.id), "{:#x}", fs.e.action.id);
+    let left = fs.e.action.duration() - fs.t;
+    s.run((left - 0.05).max(0.0));
+    assert_eq!(s.data().narrow.kind, NarrowKind::FreeStep, "the stick cut the free step");
+    assert!(s.run_until(0.2, |s| s.data().narrow.kind == NarrowKind::Beam), "no beam mount: {:?}", s.loco().current);
+}
+
+/// RE/05 §2.15 (live RE/25 roof_jogoff_high): with the stick pointing back over the edge the stay leaves at half its
+/// action, into the wait through the action's authored transition (`freestep_entry_tr_l_wait`, entry mode 0 in low
+/// profile).
+#[test]
+fn the_stay_leaves_at_half_its_action_with_the_stick_back() {
+    use crate::player::free_step::FreeStepEntry;
+    use crate::player::ledge_moves::ACT_KNEE_TO_FREESTEP;
+    let feet = Vec3::new(0.0, 0.0, -30.0);
+    let mut s = Sim::new(feet, 0.0);
+    let action = crate::player::ledge_moves::single_item(ACT_KNEE_TO_FREESTEP[0], 0).expect("the install's action");
+    let e = FreeStepEntry { action, t: 0.0, from: feet, to: feet, root_time: 0.0, follow_clip: false, point: feet,
+        normal: Vec3::Z, small_box: false, heading: 0.0 };
+    force(&mut s, crate::player::TransitionSetup::ToFreeStep(e));
+    // facing −Z; the stick +Z points back (along +the support normal)
+    s.pad(Vec3::Z, 1.0, false, false);
+    let half = action.duration() * 0.5;
+    let mut t = 0.0;
+    while s.loco().current != ActorContextId::Ground && t < action.duration() + 0.1 {
+        s.run(1.0 / 60.0 + 1e-4);
+        t += 1.0 / 60.0;
     }
-    s.run(2.0 / 60.0 + 1e-4);
-    assert!(s.ground().oneshot.is_none(), "still in the pull-up's end clip: {:?}", s.ground().oneshot.map(|o| o.blend.id));
+    assert_eq!(s.loco().current, ActorContextId::Ground, "never left");
+    assert!(t < half + 0.05, "left at {t} s (half {half})");
+    let tr = s.ground().tr.expect("the wait's transition");
+    assert!(tr.to_wait, "into the wait");
+    let waits = crate::player::ground_tree::WAITS[0];
+    let authored = crate::player::jump_clips::GROUND_TRANSITIONS.iter().find(|x| x.0 == action.id && waits.contains(&x.4)).map(|x| x.2);
+    assert_eq!(authored, Some(tr.action.id), "freestep_entry_tr_l_wait");
 }
 
 #[test]
@@ -3456,9 +3519,13 @@ fn pull_up_ends_standing_still() {
     let mut s = hang_on_jump_up_wall();
     assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
     s.pad(Vec3::Z, 1.0, false, false);
-    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
-    assert_eq!(s.ground().speed_param, 0.0, "the speed from before the climb must not carry over");
+    assert!(s.run_until(3.0, stood_up));
+    if s.loco().current == ActorContextId::Ground {
+        assert_eq!(s.ground().speed_param, 0.0, "the speed from before the climb must not carry over");
+    }
     s.pad(Vec3::Z, 0.0, false, false);
+    // the beam mount's entry (mode 3: the warp onto the beam line over its action) settles first
+    s.run(1.0);
     let f = s.body().feet;
     s.run(1.0);
     assert!((s.body().feet - f).length() < 0.05, "moved after the pull-up: {f:?} -> {:?}", s.body().feet);
@@ -3483,7 +3550,7 @@ fn the_ledge_suspends_the_limb_ik_through_the_pull_up() {
     s.pad(Vec3::Z, 1.0, false, false);
     assert!(s.run_until(1.0, |s| s.data().ledge.sub_state == S::Pullup), "no pull-up");
     assert!(limbs(&s).suspended, "the pull-up runs no limb IK, from its first frame");
-    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
+    assert!(s.run_until(3.0, stood_up));
     assert!(!limbs(&s).suspended);
 }
 
@@ -4300,7 +4367,7 @@ fn pulling_up_at_the_end_of_a_wall_uses_one_hand() {
             assert_eq!(mv.seq[2].map(|a| a.id), Some(ACT_KNEE_ONEHAND_TO_FREESTEP));
         }
         s.pad(Vec3::Z, 0.0, false, false);
-        assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::Ground), "never stood up at x {x}");
+        assert!(s.run_until(4.0, stood_up), "never stood up at x {x}");
     }
 }
 
@@ -4695,12 +4762,13 @@ fn ground_extras_registered_crowd_actor_drives_and_releases_lean() {
 #[test]
 fn a_landing_hands_over_through_its_authored_transition() {
     use crate::player::move_blend::ACT_GROUND_LOCOMOTION;
+    // the free-step stay's Ground setup (mode 6, layout 5): its action's authored transition into the locomotion
+    // (`freestep_entry_tr_h_sprint_impultion`), steered by MoveBlend's transition path (RE/05 §2.15)
     let mut s = Sim::new(Vec3::new(7.0, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, true, true);
-    assert!(s.run_until(4.0, |s| s.saw_air && s.loco().current == ActorContextId::Ground), "never landed");
-    let landing = s.ground().oneshot.expect("landing action").blend;
-    // the landing completes (state 21 has no early exit), then its item's transition action plays in front of the
-    // locomotion, steered by MoveBlend's transition path
+    assert!(s.run_until(4.0, |s| s.saw_air && s.loco().current == ActorContextId::NarrowObject), "never arrived");
+    let landing = s.data().narrow.free_step.expect("the free-step stay").e.action;
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ground), "the stay never ended");
     assert!(s.run_until(1.0, |s| s.ground().tr.is_some()), "no transition after the landing");
     let t = s.ground().tr.unwrap();
     let authored = crate::player::ground_tree::authored_transition(landing.id, landing.item, ACT_GROUND_LOCOMOTION);
@@ -4859,13 +4927,13 @@ fn a_wall_free_hang_swings_onto_the_wall_before_it_pulls_up() {
         s.run(1.0 / 60.0 + 1e-4);
         worst = worst.max(face_z - s.body().feet.z);
         was_wall |= s.data().ledge.hang_type == ledge::LedgeHangType::Wall;
-        if s.loco().current == ActorContextId::Ground {
+        if stood_up(&s) {
             break;
         }
     }
     assert!(was_wall, "never switched to the wall hang");
     assert!(worst <= 0.55, "the root left the wall by {worst} m");
-    assert!(s.loco().current == ActorContextId::Ground && (s.body().feet.y - 2.6).abs() < 0.05, "pull-up failed: {:?}", s.body().feet);
+    assert!(stood_up(&s) && (s.body().feet.y - 2.6).abs() < 0.05, "pull-up failed: {:?}", s.body().feet);
 }
 
 #[test]
@@ -5281,7 +5349,7 @@ fn free_running_onto_a_haystack_carts_rim_drops_into_the_haystack() {
     s.pad(Vec3::Z, 1.0, true, true);
     let on_rim = std::cell::Cell::new(false);
     let ok = s.run_until(5.0, |s| {
-        if s.loco().current == ActorContextId::Ground && s.body().feet.y > 1.1 {
+        if s.loco().current == ActorContextId::NarrowObject && s.data().narrow.kind == crate::player::narrow::NarrowKind::FreeStep && s.body().feet.y > 1.1 {
             on_rim.set(true);
         }
         s.loco().current == ActorContextId::HayStack

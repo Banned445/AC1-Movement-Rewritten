@@ -362,7 +362,7 @@ mod tests {
 mod ray_tests {
     use super::*;
     use crate::collision::Aabb3;
-    fn target(position:Vec3,ty:u32)->JumpTarget {JumpTarget{position,type_flags:ty,hang:None,straight:None,pass:None,ladder:None}}
+    fn target(position:Vec3,ty:u32)->JumpTarget {JumpTarget{position,type_flags:ty,hang:None,straight:None,pass:None,ladder:None,support:None}}
     #[test]
     fn target_guard_is_a_ray_not_a_forward_cone() {
         let mut world=CollisionWorld::default();let root=Vec3::ZERO;

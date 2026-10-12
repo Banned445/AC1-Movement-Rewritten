@@ -886,8 +886,8 @@ fn choose_clip(
                     p.sim_phase = Some(ph.min(1.0));
                     sim_request(&mut p, &lib, &b, 2_000_000 + data.air.seq as u64, 0.05)
                 }
-                // a jump whose actions are not loaded, or the free-step arrival's few frames: the pose carries on
-                AirMode::Jump { .. } | AirMode::Arrive { .. } => continue,
+                // a jump whose actions are not loaded: the pose carries on
+                AirMode::Jump { .. } => continue,
                 // Leap of Faith free-fall tail: `faith_jump_fall` (0xB1EC40 third action), played when the flight ends with
                 // a 0.5 s blend (0xE0F3D4, RE/24 AIR-22); the let-go's dive keeps its own blend
                 AirMode::Fall { .. } if data.air.flight.is_some_and(|f| f.id == crate::player::jump_blend::FLIGHT_FAITH) => {
