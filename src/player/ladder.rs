@@ -567,8 +567,10 @@ pub fn top_exit_free(top: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
 ///   ladder's own height); the character faces the ladder within 90° (−forward against the closest point → root); the
 ///   ladder's side is not tested (LADDER-3: the climb frame is signed toward the climber);
 /// - from the top when the root is within 1.5 m of the top's height.
-/// Returns (base, top, the outward normal on the climb side, from the top). PORT: the head is the feet + 1.7 m.
-pub fn find_ladder(feet: Vec3, stick: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3, Vec3, bool)> {
+/// Returns (base, top, the outward normal on the climb side, from the top). `head` is the Head bone (it leans ahead of
+/// the root in the walk: live, RE/25, the walk-in entry came with the head 0.60 m from the ladder line and the root
+/// 0.62–0.69 m). PORT: without a pose the head is the feet + 1.7 m.
+pub fn find_ladder(feet: Vec3, head: Option<Vec3>, stick: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3, Vec3, bool)> {
     const REACH: f32 = 0.6;
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
     let closest = |a: Vec3, b: Vec3, p: Vec3| {
@@ -597,7 +599,7 @@ pub fn find_ladder(feet: Vec3, stick: Vec3, forward: Vec3, guidance: &GuidanceWo
         }
         // CanGrabLadder: the root or the head within reach of base … top
         let q = closest(base, top, feet);
-        let head = feet + Vec3::Y * 1.7;
+        let head = head.unwrap_or(feet + Vec3::Y * 1.7);
         if (feet - q).length() > REACH && (head - closest(base, top, head)).length() > REACH {
             continue;
         }
@@ -1138,7 +1140,7 @@ mod catch_tests {
         let mut g = GuidanceWorld::default();
         g.edges.push(GuidanceEdge { p0: base, p1: top, n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::Ladder });
         // at the top's height on the guidance front (-Z), facing the ladder
-        let (_, _, n, from_top) = find_ladder(Vec3::new(0.0, 5.0, -0.5), Vec3::Z, Vec3::Z, &g).expect("the ladder");
+        let (_, _, n, from_top) = find_ladder(Vec3::new(0.0, 5.0, -0.5), None, Vec3::Z, Vec3::Z, &g).expect("the ladder");
         assert!(from_top && n.dot(Vec3::Z) > 0.99, "the side away from the character: {n:?}");
         assert_eq!(top_entry_side(base, top, n, &CollisionWorld::default()), n);
         let mut wall = CollisionWorld::default();

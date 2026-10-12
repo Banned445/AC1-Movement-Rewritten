@@ -767,6 +767,8 @@ pub fn update_ground(
     for (mut loco, mut body, mut data, anim, pose, mut ik_switch) in &mut q {
         // `Human__GetLeadingFoot` 0xB18850 on last frame's pose (`bone_pose`); None without the install
         let leading_foot = skeleton.as_deref().zip(pose).filter(|(_, p)| p.seq > 0).and_then(|(s, p)| p.leading_foot(s));
+        // the Head bone on last frame's pose (`Bone__GetWorldPosition` 0x4EC0E0 on Human+0x280), for the ladder grab test
+        let head = skeleton.as_deref().zip(pose).filter(|(_, p)| p.seq > 0).and_then(|(s, p)| p.world_pos(s, crate::bone_pose::HEAD, &body));
         let g = &mut data.ground;
         if loco.current != ActorContextId::Ground {
             // left the ground: the foot IK and the smoothing go off (RE/24 GROUND-16)
@@ -1331,7 +1333,7 @@ pub fn update_ground(
         // `Human__CanGrabLadder` (reach 0.6) → event 38, from the foot or from the top; no button. PORT: the ladder
         // entity's reply (0xEE720A) is taken as yes
         if !(g.high_profile && pad.legs_held) && pad.magnitude > 0.0 && !busy && ab.allows(Ability::Ladder) {
-            if let Some((base, top, mut n, from_top)) = super::ladder::find_ladder(body.feet, pad.dir, body.forward(), &guidance) {
+            if let Some((base, top, mut n, from_top)) = super::ladder::find_ladder(body.feet, head, pad.dir, body.forward(), &guidance) {
                 // the approach side's attach box blocked → the back-approach turn onto the far side (RE/24 LADDER-4)
                 let mut back_turn = None;
                 if from_top {
@@ -1339,8 +1341,11 @@ pub fn update_ground(
                     n = super::ladder::top_entry_side(base, top, n, &collision);
                 }
                 if !from_top && super::ladder::attach_blocked(base + n * super::ladder::ATTACH_OUT, -n, &collision) {
+                    // the item by the signed angle about up from the ladder → root direction to the ladder's normal on
+                    // the root's side (0xE269FC, v74 = angle / 90 deg): above 0 → TURN[0] (`turn_l`), else TURN[1]
+                    // (0xE26B26; live, RE/25: the root 0.13 m to the side of the line → `turn_l`, on it → `turn_r`)
                     let to_char = Vec3::new(body.feet.x - base.x, 0.0, body.feet.z - base.z);
-                    back_turn = Some(to_char.dot(super::right_of(-n)) > 0.0);
+                    back_turn = Some(to_char.cross(n).y > 0.0);
                     n = -n;
                 }
                 // the entry's column: 2·(`Human__GetLeadingFoot` ≠ 1) (0xE26A4C, RE/24 LADDER-24); PORT without a pose: the
