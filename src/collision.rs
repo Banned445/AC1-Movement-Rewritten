@@ -3,7 +3,7 @@
 //! The game's `CharacterController` (vftable 0x168C484, ctor 0x57B4F0) is Havok's `hkpCharacterProxy`: each frame
 //! `CharacterController__Integrate` 0x57C7C0 casts its shape along the velocity (≤ 10 iterations), turns the contacts
 //! into planes (0x57A6B0: the plane is pushed out by the keep distance 0.05; a walkable contact steeper than the
-//! max slope, cos 45° at +176, also gets a vertical plane, 0x57A1D0), and lets the simplex solver (0x101F3F0) slide
+//! max slope at +176, cos 53° for the player, also gets a vertical plane, 0x57A1D0), and lets the simplex solver (0x101F3F0) slide
 //! the velocity along them. With the "stick to ground" flag (+127) it then casts the shape down and sets it on what
 //! it finds (`CharacterController__StickToGround` 0x57D240).
 //!
@@ -23,8 +23,8 @@ use bevy::prelude::*;
 
 use crate::tuning::*;
 
-/// Ctor 0x57B4F0 +176: max walkable slope, cos 45°.
-pub const MAX_SLOPE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// The controller's max walkable slope (+176, cos 53° live; `proxy::MAX_SLOPE_COS`).
+pub const MAX_SLOPE_COS: f32 = crate::proxy::MAX_SLOPE_COS;
 /// `Human__ShouldFallOffSupport` 0xB23CB0: with no contact flatter than 45°, a ray straight down of 0.8 m.
 pub const OFF_SUPPORT_RAY: f32 = 0.8;
 /// `CharacterController__PostIntegrate` 0x57D6FC: an entity below `dword_18CF194` (−200 m) is put back at −200 (the body
@@ -374,7 +374,7 @@ impl CollisionWorld {
         self.floor_height_below(p, max).is_some()
     }
 
-    /// Ground's support rule: the stick-to-ground support, kept while its contact is within 45° of vertical, or with a
+    /// Ground's support rule: the stick-to-ground support, kept while its contact is within the max slope (53°) of vertical, or with a
     /// floor within 0.8 m straight below (`Human__ShouldFallOffSupport` 0xB23CB0). `None` = the character falls.
     pub fn ground_support(&self, feet: Vec3) -> Option<Support> {
         let s = self.support(feet)?;
@@ -647,7 +647,7 @@ mod tests {
         // 0.2 m past: on the rim, sunk by r − √(r² − d²)
         let s = on(0.2).unwrap();
         assert!(s.y < 3.0 && s.y > 2.9, "{s:?}");
-        // 0.3 m past (contact > 45°, 0.4·sin45 = 0.283): falls
+        // 0.3 m past: off the rim (the contact past the max slope): falls
         assert!(on(0.3).is_none());
     }
 }
