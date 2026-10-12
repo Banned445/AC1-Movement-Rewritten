@@ -661,6 +661,29 @@ fn probe_resolve_actions() {
     }
 }
 
+/// Movement items whose word says "feet after: parallel" (bits 2–3 = 3, RE/13 §7.6): what can lead to a `_footm` wait.
+#[test]
+#[ignore]
+fn probe_items_feet_after_parallel() {
+    use super::ac_actions::{ActionGraph, CLASS_ACTION_BLOCK};
+    let res = game_fix();
+    let mut graph = ActionGraph::default();
+    for r in res.iter().filter(|r| r.class_hash == CLASS_ACTION_BLOCK) {
+        graph.add_block(&r.name, &r.payload).unwrap();
+    }
+    let names: HashMap<u32, &str> = res.iter().filter(|r| r.class_hash == CLASS_ANIMATION).map(|r| (r.id, r.name.as_str())).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for a in graph.actions.values() {
+        if !a.block.starts_with("Human") || a.block.contains("Fight") || a.block.contains("Assassination") { continue; }
+        for it in &a.items {
+            if it.flags & 0xC == 0xC {
+                let clip = it.animations.first().and_then(|x| names.get(x).copied()).unwrap_or("?");
+                if seen.insert(clip.to_string()) { println!("[{}] {clip} word {:#06x}", a.block, it.flags); }
+            }
+        }
+    }
+}
+
 /// Names for every action (resource id and Action+8 request id): `<id hex>\t<block>: <clip of each item>`, written to
 /// `PROBE_OUT` (a live-analysis overlay shows the playing action by name). Both ids map to the same text.
 #[test]

@@ -258,6 +258,43 @@ mod tests {
         }
     }
 
+    /// Live-analysis courses: every player spawner, then the haystacks, ladders, beams, poles, kiosks and long
+    /// ledge edges within `LAB_RADIUS` (default 40) m of `LAB_CENTER` ("x y", game coordinates, Z up; default the
+    /// Bureau spawner), all printed in game coordinates.
+    #[test]
+    #[ignore]
+    fn probe_lab_courses() {
+        let Some(w) = damascus() else { return };
+        let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+        for r in w.globals.iter().filter(|r| r.name.starts_with("PlayerSpawner")) {
+            if let Some((p, h)) = spawner(&w.globals, &r.name) {
+                println!("spawner {} at {:.2?} heading {h:.2}", r.name, game(p));
+            }
+        }
+        let center = std::env::var("LAB_CENTER").ok().and_then(|s| {
+            let v: Vec<f32> = s.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            (v.len() == 2).then(|| Vec2::new(v[0], v[1]))
+        }).unwrap_or_else(|| { let p = game(spawner(&w.globals, "PlayerSpawner_DEBUG_Bureau").unwrap().0); Vec2::new(p.x, p.y) });
+        let radius: f32 = std::env::var("LAB_RADIUS").ok().and_then(|s| s.parse().ok()).unwrap_or(40.0);
+        let near = |p: Vec3| { let g = game(p); Vec2::new(g.x, g.y).distance(center) < radius };
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in &d.objects {
+                if let Some(h) = o.haystack.filter(|h| near((h.min + h.max) * 0.5)) {
+                    println!("haystack {} centre {:.2?} top {:.2}", o.name, game((h.min + h.max) * 0.5), h.max.y);
+                }
+                for e in o.edges.iter().filter(|e| near((e.p0 + e.p1) * 0.5)) {
+                    use crate::guidance::GuidanceSubType as T;
+                    let len = e.p0.distance(e.p1);
+                    let keep = match e.subtype { T::Ladder | T::Beam | T::Pole | T::Kiosk | T::Rope => true, T::LedgeGrab => len > 4.0, _ => false };
+                    if keep {
+                        println!("{:?} {} {:.2?} -> {:.2?} len {len:.1} wall {:.2?}", e.subtype, o.name, game(e.p0), game(e.p1), game(e.n1));
+                    }
+                }
+            }
+        }
+    }
+
     /// Every cell decodes; entity placements lie in (or near: large objects overhang) their cell's rectangle.
     #[test]
     #[ignore]

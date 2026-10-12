@@ -3823,29 +3823,119 @@ fn a_free_hang_drops_into_a_wall_hang_on_the_ledge_below() {
     assert!((l.hand_l.y - 2.4).abs() < 0.05 && (l.hand_l.z + 19.1).abs() < 0.05, "hands on wall H: {:?}", l.hand_l);
 }
 
-/// Replays a live-game recording's input in the headless sim: `AC_LAB_TRACE=<frames.csv>` (a recording of the
-/// live-analysis lab: per frame the game's dt, buttons and the interpreter's world move direction and stick
-/// magnitude, Z-up). Starts on flat ground (`AC_LAB_START="x y z"`, default -30 0 -30) facing the recording's first
-/// facing, and writes `port_trace.csv` next to the input: frame, time, context, clip, position relative to the start
-/// and horizontal speed, in the game's axes, for a side-by-side timeline. PORT: the game camera's yaw is not in the
-/// recording, so the actor-frame stick of the climb / ledge / ladder states is taken with an input yaw of 0.
-#[test]
-#[ignore]
-fn replay_lab_trace() {
+/// A live-game recording of the live-analysis lab (`frames.csv`: per frame the game's dt, buttons and the
+/// interpreter's world move direction and stick magnitude, Z-up) as port input frames. `start` is the first frame's
+/// position (game axes) and `heading` its facing as a port heading.
+pub(crate) struct LabTrace {
+    pub frames: Vec<crate::recorder::InputFrame>,
+    pub start: Vec3,
+    pub heading: f32,
+}
+
+/// The camera yaw is not recorded; it follows from the raw stick and the interpreter's world move direction (the two
+/// are a rotation apart): camera forward = the move direction turned back by the stick's angle from straight up. With
+/// the stick in the dead zone the last yaw is kept (the first known one before any).
+pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
     use crate::recorder::InputFrame;
-    let Ok(path) = std::env::var("AC_LAB_TRACE") else {
-        eprintln!("set AC_LAB_TRACE to a lab frames.csv");
-        return;
-    };
-    let text = std::fs::read_to_string(&path).expect("read the trace");
+    let text = std::fs::read_to_string(path).expect("read the trace");
     let mut lines = text.lines();
     let head: Vec<&str> = lines.next().unwrap_or_default().split(',').collect();
     let col = |name: &str| head.iter().position(|h| *h == name).unwrap_or_else(|| panic!("no column {name}"));
     let (c_dt, c_b, c_fx, c_fy) = (col("dt"), col("buttons"), col("fx"), col("fy"));
+    let (c_x, c_y, c_z) = (col("x"), col("y"), col("z"));
     let (c_dx, c_dy, c_dz, c_mag) = (col("mdx"), col("mdy"), col("mdz"), col("mmag"));
+    let (c_lx, c_ly) = (col("lx"), col("ly"));
     let rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).filter(|r: &Vec<&str>| r.len() >= head.len()).collect();
     assert!(!rows.is_empty(), "empty trace");
     let f = |r: &Vec<&str>, c: usize| r[c].parse::<f32>().unwrap_or(0.0);
+    // game forward (row 1, Z-up) -> Bevy (x, z, -y); Body::forward = (-sin h, 0, -cos h)
+    let (bx, bz) = (f(&rows[0], c_fx), -f(&rows[0], c_fy));
+    let heading = (-bx).atan2(-bz);
+    let start = Vec3::new(f(&rows[0], c_x), f(&rows[0], c_y), f(&rows[0], c_z));
+    // the camera's yaw per frame in the port's convention (camera forward = (-sin yaw, 0, -cos yaw) in Bevy)
+    let mut yaws: Vec<Option<f32>> = rows
+        .iter()
+        .map(|r| {
+            let (lx, ly, dx, dy) = (f(r, c_lx), f(r, c_ly), f(r, c_dx), f(r, c_dy));
+            if lx.hypot(ly) < 0.4 || dx.hypot(dy) < 0.5 {
+                return None;
+            }
+            // game angle of the camera's forward: the move direction minus the stick's angle, plus a quarter turn
+            let phi = dy.atan2(dx) - ly.atan2(lx) + std::f32::consts::FRAC_PI_2;
+            Some((-phi.cos()).atan2(phi.sin()))
+        })
+        .collect();
+    let first = yaws.iter().flatten().next().copied().unwrap_or(heading + std::f32::consts::PI);
+    let mut last = first;
+    for y in yaws.iter_mut() {
+        last = y.unwrap_or(last);
+        *y = Some(last);
+    }
+    let (mut legs_ago, mut hand_ago, mut prev_b) = (f32::INFINITY, f32::INFINITY, 0u32);
+    let frames = rows
+        .iter()
+        .zip(yaws)
+        .map(|(r, yaw)| {
+            let yaw = yaw.unwrap_or(first);
+            let dt = f(r, c_dt).clamp(0.0005, 0.1);
+            let b = u32::from_str_radix(r[c_b], 16).unwrap_or(0);
+            let mag = f(r, c_mag).min(1.0);
+            let dir = Vec3::new(f(r, c_dx), f(r, c_dz), -f(r, c_dy)).normalize_or_zero();
+            legs_ago = if b & 1 != 0 && prev_b & 1 == 0 { 0.0 } else { legs_ago + dt };
+            hand_ago = if b & 8 != 0 && prev_b & 8 == 0 { 0.0 } else { hand_ago + dt };
+            prev_b = b;
+            InputFrame {
+                dt_nanos: (dt as f64 * 1e9) as u64,
+                dir: if mag < crate::tuning::STICK_DEADZONE { Vec3::ZERO } else { dir },
+                magnitude: mag,
+                speed01: if mag <= 0.35 { 0.0 } else { ((mag - 0.35) / 0.65).clamp(0.0, 1.0) },
+                high_profile: b & (1 << 12) != 0,
+                legs_held: b & 1 != 0,
+                legs_pressed_ago: legs_ago,
+                cam_yaw: yaw,
+                cam_pitch: -0.25,
+                hand_pressed_ago: hand_ago,
+                hand_held: b & 8 != 0,
+                input_yaw: yaw,
+            }
+        })
+        .collect();
+    LabTrace { frames, start, heading }
+}
+
+/// `port_trace.csv`'s columns.
+pub(crate) const LAB_TRACE_HEADER: &str = "frame,time,ctx,clip,x,y,z,hspeed,\
+    head_f,head_r,head_u,spine_f,spine_r,spine_u,lh_f,lh_r,lh_u,rh_f,rh_r,rh_u,lf_f,lf_r,lf_u,rf_f,rf_r,rf_u\n";
+
+/// One `port_trace.csv` row: frame, time, context, clip, position (relative to the start) and horizontal speed in the
+/// game's axes (Bevy (x, y, z) -> game (x, -z, y)), then the six handle bones (Head, Spine, LeftHand, RightHand,
+/// LeftFoot, RightFoot) in the character's frame: forward, right, up from the feet (0 before the first pose).
+pub(crate) fn lab_trace_row(i: usize, t: f32, ctx: ActorContextId, clip: &str, rel: Vec3, vel: Vec3, world: &World, player: Entity) -> String {
+    use crate::bone_pose::{BonePose, PoseSkeleton, HEAD, LEFT_FOOT, LEFT_HAND, RIGHT_FOOT, RIGHT_HAND, SPINE};
+    let mut row = format!("{i},{t:.5},{ctx:?},{clip},{:.4},{:.4},{:.4},{:.4}", rel.x, -rel.z, rel.y, Vec2::new(vel.x, vel.z).length());
+    let pose = world.get::<BonePose>(player);
+    let skel = world.get_resource::<PoseSkeleton>();
+    for bone in [HEAD, SPINE, LEFT_HAND, RIGHT_HAND, LEFT_FOOT, RIGHT_FOOT] {
+        // the player's space faces -Z with +X to the right
+        let m = pose.zip(skel).and_then(|(p, k)| p.model_pos(k, bone)).unwrap_or(Vec3::ZERO);
+        row.push_str(&format!(",{:.4},{:.4},{:.4}", -m.z, m.x, m.y));
+    }
+    row.push('\n');
+    row
+}
+
+/// Replays a live-game recording's input in the headless sim on flat ground: `AC_LAB_TRACE=<frames.csv>`
+/// (`AC_LAB_START="x y z"`, default -30 0 -30, port space), facing the recording's first facing; writes
+/// `port_trace.csv` next to the input for a side-by-side timeline. The city version (the same coordinates as the game)
+/// is `city::stream_tests::replay_lab_trace_city`.
+#[test]
+#[ignore]
+fn replay_lab_trace() {
+    let Ok(path) = std::env::var("AC_LAB_TRACE") else {
+        eprintln!("set AC_LAB_TRACE to a lab frames.csv");
+        return;
+    };
+    let trace = load_lab_trace(&path);
     let start = std::env::var("AC_LAB_START")
         .ok()
         .and_then(|s| {
@@ -3853,56 +3943,22 @@ fn replay_lab_trace() {
             (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
         })
         .unwrap_or(Vec3::new(-30.0, 0.0, -30.0));
-    // game forward (row 1, Z-up) -> Bevy (x, z, -y); Body::forward = (-sin h, 0, -cos h)
-    let (bx, bz) = (f(&rows[0], c_fx), -f(&rows[0], c_fy));
-    let heading = (-bx).atan2(-bz);
-    let mut s = Sim::new(start, heading);
+    let mut s = Sim::new(start, trace.heading);
     s.cam_follow = false;
-    let (mut legs_ago, mut hand_ago, mut prev_b) = (f32::INFINITY, f32::INFINITY, 0u32);
-    let mut out = String::from("frame,time,ctx,clip,x,y,z,hspeed\n");
+    let mut out = String::from(LAB_TRACE_HEADER);
     let mut t = 0.0f32;
-    for (i, r) in rows.iter().enumerate() {
-        let dt = f(r, c_dt).clamp(0.0005, 0.1);
-        let b = u32::from_str_radix(r[c_b], 16).unwrap_or(0);
-        let mag = f(r, c_mag).min(1.0);
-        let dir = Vec3::new(f(r, c_dx), f(r, c_dz), -f(r, c_dy)).normalize_or_zero();
-        legs_ago = if b & 1 != 0 && prev_b & 1 == 0 { 0.0 } else { legs_ago + dt };
-        hand_ago = if b & 8 != 0 && prev_b & 8 == 0 { 0.0 } else { hand_ago + dt };
-        prev_b = b;
-        let frame = InputFrame {
-            dt_nanos: (dt as f64 * 1e9) as u64,
-            dir: if mag < crate::tuning::STICK_DEADZONE { Vec3::ZERO } else { dir },
-            magnitude: mag,
-            speed01: if mag <= 0.35 { 0.0 } else { ((mag - 0.35) / 0.65).clamp(0.0, 1.0) },
-            high_profile: b & (1 << 12) != 0,
-            legs_held: b & 1 != 0,
-            legs_pressed_ago: legs_ago,
-            cam_yaw: 0.0,
-            cam_pitch: -0.25,
-            hand_pressed_ago: hand_ago,
-            hand_held: b & 8 != 0,
-            input_yaw: 0.0,
-        };
+    for (i, frame) in trace.frames.iter().enumerate() {
         s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(frame.dt_nanos)));
         frame.apply(&mut s.app.world_mut().resource_mut::<PadInput>());
+        s.app.world_mut().resource_mut::<CameraRig>().yaw = frame.cam_yaw;
         s.app.update();
-        t += dt;
-        let b = s.body();
-        let rel = b.feet - start;
+        t += frame.dt_nanos as f32 * 1e-9;
         let clip = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()).unwrap_or_default();
-        // back to the game's axes: Bevy (x, y, z) -> game (x, -z, y)
-        out.push_str(&format!(
-            "{i},{t:.5},{:?},{clip},{:.4},{:.4},{:.4},{:.4}\n",
-            s.loco().current,
-            rel.x,
-            -rel.z,
-            rel.y,
-            Vec2::new(b.velocity.x, b.velocity.z).length()
-        ));
+        out.push_str(&lab_trace_row(i, t, s.loco().current, &clip, s.body().feet - start, s.body().velocity, s.app.world(), s.player));
     }
     let dst = std::path::Path::new(&path).with_file_name("port_trace.csv");
     std::fs::write(&dst, out).expect("write port_trace.csv");
-    eprintln!("{} frames -> {}", rows.len(), dst.display());
+    eprintln!("{} frames -> {}", trace.frames.len(), dst.display());
 }
 
 /// Replays every recording in `bugs/*/input.txt` through the gameplay systems (no rendering, animation or IK) and

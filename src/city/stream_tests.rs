@@ -123,6 +123,99 @@ impl CitySim {
     }
 }
 
+/// Live-analysis course finder around the Bureau (game coordinates, Z up): flat open squares (12 × 12 m, every 1 m
+/// sample within 0.15 m of the mean) for walking tests, then roof edges (ledge edges with a horizontal wall normal)
+/// with the drop beyond them, for walk-off / edge tests. `LAB_RADIUS` (default 60) m.
+#[test]
+#[ignore = "live-analysis course finder; requires the local game install"]
+fn probe_lab_course_finder() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.run(0.5);
+    let radius: f32 = std::env::var("LAB_RADIUS").ok().and_then(|v| v.parse().ok()).unwrap_or(60.0);
+    let centre = s.body().feet;
+    let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+    let world = s.app.world();
+    let col = world.resource::<CollisionWorld>();
+    let height = |x: f32, z: f32| col.floor_height_below(Vec3::new(x, 60.0, z), 90.0);
+    // flat squares, best (highest, so roofs first) without overlaps
+    let n = (radius as i32) * 2;
+    let mut squares: Vec<(Vec3, f32)> = Vec::new();
+    for i in (0..n).step_by(3) {
+        for j in (0..n).step_by(3) {
+            let (x0, z0) = (centre.x - radius + i as f32, centre.z - radius + j as f32);
+            let mut hs = Vec::with_capacity(144);
+            for a in 0..12 {
+                for b in 0..12 {
+                    if let Some(h) = height(x0 + a as f32, z0 + b as f32) { hs.push(h) } else { break }
+                }
+            }
+            if hs.len() < 144 { continue; }
+            let mean = hs.iter().sum::<f32>() / hs.len() as f32;
+            if hs.iter().all(|h| (h - mean).abs() < 0.15) {
+                let c = Vec3::new(x0 + 5.5, mean, z0 + 5.5);
+                if squares.iter().all(|(o, _)| o.distance(c) > 12.0) { squares.push((c, mean)); }
+            }
+        }
+    }
+    squares.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (c, h) in squares.iter().take(15) {
+        println!("flat 12x12 centre {:.2?} height {h:.2}", game(*c));
+    }
+    // roof edges and their drops
+    let guidance = world.resource::<crate::guidance::GuidanceWorld>();
+    let mut edges = 0;
+    for e in guidance.edges.iter().filter(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab) {
+        let mid = (e.p0 + e.p1) * 0.5;
+        if mid.distance(centre) > radius || e.p0.distance(e.p1) < 3.0 || e.n1.y.abs() > 0.3 || e.n0.y < 0.7 { continue; }
+        let out = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+        let inside = height(mid.x - out.x * 0.8, mid.z - out.z * 0.8);
+        let beyond = height(mid.x + out.x * 0.8, mid.z + out.z * 0.8);
+        let (Some(top), Some(below)) = (inside, beyond) else { continue };
+        let drop = mid.y - below;
+        if (top - mid.y).abs() > 0.2 || !(1.0..15.0).contains(&drop) { continue; }
+        println!("edge mid {:.2?} out {:.2?} len {:.1} drop {drop:.2}", game(mid), game(out), e.p0.distance(e.p1));
+        edges += 1;
+        if edges >= 80 { break; }
+    }
+}
+
+/// A live-game recording made in Damascus replayed in the port's Damascus at the same coordinates:
+/// `AC_LAB_TRACE=<frames.csv>` (see `sim_tests::load_lab_trace`). The player starts where the recording starts
+/// (the streaming loads around it first), and `port_trace.csv` is written next to the input.
+#[test]
+#[ignore = "live-analysis replay; requires the local game install"]
+fn replay_lab_trace_city() {
+    let Ok(path) = std::env::var("AC_LAB_TRACE") else {
+        eprintln!("set AC_LAB_TRACE to a lab frames.csv");
+        return;
+    };
+    let trace = crate::sim_tests::load_lab_trace(&path);
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    // game (x, y, z) -> Bevy (x, z, -y)
+    let start = Vec3::new(trace.start.x, trace.start.z, -trace.start.y);
+    s.teleport(start);
+    s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
+    // let the cells around the start stream in, standing
+    s.app.insert_resource(crate::map_menu::neutral_pad());
+    s.run(1.0);
+    s.teleport(start);
+    s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
+    let mut out = String::from(crate::sim_tests::LAB_TRACE_HEADER);
+    let mut t = 0.0f32;
+    for (i, frame) in trace.frames.iter().enumerate() {
+        s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(frame.dt_nanos)));
+        frame.apply(&mut s.app.world_mut().resource_mut::<PadInput>());
+        s.app.world_mut().resource_mut::<crate::camera::CameraRig>().yaw = frame.cam_yaw;
+        s.app.update();
+        t += frame.dt_nanos as f32 * 1e-9;
+        let clip = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()).unwrap_or_default();
+        out.push_str(&crate::sim_tests::lab_trace_row(i, t, s.loco().current, &clip, s.body().feet - start, s.body().velocity, s.app.world(), s.player));
+    }
+    let dst = std::path::Path::new(&path).with_file_name("port_trace.csv");
+    std::fs::write(&dst, out).expect("write port_trace.csv");
+    eprintln!("{} frames from {:?} -> {}", trace.frames.len(), trace.start, dst.display());
+}
+
 #[test]
 #[ignore = "manual Damascus CPU profile; requires the local game install"]
 fn profile_damascus_souk_walk_and_freerun() {
