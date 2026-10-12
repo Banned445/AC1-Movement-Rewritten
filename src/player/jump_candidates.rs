@@ -57,6 +57,65 @@ pub fn in_zone(slot: usize, origin: Vec3, p: Vec3, k: f32) -> bool {
     inside
 }
 
+/// `sub_E153C0`: the outline of zone `slot` from its second vertex on (`count` vertices), in the frame of a jumper at
+/// `origin` facing `dir` (x forward, y up; vertices from the third on stretched by `k`, as in `in_zone`).
+fn zone_outline(slot: usize, origin: Vec3, dir: Vec3, count: usize, k: f32) -> Vec<Vec3> {
+    let poly = ZONES[slot];
+    let f = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
+    (1..=count).filter(|&i| i < poly.len()).map(|i| {
+        let q = poly[i];
+        let x = if i >= 2 { q[0] * k } else { q[0] };
+        origin + f * x + Vec3::Y * q[1]
+    }).collect()
+}
+
+/// `sub_116E070` (with `sub_976A50`, the segment–segment closest approach): the point of `a`–`b` nearest the polyline.
+fn nearest_to_outline(a: Vec3, b: Vec3, outline: &[Vec3]) -> Vec3 {
+    let mut best = (f32::MAX, 0.0f32);
+    for w in outline.windows(2) {
+        let (t, d) = segment_closest(a, b, w[0], w[1]);
+        if d < best.0 {
+            best = (d, t);
+        }
+    }
+    if outline.len() < 2 || best.1 <= 0.0 { a } else if best.1 >= 1.0 { b } else { a.lerp(b, best.1) }
+}
+
+/// The closest approach of segments p0–p1 and q0–q1: (the parameter on the first, the distance).
+fn segment_closest(p0: Vec3, p1: Vec3, q0: Vec3, q1: Vec3) -> (f32, f32) {
+    let (d1, d2, r) = (p1 - p0, q1 - q0, p0 - q0);
+    let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
+    let (s, t);
+    if a <= 1e-9 && e <= 1e-9 {
+        return (0.0, r.length());
+    }
+    if a <= 1e-9 {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = d1.dot(r);
+        if e <= 1e-9 {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let bb = d1.dot(d2);
+            let denom = a * e - bb * bb;
+            let mut s0 = if denom > 1e-9 { ((bb * f - c * e) / denom).clamp(0.0, 1.0) } else { 0.0 };
+            let mut t0 = (bb * s0 + f) / e;
+            if t0 < 0.0 {
+                t0 = 0.0;
+                s0 = (-c / a).clamp(0.0, 1.0);
+            } else if t0 > 1.0 {
+                t0 = 1.0;
+                s0 = ((bb - c) / a).clamp(0.0, 1.0);
+            }
+            s = s0;
+            t = t0;
+        }
+    }
+    (s, ((p0 + d1 * s) - (q0 + d2 * t)).length())
+}
+
 /// The request (the query's a7 / a8 / a10 / a12 / a13).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Query {
@@ -449,15 +508,18 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
             if along == Vec3::ZERO || along.dot(dir).abs() <= 0.766_044_4 {
                 continue;
             }
-            // PORT: 0x116E070 clips the beam to the primary zone's front vertices (not decoded); the port takes the
-            // in-zone point (sampled every 0.1 m, 0.3 m from the beam's ends) closest to 4 m ahead, as before
-            let len = a.distance(b);
-            let steps = (len / 0.1).ceil().max(1.0) as usize;
-            let ahead = pos + dir * 4.0;
-            let margin = (0.3 / len.max(1e-3)).min(0.5);
-            let p = (0..=steps).map(|s| s as f32 / steps as f32).filter(|t| (margin..=1.0 - margin).contains(t)).map(|t| a.lerp(b, t)).filter(|p| in1_test(*p))
-                .min_by(|x, y| x.distance_squared(ahead).total_cmp(&y.distance_squared(ahead)));
-            let Some(p) = p else { continue };
+            // `sub_116E070` (0xE19D3E): the point on the beam nearest the zone's outline, the primary polygon from its
+            // second vertex on (4 vertices for the kinds 1 / 2 or mode 4, else 5; `sub_E153C0` 0xE19C18) set in the
+            // jump's frame (forward = dir, up); then `JumpZone__Contains` (0xE19D5A). A beam running along the jump
+            // gives its far end
+            let p = nearest_to_outline(a, b, &zone_outline(z.primary, pos, dir, if q.kind == 1 || q.kind == 2 || q.mode == 4 { 4 } else { 5 }, k));
+            // PORT: a beam crossing the outline gives the crossing point itself, on the zone's boundary, where the
+            // game's float test is untraced: it counts when 1 mm toward the beam's nearer end lies inside
+            let near = if a.distance_squared(pos) <= b.distance_squared(pos) { a } else { b };
+            let p = if in1_test(p) { p } else { p + (near - p).normalize_or_zero() * 0.001 };
+            if !in1_test(p) {
+                continue;
+            }
             let eye = pos + up * 0.75;
             if !clear(collision, eye, p + up * 0.05) {
                 continue;

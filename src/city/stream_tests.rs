@@ -618,3 +618,42 @@ fn probe_damascus_guidance_subtypes() {
         }
     }
 }
+
+/// Jump-target probe (game coordinates, Z up): the candidate query and the scorer at `LAB_POS` along `LAB_DIR` with
+/// `LAB_KIND` (default 0) and beams on, as the free-step stay asks (RE/05 §2.15); then the guidance edges within 1.5 m
+/// of `LAB_REF` (e.g. where the game landed).
+#[test]
+#[ignore = "live-analysis jump-target probe; requires the local game install"]
+fn probe_jump_candidates_at() {
+    use crate::player::jump_candidates::{query, select, Query};
+    let v3 = |k: &str| std::env::var(k).ok().map(|s| { let v: Vec<f32> = s.split(',').map(|x| x.trim().parse().unwrap()).collect(); Vec3::new(v[0], v[2], -v[1]) });
+    let (Some(pos), Some(dir)) = (v3("LAB_POS"), v3("LAB_DIR")) else { return };
+    let kind: u32 = std::env::var("LAB_KIND").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.place(pos, dir);
+    s.run(1.0);
+    let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+    let q = Query { kind, mode: 0, long: false, beams: true, exclude: 0 };
+    let cands = query(pos, dir, &q, s.guidance(), s.collision());
+    for (i, c) in cands.iter().enumerate() {
+        eprintln!("cand {i}: pos {:.3} ty {} sub {} flags {:#x} wall {:.2} dz {:.2} d {:.2}", game(c.pos), c.ty, c.sub, c.flags, game(c.wall), c.pos.y - pos.y, Vec2::new(c.pos.x - pos.x, c.pos.z - pos.z).length());
+    }
+    if let Some(r) = v3("LAB_DOWN") {
+        let c = s.collision();
+        for layer in [crate::layers::MAIN_CHARACTER, crate::layers::CHARACTER, crate::layers::ONLY_STATIC] {
+            let d = c.ray_distance(r, Vec3::NEG_Y, 3.05, layer);
+            eprintln!("down ray at {:.3} layer {layer}: {d:.3}", game(r));
+        }
+        if let Some((d, n, l)) = c.ray_hit_layer(r, Vec3::NEG_Y, 3.05, crate::layers::MAIN_CHARACTER) { eprintln!("hit at {d:.3} normal {:.2} layer {l}", game(n)); }
+    }
+    eprintln!("select mode 1: {:?}", select(&cands, pos, dir, dir, 1, false));
+    eprintln!("select mode 2: {:?}", select(&cands, pos, dir, dir, 2, false));
+    if let Some(r) = v3("LAB_REF") {
+        for e in s.guidance().edges.iter() {
+            let q = crate::guidance::closest_on_segment(e.p0, e.p1, r);
+            if q.distance(r) < 1.5 {
+                eprintln!("edge {:?} {:.3} -> {:.3} n0 {:.2} n1 {:.2} dist {:.2}", e.subtype, game(e.p0), game(e.p1), game(e.n0), game(e.n1), q.distance(r));
+            }
+        }
+    }
+}
