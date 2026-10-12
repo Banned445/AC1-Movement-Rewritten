@@ -1057,8 +1057,9 @@ fn small_drop_lands_with_the_forward_landing_blend() {
     assert!(w[1] + w[4] > 0.99, "{w:?}");
 }
 
-/// RE/24 GROUND-18: walking, once the fidget timer has run out, a cycle breaker from the player's group plays on the
-/// upper-body slot; breaking into a run ends it.
+/// RE/24 GROUND-18: walking, once the fidget timer has run out, a cycle breaker from the group plays on the
+/// upper-body slot; breaking into a run ends it. The player never does it (RE/25 #67, HumanData +0x201 = 0): the test
+/// allows the fidget as for an NPC.
 #[test]
 fn the_walk_plays_a_cycle_breaker_on_the_upper_body() {
     use crate::player::ground_tree::CYCLE_BREAKER;
@@ -1070,7 +1071,11 @@ fn the_walk_plays_a_cycle_breaker_on_the_upper_body() {
     s.pad(Vec3::NEG_Z, 0.5, false, false);
     s.run(0.5);
     assert!(s.ground().speed_param > 0.0 && s.ground().speed_param <= 0.25, "walking: {}", s.ground().speed_param);
-    s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().ground.fidget.timer = 0.0;
+    {
+        let mut d = s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap();
+        d.ground.fidget.allowed = true;
+        d.ground.fidget.timer = 0.0;
+    }
     let group: Vec<u32> = {
         let lib = s.app.world().resource::<crate::anim::AnimLibrary>();
         lib.graph.actions[&CYCLE_BREAKER[0]].assoc.iter().map(|e| e[2]).collect()

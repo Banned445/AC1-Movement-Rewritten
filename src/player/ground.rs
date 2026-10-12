@@ -146,9 +146,11 @@ pub struct HumanGroundData {
     pub fidget: Fidget,
 }
 
-/// The walking upper-body fidget, the "cycle breaker" (RE/24 GROUND-18). `HumanGround__Move_EnterBody` 0xD94BFA arms
-/// the timer HG+0x588 with Random(HumanData +0x204, +0x208) = Random(6, 15) s (`HumanData__ctor` 0xB30330; no
-/// HumanData is serialized in DataPC.forge, so these defaults hold). `UpdateMoveBlend`'s tail (0xDA1FD4–0xDA20D0), on the
+/// The walking upper-body fidget, the "cycle breaker" (RE/24 GROUND-18). Only while HumanData +0x201 is set: the
+/// HumanData constructor sets it, but the player's behaviour clears it (`BhvAssassin__SetupPlayerHuman` 0xAF29C0), so
+/// the player never fidgets (RE/25 #67: +0x201 = 0 and HG+0x588 = 0 through 100 s of walking): `allowed` is false for
+/// the player. When set, `HumanGround__Move_EnterBody` 0xD94BFA arms the timer HG+0x588 with Random(HumanData +0x204,
+/// +0x208) = Random(6, 15) s (`HumanData__ctor` 0xB30330; confirmed live). `UpdateMoveBlend`'s tail (0xDA1FD4–0xDA20D0), on the
 /// locomotion path: when the playing locomotion item becomes item 1 (HG+0x7C0 the last one), in the walk band (HG+0x5DC
 /// = 0: s ≤ 0.25) with the timer run out, it posts event 2 to the upper-body FSM (HG+0x580: `sub_D82560`) and re-arms
 /// the timer; at s ≥ 0.75 it posts event 4 (`sub_D826F0`), which ends the fidget. Event 2's variant is HumanData +0x202:
@@ -158,6 +160,8 @@ pub struct HumanGroundData {
 /// fidgeting. The action played (`ground_tree::CYCLE_BREAKER`) is the animation's to pick.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Fidget {
+    /// HumanData +0x201: the cycle breakers are allowed at all (false for the player).
+    pub allowed: bool,
     /// HG+0x588: time until the next fidget may start.
     pub timer: f32,
     /// Bumped at every event 2 (the animation starts a fidget).
@@ -184,8 +188,8 @@ impl Fidget {
     /// One frame: `moving` = the Move state, `locomotion` = MoveBlend's locomotion path (no transition action in front),
     /// `item` the playing locomotion item, `s` the speed parameter, `enabled` the upper-body FSM's state.
     pub fn update(&mut self, moving: bool, locomotion: bool, item: usize, s: f32, enabled: bool, dt: f32) {
-        if moving && !self.moving {
-            // `Move_EnterBody`: the timer armed on every Move entry
+        if moving && !self.moving && self.allowed {
+            // `Move_EnterBody`: the timer armed on every Move entry while HumanData +0x201 is set
             self.timer = self.random(Self::RANGE.0, Self::RANGE.1);
         }
         self.moving = moving;
@@ -194,7 +198,7 @@ impl Fidget {
         if !(moving && locomotion) {
             return;
         }
-        if item != self.prev_item && item == 1 && s <= Self::WALK && self.timer <= 0.0 && enabled {
+        if item != self.prev_item && item == 1 && s <= Self::WALK && self.timer <= 0.0 && enabled && self.allowed {
             self.seq = self.seq.wrapping_add(1);
             self.timer = self.random(Self::RANGE.0, Self::RANGE.1);
         }
@@ -2092,12 +2096,23 @@ impl AnyHit for std::ops::RangeInclusive<f32> {
 mod reanalysis_tests {
     use super::*;
 
+    /// RE/25 #67: the player's cycle breakers are off (HumanData +0x201 = 0): no timer, no fidget.
+    #[test]
+    fn the_player_never_fidgets() {
+        let mut f = Fidget::default();
+        for i in 0..400 {
+            f.update(true, true, i % 2, 0.2, true, 0.05);
+        }
+        assert_eq!((f.timer, f.seq), (0.0, 0));
+    }
+
     /// RE/24 GROUND-18: the fidget waits for the timer armed at the Move entry (6–15 s), then starts when the walk's
     /// locomotion item turns to item 1; not when running, not while the upper body is locked; a run ends it.
     #[test]
     fn the_walk_fidgets_when_the_timer_runs_out_on_the_right_step() {
         let dt = 0.1;
-        let mut f = Fidget::default();
+        // allowed (HumanData +0x201): an NPC's setting; the player's is off (RE/25 #67)
+        let mut f = Fidget { allowed: true, ..Default::default() };
         f.update(true, true, 0, 0.2, true, dt);
         assert!((6.0..=15.0).contains(&f.timer), "armed at the Move entry: {}", f.timer);
         f.timer = 0.0;
