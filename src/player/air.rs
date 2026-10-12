@@ -1081,19 +1081,21 @@ pub fn update_air(
                 if r.hit_ceiling && body.velocity.y > 0.0 {
                     body.velocity.y = 0.0;
                 }
-                if GAME_FALLS && narrow_on.is_none() && air.hay_pass {
+                if GAME_FALLS && narrow_on.is_none() {
                     // 0xE05490 checks hay before ordinary landing: a controller contact with a haystack (type 3,
                     // descriptor 8 / 9); InAir+340 = the contact normal's z ≤ 0.9, so through the top → Top, against a
-                    // side → SideJump (`EnterFromAir` 0xE42700, `xx_h_air_to_haystack`). The game takes it only while
-                    // InAir knows the haystack (+336, `sub_E03A90`: within 3.5 m in height), i.e. from a jump at a
-                    // haystack target that ends in a free fall (0xB1B8C0) or a let-go record (0xDD7810): `hay_pass`; any
-                    // other fall lands on the solid haystack (RE/24 AIR-25, RE/20 #1 settled statically). Layer 44 lets the
-                    // flight through the static world, not through the haystack: its Dynamic box gives the contact.
-                    // the controller's contact with the haystack (its Dynamic box, which layer 44 still collides with):
-                    // InAir+340 = the normal's z > 0.9 -> Top, else SideJump
-                    // While the faith dive plays (the Leap of Faith, the let-go dive) the dive branch's ray decides instead
+                    // side → SideJump (`EnterFromAir` 0xE42700, `xx_h_air_to_haystack`). Any contact enters: the branch
+                    // takes the contact's haystack before asking whether InAir knows one (+336, `sub_E03A90` 0xE057D7)
+                    // and keeps it when it does not, so the known haystack only replaces the handle (RE/25 #1: a plain
+                    // fall from 6 m entered `Hay_Bale_01` through the top, InAir+336 empty). Layer 44 (an aimed jump)
+                    // lets the flight through the static world, not through the haystack: its Dynamic box gives the
+                    // contact. While the faith dive plays (the Leap of Faith, the let-go dive) the dive branch's ray
+                    // decides instead, and that one does need the known haystack (`hay_pass`).
                     let hit = if air.faith_dive() || air.hollywood {
-                        super::hay::dive_hit(body.feet - body.velocity * dt, body.feet, &guidance.haystacks).map(|stack| (stack, super::hay::HayEntry::Top))
+                        air.hay_pass
+                            .then(|| super::hay::dive_hit(body.feet - body.velocity * dt, body.feet, &guidance.haystacks))
+                            .flatten()
+                            .map(|stack| (stack, super::hay::HayEntry::Top))
                     } else {
                         super::hay::haystack_contacts(&body.proxy.manifold, &guidance.haystacks, &collision)
                             .next()
