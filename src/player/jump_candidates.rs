@@ -212,6 +212,8 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
     let mut pieces: Vec<Piece> = Vec::new();
     let mut ladders: Vec<(usize, Vec3, Vec3)> = Vec::new();
     let mut authored_beams: Vec<(Vec3, Vec3)> = Vec::new();
+    // the report's LedgeGrab pieces, paired into beams below (0xE19BE0 `sub_680260` on this report)
+    let mut ledge_pieces: Vec<crate::guidance::GuidanceEdge> = Vec::new();
     for (i, e) in guidance.edges.iter().enumerate() {
         if !in_bounds(e.p0, e.p1) {
             continue;
@@ -231,6 +233,12 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
             GuidanceSubType::Beam => {
                 authored_beams.push((a, b));
                 continue;
+            }
+            GuidanceSubType::LedgeGrab if q.beams => {
+                let mut piece = e.clone();
+                piece.p0 = a;
+                piece.p1 = b;
+                ledge_pieces.push(piece);
             }
             _ => {}
         }
@@ -432,7 +440,9 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
 
     if q.beams {
         // ------------------------------------------------------------ beams (type 4 / sub-type 1 / 0x10000)
-        let mut beams: Vec<(Vec3, Vec3)> = beam_contacts::detect(guidance, collision, (lo + hi) * 0.5, (hi - lo) * 0.5).into_iter().map(|b| (b.p0, b.p1)).collect();
+        // the beams paired from the box-clipped report (0xE19BE0), not the whole neighbourhood: a beam outside the
+        // kind's box (kind 3 / 4: 0.45–1.3 m up) is no candidate
+        let mut beams: Vec<(Vec3, Vec3)> = beam_contacts::pair_report(std::mem::take(&mut ledge_pieces), collision).into_iter().map(|b| (b.p0, b.p1)).collect();
         beams.extend(authored_beams);
         for (a, b) in beams {
             let along = flat(b - a);
