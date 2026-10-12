@@ -229,6 +229,62 @@ struct Piece {
     subtype: GuidanceSubType,
     /// The chain sets the piece belongs to (bit k = set k).
     sets: u8,
+    /// The lengths the wedge cut off at `a` and `b` (`GuidanceContact__AddCutLengths` 0x6764E0).
+    cut: [f32; 2],
+}
+
+/// The jump wedge: the `MeshShape` of the shared `GuidanceZoneMesh` at `sub_4155B0()` +208 (vertices and triangles read
+/// from the running game, live 2026-10-12), in its own frame: x right (dir × up), y forward, z up. A sector about ±12.5°
+/// wide from its apex, reaching 3 m up to 3 m out, 1.8 m at 4.8, −0.5 at 7.0, −3 at 8.5, its floor 5 m down. Not
+/// quite convex: the arc's second vertices stand at 13.4° against 12.7° for their neighbours.
+const WEDGE_VERTS: [[f32; 3]; 22] = [
+    [0.0, 0.0, 3.0], [0.633, 2.924, 3.0], [1.113, 4.670, 1.8], [1.553, 6.803, -0.5], [1.812, 8.288, -3.0],
+    [0.0, 0.0, -5.0], [0.204, 3.0, 3.0], [0.375, 4.801, 1.8], [0.523, 6.985, -0.5], [0.610, 8.5, -3.0],
+    [-0.232, 3.0, 3.0], [-0.375, 4.801, 1.8], [-0.523, 6.985, -0.5], [-0.610, 8.5, -3.0], [-0.661, 2.924, 3.0],
+    [-1.113, 4.670, 1.8], [-1.553, 6.803, -0.5], [-1.812, 8.288, -3.0], [1.812, 8.288, -5.0], [0.610, 8.5, -5.0],
+    [-0.610, 8.5, -5.0], [-1.812, 8.288, -5.0],
+];
+const WEDGE_TRIS: [[usize; 3]; 40] = [
+    [0, 1, 6], [1, 2, 7], [1, 7, 6], [2, 3, 8], [2, 8, 7], [3, 4, 9], [3, 9, 8], [18, 5, 19], [0, 6, 10], [6, 7, 11],
+    [6, 11, 10], [7, 8, 12], [7, 12, 11], [8, 9, 13], [8, 13, 12], [19, 5, 20], [0, 10, 14], [10, 11, 15], [10, 15, 14],
+    [11, 12, 16], [11, 16, 15], [12, 13, 17], [12, 17, 16], [20, 5, 21], [3, 5, 4], [3, 2, 5], [2, 1, 5], [5, 1, 0],
+    [16, 17, 5], [14, 5, 0], [15, 16, 5], [15, 5, 14], [9, 4, 18], [18, 19, 9], [5, 18, 4], [13, 9, 19], [19, 20, 13],
+    [17, 13, 20], [20, 21, 17], [5, 17, 21],
+];
+
+/// Where the line `o + t·d` crosses the wedge's triangles (Möller–Trumbore), as parameters t.
+fn wedge_crossings(o: Vec3, d: Vec3) -> Vec<f32> {
+    let v = WEDGE_VERTS.map(|[x, y, z]| Vec3::new(x, y, z));
+    WEDGE_TRIS.iter().filter_map(|&[i, j, k]| {
+        let (e1, e2) = (v[j] - v[i], v[k] - v[i]);
+        let p = d.cross(e2);
+        let det = e1.dot(p);
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let s = o - v[i];
+        let u = s.dot(p) / det;
+        let q = s.cross(e1);
+        let w = d.dot(q) / det;
+        (u >= 0.0 && w >= 0.0 && u + w <= 1.0).then(|| e2.dot(q) / det)
+    }).collect()
+}
+
+/// Is `p` (wedge frame) inside the wedge: an odd number of crossings on a ray from it (a skew direction, clear of
+/// the mesh's vertices and edges).
+fn in_wedge(p: Vec3) -> bool {
+    wedge_crossings(p, Vec3::new(0.123, 0.311, 0.942)).into_iter().filter(|&t| t > 0.0).count() % 2 == 1
+}
+
+/// The part of `a`→`b` (wedge frame) inside the wedge, as segment parameters: from `a` (inside) or the first crossing
+/// to `b` (inside) or the last (`sub_5AD070` → 0x6334D0: the hits from either end; mode 1 of `GuidanceZoneMesh` vslot
+/// 12, 0x659570).
+fn wedge_clip(a: Vec3, b: Vec3) -> Option<(f32, f32)> {
+    let mut ts: Vec<f32> = wedge_crossings(a, b - a).into_iter().filter(|t| (0.0..=1.0).contains(t)).collect();
+    ts.sort_by(f32::total_cmp);
+    let t0 = if in_wedge(a) { 0.0 } else { *ts.first()? };
+    let t1 = if in_wedge(b) { 1.0 } else { *ts.last()? };
+    (t1 > t0).then_some((t0, t1))
 }
 
 /// The query. `pos` = feet, `dir` = the wanted direction.
@@ -309,6 +365,23 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
         if w == Vec3::ZERO {
             continue;
         }
+        // the wedge (a11: every player jump query but a long one passes it, 0xEE8026 / 0xEE81E0 / 0xEE8757 /
+        // 0xEE9712; a10 clears it): the report is clipped to the jump wedge at pos + 0.5·dir (0.7 m higher in mode 3),
+        // kiosks exempt (mask 256), after the ladders, the beams' copy and the steep removal (0xE191D0, `sub_5AA970` →
+        // 0x659570 mode 1); a piece outside it is dropped and a clipped one keeps its cut lengths. Live (RE/25
+        // freerun_east): it drops a corner's side face 0.6 m off the jump line, which the game then does not jump to.
+        let (a, b, cut) = if q.long || e.subtype == GuidanceSubType::Kiosk {
+            (a, b, [0.0, 0.0])
+        } else {
+            let origin = pos + dir * 0.5 + if q.mode == 3 { up * 0.7 } else { Vec3::ZERO };
+            let wl = |p: Vec3| { let d = p - origin; Vec3::new(d.dot(right), d.dot(dir), d.dot(up)) };
+            let Some((t0, t1)) = wedge_clip(wl(a), wl(b)) else { continue };
+            let len = a.distance(b);
+            (a.lerp(b, t0), a.lerp(b, t1), [t0 * len, (1.0 - t1) * len])
+        };
+        if a.distance(b) <= 0.0005 {
+            continue;
+        }
         // the three chain sets (`GuidanceChain__Build` 0x116CD50 at 0xE19AD6 / 0xE19B13 / 0xE19B70, RE/24 AIR-27):
         // (reference, axis, turn range), right = dir × up (var_EAC, 0xE198F0). An edge belongs to a set when its
         // direction runs within 45° of the axis and its outward perpendicular is turned from the reference by a signed
@@ -331,7 +404,7 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
                 sets |= 1 << k;
             }
         }
-        pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sets });
+        pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sets, cut });
     }
 
     // ---------------------------------------------------------------- chains (sub_116CD50 × 3 → sub_678670)
@@ -367,7 +440,7 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
         if (1u32 << piece0.subtype as u32) & q.exclude != 0 {
             continue;
         }
-        let Some((pi, g)) = grab_point(chain, centre, dir) else { continue };
+        let Some((pi, g)) = grab_point(chain, &pieces, centre, dir) else { continue };
         let piece = &pieces[pi];
         let e = &guidance.edges[piece.edge];
         let kind = piece.subtype;
@@ -584,9 +657,14 @@ fn nearest_on_shortened(p: Vec3, a: Vec3, b: Vec3, step: f32) -> Vec3 {
 
 /// `GuidanceChain__FindGrabPoint` 0x66E150 (margin 0.5, no hand offsets): `centre` projected along `dir` onto the
 /// chain's vertical plane, kept 0.5 m from the chain's ends; the piece carrying it and the point on that piece.
-fn grab_point(chain: &[(usize, Vec3, Vec3)], centre: Vec3, dir: Vec3) -> Option<(usize, Vec3)> {
+fn grab_point(chain: &[(usize, Vec3, Vec3)], pieces: &[Piece], centre: Vec3, dir: Vec3) -> Option<(usize, Vec3)> {
     let s = chain.first()?.1;
     let e = chain.last()?.2;
+    // the cut lengths at the chain's free ends lengthen it (0x66E150: each hand offset, here 0, less the end's cut
+    // scratch; live RE/25 freerun_east: the grab point lies past the wedge-clipped end, at the middle of the piece the
+    // box left)
+    let cut_at = |pi: usize, q: Vec3| { let p = &pieces[pi]; if p.a.distance(q) <= p.b.distance(q) { p.cut[0] } else { p.cut[1] } };
+    let (cs, ce) = (cut_at(chain[0].0, s), cut_at(chain[chain.len() - 1].0, e));
     let u = flat(e - s);
     if u == Vec3::ZERO {
         // a chain without horizontal extent: its first piece's middle
@@ -598,7 +676,15 @@ fn grab_point(chain: &[(usize, Vec3, Vec3)], centre: Vec3, dir: Vec3) -> Option<
     let proj = if denom.abs() > 1e-6 { centre + dir * ((s - centre).dot(n) / denom) } else { centre - n * (centre - s).dot(n) };
     let len = Vec2::new(e.x - s.x, e.z - s.z).length();
     let t = (proj - s).dot(u);
-    let t = if len > 1.0 { t.clamp(0.5, len - 0.5) } else { len * 0.5 };
+    let (lo, hi) = (-cs, len + ce);
+    let t = if hi - lo > 1.0 { t.clamp(lo + 0.5, hi - 0.5) } else { (lo + hi) * 0.5 };
+    // past a free end: on the end piece's line
+    for (&(pi, a, b), out) in [(chain.first()?, t < 0.0), (chain.last()?, t > len)] {
+        let (ta, tb) = ((a - s).dot(u), (b - s).dot(u));
+        if out && (tb - ta).abs() > 1e-6 {
+            return Some((pi, a.lerp(b, (t - ta) / (tb - ta))));
+        }
+    }
     // the piece whose flat extent along the chain carries t
     let mut best: Option<(f32, usize, Vec3)> = None;
     for &(pi, a, b) in chain {
@@ -951,6 +1037,23 @@ mod tests {
         assert!(found(Vec3::new(-co, 0.0, s)), "facing left, turned toward the jumper");
         assert!(!found(Vec3::new(co, 0.0, -s)), "facing right, turned away");
         assert!(!found(Vec3::new(-co, 0.0, -s)), "facing left, turned away");
+    }
+
+    /// The wedge's side at 0.89 m up, where the live clips cut the corner's edges (RE/25 freerun_east, in the wedge
+    /// frame: forward, left of the jump line): (2.44, 0.56), (2.54, 0.58), (2.58, 0.59), (3.46, 0.81). The mesh's surface
+    /// meets them within 6 mm (the logs give 3 decimals of position and direction).
+    #[test]
+    fn the_wedge_cuts_where_the_game_cut() {
+        for (f, l) in [(2.438, 0.559), (2.541, 0.579), (2.578, 0.594), (3.460, 0.813)] {
+            // a lateral segment from the jump line out to the left (x is right)
+            let (t0, t1) = wedge_clip(Vec3::new(0.0, f, 0.887), Vec3::new(-2.0, f, 0.887)).unwrap();
+            assert!(t0 == 0.0, "{t0}");
+            let edge = 2.0 * t1;
+            assert!((edge - l).abs() < 0.01, "at {f}: the wedge ends {edge:.3} to the left, the game cut at {l}");
+        }
+        // behind the apex and above 3 m nothing is inside
+        assert!(wedge_clip(Vec3::new(-1.0, -0.5, 0.0), Vec3::new(1.0, -0.5, 0.0)).is_none());
+        assert!(wedge_clip(Vec3::new(-1.0, 2.0, 3.2), Vec3::new(1.0, 2.0, 3.2)).is_none());
     }
 
     #[test]

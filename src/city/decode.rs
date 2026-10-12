@@ -157,7 +157,7 @@ pub struct CityData {
     pub resident: Mutex<std::collections::HashSet<u32>>,
 }
 
-fn markers(b: &[u8], class: &str) -> Vec<usize> {
+pub fn markers(b: &[u8], class: &str) -> Vec<usize> {
     let h = crc32(class).to_le_bytes();
     b.windows(4).enumerate().filter(|(_, w)| *w == h).map(|(p, _)| p).collect()
 }
@@ -190,6 +190,10 @@ pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> 
             out.stats.bodies += 1;
             let name = if body.as_ptr() == r.payload.as_ptr() { r.name.clone() } else { format!("{}/{:08x}", r.name, word(body, 0).unwrap_or(0)) };
             if EXCLUDED.iter().any(|x| name.contains(x)) { *out.stats.skipped.entry("excluded name".into()).or_default() += 1; continue; }
+            // PORT: an entity its own Scene moves (`BlendPosClip`) is left out. Its authored placement is not where the
+            // game keeps it, and the scene's positions are not decoded. Damascus has one with collision: the Bureau's
+            // roof hatch `BA_Trap_Group_001` (live 2026-10-12: open in the game, the player falls through the entrance).
+            if !markers(body, "BlendPosClip").is_empty() { *out.stats.skipped.entry("scene-moved".into()).or_default() += 1; continue; }
             match decode_body(data, body, &name, &mut materials, &mut out.stats.skipped) {
                 Ok(Some(o)) => {
                     out.stats.triangles += o.collision.len();

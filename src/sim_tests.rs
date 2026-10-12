@@ -3641,8 +3641,10 @@ fn the_hands_let_go_of_the_bar_on_a_swing_jump() {
 #[test]
 fn grabbing_near_the_end_of_a_ledge_keeps_both_hands_on_it() {
     // the jump-up wall's edge starts at x 8: stand at its very end and jump at it
-    // (a tap jump: Legs pressed and let go; free running in with Legs held would start the wall run, 0xEE7E50)
-    let mut s = Sim::new(Vec3::new(7.85, 0.0, 40.6), FACE_PZ);
+    // (a tap jump: Legs pressed and let go; free running in with Legs held would start the wall run, 0xEE7E50).
+    // 1.1 m from the wall the jump wedge reaches only ±0.14 m to the sides, so 0.15 m past the end the edge is not
+    // in front (RE/18 §1.3b)
+    let mut s = Sim::new(Vec3::new(8.0, 0.0, 40.6), FACE_PZ);
     s.pad(Vec3::Z, 1.0, true, false);
     s.press_legs();
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge), "never hung: {:?}", s.body().feet);

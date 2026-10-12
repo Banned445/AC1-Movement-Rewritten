@@ -231,6 +231,83 @@ mod tests {
         assert!(spawner(&w.globals, "PlayerSpawner_Kingdom").is_some());
     }
 
+    /// The collision triangles under `LAB_POS` ("x y z", game coordinates, Z up), from 0.5 m above it to 3 m below:
+    /// object, cell, layer, height and normal (live-analysis probe for surfaces the port's Damascus has and the game
+    /// doesn't).
+    #[test]
+    #[ignore]
+    fn probe_collision_under() {
+        let Some(w) = damascus() else { return };
+        let Some(p) = std::env::var("LAB_POS").ok().map(|s| s.split_whitespace().filter_map(|x| x.parse().ok()).collect::<Vec<f32>>()) else { return };
+        let (x, z, top) = (p[0], -p[1], p[2]);
+        let game = |v: Vec3| Vec3::new(v.x, -v.z, v.y);
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in &d.objects {
+                for t in &o.collision {
+                    let [a, b, c] = t.vertices;
+                    if t.normal.y.abs() < 1e-4 { continue; }
+                    // inside the triangle in the horizontal plane, then the plane's height there
+                    let s = |u: Vec3, v: Vec3| (v.x - u.x) * (z - u.z) - (v.z - u.z) * (x - u.x);
+                    let (s0, s1, s2) = (s(a, b), s(b, c), s(c, a));
+                    if !((s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0) || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0)) { continue; }
+                    let y = a.y - (t.normal.x * (x - a.x) + t.normal.z * (z - a.z)) / t.normal.y;
+                    if y <= top + 0.5 && y >= top - 3.0 {
+                        println!("{} (cell {cell}) layer {} height {y:.3} normal {:.2?} material {} at {:.2?}", o.name, t.layer, game(t.normal), t.material, game(o.transform.w_axis.truncate()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes the entity bodies of cell `LAB_CELL` whose name contains `LAB_OBJ` to `LAB_OUT`-<n>.bin (live-analysis
+    /// probe: their component classes are then looked up against the reflected class hashes).
+    #[test]
+    #[ignore]
+    fn probe_dump_bodies() {
+        let Some(w) = damascus() else { return };
+        let (Ok(cell), Ok(obj), Ok(out)) = (std::env::var("LAB_CELL"), std::env::var("LAB_OBJ"), std::env::var("LAB_OUT")) else { return };
+        let c = &w.data.grid.cells[cell.parse::<usize>().unwrap()];
+        let (archive, file) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())).unwrap();
+        let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+        let entry = w.data.archives.find(a, &file).unwrap();
+        let mut n = 0;
+        for r in w.data.archives.file(a, entry).unwrap().values() {
+            for body in decode::bodies(r) {
+                let name = if body.as_ptr() == r.payload.as_ptr() { r.name.clone() } else { format!("{}/{:08x}", r.name, u32::from_le_bytes(body[..4].try_into().unwrap())) };
+                if name.contains(&obj) {
+                    std::fs::write(format!("{out}-{n}.bin"), body).unwrap();
+                    println!("{name}: {} bytes -> {out}-{n}.bin", body.len());
+                    n += 1;
+                }
+            }
+        }
+    }
+
+    /// Every entity with collision that a Scene moves (`BlendPosClip`): the scripted movers the decoder leaves out.
+    #[test]
+    #[ignore]
+    fn probe_scene_movers() {
+        let Some(w) = damascus() else { return };
+        let mut n = 0;
+        for cell in 0..w.data.grid.cells.len() {
+            let c = &w.data.grid.cells[cell];
+            let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+            let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+            let Some(entry) = w.data.archives.find(a, &file) else { continue };
+            let Ok(res) = w.data.archives.file(a, entry) else { continue };
+            for r in res.values() {
+                for body in decode::bodies(r) {
+                    if decode::markers(body, "BlendPosClip").is_empty() || decode::markers(body, "RigidBody").is_empty() { continue; }
+                    let name = if body.as_ptr() == r.payload.as_ptr() { r.name.clone() } else { format!("{}/{:08x}", r.name, u32::from_le_bytes(body[..4].try_into().unwrap())) };
+                    println!("{name} (cell {cell})");
+                    n += 1;
+                }
+            }
+        }
+        println!("{n} scene-moved entities with collision");
+    }
+
     /// The haystack objects' own collision: layers, triangle count, the hull's vertical extent against the hay volume
     /// (AIR-25 probe).
     #[test]
