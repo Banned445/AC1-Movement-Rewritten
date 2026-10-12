@@ -195,6 +195,18 @@ pub enum TransitionSetup {
     ToDebug,
 }
 
+/// IHumanTeleport (HumanGround +36: `CanTeleport` 0xDB6BF0 = CanHandleEvent(123), `Teleport` 0xDBF5A0 posts event 123,
+/// always accepted, → 0xD89860 with the fill `sub_D7D380`): the character is put at `to` and re-enters Ground's
+/// Movement through a ToMovement setup that is zero but for +28 = 0.5 and the MoveBlend layout 1, i.e. entry mode 0,
+/// Idle in low profile (RE/24 CENSUS-6). PORT: the port's respawns (a fatal landing, the city's floor of the world).
+pub fn teleport(loco: &mut Locomotion, data: &mut HumanDataBundle, body: &mut Body, to: Vec3) {
+    body.feet = to;
+    body.velocity = Vec3::ZERO;
+    body.proxy.manifold.clear();
+    body.grounded = true;
+    switch_context(loco, data, TransitionSetup::ToMovement { landing: None });
+}
+
 /// Immediate context switch (0x55F7E0): exit old, apply setup to destination data, enter new.
 pub fn switch_context(loco: &mut Locomotion, data: &mut HumanDataBundle, setup: TransitionSetup) {
     loco.previous = loco.current;

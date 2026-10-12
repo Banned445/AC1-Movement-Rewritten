@@ -727,9 +727,12 @@ pub fn update_ground(
                     rig.shake = ((l.total_drop - 3.0) / 7.0).min(1.0);
                 }
                 if l.kind == LandingType::Fatal {
-                    // PORT: immediate respawn until native fatal ragdoll/Dead and desynchronisation are implemented.
+                    // PORT: immediate respawn until native fatal ragdoll/Dead and desynchronisation are implemented,
+                    // as the game's teleport does it (`super::teleport`, RE/24 CENSUS-6): Idle in low profile, no landing
                     body.feet = spawn.0;
                     body.velocity = Vec3::ZERO;
+                    body.proxy.manifold.clear();
+                    g.enter(None);
                 }
             }
             body.grounded = true;

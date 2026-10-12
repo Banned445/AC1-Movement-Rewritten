@@ -151,13 +151,13 @@ const VOID_Y: f32 = -150.0;
 
 pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn: Res<crate::player::SpawnPoint>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>,
-    mut guidance: ResMut<crate::guidance::GuidanceWorld>, mut players: Query<&mut crate::player::Body, With<crate::player::Player>>,
+    mut guidance: ResMut<crate::guidance::GuidanceWorld>, mut players: Query<(&mut crate::player::Body, &mut crate::player::Locomotion, &mut crate::player::HumanDataBundle), With<crate::player::Player>>,
     cams: Query<(&GlobalTransform, Option<&Projection>), With<crate::camera::MainCamera>>) {
     let Some(state) = city.0.as_mut() else { return };
-    let Ok(mut body) = players.single_mut() else { return };
-    // PORT: falling out of the world (past the grid's ground) puts the player back at the spawn; the game's
-    // OutOfBounds / desynchronisation handling is not ported.
-    if body.feet.y < VOID_Y { body.feet = spawn.0; body.velocity = Vec3::ZERO; body.proxy.manifold.clear(); }
+    let Ok((mut body, mut loco, mut data)) = players.single_mut() else { return };
+    // PORT: falling out of the world (past the grid's ground) puts the player back at the spawn through the game's
+    // teleport (re-entering Ground, RE/24 CENSUS-6); the game's OutOfBounds / desynchronisation handling is not ported.
+    if body.feet.y < VOID_Y { crate::player::teleport(&mut loco, &mut data, &mut body, spawn.0); }
     // AC_CITY_TOUR=<m/s>: debug fly-through, 25 m above the spawn, straight across the grid (streaming / LOD stress)
     if let Some(speed) = std::env::var("AC_CITY_TOUR").ok().and_then(|v| v.parse::<f32>().ok()) {
         let height = std::env::var("AC_CITY_TOUR_HEIGHT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(25.0);

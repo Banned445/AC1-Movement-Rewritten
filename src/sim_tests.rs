@@ -1057,6 +1057,28 @@ fn small_drop_lands_with_the_forward_landing_blend() {
     assert!(w[1] + w[4] > 0.99, "{w:?}");
 }
 
+/// RE/24 CENSUS-6: the teleport re-enters Ground's Movement in Idle at the target (entry mode 0): no landing, standing,
+/// whatever context the character was in.
+#[test]
+fn a_teleport_reenters_the_ground_standing_at_the_target() {
+    let mut s = Sim::new(Vec3::new(19.0, 3.0, 12.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, true, false);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::InAir), "never left the roof");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    let to = Vec3::new(-30.0, 0.0, -30.0);
+    {
+        let player = s.player;
+        let w = s.app.world_mut();
+        let mut q = w.query::<(&mut Locomotion, &mut HumanDataBundle, &mut crate::player::Body)>();
+        let (mut loco, mut data, mut body) = q.get_mut(w, player).unwrap();
+        crate::player::teleport(&mut loco, &mut data, &mut body, to);
+    }
+    s.run(0.2);
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    assert!(s.ground().oneshot.is_none() && s.ground().speed_param == 0.0, "no landing, standing");
+    assert!(s.body().feet.distance(to) < 0.01, "{:?}", s.body().feet);
+}
+
 /// RE/24 GROUND-16: leaving the ground switches the foot IK and the smoothing off, a landing keeps them off (on at the
 /// ground entry, off again for state 21), and its end switches them on over 0.35 s.
 #[test]
