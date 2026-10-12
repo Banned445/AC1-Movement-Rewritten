@@ -149,8 +149,10 @@ pub struct LadderEntry {
     pub catch_out: Option<Vec3>,
     /// Controller speed for the catch blend (0xE0BB70).
     pub catch_speed: f32,
+    /// The ladder's buried part (`sub_E25B20`, LadderState +788), the entry from the ground's attach rung floor.
+    pub buried: f32,
     /// The back-approach turn (`sub_E24FD0`: the attach box blocked on the approach side, RE/24 LADDER-4): `Some(true)`
-    /// = `TURN[0]` (signed approach angle > 0), `Some(false)` = `TURN[1]`; `n` is then the far side.
+    /// = `TURN[0]` (signed approach angle > 0), `Some(false)` = `TURN[1]`; `n` stays the approach side (live RE/25 #68).
     pub back_turn: Option<bool>,
 }
 
@@ -450,12 +452,18 @@ impl HumanLadderData {
             // ladder's height − 1.95 m; high profile 0.5 m higher (0xE26AB5–0xE26AE2, RE/24 LADDER-5). PORT: the buried
             // base (`sub_E25B20`) is not measured
             let h_in = self.height_of(e.from).max(0.0);
-            let k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
+            let mut k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
+            // a ladder buried more than 0.1 m starts at the rung 1 + trunc(2 × buried) at least (0xE1F95D: `1 − (int)(−2·b)`;
+            // live RE/25: the Bureau ladder, 0.67 m below the ground, attached at 1.0 m)
+            if e.buried > 0.1 {
+                k = k.max(1.0 + (2.0 * e.buried).trunc());
+            }
             self.height = 0.5 * k + if e.high { 0.5 } else { 0.0 };
             let to = self.root_at(self.height);
             if let Some(left) = e.back_turn {
-                // the back-approach turn onto the far side (+908 bit 2: 0x0A64400C / D, items a then b into the wait,
-                // single-weight blend; RE/24 LADDER-4). PORT: the heading snaps (the game slerps at rate 1.6)
+                // the back-approach turn (+908 bit 2: 0x0A64400C / D, items a then b into the wait, single-weight blend;
+                // RE/24 LADDER-4), ending on the approach side (live RE/25 #68). PORT: the heading snaps (the game slerps
+                // at rate 1.6)
                 self.chain = true;
                 self.play(LadderPhase::Entry, blend(TURN[(!left) as usize], 0, &[]), e.from, to, false);
                 return;
@@ -464,6 +472,26 @@ impl HumanLadderData {
             self.fwd = Vec3::new(e.facing.x, 0.0, e.facing.z).normalize_or(-self.n);
             self.play(LadderPhase::EnterGround, blend(ENTER_GROUND[hi][e.foot], 0, &w), e.from, to, true);
         }
+    }
+}
+
+/// `sub_E25B20` (from the ground entry, 0xE26A75): how deep the ladder's base lies under what stands on it: the highest hit
+/// of a ray from half-way up the ladder down to its base (layer 8, not the ladder), its height over the base over cos(tilt);
+/// 0 with none above the base or a ladder tilted more than 60°.
+pub fn buried_depth(base: Vec3, top: Vec3, collision: &CollisionWorld) -> f32 {
+    let axis = top - base;
+    let tilt = axis.normalize_or(Vec3::Y).y.clamp(-1.0, 1.0).acos();
+    let from = base + axis * 0.5;
+    let len = (from - base).length();
+    if len < 1e-4 || tilt > 60f32.to_radians() {
+        return 0.0;
+    }
+    match collision.ray_hit(from, (base - from) / len, len, crate::layers::NO_CHARACTER_COLLISION) {
+        Some((d, _)) => {
+            let hit = from + (base - from) / len * d;
+            ((hit.y - base.y) / tilt.cos()).max(0.0)
+        }
+        None => 0.0,
     }
 }
 

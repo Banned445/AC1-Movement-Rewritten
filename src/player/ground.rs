@@ -1409,12 +1409,17 @@ pub fn update_ground(
                     // (0xE26B26; live, RE/25: the root 0.13 m to the side of the line → `turn_l`, on it → `turn_r`)
                     let to_char = Vec3::new(body.feet.x - base.x, 0.0, body.feet.z - base.z);
                     back_turn = Some(to_char.cross(n).y > 0.0);
-                    n = -n;
+                    // the climb stays on the approach side: live (RE/25 #68, probed at 0xE26B00 / 0xE26B57 on the Bureau
+                    // ladder) the box was blocked at the near target (y 3.214) and the flipped frame put the target on
+                    // the far side (y 2.214), yet the root ended on the near side 0.545 m out, hands on the line, after
+                    // the turn (twice, from both sides); the flipped target does not place it (hypothesis: the
+                    // entry's root warp is relative to the turn clip). PORT: `n` is kept
                 }
                 // the entry's column: 2·(`Human__GetLeadingFoot` ≠ 1) (0xE26A4C, RE/24 LADDER-24); PORT without a pose: the
                 // locomotion blend's foot
                 let foot = leading_foot.unwrap_or((g.blend.foot != 0) as usize);
-                let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot, from_ledge: false, action: None, back_turn, ..Default::default() };
+                let buried = if from_top { 0.0 } else { super::ladder::buried_depth(base, top, &collision) };
+                let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot, from_ledge: false, action: None, back_turn, buried, ..Default::default() };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
                 continue;
             }
