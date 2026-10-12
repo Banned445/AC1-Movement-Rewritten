@@ -206,7 +206,7 @@ fn replay_lab_trace_city() {
     let mut t = 0.0f32;
     for (i, frame) in trace.frames.iter().enumerate() {
         s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(frame.dt_nanos)));
-        frame.apply(&mut s.app.world_mut().resource_mut::<PadInput>());
+        crate::sim_tests::apply_lab_frame(frame, &mut s.app.world_mut().resource_mut::<PadInput>());
         s.app.world_mut().resource_mut::<crate::camera::CameraRig>().yaw = frame.cam_yaw;
         s.app.update();
         t += frame.dt_nanos as f32 * 1e-9;

@@ -1231,8 +1231,11 @@ fn swing_back_catches_the_beam_behind_into_a_free_hang() {
 
 /// Walk (high profile, no Legs) straight along `dir` until the body stops against something (or `max_s` runs out).
 /// The grab probes reach 0.75 m, so the wall-start tests first walk up to the wall, as a player does.
+/// Walk up to a wall in low profile: pushed into a plain wall in high profile the character leans on it (event 42, the
+/// interpreter's obstacle sender 0xEE8C83, live RE/25 GROUND-32), and the lean refuses the climb start (event 50,
+/// `ObstacleCollision_HandleEvent` 0xDA6FF0), so the climb tests approach in low profile.
 fn walk_to_wall(s: &mut Sim, dir: Vec3, max_s: f32) {
-    walk_to_wall_in(s, dir, max_s, true);
+    walk_to_wall_in(s, dir, max_s, false);
 }
 
 /// `high` = high profile, which hops onto obstacles under 1.3 m by itself (the free-run target jump 0xEE7F7A).
@@ -2376,8 +2379,9 @@ fn send_obstacle_collision(s: &mut Sim) -> bool {
     true
 }
 
-/// The lean (ObstacleCollision) starts in high profile with the stick pushed into a wall at least 0.7 m high (owner's
-/// live check 2026-10-10, bug-1791665811; PORT sender); low profile and a 0.6 m box only block the run.
+/// The lean (ObstacleCollision) on a plain wall (no guidance edge in the query's plane zone) starts only in high profile
+/// (the interpreter's event-42 sender 0xEE8C83, live-traced RE/25 GROUND-32; owner's check 2026-10-10, bug-1791665811);
+/// in low profile it only blocks the run.
 #[test]
 fn pushing_into_a_wall_in_high_profile_puts_the_hands_on_it() {
     use crate::player::collide::CollideKind;
@@ -2455,10 +2459,9 @@ fn obstacle_collision_leans_on_a_low_wall_and_releasing_stands_up() {
     let c = s.ground().collide.unwrap();
     assert_eq!(c.kind, CollideKind::Hand);
     assert!((c.h - 0.5).abs() < 0.02, "1.1 m → halfway between the 70 and 150 cm clips: {}", c.h);
-    // keeps leaning while pushing into the wall
+    // leaning while pushing into the wall (the climb comes only after 0.5 s of pushing, the test below)
     assert!(s.run_until(3.0, |s| s.ground().collide.is_some_and(|c| c.phase == CollidePhase::Wait)), "no lean wait");
-    s.run(1.0);
-    assert!(s.ground().collide.is_some(), "still leaning");
+    assert!(s.ground().lean_push_t < 0.5, "the wait starts before the climb: {}", s.ground().lean_push_t);
     let f = s.body().feet;
     assert!((f.z - (-3.8 + 0.4)).abs() < 0.02, "root 0.4 m out of the face: {f:?}");
     assert!(s.body().forward().dot(Vec3::NEG_Z) > 0.99, "facing the wall");
@@ -2467,6 +2470,22 @@ fn obstacle_collision_leans_on_a_low_wall_and_releasing_stands_up() {
     s.run(2.0 / 60.0);
     assert!(s.ground().collide.is_none());
     assert!(s.ground().oneshot.is_some_and(|o| o.blend.id == LEAN_TO_WAIT[0]), "lean_*_wait_tr_l_wait");
+}
+
+/// The lean's climb (interpreter 0xEE75E0–0xEE7788, live-traced RE/25 GROUND-32): pushing into the 1.1 m wall for more
+/// than 0.5 s in low profile jumps at its edge from the lean (event 47, the straight jump's knee band
+/// `lean_wait_025cm_twohand_*_to_hangknee`), as the game climbed the Bureau crate 0.47 s after the collide.
+#[test]
+fn pushing_on_in_the_lean_climbs_the_low_wall() {
+    use crate::player::collide::CollidePhase;
+    let mut s = Sim::new(Vec3::new(30.0, 0.0, -3.38), 0.0);
+    s.run(0.2);
+    assert!(send_obstacle_collision(&mut s));
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.ground().collide.is_some_and(|c| c.phase == CollidePhase::Wait)), "no lean wait");
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::InAir), "no climb from the lean");
+    assert!(s.ground().lean_push_t == 0.0);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y > 1.0), "not on the wall top: {:?} {:?}", s.loco().current, s.body().feet);
 }
 
 #[test]
@@ -3858,6 +3877,20 @@ pub(crate) struct LabTrace {
     pub wait_foot: Option<usize>,
 }
 
+/// A lab frame onto the pad. Unlike the port's own recordings (whose press ages are the pad's), a recorded press only
+/// restarts the age: between presses the pad's own age runs on, so a press the simulation consumed stays consumed.
+pub(crate) fn apply_lab_frame(frame: &crate::recorder::InputFrame, pad: &mut PadInput) {
+    let (legs, hand) = (pad.legs_pressed_ago, pad.hand_pressed_ago);
+    frame.apply(pad);
+    let dt = frame.dt_nanos as f32 * 1e-9;
+    if frame.legs_pressed_ago > 0.0 {
+        pad.legs_pressed_ago = legs + dt;
+    }
+    if frame.hand_pressed_ago > 0.0 {
+        pad.hand_pressed_ago = hand + dt;
+    }
+}
+
 impl LabTrace {
     /// The replay starts in the recording's wait foot, so the next start and stop take the game's feet.
     pub fn apply_start(&self, world: &mut World, player: Entity) {
@@ -3990,7 +4023,7 @@ fn replay_lab_trace() {
     let mut t = 0.0f32;
     for (i, frame) in trace.frames.iter().enumerate() {
         s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(frame.dt_nanos)));
-        frame.apply(&mut s.app.world_mut().resource_mut::<PadInput>());
+        apply_lab_frame(frame, &mut s.app.world_mut().resource_mut::<PadInput>());
         s.app.world_mut().resource_mut::<CameraRig>().yaw = frame.cam_yaw;
         s.app.update();
         t += frame.dt_nanos as f32 * 1e-9;
