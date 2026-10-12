@@ -1489,14 +1489,16 @@ fn releasing_the_stick_stops_quickly_like_the_game() {
     let slide = s.body().feet.x - x0;
     assert!((0.2..2.0).contains(&slide), "run stop slide {slide}");
     let _ = RUN_STOP_TO_WAIT;
-    // walk, release: stopped at once
+    // walk, release: the accel transition into the wait (0xD8B220), the walk's displacement fading out over its 0.2 s
+    // blend (BLENDAB): a short coast of about speed × 0.1 s (live RE/25: 0.15–0.3 m)
     let mut s = Sim::new(Vec3::new(0.0, 0.0, -30.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, false, false);
     s.run(1.5);
     let x0 = s.body().feet.x;
     s.pad(Vec3::X, 0.0, false, false);
     s.run(0.3);
-    assert!(s.body().feet.x - x0 < 0.05, "walk stop slid {}", s.body().feet.x - x0);
+    let slide = s.body().feet.x - x0;
+    assert!((0.05..0.3).contains(&slide), "walk stop slid {slide}");
     assert!(s.ground().oneshot.is_none());
 }
 
@@ -2712,8 +2714,10 @@ fn the_swing_stops_and_starts_with_high_profile_and_legs_held() {
 #[test]
 fn a_free_hang_jump_at_a_wall_lands_feet_on_the_wall() {
     use crate::player::ledge::LedgeHangType;
-    // the free run off the roof edge (high profile, Legs held), as recorded
-    let mut s = Sim::new(Vec3::new(8.2, 3.5, 11.0), std::f32::consts::PI);
+    // the free run off the roof edge (high profile, Legs held), from the take-off point of the recording: the edge jump
+    // (`v142`, +52 < 0.25: a squared distance, within 0.5 m) now fires 0.5 m before the edge, where this 6.9 m gap is out
+    // of the tap query's reach, so the run starts 0.2 m from it
+    let mut s = Sim::new(Vec3::new(8.2, 3.5, 14.8), std::f32::consts::PI);
     s.pad(Vec3::Z, 1.0, true, true);
     s.press_legs();
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.body().feet);
@@ -3696,14 +3700,17 @@ fn starting_from_standing_plays_the_start_item() {
     // it hands over to the locomotion item of the other foot when it ends
     assert!(s.run_until(1.0, |s| s.ground().tr.is_none()), "start never ended");
     assert!(s.ground().speed_param > 0.0);
-    // releasing the stick during a start ends it (Move_CanStop: the playing action is not the locomotion)
+    // releasing the stick during a start ends it (Move_CanStop: the playing action is not the locomotion): Idle from
+    // Move plays the wait through the accel transition (0xD8B220, live RE/25 `xx_h_accel_tr_l_wait_foot*`)
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
     s.run(0.2);
     s.pad(Vec3::NEG_Z, 1.0, false, false);
     s.run(0.1);
     s.pad(Vec3::ZERO, 0.0, false, false);
     s.run(1.0 / 60.0 + 1e-4);
-    assert!(s.ground().tr.is_none() && s.ground().speed_param == 0.0);
+    let tr = s.ground().tr.expect("the accel transition");
+    assert!(tr.to_wait && crate::player::ground_tree::IDLE_FROM_MOVE[0].contains(&tr.action.id), "{:#x}", tr.action.id);
+    assert_eq!(s.ground().speed_param, 0.0);
 }
 
 #[test]
@@ -3766,15 +3773,17 @@ fn trace_low_profile_edge_halt() {
 
 #[test]
 fn walking_into_a_lower_edge_halts_without_the_ledge_stop() {
-    // roof A (3.5 m, drop 2-5 m) in low profile: the interpreter's edge halt (0xEE7BDA) stops the walk 0.16 m from the
-    // edge, no ledge-stop clip, no fall, and no restart while the stick still pushes into it
+    // roof A (3.5 m, drop 2-5 m) in low profile: the interpreter's edge halt (0xEE7BDA) stops the walk within 0.4 m of the
+    // edge (+52 < 0.16 is a squared distance; live RE/25: the feet ended 0.23–0.39 m before the line), no ledge-stop
+    // clip, no fall, and no restart while the stick still pushes into it
     let mut s = Sim::new(Vec3::new(9.0, 3.5, 12.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, false, false);
     s.run(3.0);
     assert_eq!(s.loco().current, ActorContextId::Ground, "fell: {:?}", s.body().feet);
     assert!(s.ground().ledge_stop.is_none(), "no ledge stop below 5 m");
     let x = s.body().feet.x;
-    assert!((11.0 - x - 0.16).abs() < 0.05, "halted 0.16 m from the edge: {x}");
+    // the halt at 0.4 m, then the walk's coast into the wait (live: 0.23–0.39 m before the line)
+    assert!((0.15..0.41).contains(&(11.0 - x)), "halted short of the edge: {x}");
 }
 
 #[test]

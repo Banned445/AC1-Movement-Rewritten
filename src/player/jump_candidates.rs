@@ -653,9 +653,18 @@ pub struct EdgeReport {
     pub normal: Vec3,
     /// +48: the drop beyond the edge.
     pub drop: f32,
-    /// +52: the horizontal distance to the edge, negative once the feet are past it.
+    /// The horizontal distance to the edge, negative once the feet are past it (the game stores its square, `sq`).
     pub dist: f32,
     pub edge: usize,
+}
+
+impl EdgeReport {
+    /// +52 as the game stores it: the **squared** horizontal distance (`sub_42EC70` is the squared length), negative
+    /// once the feet are past the edge. The game's thresholds on it are squared distances (live RE/25: the halt's 0.16
+    /// fired with the feet 0.393 m from the edge, +52 = 0.154).
+    pub fn sq(&self) -> f32 {
+        self.dist * self.dist.abs()
+    }
 }
 
 /// `Human__BuildEdgeReports` 0xB1BC50 (pos, radius, min drop; the floor case is not ported): every guidance piece
