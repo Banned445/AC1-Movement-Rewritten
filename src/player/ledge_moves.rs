@@ -1209,6 +1209,9 @@ pub fn try_side_to_ladder(
         if Vec2::new(p.x - q.x, p.z - q.z).length() > 0.6 {
             continue;
         }
+        // the climb side is the hanger's (the ladder frame is signed toward the climber, RE/24 LADDER-3; live RE/25: from
+        // the Bureau roof-edge hang the game climbs on the hang's side, 0.5 m out, still facing the wall)
+        let ln = if ln.dot(Vec3::new(root.x - q.x, 0.0, root.z - q.z)) < 0.0 { -ln } else { ln };
         let to = q + ln * super::ladder::ATTACH_OUT;
         let id = FROM_LEDGE_SIDE[free as usize][right as usize];
         let seq = [single(id, 0), None, None, None];
