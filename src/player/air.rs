@@ -426,6 +426,9 @@ impl HumanInAirData {
                 // it (live: 0.66 s, 4.8 m), off a roof it falls on from there
                 let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
                 let aim = from + flat * ahead - Vec3::Y * FREE_JUMP_DOWN;
+                // its candidate is type 1 (`Human__MakeFreeJumpTarget` 0xB13630), so the automatic catch is armed
+                // during the flight (live RE/25 freerun_east 016: a wall hang caught off the free jump)
+                self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
                 self.free_target = true;
             }
@@ -438,6 +441,7 @@ impl HumanInAirData {
                 self.foot_left = foot_left;
                 let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
                 let aim = from + flat * ahead - Vec3::Y * down;
+                self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 1);
                 self.free_target = true;
             }
@@ -1183,7 +1187,9 @@ pub fn update_air(
             let manual = grasp && !air.faith_dive() && super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
             // Data+505: set by the jump's set-up, cleared when its flight ends without an arrival (0xE0F268)
             let jumping = matches!(air.mode, AirMode::Jump { .. });
-            let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, air.target.map(|t| t.type_flags), body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
+            // the jump's type is InAirData +0x290 (`target_flags`): a target's type, or 1 for the free jumps
+            let jump_type = Some(air.target_flags).filter(|&f| f != 0);
+            let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, jump_type, body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
             // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
             let reach = if manual && pad.speed01 > 0.0 && pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { body.forward() };
             if manual || automatic {
@@ -1209,7 +1215,7 @@ pub fn update_air(
             }
             if ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
                 let stored = match air.mode { AirMode::Jump { aim, .. } => Some(aim), _ => None };
-                let ahead = super::air_catches::target_ahead(body.feet, stored, air.target.map(|t| t.type_flags), &collision);
+                let ahead = super::air_catches::target_ahead(body.feet, stored, jump_type, &collision);
                 // the beam too only with no jump target ahead: its call (0xE0D41D) sits outside the pilotis'
                 // `IsJumpTargetAhead` block, but `HumanInAir__FindBeamCatch` 0xE0B890 runs the same test itself. The
                 // gate's InAir+104 is a deadline armed once at the InAir entry (0.4 s, 0xE01D4A) (RE/24 AIR-16)

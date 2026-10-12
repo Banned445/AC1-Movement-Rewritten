@@ -1624,8 +1624,10 @@ pub fn update_ground(
                 // takeoff): the foot opposite the locomotion's (live RE/25: three free-run take-offs, the game always
                 // on the other foot from the port's former "same foot" reading)
                 Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
-                // vt28: free jump without a target
-                None => InAirEntry::FreeJump { from: body.feet, dir: forward, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
+                // vt28: free jump without a target, along the direction the candidates were searched in (IHuman vt68
+                // gets the query's own direction pointer, 0xEE842D / 0xEE81CE; live RE/25 freerun_east: the stick's
+                // (0.999, −0.038) while the body still faced 12° to the right)
+                None => InAirEntry::FreeJump { from: body.feet, dir: want, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;
