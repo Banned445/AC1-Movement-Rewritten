@@ -148,7 +148,7 @@ fn flat(v: Vec3) -> Vec3 {
 }
 
 /// The wall normal of an edge: the face normal with the lower vertical part, flattened (`v221`).
-fn wall_of(n0: Vec3, n1: Vec3) -> Vec3 {
+pub(crate) fn wall_of(n0: Vec3, n1: Vec3) -> Vec3 {
     flat(if n1.y <= n0.y { n1 } else { n0 })
 }
 

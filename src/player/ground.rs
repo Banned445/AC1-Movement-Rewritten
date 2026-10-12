@@ -101,6 +101,9 @@ pub struct HumanGroundData {
     pub look_down: Option<LookDown>,
     /// The interpreter's edge-halt latch (+4176) and how long it has held (timer +4144, 0xEE7C5E–0xEE7C8E).
     pub edge_halt_t: f32,
+    /// The interpreter's lean push timer (+0xFC8, 0xEE75F4–0xEE763E): how long the stick has pushed within 45° of the
+    /// facing while leaning; any other frame restarts it.
+    pub lean_push_t: f32,
     pub pose_seq: u32,
     /// Facing applied when the next one-shot starts (the lean exits end turned, `collide`).
     pub face_next: Option<f32>,
@@ -1263,6 +1266,9 @@ pub fn update_ground(
         }
 
         // ---------------------------------------------------------------- obstacle collision / lean (sub-state 5)
+        if g.collide.is_none() {
+            g.lean_push_t = 0.0;
+        }
         if let Some(mut c) = g.collide {
             g.sub_state = HumanGroundSubState::ObstacleCollision;
             // event 49 in the lean (`ObstacleCollision` handler 0xDA6FF0: HG+1492 clear → FindWallingWall → 0xDA5680,
@@ -1275,6 +1281,30 @@ pub fn update_ground(
                     g.collide = None;
                     let from = body.feet;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
+                    continue;
+                }
+            }
+            // The lean's climb (interpreter 0xEE75E0–0xEE7788, live-traced RE/25 GROUND-32: `DoStraightJumpToTarget`
+            // posts event 47 from 0xEE7781): while leaning (IHumanGround vt708 0xD7DB10: sub-state 5) the stick past
+            // 0.35 within 45° of the facing runs the push timer. Legs pressed, or pushed for more than 0.5 s (0.1 s in
+            // high profile), with the Jump ability and the lean's item unlocked (CanHandleEvent(47), 0xDA6FF0): the static
+            // hand target (IHuman vt64 0xB10990 → `Human__EvaluateStaticHandTargets` 0xE165D0, picked by 0xE97720) of a
+            // free-step, knee or waist type (flags & 0xD; any type with high profile and Legs) is jumped at (event 47 →
+            // `HumanGround__StartStraightJumpToTarget` 0xD8A9C0 → 0xB21DA0). Live: the Bureau crate (1.16 m) was climbed
+            // 0.47 s after the collide.
+            let pushing = pad.magnitude > crate::tuning::STICK_DEADZONE && pad.stick_facing_angle.abs() < std::f32::consts::FRAC_PI_4;
+            g.lean_push_t = if pushing { g.lean_push_t + dt } else { 0.0 };
+            let legs = pad.jump_buffered();
+            if (legs || g.lean_push_t > LEAN_CLIMB_TIME[pad.high_profile as usize]) && ab.allows(Ability::Jump) && !super::anim_gate::locked(&c.current().0) {
+                let target = static_hand_target(body.feet, body.forward(), &guidance, &collision, false)
+                    .filter(|t| (pad.high_profile && legs) || t.type_flags & 0xD != 0);
+                if let Some(target) = target {
+                    pad.consume_jump();
+                    g.collide = None;
+                    g.lean_push_t = 0.0;
+                    body.velocity = Vec3::ZERO;
+                    let foot_left = g.blend.foot == 0;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from: body.feet, target, speed_param: 0.0, foot_left }));
                     continue;
                 }
             }
@@ -1680,21 +1710,25 @@ pub fn update_ground(
         if stopping && collision.ground_support(r.position).is_none() {
             r.position = before;
         }
-        // ObstacleCollision (sub-state 5, the two-hand lean). LIVE (owner, 2026-10-10): in high profile the game puts
-        // the hands on a wall the character is pushed into, and left / right pushes away from it. PORT: the sender is
-        // not traced: the interpreter's event-42 path is dead (0xE96BF0 only writes 0 to its flag, 0xE97581; RE/02
-        // §4.5), so another poster (e.g. `HumanGround__PostEventTop` 0xDB5030) must send it. The stand-in: high profile,
-        // the stick pushing into a wall at least 0.7 m high (the hand type; the foot type is not observed) within 45°
-        // of the facing, on snapped ground (event 42's guard 0xB25230). The wall run and the jumps above go first.
+        // ObstacleCollision (sub-state 5, the collide and lean). The sender (live-traced RE/25 GROUND-32: walking into
+        // the Bureau crate, `DoObstacleCollision` returns to 0xEE8DB2) is the interpreter's walking path
+        // (`ProcessGroundMovement` 0xEE8C83–0xEE8DB0), not its dead jump-branch one (0xEE83B5): the Jump ability, the
+        // stick past 0.35, `HumanGround__CanObstacleCollision` (vt104 0xDB5E70 = CanHandleEvent(42) along the stick:
+        // a controller wall contact within 45°), then the obstacle query along the stick, reach 0.6
+        // (`Human__ObstacleQuery` 0xB27900); a plain obstacle (no guidance edge, flag 1) only in high profile. So a
+        // crate with ledge guidance collides in either profile and a plain wall only in high profile (both live).
+        // The wall run and the jumps above go first.
         // Movement takes event 42 with only its contact guard (`Movement_CanHandleEvent` 0xDAF731 → 0xD838F0 →
         // `Human__GetObstacleContact` 0xB25230: a controller contact within 45° of the event's direction, ≥ 0.5 m above the
         // feet), no anim gate: it starts again during the push-away's transition into the walk (unlocked), not during the
         // locked push-away itself. The direction is the stick, so standing along the wall and pushing into it turns the
         // character to face it (the entry's 0.15 s warp).
         let unlocked = g.oneshot.is_none_or(|o| !super::anim_gate::locked(&o.blend)) && g.tr.is_none_or(|t| !super::anim_gate::locked(&t.action));
-        if g.high_profile && pad.speed01 > 0.0 && (r.hit_wall || wall_stopped) && unlocked && g.ledge_stop.is_none() && body.stick_residual.abs() <= 0.2 {
-            if let Some((contact, n, height)) = super::collide::obstacle_ahead(r.position, pad.dir, &collision).filter(|&(_, n, h)| h >= 0.7 && pad.dir.dot(-n) > std::f32::consts::FRAC_1_SQRT_2) {
-                if let Some(c) = super::collide::enter(r.position, body.heading, contact, n, height, g.pose_seq) {
+        let event42 = ab.allows(Ability::Jump) && pad.magnitude > crate::tuning::STICK_DEADZONE && unlocked && g.ledge_stop.is_none()
+            && body.stick_residual.abs() <= 0.2 && super::collide::has_obstacle_contact(&body.proxy.manifold, pad.dir);
+        if event42 {
+            if let Some(o) = super::collide::obstacle_query(r.position, pad.dir, OBSTACLE_REACH, &guidance, &collision).filter(|o| o.guided || pad.high_profile) {
+                if let Some(c) = super::collide::enter(r.position, body.heading, o.contact, o.normal, o.height, g.pose_seq) {
                     g.pose_seq = c.seq;
                     g.collide = Some(c);
                     g.tr = None;
@@ -2007,6 +2041,10 @@ const LEDGE_STOP_REACH: f32 = 0.15;
 const LEDGE_STOP_DROP: f32 = 5.0;
 /// The interpreter's low-profile edge halt: within 0.16 m, normal within 70 deg (0xEE7C1A / 0xEE7C5C).
 const EDGE_HALT_REACH: f32 = 0.16;
+/// The lean's push time before it climbs, [low, high profile] (0xEE7672: `dword_1683384` 0.5 / `dword_1708648` 0.1).
+const LEAN_CLIMB_TIME: [f32; 2] = [0.5, 0.1];
+/// The event-42 sender's obstacle query reach (`dword_16834C4`, 0xEE8CEA).
+const OBSTACLE_REACH: f32 = 0.6;
 const EDGE_HALT_COS: f32 = 0.342_020_1;
 /// PORT: the feet stay this far behind the edge line during the ledge stop (live: 0.12–0.14 m, RE/25 #39).
 const LEDGE_STOP_MARGIN: f32 = 0.13;
