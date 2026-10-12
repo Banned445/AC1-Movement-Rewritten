@@ -387,7 +387,11 @@ fn hands(c: &LedgeCandidate) -> (Vec3, Vec3) {
 }
 
 fn exit(seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, c: &LedgeCandidate, end: (bool, bool, bool)) -> LedgeEntry {
-    let (hl, hr) = hands(c);
+    exit_with_hands(seq, from, to, c, end, hands(c))
+}
+
+/// `exit` with the hand targets given (probe D's wall hang: the hand pair it found).
+fn exit_with_hands(seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, c: &LedgeCandidate, end: (bool, bool, bool), (hl, hr): (Vec3, Vec3)) -> LedgeEntry {
     let facing = -Vec3::new(c.normal.x, 0.0, c.normal.z).normalize_or_zero();
     let durations = seq.map(|a| a.map(|a| a.duration()).unwrap_or(0.0));
     let mv = LedgeMove {
@@ -530,7 +534,11 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
             let w = [(1.0 - v) * (1.0 - o), v * (1.0 - o), (1.0 - v) * o, v * o];
             let to = hang_root(hl, hr, n, LedgeHangType::Wall);
             let c = LedgeCandidate { normal: n, ..c };
-            return Some(exit([blended(STEP1_TO_HANGWALL, 0, &w), blended(STEP1_TO_HANGWALL, 1, &w), None, None], root, to, &c, (false, true, false)));
+            // the hands are the pair it found (0xE391FB / 0xE3920C: `sub_E55CB0`(0 / 1) with its two points): on short
+            // pieces both on the piece's middle, so the hang starts with its hands together (live RE/25 climb survey
+            // wall 08: 0.09 m apart, and the first side move goes onto the climb holds, `+133` clear); the port's ±0.2 m
+            // spread made every such hang start with a closing step
+            return Some(exit_with_hands([blended(STEP1_TO_HANGWALL, 0, &w), blended(STEP1_TO_HANGWALL, 1, &w), None, None], root, to, &c, (false, true, false), (hl, hr)));
         }
     }
     None

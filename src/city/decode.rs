@@ -261,6 +261,15 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     // --- collision
     for &p in &rigid {
         if word(b, p + 8)? != crc32("CollisionFilterInfo") { continue; }
+        // the owning component (`InertComponent` / `RigidBodyComponent`, 17 bytes before its RigidBody) carries the
+        // component's active byte (`Physic` reader 0x4D7850): an inactive one is another state of the entity (a kiosk's
+        // knocked-over stall behind its `InertSwitch`, a gate's other position) and has no collision while inactive
+        if let (Some(owner), Some(&active)) = (p.checked_sub(17).and_then(|o| word(b, o).ok()), p.checked_sub(13).and_then(|o| b.get(o))) {
+            if (owner == crc32("InertComponent") || owner == crc32("RigidBodyComponent")) && active == 0 {
+                *skipped.entry("collision of an inactive component".into()).or_default() += 1;
+                continue;
+            }
+        }
         let layer = (word(b, p + 12)? & 0x3f) as u8;
         let shape_id = word(b, p + 20)?;
         if shape_id == 0 { continue; }
@@ -287,10 +296,10 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
         let Ok(parsed) = parse_guidance(&b[start..]) else { continue };
         let p = NativePlacement { id: parsed.id, name: name.to_string(), transform: placement, guidance: parsed };
         for (active, mut edge) in p.world_edges() {
-            if !active { continue; }
+            if !active { *skipped.entry(format!("guidance edge inactive ({:?})", edge.subtype)).or_default() += 1; continue; }
             // movement probes expect n1 to be the lower face normal (0x66BB40)
             if edge.n1.y > edge.n0.y { std::mem::swap(&mut edge.n0, &mut edge.n1); }
-            if p.guidance.check_world_orientation && !crate::native_map::filter_accepts(&p.guidance, edge.n0, edge.n1) { continue; }
+            if p.guidance.check_world_orientation && !crate::native_map::filter_accepts(&p.guidance, edge.n0, edge.n1) { *skipped.entry(format!("guidance edge filtered ({:?})", edge.subtype)).or_default() += 1; continue; }
             o.edges.push(edge);
         }
     }

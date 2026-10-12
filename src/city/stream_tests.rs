@@ -195,9 +195,10 @@ fn replay_lab_trace_city() {
     let start = Vec3::new(trace.start.x, trace.start.z, -trace.start.y);
     s.teleport(start);
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
-    // let the cells around the start stream in, standing
+    // let the cells around the start stream in, standing (a recording far from the spawn waited on the streaming hold
+    // while its inputs ran on)
     s.app.insert_resource(crate::map_menu::neutral_pad());
-    s.run(1.0);
+    s.settle_streaming(30.0, Some(start));
     s.teleport(start);
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
     let player = s.player;
@@ -252,6 +253,20 @@ impl CitySim {
         let (mut loco, mut data) = q.get_mut(w, self.player).unwrap();
         if loco.current != ActorContextId::Ground {
             crate::player::switch_context(&mut loco, &mut data, crate::player::TransitionSetup::ToMovement { landing: None });
+        }
+    }
+    /// Steps standing until the cells around the player have streamed in: no hold and nothing loading for half a second
+    /// (a teleport across the city holds the player while the near box loads, RE/17 §1.1).
+    /// `hold`: kept there meanwhile (a recording starting in mid-air must not fall during the wait).
+    pub fn settle_streaming(&mut self, max_s: f32, hold: Option<Vec3>) {
+        let mut quiet = 0;
+        for _ in 0..(max_s * 60.0) as usize {
+            self.step();
+            if let Some(p) = hold { self.teleport(p); }
+            let city = self.app.world().resource::<super::stream::City>();
+            let busy = city.0.as_ref().is_some_and(|c| c.hold.is_some() || c.stats.loading > 0);
+            quiet = if busy { 0 } else { quiet + 1 };
+            if quiet >= 30 { return; }
         }
     }
     pub fn run_until(&mut self, max_s: f32, pred: impl Fn(&CitySim) -> bool) -> bool {
@@ -629,7 +644,8 @@ fn probe_jump_candidates_at() {
     let v3 = |k: &str| std::env::var(k).ok().map(|s| { let v: Vec<f32> = s.split(',').map(|x| x.trim().parse().unwrap()).collect(); Vec3::new(v[0], v[2], -v[1]) });
     let (Some(pos), Some(dir)) = (v3("LAB_POS"), v3("LAB_DIR")) else { return };
     let kind: u32 = std::env::var("LAB_KIND").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    let spawn = std::env::var("LAB_SPAWN").map(|s| format!("PlayerSpawner_DEBUG_{s}")).unwrap_or("PlayerSpawner_DEBUG_Bureau".into());
+    let Some(mut s) = CitySim::new(&spawn) else { return };
     s.place(pos, dir);
     s.run(1.0);
     let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
@@ -656,4 +672,104 @@ fn probe_jump_candidates_at() {
             }
         }
     }
+}
+
+/// Climb survey (map support): up to `LAB_N` (default 40) facades near the `LAB_SPAWN` district (default the Souk)
+/// with a climbable column of ledge holds: a first hold 1.5–4 m above the street, the column's top at least 1.5 m
+/// higher. Each is run up with high profile and Legs held, then climbed by holding up; prints how far it got, where it
+/// stopped and in which context, and a summary. Game coordinates (Z up) in the output.
+#[test]
+#[ignore = "map support survey; requires the local game install"]
+fn probe_city_climb_survey() {
+    use crate::guidance::GuidanceSubType;
+    let spawn_name = std::env::var("LAB_SPAWN").map(|s| format!("PlayerSpawner_DEBUG_{s}")).unwrap_or(SPAWNS[0].into());
+    let n_max: usize = std::env::var("LAB_N").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let Some(mut s) = CitySim::new(&spawn_name) else { return };
+    let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+    let spawn = s.body().feet;
+    let c = s.collision();
+    let g = s.guidance();
+    let ledges: Vec<_> = g.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.n1.y.abs() < 0.3 && e.p0.distance(e.p1) > 0.6).collect();
+    let mut spots = Vec::new();
+    for e in &ledges {
+        let q = (e.p0 + e.p1) * 0.5;
+        let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+        if n == Vec3::ZERO { continue; }
+        let stand = q + n * 1.5;
+        let Some(floor) = c.floor_height_below(Vec3::new(stand.x, q.y - 1.0, stand.z), 5.0) else { continue };
+        let h = q.y - floor;
+        if !(1.5..=4.0).contains(&h) { continue; }
+        // the lowest hold of its column: nothing below it on the same wall within 0.6 m sideways
+        let column = |lo: f32| ledges.iter().filter(|o| {
+            let m = (o.p0 + o.p1) * 0.5;
+            let on = Vec3::new(o.n1.x, 0.0, o.n1.z).normalize_or_zero().dot(n) > 0.9 && ((m - q) - n * (m - q).dot(n)).with_y(0.0).length() < 0.6;
+            on && m.y > lo
+        }).map(|o| (o.p0.y + o.p1.y) * 0.5).collect::<Vec<_>>();
+        if !column(floor + 0.3).iter().all(|&y| y >= q.y - 0.05) { continue; }
+        let mut holds = column(q.y - 0.05);
+        holds.sort_by(f32::total_cmp);
+        holds.dedup_by(|a, b| (*a - *b).abs() < 0.1);
+        let top = holds.last().copied().unwrap_or(q.y);
+        let max_gap = holds.windows(2).map(|w| w[1] - w[0]).fold(0.0f32, f32::max);
+        let gap_limit: f32 = std::env::var("LAB_GAP").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+        if top - q.y < 1.5 || max_gap > gap_limit { continue; }
+        let feet = Vec3::new(stand.x, floor, stand.z);
+        if !c.capsule_fits(feet) { continue; }
+        // one spot per 3 m
+        spots.push((feet.distance(spawn), feet, n, q, top, holds.iter().map(|h| h - floor).collect::<Vec<_>>()));
+    }
+    spots.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut picked: Vec<(f32, Vec3, Vec3, Vec3, f32, Vec<f32>)> = Vec::new();
+    for sp in spots { if picked.iter().all(|p| p.1.distance(sp.1) > 3.0) { picked.push(sp); } if picked.len() >= n_max { break; } }
+    if let Some(only) = std::env::var("LAB_ONLY").ok().and_then(|v| { let v: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect(); (v.len() == 2).then(|| Vec2::new(v[0], v[1])) }) {
+        picked.retain(|p| Vec2::new(game(p.3).x, game(p.3).y).distance(only) < 0.5);
+    }
+    let trace = std::env::var_os("LAB_TRACE_CLIMB").is_some();
+    eprintln!("{} facades", picked.len());
+    // the spots as lab courses: feet and the yaw facing the wall (game coordinates, yaw 0 = +x)
+    for (_, feet, n, q, _, holds) in &picked {
+        let (f, w) = (game(*feet), game(-*n));
+        eprintln!("COURSE {:.2} {:.2} {:.2} {:.1} wall {:.2} {:.2} holds {:.1?}", f.x, f.y, f.z, w.y.atan2(w.x).to_degrees(), game(*q).x, game(*q).y, holds);
+    }
+    if std::env::var_os("LAB_LIST_ONLY").is_some() { return; }
+    let mut summary = std::collections::BTreeMap::<String, usize>::new();
+    for (_, feet, n, q, top, holds) in picked {
+        s.place(feet, -n);
+        s.run(0.3);
+        s.pad(-n, 1.0, true, true);
+        s.press_legs();
+        let mut best = feet.y;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut on_wall = false;
+        for k in 0..(14.0 * 60.0) as usize {
+            // on the wall, climb with high profile and the stick (Legs would jump off); not on it after 3 s: walk to
+            // it and climb from the ground with the empty-hand press (event 50)
+            if !on_wall && matches!(s.loco().current, ActorContextId::Ledge | ActorContextId::Climb) { on_wall = true; s.pad(-n, 1.0, true, false); }
+            if !on_wall && k == 180 { s.pad(-n, 1.0, true, false); }
+            if !on_wall && k > 180 && k % 30 == 0 { s.app.world_mut().resource_mut::<PadInput>().hand_pressed_ago = 0.0; }
+            s.step();
+            if trace && k % 6 == 0 { let d = s.data(); eprintln!("  t {:.2} {:?} feet {:.2} ledge {:?} {:?} {:?} climb {:?} hands {:.2} {:.2}", k as f32 / 60.0, s.loco().current, game(s.body().feet), d.ledge.sub_state, d.ledge.hang_type, d.ledge.last_action, d.climb.last_action, game(d.ledge.hand_l), game(d.ledge.hand_r)); }
+            best = best.max(s.body().feet.y);
+            seen.insert(format!("{:?}", s.loco().current));
+            if s.body().feet.y > top - 0.4 && matches!(s.loco().current, ActorContextId::Ground | ActorContextId::NarrowObject) { break; }
+        }
+        if trace {
+            let d = s.data();
+            let mid = (d.ledge.hand_l + d.ledge.hand_r) * 0.5;
+            let c = s.collision();
+            for dy in [0.1f32, 0.3, 0.5, 0.8, 1.1, 1.5, 2.0, 2.5] {
+                let o = mid + n * 0.8 - Vec3::Y * dy;
+                eprintln!("  wall ray {dy:.1} below the hands: {:.2} (from 0.8 out)", c.ray_distance(o, -n, 2.5, crate::layers::MAIN_CHARACTER));
+            }
+        }
+        let f = s.body().feet;
+        let ok = best > top - 0.4;
+        let tag = if ok { "top".to_string() } else if seen.contains("Climb") || seen.contains("Ledge") { format!("stuck in {:?}", s.loco().current) } else { format!("never grabbed ({:?})", s.loco().current) };
+        *summary.entry(tag.clone()).or_default() += 1;
+        eprintln!("SURVEY {tag:28} wall {:.2} holds {:.1?} reached +{:.1} end {:.2} contexts {:?} last {:?}",
+            game(q), holds, best - feet.y, game(f), seen, s.data().climb.last_action);
+        s.pad(n, 0.0, false, false);
+        s.run(0.5);
+    }
+    eprintln!("SUMMARY {summary:?}");
 }

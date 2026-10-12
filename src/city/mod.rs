@@ -267,20 +267,24 @@ mod tests {
     fn probe_dump_bodies() {
         let Some(w) = damascus() else { return };
         let (Ok(cell), Ok(obj), Ok(out)) = (std::env::var("LAB_CELL"), std::env::var("LAB_OBJ"), std::env::var("LAB_OUT")) else { return };
-        let c = &w.data.grid.cells[cell.parse::<usize>().unwrap()];
-        let (archive, file) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())).unwrap();
-        let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
-        let entry = w.data.archives.find(a, &file).unwrap();
+        let cells: Vec<usize> = if cell == "all" { (0..w.data.grid.cells.len()).collect() } else { vec![cell.parse().unwrap()] };
         let mut n = 0;
-        for r in w.data.archives.file(a, entry).unwrap().values() {
+        for cell in cells {
+        let c = &w.data.grid.cells[cell];
+        let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+        let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+        let Some(entry) = w.data.archives.find(a, &file) else { continue };
+        let Ok(res) = w.data.archives.file(a, entry) else { continue };
+        for r in res.values() {
             for body in decode::bodies(r) {
                 let name = if body.as_ptr() == r.payload.as_ptr() { r.name.clone() } else { format!("{}/{:08x}", r.name, u32::from_le_bytes(body[..4].try_into().unwrap())) };
                 if name.contains(&obj) {
                     std::fs::write(format!("{out}-{n}.bin"), body).unwrap();
-                    println!("{name}: {} bytes -> {out}-{n}.bin", body.len());
+                    println!("{name} (cell {cell}): {} bytes -> {out}-{n}.bin", body.len());
                     n += 1;
                 }
             }
+        }
         }
     }
 
@@ -306,6 +310,79 @@ mod tests {
             }
         }
         println!("{n} scene-moved entities with collision");
+    }
+
+    /// How many entities carry the procedural guidance systems (`GuidanceSystemCapsule` / `GuidanceSystemBarrel`, RE/06
+    /// §2), with a few names and positions (game coordinates).
+    #[test]
+    #[ignore]
+    fn probe_procedural_guidance() {
+        let Some(w) = damascus() else { return };
+        let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+        let mut names = std::collections::BTreeMap::<String, usize>::new();
+        for cell in 0..w.data.grid.cells.len() {
+            let c = &w.data.grid.cells[cell];
+            let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+            let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+            let Some(entry) = w.data.archives.find(a, &file) else { continue };
+            let Ok(res) = w.data.archives.file(a, entry) else { continue };
+            for r in res.values() {
+                for body in decode::bodies(r) {
+                    for class in ["GuidanceSystemCapsule", "GuidanceSystemBarrel", "GuidanceSystem"] {
+                        if !decode::markers(body, class).is_empty() {
+                            *counts.entry(class).or_default() += 1;
+                            if class != "GuidanceSystem" {
+                                let base = r.name.split('_').take(3).collect::<Vec<_>>().join("_");
+                                *names.entry(format!("{class} {base}")).or_default() += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("{counts:?}");
+        let mut v: Vec<_> = names.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        for (n, k) in v.iter().take(40) { println!("{k:5} {n}"); }
+    }
+
+    /// The guidance components whose active byte is clear: their entities, edge counts and positions (game coordinates);
+    /// with `LAB_POS` ("x y", game) only those within 15 m.
+    #[test]
+    #[ignore]
+    fn probe_inactive_guidance() {
+        let Some(w) = damascus() else { return };
+        let near = std::env::var("LAB_POS").ok().map(|s| { let v: Vec<f32> = s.split_whitespace().filter_map(|x| x.parse().ok()).collect(); Vec2::new(v[0], v[1]) });
+        let (mut comps, mut edges) = (0, 0);
+        let mut names = std::collections::BTreeMap::<String, usize>::new();
+        for cell in 0..w.data.grid.cells.len() {
+            let c = &w.data.grid.cells[cell];
+            let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+            let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+            let Some(entry) = w.data.archives.find(a, &file) else { continue };
+            let Ok(res) = w.data.archives.file(a, entry) else { continue };
+            for r in res.values() {
+                for body in decode::bodies(r) {
+                    for g in decode::markers(body, "GuidanceSystem") {
+                        let Some(start) = g.checked_sub(4) else { continue };
+                        let Ok(parsed) = crate::assets::world::parse_guidance(&body[start..]) else { continue };
+                        if parsed.active { continue; }
+                        let m = &body[8..72];
+                        let f = |i: usize| f32::from_le_bytes(m[i * 4..i * 4 + 4].try_into().unwrap());
+                        let pos = Vec3::new(f(12), f(13), f(14));
+                        if near.is_some_and(|n| Vec2::new(pos.x, pos.y).distance(n) > 15.0) { continue; }
+                        comps += 1; edges += parsed.edges.len();
+                        let base = r.name.split('_').take(4).collect::<Vec<_>>().join("_");
+                        *names.entry(base).or_default() += parsed.edges.len();
+                        if near.is_some() { println!("inactive {} at {pos:.2}: {} edges", r.name, parsed.edges.len()); }
+                    }
+                }
+            }
+        }
+        println!("{comps} inactive components, {edges} edges");
+        let mut v: Vec<_> = names.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        for (n, k) in v.iter().take(25) { println!("{k:5} {n}"); }
     }
 
     /// The haystack objects' own collision: layers, triangle count, the hull's vertical extent against the hay volume
