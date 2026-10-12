@@ -38,8 +38,13 @@ pub const STEP1_TO_REBOUND: u32 = 0x0115_7E36;
 /// (0xE37590 SubState 6, flag +0x32).
 pub const REBOUND_TO_FALL: u32 = 0x0129_1762;
 
+/// The Ground's lead-in to the wall run from the lean and from the standing FreeRun (event 49 with HG+1492 = 0:
+/// `ObstacleCollision_HandleEvent` 0xDA6FF0 / `HumanGround__FreeRun_WallingGuardA` 0xDA2DD0 → 0xD8E740 / 0xD89AA0 →
+/// 0xD857C0 / 0xD8A460): `xx_h_impultionstraight_footl_to_wallingfront_step1_footr`, then the wall run.
+pub const GROUND_LEAD_IN: u32 = 0x02F4_B310;
+
 pub const DUMPED_ACTIONS: &[u32] = &[
-    ENTRY_A, ENTRY_B, STEP1, STEP1_TO_FALL, VERTICAL_END, ENTRY_TO_FALL, ENTRY_TO_KNEE, ENTRY_TO_PASSOVER, ENTRY_TO_HANGFREE,
+    GROUND_LEAD_IN, ENTRY_A, ENTRY_B, STEP1, STEP1_TO_FALL, VERTICAL_END, ENTRY_TO_FALL, ENTRY_TO_KNEE, ENTRY_TO_PASSOVER, ENTRY_TO_HANGFREE,
     STEP1_TO_KNEE, STEP1_TO_HANGWALL, STEP1_TO_HANGFREE, STEP1_TO_PASSOVER, ENTRY_TO_REBOUND, STEP1_TO_REBOUND, REBOUND_TO_FALL,
 ];
 

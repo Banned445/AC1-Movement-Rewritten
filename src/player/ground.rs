@@ -101,6 +101,9 @@ pub struct HumanGroundData {
     pub look_down: Option<LookDown>,
     /// The interpreter's edge-halt latch (+4176) and how long it has held (timer +4144, 0xEE7C5E–0xEE7C8E).
     pub edge_halt_t: f32,
+    /// The wall run waiting for its Ground lead-in (`walling::GROUND_LEAD_IN`) to end: the wall's contact and normal
+    /// (the payload 0xD857C0 keeps at HG+1344).
+    pub wall_start: Option<(Vec3, Vec3)>,
     /// The interpreter's lean push timer (+0xFC8, 0xEE75F4–0xEE763E): how long the stick has pushed within 45° of the
     /// facing while leaning; any other frame restarts it.
     pub lean_push_t: f32,
@@ -722,6 +725,7 @@ impl HumanGroundData {
         self.turn_k = PLAYER_TURN_BAND_K0;
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
+        self.wall_start = None;
         self.narrow_pending = None;
         self.collide = None;
         self.look_down = None;
@@ -833,6 +837,16 @@ pub fn update_ground(
                 continue;
             }
         }
+        // the wall run's lead-in done: the wall run (PORT: a frame after its end; anything that took over drops it)
+        if g.wall_start.is_some() && !g.oneshot.is_some_and(|o| o.blend.id == super::walling::GROUND_LEAD_IN && o.t < o.duration) {
+            g.oneshot = None;
+            if let Some((contact, normal)) = g.wall_start.take() {
+                let from = body.feet;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
+                continue;
+            }
+        }
+        let g = &mut data.ground;
         // the step-up tracker at last frame's end (`Human__PostUpdate` runs after the contexts; event 68 reads it)
         g.step_up = g.step_up.and_then(|s| s.hold(body.feet));
         // the foot IK switch of the state the ground is in (its entry or exit, RE/24 GROUND-16). PORT: read once per
@@ -940,12 +954,21 @@ pub fn update_ground(
                 // The wall run from the FreeRun sub-state (0xEE7E0F–0xEE7F0D, RE/24 WALL-15): high profile and the last strong
                 // stick direction (+0x10E0) within 60° of the facing start it with no Legs, lock or stick test; event 49
                 // is refused until 0.2 s after the FreeRun start (0xDA4890 → `sub_DA2DD0` / `sub_DA2BF0`, HG+520).
-                if extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed>=0.2 && g.high_profile
+                if extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed+dt>=0.2 && g.high_profile
                     && pad.strong_dir.length()>0.75 && pad.strong_dir.angle_between(body.forward())<60f32.to_radians()
                     && ab.allows(Ability::Walling)
                 {
                     if let Some((contact,normal))=super::walling::wall_ahead(body.feet,body.forward(),&collision) {
                         g.extra=None;
+                        // standing (HG+1492 = 0): `FreeRun_WallingGuardA` 0xDA2DD0 → the Ground lead-in first (0xD89AA0 →
+                        // 0xD857C0; live RE/25 #49 `wall41_legs_hold`)
+                        if let Some(b)=super::ledge_moves::single_item(super::walling::GROUND_LEAD_IN,0) {
+                            g.play_oneshot(b);
+                            g.owner=TreeState::Other;
+                            g.wall_start=Some((contact,normal));
+                            body.velocity=Vec3::ZERO;
+                            continue;
+                        }
                         let from=body.feet;
                         switch_context(&mut loco,&mut data,TransitionSetup::ToWalling(super::walling::WallingEntry{contact,normal,from,warp_duration:None}));
                         continue;
@@ -1308,7 +1331,18 @@ pub fn update_ground(
                     if pad.jump_buffered() {
                         pad.consume_jump();
                     }
+                    // the lean takes event 49 with HG+1492 clear only, and plays the Ground lead-in first (0xD8E740 →
+                    // 0xD8A460; live RE/25 #49: `impultionstraight_footl_to_wallingfront_step1_footr`, 0.27 s, then
+                    // `wallingfront_entry_a`)
                     g.collide = None;
+                    g.lean_push_t = 0.0;
+                    if let Some(b) = super::ledge_moves::single_item(super::walling::GROUND_LEAD_IN, 0) {
+                        g.play_oneshot(b);
+                        g.owner = TreeState::Other;
+                        g.wall_start = Some((contact, normal));
+                        body.velocity = Vec3::ZERO;
+                        continue;
+                    }
                     let from = body.feet;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
                     continue;
@@ -1450,6 +1484,19 @@ pub fn update_ground(
             if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
                 if pad.jump_buffered() {
                     pad.consume_jump();
+                }
+                // in the FreeRun sub-state, standing (HG+1492 = 0), event 49 plays the Ground lead-in first
+                // (`FreeRun_WallingGuardA` 0xDA2DD0 → 0xD89AA0; live RE/25 #49 `wall41_legs_hold`); from Movement it
+                // switches at once (`Movement_HandleEvent` 0xDB1AB6 → `ToWalling` 0xDA7B90)
+                if g.extra.is_some_and(|e| e.mode == super::ground_extras::ExtraMode::FreeRun) {
+                    if let Some(b) = super::ledge_moves::single_item(super::walling::GROUND_LEAD_IN, 0) {
+                        g.extra = None;
+                        g.play_oneshot(b);
+                        g.owner = TreeState::Other;
+                        g.wall_start = Some((contact, normal));
+                        body.velocity = Vec3::ZERO;
+                        continue;
+                    }
                 }
                 let from = body.feet;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
@@ -1671,7 +1718,8 @@ pub fn update_ground(
             let d = os.blend.disp(os.t / os.duration.max(1e-4));
             let step = [d[0] - os.applied[0], d[1] - os.applied[1]];
             os.applied = d;
-            g.oneshot = (os.t < os.duration).then_some(os);
+            // the wall run's lead-in holds its last frame until the switch (the next frame's start)
+            g.oneshot = (os.t < os.duration || (g.wall_start.is_some() && os.blend.id == super::walling::GROUND_LEAD_IN)).then_some(os);
             if g.oneshot.is_none() {
                 if let Some(next) = g.oneshot_next.take() {
                     g.play_oneshot(next);
@@ -1687,7 +1735,7 @@ pub fn update_ground(
                         g.play_oneshot(b);
                     }
                 }
-                if GAME_GROUND_TREE && g.oneshot.is_none() {
+                if GAME_GROUND_TREE && g.oneshot.is_none() && g.wall_start.is_none() {
                     let mut heading = body.heading;
                     g.after_oneshot(os.blend, mv_speed > 0.0, stick_turn, &mut heading);
                     body.heading = heading;
