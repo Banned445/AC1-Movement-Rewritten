@@ -1,7 +1,6 @@
 //! Air-catch eligibility (0xE0BB70, timers 0xE01C00; RE/05 §5).
 use bevy::prelude::*;
 use crate::collision::CollisionWorld;
-use super::targets::JumpTarget;
 
 /// Manual ladder search remains height-gated even after the grasp-blend timer expires.
 pub fn manual(hand: bool, fall_height: f32, drop_type: Option<usize>) -> bool {
@@ -12,13 +11,16 @@ pub fn narrow(fall_height: f32, elapsed: f32, drop: bool) -> bool {
     !drop && fall_height < 9.0 && (fall_height > 0.3 || elapsed >= 0.4)
 }
 
-/// 0xE044D0: a clear path, regardless of which side of the root the target lies on.
-pub fn target_ahead(root: Vec3, target: Option<JumpTarget>, world: &CollisionWorld) -> bool {
-    let Some(target) = target.filter(|t| matches!(t.type_flags, 1 | 0x10000 | 2)) else { return false };
+/// `HumanInAir__IsJumpTargetAhead` 0xE044D0: only during the target-driven part of a jump (Data+505, the port's
+/// `AirMode::Jump`: `stored` is its aim), a target of type 1 / 0x10000 / 2, and a clear ray (layer 5) from the root to
+/// the **stored** target Data+560 (the aim pulled back 0.5 m toward the jumper, `pull_back`), not the candidate point:
+/// a ray to a point on a beam's top grazes the beam. Regardless of which side of the root the target lies on.
+pub fn target_ahead(root: Vec3, stored: Option<Vec3>, type_flags: Option<u32>, world: &CollisionWorld) -> bool {
+    let (Some(aim), Some(ty)) = (stored, type_flags.filter(|t| matches!(t, 1 | 0x10000 | 2))) else { return false };
     // PORT: immutable jump targets have no native entity lifetime / cell handle to invalidate.
-    let delta = target.position - root;
+    let delta = aim - root;
     let distance = delta.length();
-    let slack = if target.type_flags == 0x10000 { 0.0005 } else { 0.0 };
+    let slack = if ty == 0x10000 { 0.0005 } else { 0.0 };
     world.ray_distance(root, delta, distance, crate::layers::CHARACTER) >= distance - slack
 }
 
@@ -362,19 +364,22 @@ mod tests {
 mod ray_tests {
     use super::*;
     use crate::collision::Aabb3;
-    fn target(position:Vec3,ty:u32)->JumpTarget {JumpTarget{position,type_flags:ty,hang:None,straight:None,pass:None,ladder:None,support:None}}
+    fn target(position:Vec3,ty:u32)->(Option<Vec3>,Option<u32>) {(Some(position),Some(ty))}
+    fn ahead(root:Vec3,(p,t):(Option<Vec3>,Option<u32>),world:&CollisionWorld)->bool {target_ahead(root,p,t,world)}
     #[test]
     fn target_guard_is_a_ray_not_a_forward_cone() {
         let mut world=CollisionWorld::default();let root=Vec3::ZERO;
-        assert!(target_ahead(root,Some(target(Vec3::NEG_Z*3.0,1)),&world));
-        assert!(!target_ahead(root,Some(target(Vec3::Z*3.0,0x40)),&world));
+        assert!(ahead(root,target(Vec3::NEG_Z*3.0,1),&world));
+        assert!(!ahead(root,target(Vec3::Z*3.0,0x40),&world));
+        // the flight's target-driven part has ended (Data+505 clear): no target ahead
+        assert!(!target_ahead(root,None,Some(1),&world));
         world.boxes.push(Aabb3{min:Vec3::new(-0.5,-0.5,1.0),max:Vec3::new(0.5,0.5,1.5)});
-        assert!(!target_ahead(root,Some(target(Vec3::Z*3.0,1)),&world));
-        assert!(target_ahead(root,Some(target(Vec3::Z,1)),&world));
-        assert!(!target_ahead(root,Some(target(Vec3::Z*1.0004,1)),&world));
-        assert!(target_ahead(root,Some(target(Vec3::Z*1.0004,0x10000)),&world));
+        assert!(!ahead(root,target(Vec3::Z*3.0,1),&world));
+        assert!(ahead(root,target(Vec3::Z,1),&world));
+        assert!(!ahead(root,target(Vec3::Z*1.0004,1),&world));
+        assert!(ahead(root,target(Vec3::Z*1.0004,0x10000),&world));
         world.layers.push(crate::layers::NOTHING);
-        assert!(target_ahead(root,Some(target(Vec3::Z*3.0,1)),&world));
+        assert!(ahead(root,target(Vec3::Z*3.0,1),&world));
     }
 
     /// RE/24 AIR-14: the wall catch needs the wall under both feet (two support boxes 1 m below the hands).

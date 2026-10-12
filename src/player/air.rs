@@ -1208,7 +1208,8 @@ pub fn update_air(
                 }
             }
             if ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
-                let ahead = super::air_catches::target_ahead(body.feet, air.target, &collision);
+                let stored = match air.mode { AirMode::Jump { aim, .. } => Some(aim), _ => None };
+                let ahead = super::air_catches::target_ahead(body.feet, stored, air.target.map(|t| t.type_flags), &collision);
                 // the beam too only with no jump target ahead: its call (0xE0D41D) sits outside the pilotis'
                 // `IsJumpTargetAhead` block, but `HumanInAir__FindBeamCatch` 0xE0B890 runs the same test itself. The
                 // gate's InAir+104 is a deadline armed once at the InAir entry (0.4 s, 0xE01D4A) (RE/24 AIR-16)
