@@ -1511,7 +1511,7 @@ pub fn update_ground(
         if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
             if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir_snap, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
                 jump_log("free-run target jump", body.feet, Some(&target));
-                let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };
+                let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot != 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 continue;
             }
@@ -1633,10 +1633,12 @@ pub fn update_ground(
                 .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, forward, &guidance, &collision)).flatten());
             jump_log("tap jump", body.feet, found.as_ref());
             let entry = match found {
-                // leading foot: the playing locomotion item (footl item = left ahead) (hypothesis)
-                Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: g.blend.foot == 0 },
+                // the takeoff foot (`StartRunJumpToTarget` 0xD837A0: the playing item's word bits 2–3, 1 = the footl
+                // takeoff): the foot opposite the locomotion's (live RE/25: three free-run take-offs, the game always
+                // on the other foot from the port's former "same foot" reading)
+                Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
                 // vt28: free jump without a target
-                None => InAirEntry::FreeJump { from: body.feet, dir: forward, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot == 0 },
+                None => InAirEntry::FreeJump { from: body.feet, dir: forward, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;
@@ -1653,7 +1655,7 @@ pub fn update_ground(
                 if r.sq() < 0.01 && moving && ab.allows(Ability::Jump) && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
                     if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision) {
                         jump_log("edge jump", body.feet, Some(&target));
-                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot == 0 };
+                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot != 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
                     }
