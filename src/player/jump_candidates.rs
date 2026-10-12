@@ -689,7 +689,7 @@ pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWo
         if n == Vec3::ZERO {
             continue;
         }
-        let drop = measure_drop(p, n, 7.0, 0.02, collision);
+        let drop = measure_drop_stepped(p, n, 7.0, 0.02, collision, Some(guidance));
         if drop < min_drop {
             continue;
         }
@@ -700,11 +700,62 @@ pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWo
     out
 }
 
-/// `Human__MeasureDropBeyondEdge` 0xB19620 (max, step out). PORT: one ray down from just past the edge; the exe
-/// sweeps angled rays and follows stepped drops with nested edge reports.
+/// `Human__MeasureDropBeyondEdge` 0xB19620 (max, step out), without the stepped-drop refinement (no guidance at hand).
 pub(crate) fn measure_drop(p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld) -> f32 {
-    let o = p + n * (step + 0.05) + Vec3::Y * 0.05;
-    collision.ray_distance(o, -Vec3::Y, max + 0.05, RAY_LAYER) - 0.05
+    measure_drop_stepped(p, n, max, step, collision, None)
+}
+
+/// `Human__MeasureDropBeyondEdge` 0xB19620 (max, step out): the edge height minus the floor found beyond it.
+/// - From `step` past the edge a ray 45 deg out and down (the axis up × normal), to 0.5 m below the edge (at most
+///   `max`). A hit is the floor.
+/// - Else, from its end, a ray 10 deg off straight down, outward, to `max` below the edge. Nothing → `max`.
+/// - A floor steeper than 45 deg (`Math__SignedAngleAroundAxis` from up) is slid down: from 0.01 m off it along its
+///   flattened normal, a ray 45 deg down and out from it to 0.5 m below the hit, then the 10 deg ray again.
+/// - Stairs: with a drop d, the edge reports at the floor (IHuman vt132 with radius 0.2 · clamp(d / 3, 0, 1) when that
+///   exceeds 0.01, minimum drop 0.45, no floor report) add the deepest one's drop (`sub_B14CA0`), so a ledge below the
+///   edge adds the drop beyond it (RE/25 #2: the 1.61 m roof edge over a 0.6 m shelf halts the walk).
+/// PORT: the two checks before the sweep are left out (the edge's lip from 0.05 m inside, 50 deg down, and the line
+/// from 1 m above the feet to the point past the edge; a hit on either is the drop); the rays use one layer.
+pub(crate) fn measure_drop_stepped(p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld, guidance: Option<&GuidanceWorld>) -> f32 {
+    let n = flat(n);
+    if n == Vec3::ZERO {
+        let o = p + Vec3::Y * 0.05;
+        return collision.ray_distance(o, -Vec3::Y, max + 0.05, RAY_LAYER) - 0.05;
+    }
+    let tilted = |axis: Vec3, deg: f32| Quat::from_axis_angle(axis, (-deg).to_radians()) * -Vec3::Y;
+    // the ray from `o` along `d` down to the height `h` (`Vec_ProjectOntoPlane` 0x9470B0 with a horizontal plane)
+    let to_plane = |o: Vec3, d: Vec3, h: f32| if d.y < -1e-6 { ((o.y - h) / -d.y).max(0.0) } else { 0.0 };
+    let stepped = |hit: Vec3| {
+        let drop = p.y - hit.y;
+        let r = 0.2 * (drop / 3.0).clamp(0.0, 1.0);
+        let below = guidance.filter(|_| r > 0.01).map_or(0.0, |g| {
+            edge_reports(hit, r, 0.45, g, collision).iter().map(|e| e.drop).fold(0.0, f32::max)
+        });
+        drop + below
+    };
+    let mut axis = Vec3::Y.cross(n);
+    let mut from = p + n * step;
+    let mut dir = tilted(axis, 45.0);
+    let mut len = to_plane(from, dir, p.y - max.min(0.5));
+    for _ in 0..32 {
+        if let Some((d, _)) = collision.ray_hit(from, dir, len, RAY_LAYER) {
+            return stepped(from + dir * d);
+        }
+        from += dir * len;
+        dir = tilted(axis, 10.0);
+        len = to_plane(from, dir, p.y - max);
+        let Some((d, normal)) = collision.ray_hit(from, dir, len, RAY_LAYER) else { return max };
+        let hit = from + dir * d;
+        let side = flat(normal);
+        if side == Vec3::ZERO || normal.angle_between(Vec3::Y) <= 45f32.to_radians() {
+            return stepped(hit);
+        }
+        axis = Vec3::Y.cross(side);
+        from = hit + side * 0.01;
+        dir = tilted(axis, 45.0);
+        len = to_plane(from, dir, hit.y - 0.5);
+    }
+    max
 }
 
 /// IHuman vt136 0xB17EF0: the report within `radius` whose normal is closest in angle to `dir`, at most `max_angle`.

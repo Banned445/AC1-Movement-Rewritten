@@ -1374,14 +1374,15 @@ fn pull_down_from_a_roof_edge_into_a_wall_hang() {
 #[test]
 fn walking_into_a_roof_edge_stops_then_steps_back() {
     use crate::player::ledge_moves::{LEDGE_STOP_END, LEDGE_STOP_START};
-    // the 6 m block (x -14.5..-9.5): a drop of more than 5 m (0xEE88A9); walk toward its +X edge
+    // the 6 m block (x -14.5..-9.5): a drop of more than 5 m (0xEE88A9); run toward its +X edge in high profile (low
+    // profile halts first, RE/25 #39)
     let edge = -9.5f32;
     let mut s = Sim::new(Vec3::new(-12.0, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
-    s.pad(Vec3::X, 1.0, false, false);
+    s.pad(Vec3::X, 1.0, true, false);
     assert!(s.run_until(3.0, |s| s.ground().ledge_stop.is_some()), "never stopped: {:?}", s.body().feet);
     assert_eq!(s.ground().oneshot.map(|o| o.blend.id), Some(LEDGE_STOP_START));
     // the stick let go during the start action: no pull-down, the end action steps back
-    s.pad(Vec3::X, 0.0, false, false);
+    s.pad(Vec3::X, 0.0, true, false);
     assert!(s.run_until(1.0, |s| s.ground().ledge_stop.is_some_and(|l| l.ending)));
     assert_eq!(s.ground().oneshot.map(|o| o.blend.id), Some(LEDGE_STOP_END));
     let at_end = s.body().feet;
@@ -1391,7 +1392,7 @@ fn walking_into_a_roof_edge_stops_then_steps_back() {
     assert!(s.body().feet.x < at_end.x - 0.3, "stepped back: {:?}", s.body().feet);
     assert_eq!(s.loco().current, ActorContextId::Ground);
     // walking in again stops again; holding on into the edge then hangs from it
-    s.pad(Vec3::X, 1.0, false, false);
+    s.pad(Vec3::X, 1.0, true, false);
     assert!(s.run_until(2.0, |s| s.ground().ledge_stop.is_some()), "stops again");
     assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ledge), "held into the edge: the pull-down");
 }
@@ -1400,7 +1401,7 @@ fn walking_into_a_roof_edge_stops_then_steps_back() {
 fn pull_down_from_the_ledge_stop_uses_the_edge_stop_orientation() {
     use crate::player::ledge_moves::{MoveKind, PULLDOWN_ORIENT};
     let mut s = Sim::new(Vec3::new(-11.0, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
-    s.pad(Vec3::X, 1.0, false, false);
+    s.pad(Vec3::X, 1.0, true, false);
     assert!(s.run_until(3.0, |s| s.ground().ledge_stop.is_some()));
     // still pushing into the edge when the start action is done (0xEE8977 / guard 0xD9D580): the pull-down
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
@@ -3755,6 +3756,24 @@ fn walking_into_a_lower_edge_halts_without_the_ledge_stop() {
     assert!(s.ground().ledge_stop.is_none(), "no ledge stop below 5 m");
     let x = s.body().feet.x;
     assert!((11.0 - x - 0.16).abs() < 0.05, "halted 0.16 m from the edge: {x}");
+}
+
+#[test]
+fn walking_into_a_deep_edge_in_low_profile_halts_and_never_ledge_stops() {
+    // the 6 m block (a drop over 5 m): low profile halts 0.16 m from the edge (0xEE7C1A tests only `> 2.0`) and looks
+    // down; the ledge stop and its pull-down are high profile only (RE/25 #39: live at 4.1 and 7.6 m drops)
+    let mut s = Sim::new(Vec3::new(-12.0, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, false, false);
+    let mut stopped = false;
+    for _ in 0..240 {
+        s.run(1.0 / 60.0);
+        stopped |= s.ground().ledge_stop.is_some();
+    }
+    assert!(!stopped, "no ledge stop in low profile");
+    assert_eq!(s.loco().current, ActorContextId::Ground, "fell or hung: {:?}", s.body().feet);
+    assert!(s.ground().look_down.is_some(), "looks down");
+    let x = s.body().feet.x;
+    assert!(x < -9.5 - 0.1, "halted short of the edge: {x}");
 }
 
 #[test]

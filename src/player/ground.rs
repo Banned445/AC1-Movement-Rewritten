@@ -962,6 +962,20 @@ pub fn update_ground(
         // other requests.
         // The interpreter steers by the response-curved direction (+0x1270, RE/24 INPUT-6).
         let (mv_dir, mv_speed) = if GAME_GROUND_TREE { wall_slide(&body, pad.dir_move, pad.speed01) } else { (pad.dir, pad.speed01) };
+        // The interpreter's own edge stop (0xEE7BDA–0xEE7CB4), low profile: the stick-direction edge report within
+        // 0.16 m with a drop of more than 2 m (any deeper drop too: 0xEE7C1A tests only `> 2.0`) and its normal within
+        // 70 deg of the facing (and of the stick) sets the wanted speed to 0 (SetMoveSpeed(0)) before the Ground updates:
+        // to the Ground it is a released stick, so a walk start still playing leaves for the wait at once and its root
+        // motion stops (RE/25 #39: live, the walk start at a 4.1 m drop went to `xx_h_accel_tr_l_wait` with the feet
+        // short of the line). Held 0.25 s it becomes the look-down below. Its 0.16 m reach beats the ledge stop's
+        // 0.15 m, so in low profile the ledge stop never comes (RE/25 #39: low profile at 1.6 / 4.1 / 7.6 m drops always
+        // stopped and looked down; only high profile ledge-stops).
+        let halt_edge = (!(pad.high_profile && ab.max_speed() > 1) && mv_speed > 0.0)
+            .then(|| edge_report_drop(body.feet, body.forward(), EDGE_HALT_REACH, EDGE_HALT_COS, 2.0, &guidance, &collision))
+            .flatten()
+            .filter(|&(_, n, _)| pad.dir.dot(Vec3::new(n.x, 0.0, n.z).normalize_or_zero()) > EDGE_HALT_COS);
+        let edge_halt = halt_edge.is_some();
+        let mv_speed = if edge_halt { 0.0 } else { mv_speed };
         // The stick pushed straight into a wall (wall slide result 2): no speed, but the interpreter still hands the Ground
         // the direction into the wall as DestHeading (0xEE6FB0: SetDestHeading whenever the stick magnitude +4672 > 0),
         // so Idle can pivot round to face it (RE/24 GROUND-10, bug-1791664621). PORT: the stick inside the dead zone
@@ -1152,15 +1166,6 @@ pub fn update_ground(
             }
         }
 
-        // The interpreter's own edge stop (0xEE7BDA–0xEE7CB4), low profile: the stick-direction edge report within
-        // 0.16 m with a drop of more than 2 m and its normal within 70 deg of the facing (and of the stick) zeroes the
-        // wanted speed: the walk halts at the edge without a clip (drops of 2–5 m; deeper ones get the ledge stop),
-        // and with no move request Idle does not start again.
-        let halt_edge = (!g.high_profile && moving)
-            .then(|| edge_report_drop(body.feet, body.forward(), EDGE_HALT_REACH, EDGE_HALT_COS, 2.0, &guidance, &collision))
-            .flatten()
-            .filter(|&(_, n, d)| (d <= LEDGE_STOP_DROP || g.ledge_stop_lock.is_some()) && pad.dir.dot(Vec3::new(n.x, 0.0, n.z).normalize_or_zero()) > EDGE_HALT_COS);
-        let edge_halt = halt_edge.is_some();
         // the halt also latches +4176 (0xEE7C85) and starts its timer +4144 when it rises; any frame without it clears
         // the latch (0xEE7C8E)
         g.edge_halt_t = if edge_halt { g.edge_halt_t + dt } else { 0.0 };
@@ -1449,10 +1454,14 @@ pub fn update_ground(
         // Movement event 69 (0xDB1470): guard 0xDA5DE0 = front edge (ClassifyEdgeSide 0xD9D7F0 → 1), drop > 2 m,
         // body space → ToLedgeStop 0xDA99F0. Side edges (3/4, guard 0xDA5D90) go to another state (not ported).
         // Sender: the input interpreter (0xEE8899 → IHumanGround vt748 `HumanGround__DoLedgeStop` 0xDBCAD0): a front
-        // edge (vt744) within 0.15 m (0.0225 = 0.15²) with a drop of more than 5 m, in either profile. Free running
-        // (high profile + Legs) jumps first (the interpreter's jump branch returns before it).
-        let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id));
-        if moving && !busy && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
+        // edge (vt744) within 0.15 m (0.0225 = 0.15²) with a drop of more than 5 m, in either profile, every frame
+        // without a stick test: a run stop sliding to the edge turns into the ledge stop (RE/25 #12: live, released
+        // late the jog stop became `xx_h_ledge_stop_start` within 0.1 s; it never carries the body off). Free running
+        // (high profile + Legs) jumps first (the interpreter's jump branch returns before it). In low profile the edge
+        // halt above comes first (its reach is larger) and its look-down returns before the sender.
+        let run_stopping = g.oneshot.is_some_and(|o| jump_blend::RUN_STOP.contains(&o.blend.id) || jump_blend::RUN_STOP_TO_WAIT.contains(&o.blend.id));
+        let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id)) && !run_stopping;
+        if (moving || run_stopping) && !busy && !edge_halt && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
             if let Some((p, n)) = edge_report_drop(body.feet, body.forward(), LEDGE_STOP_REACH, FRONT_COS, LEDGE_STOP_DROP, &guidance, &collision).map(|r| (r.0, r.1)) {
                 if let Some(b) = super::ledge_moves::single_item(super::ledge_moves::LEDGE_STOP_START, 0) {
                     g.ledge_stop = Some(LedgeStop { point: p, normal: n, ending: false });
@@ -1994,8 +2003,8 @@ const LEDGE_STOP_DROP: f32 = 5.0;
 /// The interpreter's low-profile edge halt: within 0.16 m, normal within 70 deg (0xEE7C1A / 0xEE7C5C).
 const EDGE_HALT_REACH: f32 = 0.16;
 const EDGE_HALT_COS: f32 = 0.342_020_1;
-/// PORT: the feet stay this far behind the edge during the ledge stop.
-const LEDGE_STOP_MARGIN: f32 = 0.05;
+/// PORT: the feet stay this far behind the edge line during the ledge stop (live: 0.12–0.14 m, RE/25 #39).
+const LEDGE_STOP_MARGIN: f32 = 0.13;
 /// ClassifyEdgeSide 0xD9D7F0: front = within 60° (120° with the report flag +68).
 const FRONT_COS: f32 = 0.5;
 
