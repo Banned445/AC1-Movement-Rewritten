@@ -27,7 +27,7 @@ pub const TRACK_ACUATOR_CONTACTS: u32 = 2;
 /// transition actions between the port's actions are there to play (a missing one turned the authored transition
 /// into a cut).
 pub const MOVEMENT_BLOCKS: &[&str] = &[
-    "HumanClimb", "HumanClimb_Jumps", "HumanGround", "HumanGround_Actions", "HumanGround_Hurt", "HumanGround_TurnOnSpot",
+    "HumanClimb", "HumanClimb_Jumps", "HumanGround", "HumanGround_Actions", "HumanGround_CycleBreakers", "HumanGround_Hurt", "HumanGround_TurnOnSpot",
     "HumanHayStack", "HumanInAir", "HumanKiosk", "HumanLadder", "HumanLedge", "HumanNarrowObject", "HumanOrientedMove",
     "HumanWalling", "Human_Environment",
 ];

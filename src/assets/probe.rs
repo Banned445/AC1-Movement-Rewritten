@@ -648,7 +648,7 @@ fn probe_resolve_actions() {
     ids.extend(std::env::var("PROBE_DEC").unwrap_or_default().split(',').filter_map(|s| s.trim().parse::<u32>().ok()));
     for id in ids {
         let Some(a) = graph.actions.get(&id) else { println!("{id} ({id:#x}): not found"); continue };
-        println!("{id} ({id:#x}) -> action {:#010x} request {} [{}] repeat {} flags {:#x} channel {:#x}", a.id, a.request_id, a.block, a.repeat, a.flags, a.channel);
+        println!("{id} ({id:#x}) -> action {:#010x} request {} [{}] repeat {} flags {:#x} channel {:#x} item ids {:x?} assoc {:x?}", a.id, a.request_id, a.block, a.repeat, a.flags, a.channel, a.item_ids, a.assoc);
         if let Some(t) = a.in_transition { println!("    in  {t:x?}"); }
         if let Some(t) = a.out_transition { println!("    out {t:x?}"); }
         for (k, it) in a.items.iter().enumerate() {
@@ -1025,3 +1025,27 @@ fn probe_dump_resources() {
         }
     }
 }
+
+/// Find a byte pattern (`PROBE_HEX`, e.g. "0000c04000007041") in the resources of the stored files named in
+/// `PROBE_FILES` (comma list; default the Rank 9 file) of DataPC.forge; prints the resource and offset with 24 bytes
+/// around.
+#[test]
+#[ignore]
+fn probe_find_bytes() {
+    let hex = std::env::var("PROBE_HEX").unwrap_or_default();
+    let pat: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect();
+    let files: Vec<String> = std::env::var("PROBE_FILES").unwrap_or("Rank 9".into()).split(',').map(String::from).collect();
+    let mut f = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    for name in files {
+        let Some(e) = f.find(&name).cloned() else { println!("{name}: not found"); continue };
+        for r in f.resources(&e).unwrap() {
+            for (i, _) in r.payload.windows(pat.len()).enumerate().filter(|(_, w)| *w == pat.as_slice()) {
+                let a = i.saturating_sub(24);
+                let b = (i + pat.len() + 24).min(r.payload.len());
+                let around: Vec<String> = r.payload[a..b].iter().map(|x| format!("{x:02x}")).collect();
+                println!("{name}: {:#010x} '{}' class {:#010x} at {i}: {}", r.id, r.name, r.class_hash, around.join(" "));
+            }
+        }
+    }
+}
+

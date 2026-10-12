@@ -33,6 +33,14 @@ pub const STANCE_WAITS: [[u32; 2]; 2] = [[0x00F3_935C, 0x00F3_9360], [0x00F3_941
 /// 0xDA7F1F / 0xDA7F0F), armed by `sub_D7E5C0` with the old profile.
 pub const STANCE_TIME: [f32; 2] = [0.1, 0.5];
 
+/// The walking fidgets, [the player's variant 0, variant 1] (`sub_DC4980`: 0x339881DE / 0x5624EE1D, played with a 0.15 s
+/// blend on the upper-body channel 0x1B99C0A): actions with no items whose `AssociatedActionGroup` lists the actions to
+/// pick from by weight, `xx_walk_cyclebreaker_footr_v01` … `v08` (variant 1: the pickpocket walk cycle breakers), RE/24
+/// GROUND-18.
+pub const CYCLE_BREAKER: [u32; 2] = [0x3398_81DE, 0x5624_EE1D];
+/// The fidget's blend in (`sub_DC4980`: 0x3E19999A).
+pub const CYCLE_BREAKER_BLEND: f32 = 0.15;
+
 /// The wait Idle plays (`HumanGround__IdleWait_Enter` 0xD94580: `dword_1A2BFE0[3·(HG+1524 + 2·HG+1500) + foot]`; HG+1492,
 /// the current move mode, is 0 there): the stance-change wait while HG+1524 is set. Its parallel-feet entry, −1, plays
 /// nothing (`Anim__PlayActionById` 0x500740 finds no action, **hypothesis**), so the old profile's wait goes on.

@@ -142,6 +142,65 @@ pub struct HumanGroundData {
     pub step_up: Option<StepUp>,
     /// Which of the foot-IK switching states the ground was in last frame (RE/24 GROUND-16).
     pub ik_state: IkState,
+    /// The walking upper-body fidget (RE/24 GROUND-18).
+    pub fidget: Fidget,
+}
+
+/// The walking upper-body fidget, the "cycle breaker" (RE/24 GROUND-18). `HumanGround__Move_EnterBody` 0xD94BFA arms
+/// the timer HG+0x588 with Random(HumanData +0x204, +0x208) = Random(6, 15) s (`HumanData__ctor` 0xB30330; no
+/// HumanData is serialized in DataPC.forge, so these defaults hold). `UpdateMoveBlend`'s tail (0xDA1FD4–0xDA20D0), on the
+/// locomotion path: when the playing locomotion item becomes item 1 (HG+0x7C0 the last one), in the walk band (HG+0x5DC
+/// = 0: s ≤ 0.25) with the timer run out, it posts event 2 to the upper-body FSM (HG+0x580: `sub_D82560`) and re-arms
+/// the timer; at s ≥ 0.75 it posts event 4 (`sub_D826F0`), which ends the fidget. Event 2's variant is HumanData +0x202:
+/// 0 for the player (an NPC controller, 0xE8DE40, sets 1: the pickpocket walk cycle breakers, **hypothesis** that the
+/// player never gets it). The FSM accepts it only while enabled (events 0 / 1 from the same ground states that switch
+/// the foot IK: `IkState::On`), with nothing of higher priority playing (+32 ≤ 1: nothing in free roam) and not already
+/// fidgeting. The action played (`ground_tree::CYCLE_BREAKER`) is the animation's to pick.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Fidget {
+    /// HG+0x588: time until the next fidget may start.
+    pub timer: f32,
+    /// Bumped at every event 2 (the animation starts a fidget).
+    pub seq: u32,
+    /// Event 4 or 0 this frame: a running fidget ends.
+    pub stop: bool,
+    /// HG+0x7C0: the locomotion item of the last MoveBlend run.
+    prev_item: usize,
+    moving: bool,
+    rng: u32,
+}
+
+impl Fidget {
+    const RANGE: (f32, f32) = (6.0, 15.0);
+    const WALK: f32 = 0.25;
+    const STOP: f32 = 0.75;
+
+    /// `Random__Range` (the game's LCG, 1664525·x + 1013904223, 28 bits).
+    fn random(&mut self, lo: f32, hi: f32) -> f32 {
+        self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        lo + (hi - lo) * (self.rng & 0x0FFF_FFFF) as f32 / 0x1000_0000 as f32
+    }
+
+    /// One frame: `moving` = the Move state, `locomotion` = MoveBlend's locomotion path (no transition action in front),
+    /// `item` the playing locomotion item, `s` the speed parameter, `enabled` the upper-body FSM's state.
+    pub fn update(&mut self, moving: bool, locomotion: bool, item: usize, s: f32, enabled: bool, dt: f32) {
+        if moving && !self.moving {
+            // `Move_EnterBody`: the timer armed on every Move entry
+            self.timer = self.random(Self::RANGE.0, Self::RANGE.1);
+        }
+        self.moving = moving;
+        self.timer = (self.timer - dt).max(0.0);
+        self.stop = !enabled;
+        if !(moving && locomotion) {
+            return;
+        }
+        if item != self.prev_item && item == 1 && s <= Self::WALK && self.timer <= 0.0 && enabled {
+            self.seq = self.seq.wrapping_add(1);
+            self.timer = self.random(Self::RANGE.0, Self::RANGE.1);
+        }
+        self.prev_item = item;
+        self.stop |= s >= Self::STOP;
+    }
 }
 
 /// The ground states that switch the standing foot IK and the stick-to-ground smoothing (`crate::ik::GroundIkSwitch`;
@@ -1162,6 +1221,10 @@ pub fn update_ground(
             g.speed_param = 0.0;
             g.blend.speed_param = 0.0;
         }
+        // MoveBlend's tail: the walking upper-body fidget (RE/24 GROUND-18)
+        let in_move = g.speed_param > 0.0 && g.oneshot.is_none() && g.crouch.is_none() && g.extra.is_none() && g.collide.is_none();
+        let (item, s, enabled) = (g.blend.foot, g.speed_param, g.ik_state == IkState::On);
+        g.fidget.update(in_move, g.tr.is_none(), item, s, enabled, dt);
 
         // heading: rotate toward wanted at the player turn rate (0xD95290), unless the playing item turns the body
         // itself (0x10)
@@ -2027,6 +2090,35 @@ impl AnyHit for std::ops::RangeInclusive<f32> {
 #[cfg(test)]
 mod reanalysis_tests {
     use super::*;
+
+    /// RE/24 GROUND-18: the fidget waits for the timer armed at the Move entry (6–15 s), then starts when the walk's
+    /// locomotion item turns to item 1; not when running, not while the upper body is locked; a run ends it.
+    #[test]
+    fn the_walk_fidgets_when_the_timer_runs_out_on_the_right_step() {
+        let dt = 0.1;
+        let mut f = Fidget::default();
+        f.update(true, true, 0, 0.2, true, dt);
+        assert!((6.0..=15.0).contains(&f.timer), "armed at the Move entry: {}", f.timer);
+        f.timer = 0.0;
+        f.update(true, true, 0, 0.2, true, dt);
+        assert_eq!(f.seq, 0, "item 0: no fidget");
+        f.update(true, true, 1, 0.2, true, dt);
+        assert_eq!(f.seq, 1, "the step onto item 1 starts it");
+        assert!((6.0..=15.0).contains(&f.timer), "re-armed: {}", f.timer);
+        // jogging, or the upper body locked: no fidget
+        for (s, enabled) in [(0.5, true), (0.2, false)] {
+            let mut g = Fidget { timer: 0.0, prev_item: 0, moving: true, ..Default::default() };
+            g.update(true, true, 1, s, enabled, dt);
+            assert_eq!(g.seq, 0, "s {s} enabled {enabled}");
+        }
+        // a run or a lock ends a fidget
+        f.update(true, true, 0, 0.8, true, dt);
+        assert!(f.stop);
+        f.update(true, true, 0, 0.2, false, dt);
+        assert!(f.stop);
+        f.update(true, true, 0, 0.2, true, dt);
+        assert!(!f.stop);
+    }
 
     /// RE/24 GROUND-16: each switching state turns the foot IK off over 0.2 s on entry and on in its exit: the landings
     /// over 0.35 s, the roll ending and the lean at once, FreeRun over 0.2 s; the others leave it alone.

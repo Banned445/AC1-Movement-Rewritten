@@ -122,6 +122,12 @@ pub struct Action {
     pub loop_item: u32,
     /// +12: the `BodyPartChannel` (object id in `BodyPartTemplate_Human`; `crate::assets::body_parts`).
     pub channel: u32,
+    /// The ids of its items in order (inline or referenced; every reference in Game Fix names an item of its own block).
+    pub item_ids: Vec<u32>,
+    /// +36 `AssociatedActionGroup`'s entries, 5 × u32: [0, the entry's class 0x356E00E2, an action id, its weight (f32
+    /// bits), a float]. An action with no items plays one of them, picked by weight (`anim::pick_associated`; the
+    /// `HumanGround_CycleBreakers` fidgets, RE/24 GROUND-18).
+    pub assoc: Vec<[u32; 5]>,
 }
 
 /// All decoded actions, by action id (the ids the exe passes to the animation graph).
@@ -189,6 +195,8 @@ enum Obj {
     Action(Action),
     Item(ActItem),
     Transition(ActTransition),
+    /// `AssociatedActionGroup`: its entries (5 × u32 each), a float and three flags.
+    Assoc(Vec<[u32; 5]>),
     Other,
 }
 
@@ -254,13 +262,21 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
             r.u32()?; // ACTTorsoConstraintMode
             let repeat = r.u32()?;
             let loop_item = r.u32()?;
-            read_obj(r, c, false)?; // AssociatedActionGroup
+            let assoc = match read_obj(r, c, false)? {
+                Obj::Assoc(e) => e,
+                _ => Vec::new(),
+            };
             let n = r.u32()?;
             let mut items = Vec::new();
+            let mut item_ids = Vec::new();
             for _ in 0..n {
                 match read_obj(r, c, false)? {
-                    Obj::Item(it) => items.push(it),
+                    Obj::Item(it) => {
+                        item_ids.push(it.id);
+                        items.push(it);
+                    }
                     Obj::Ref(rid) => {
+                        item_ids.push(rid);
                         if let Some(it) = c.items.get(&rid) {
                             items.push(it.clone());
                         }
@@ -268,7 +284,7 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
                     _ => {}
                 }
             }
-            let a = Action { id, request_id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, loop_item, channel };
+            let a = Action { id, request_id, block: c.block.clone(), items, in_transition, out_transition, flags, repeat, loop_item, channel, item_ids, assoc };
             c.actions.push(a.clone());
             Ok(Obj::Action(a))
         }
@@ -332,16 +348,19 @@ fn read_body(r: &mut R, c: &mut Ctx, id: u32, cls: u32) -> Result<Obj, String> {
         }
         CLASS_ASSOC_GROUP => {
             let n = r.u32()?;
+            let mut e = Vec::new();
             for _ in 0..n {
-                for _ in 0..5 {
-                    r.u32()?;
+                let mut v = [0u32; 5];
+                for x in v.iter_mut() {
+                    *x = r.u32()?;
                 }
+                e.push(v);
             }
             r.f32()?;
             for _ in 0..3 {
                 r.u8()?;
             }
-            Ok(Obj::Other)
+            Ok(Obj::Assoc(e))
         }
         CLASS_ACTION_BLOCK => {
             let n = r.u32()?;

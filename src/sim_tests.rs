@@ -1057,6 +1057,33 @@ fn small_drop_lands_with_the_forward_landing_blend() {
     assert!(w[1] + w[4] > 0.99, "{w:?}");
 }
 
+/// RE/24 GROUND-18: walking, once the fidget timer has run out, a cycle breaker from the player's group plays on the
+/// upper-body slot; breaking into a run ends it.
+#[test]
+fn the_walk_plays_a_cycle_breaker_on_the_upper_body() {
+    use crate::player::ground_tree::CYCLE_BREAKER;
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    s.pad(Vec3::NEG_Z, 0.5, false, false);
+    s.run(0.5);
+    assert!(s.ground().speed_param > 0.0 && s.ground().speed_param <= 0.25, "walking: {}", s.ground().speed_param);
+    s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().ground.fidget.timer = 0.0;
+    let group: Vec<u32> = {
+        let lib = s.app.world().resource::<crate::anim::AnimLibrary>();
+        lib.graph.actions[&CYCLE_BREAKER[0]].assoc.iter().map(|e| e[2]).collect()
+    };
+    assert_eq!(group.len(), 8);
+    let fidget = |s: &Sim| s.app.world().get::<crate::anim::AnimPlayer>(s.player).unwrap().overlay.as_ref().filter(|o| o.weight > 0.0).map(|o| o.action);
+    // the walk steps onto item 1 within a step (about 2 s at a slow walk)
+    assert!(s.run_until(5.0, |s| fidget(s).is_some()), "no cycle breaker");
+    assert!(group.contains(&fidget(&s).unwrap()), "{:#x?}", fidget(&s));
+    s.pad(Vec3::NEG_Z, 1.0, true, true);
+    assert!(s.run_until(3.0, |s| fidget(s).is_none()), "the run did not end it");
+}
+
 /// RE/24 CENSUS-6: the teleport re-enters Ground's Movement in Idle at the target (entry mode 0): no landing, standing,
 /// whatever context the character was in.
 #[test]

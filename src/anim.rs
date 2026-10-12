@@ -348,6 +348,11 @@ pub struct AnimPlayer {
     /// Action +48 flags of the playing item's action (bit 3 lets the standing foot IK run, `IKGroundBiped__Update`
     /// 0x432C8A); 8 for named clips outside the graph.
     pub action_flags: u8,
+    /// The walking fidget (RE/24 GROUND-18): the ground's last fidget request taken, the group picks played so far and
+    /// the picker's random state.
+    fidget_seq: u32,
+    fidget_played: Vec<u32>,
+    fidget_rng: u32,
 }
 
 /// A partial-body slot (`Anim__PlayActionOnSlots` 0x4FE730: an action on a channel of slot group 1 plays on the
@@ -360,8 +365,10 @@ pub struct Overlay {
     items: Vec<ItemPlay>,
     item: usize,
     phase: f32,
-    /// 0 → 1 over 0.2 s, back to 0 when the action ends.
+    /// 0 → 1 over `fade`, back to 0 when the action ends.
     pub weight: f32,
+    /// Its blend in and out (s).
+    fade: f32,
     ending: bool,
     looping: bool,
     /// Action +32: the item a looping action starts again at (RE/24 ANIM-5).
@@ -392,6 +399,11 @@ impl AnimPlayer {
     /// Play `action` on the partial-body slot when its channel is in slot group 1; returns false for a full-body
     /// action (play those through the normal selection).
     pub fn play_overlay(&mut self, lib: &AnimLibrary, action: u32) -> bool {
+        self.play_overlay_fade(lib, action, OVERLAY_FADE)
+    }
+
+    /// `play_overlay` with its own blend time.
+    pub fn play_overlay_fade(&mut self, lib: &AnimLibrary, action: u32, fade: f32) -> bool {
         if self.overlay.as_ref().is_some_and(|o| o.action == action && !o.ending) {
             return true;
         }
@@ -404,7 +416,7 @@ impl AnimPlayer {
         let bones = lib.body.bones(ch.mask);
         let weight = self.overlay.as_ref().map_or(0.0, |o| o.weight);
         let loop_item = (a.loop_item as usize).min(items.len() - 1);
-        self.overlay = Some(Overlay { action, items, item: 0, phase: 0.0, weight, ending: false, looping: a.repeat == 0, loop_item, bones, mask: Vec::new() });
+        self.overlay = Some(Overlay { action, items, item: 0, phase: 0.0, weight, fade: fade.max(1e-3), ending: false, looping: a.repeat == 0, loop_item, bones, mask: Vec::new() });
         true
     }
 
@@ -429,6 +441,31 @@ impl AnimPlayer {
     }
 }
 
+/// The action an action with no items plays from its `AssociatedActionGroup` (`Anim__PlayActionPtr` 0x4FF5B0 →
+/// `sub_72AD60` → `sub_72A9D0`): a weighted random pick (the game's LCG) among the entries not played yet, each entry's
+/// weight its share; once every entry has played, all are open again (the group's flag bit 0; PORT: the game's history
+/// of picks is kept per animation component and may expire, **hypothesis**). Used for the walking fidget (RE/24
+/// GROUND-18).
+pub fn pick_associated(lib: &AnimLibrary, action: u32, played: &mut Vec<u32>, rng: &mut u32) -> Option<u32> {
+    let a = lib.graph.actions.get(&action)?;
+    let entries: Vec<(u32, f32)> = a.assoc.iter().map(|e| (e[2], f32::from_bits(e[3]))).collect();
+    let mut open: Vec<(u32, f32)> = entries.iter().filter(|e| !played.contains(&e.0)).copied().collect();
+    if open.is_empty() {
+        played.retain(|id| !entries.iter().any(|e| e.0 == *id));
+        open = entries;
+    }
+    let total: f32 = open.iter().map(|e| e.1).sum();
+    *rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    let mut x = total * (*rng & 0x0FFF_FFFF) as f32 / 0x1000_0000 as f32;
+    let pick = open.iter().find(|e| {
+        let hit = e.1 >= x;
+        x -= e.1;
+        hit
+    }).or(open.last())?.0;
+    played.push(pick);
+    Some(pick)
+}
+
 /// Blend the overlay's pose over the full-body pose on its bones; advances it by `dt`.
 fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, skel: &PoseSkeleton, pose: &mut [(Quat, Vec3)], dt: f32) {
     if o.mask.len() != skel.bone_ids.len() {
@@ -449,7 +486,7 @@ fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, skel: &PoseSkeleton, pose: 
             o.ending = true;
         }
     }
-    o.weight = if o.ending { (o.weight - dt / OVERLAY_FADE).max(0.0) } else { (o.weight + dt / OVERLAY_FADE).min(1.0) };
+    o.weight = if o.ending { (o.weight - dt / o.fade).max(0.0) } else { (o.weight + dt / o.fade).min(1.0) };
     let mut ov = Vec::new();
     sample_layers(lib, skel, &o.items[o.item].layers, o.items[o.item].clip_phase(o.phase), &mut ov);
     blend_masked(pose, &ov, &o.mask, o.weight);
@@ -708,6 +745,25 @@ fn choose_clip(
         // the falling blend belongs to InAir: leaving it (a landing, a catch) fades the partial slot out
         if loco.current != ActorContextId::InAir && p.overlay.as_ref().is_some_and(|o| o.action == ACT_FALL) {
             p.stop_overlay();
+        }
+        // the walking fidget on the upper-body slot (RE/24 GROUND-18): a new request picks a cycle breaker from the
+        // player's group (variant 0); a run, a locked upper body or leaving the ground ends it
+        {
+            use crate::player::ground_tree::{CYCLE_BREAKER, CYCLE_BREAKER_BLEND};
+            let is_fidget = |lib: &AnimLibrary, id: u32| CYCLE_BREAKER.iter().any(|c| lib.graph.actions.get(c).is_some_and(|a| a.assoc.iter().any(|e| e[2] == id)));
+            let f = g.fidget;
+            if loco.current == ActorContextId::Ground && f.seq != p.fidget_seq {
+                p.fidget_seq = f.seq;
+                let (mut played, mut rng) = (std::mem::take(&mut p.fidget_played), p.fidget_rng);
+                if let Some(a) = pick_associated(&lib, CYCLE_BREAKER[0], &mut played, &mut rng) {
+                    p.play_overlay_fade(&lib, a, CYCLE_BREAKER_BLEND);
+                }
+                (p.fidget_played, p.fidget_rng) = (played, rng);
+            }
+            let stop = loco.current != ActorContextId::Ground || f.stop;
+            if stop && p.overlay.as_ref().is_some_and(|o| !o.ending && is_fidget(&lib, o.action)) {
+                p.stop_overlay();
+            }
         }
         if let Some(ctx) = p.hold {
             if ctx == loco.current && !(p.phase >= 1.0 && p.item + 1 >= p.items.len()) {
