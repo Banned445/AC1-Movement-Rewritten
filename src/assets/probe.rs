@@ -661,6 +661,36 @@ fn probe_resolve_actions() {
     }
 }
 
+/// Names for every action (resource id and Action+8 request id): `<id hex>\t<block>: <clip of each item>`, written to
+/// `PROBE_OUT` (a live-analysis overlay shows the playing action by name). Both ids map to the same text.
+#[test]
+#[ignore]
+fn probe_dump_action_names() {
+    use super::ac_actions::{ActionGraph, CLASS_ACTION_BLOCK};
+    use std::fmt::Write as _;
+    let res = game_fix();
+    let mut graph = ActionGraph::default();
+    for r in res.iter().filter(|r| r.class_hash == CLASS_ACTION_BLOCK) {
+        graph.add_block(&r.name, &r.payload).unwrap();
+    }
+    let names: HashMap<u32, &str> = res.iter().filter(|r| r.class_hash == CLASS_ANIMATION).map(|r| (r.id, r.name.as_str())).collect();
+    let mut acts: Vec<_> = graph.actions.values().collect();
+    acts.sort_by_key(|a| a.id);
+    acts.dedup_by_key(|a| a.id);
+    let mut out = String::from("# action id (resource or Action+8 request id)\tblock: first clip of each item\n");
+    for a in acts {
+        let clips: Vec<&str> = a.items.iter().map(|it| it.animations.first().and_then(|x| names.get(x).copied()).unwrap_or("?")).collect();
+        let text = format!("{}: {}", a.block, if clips.is_empty() { "(associated group)".to_string() } else { clips.join(" + ") });
+        writeln!(out, "{:08X}\t{text}", a.id).unwrap();
+        if a.request_id != a.id {
+            writeln!(out, "{:08X}\t{text}", a.request_id).unwrap();
+        }
+    }
+    let path = std::env::var("PROBE_OUT").unwrap_or("actions.tsv".into());
+    std::fs::write(&path, out).unwrap();
+    println!("wrote {path}");
+}
+
 /// Find action / item ids (`PROBE_IDS`, comma list of hex) in every ActionBlock: block, items, clips, transitions.
 #[test]
 #[ignore]
