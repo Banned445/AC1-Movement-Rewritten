@@ -122,6 +122,11 @@ pub const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
 /// Actions the clip generator dumps for the ledge (the catches, for their lengths; the wall-free → wall switch).
 /// The shimmy actions (`StartHandStep` 0xDDE0C0): [wall, free] × [left open, left close, right open, right close].
 pub const ACT_SHIMMY: [[u32; 4]; 2] = [[0x01B7_0B35, 0x01B7_0B36, 0x01B7_0B37, 0x01B7_0B38], [0x01A2_490A, 0x01A2_490B, 0x01A2_490C, 0x01A2_490D]];
+/// `HumanLedge__SetAlternationFromHandSpacing` 0xDCBCD0: +133 = the hand targets 0.3 m or more apart.
+fn alternation_from_spacing(l: Vec3, r: Vec3) -> bool {
+    (l - r).length() >= 0.3
+}
+
 /// The `ACT_SHIMMY` column: the move's side and whether this step opened the hands (the alternation flag after it).
 pub fn shimmy_index(right: bool, open: bool) -> usize {
     (right as usize) * 2 + (!open) as usize
@@ -280,7 +285,9 @@ impl HumanLedgeData {
         self.sub_state = e.sub_state;
         self.pass_over = None;
         self.swing = None;
-        self.alt_flag = false; // EnterCommon 0xDE26D0 clears +0x85
+        // EnterCommon 0xDE26D0 clears +0x85, then `HumanLedge__OnEnter` 0xDE3460 sets it from the hand targets
+        // (`HumanLedge__SetAlternationFromHandSpacing` 0xDCBCD0: 0.3 m or more apart → the trailing hand closes first)
+        self.alt_flag = alternation_from_spacing(e.hand_l, e.hand_r);
         self.repose_at_entry_end = false;
         self.last_hand = 0; // and +1844
         self.blocked_up = false;
@@ -752,11 +759,15 @@ pub fn update_ledge(
                 if mv.kind == ledge_moves::MoveKind::SwingBack {
                     d.swing_strength = Some((mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0), d.step_seq));
                 }
+                // Every hang settle sets +133 from the hand targets (`HumanLedge__SetAlternationFromHandSpacing` 0xDCBCD0,
+                // called by OnEnter, the entry, the receptions, the grasp, the ledge jump, the swing stops and the free-hang
+                // drop): a hang whose hands end apart closes the trailing hand first (RE/24 LEDGE-14; live RE/25 #36: after
+                // the pull-down, hands 0.51 m apart, the first shimmy step is `strafe_*_close`). The switch does not touch
+                // it (LEDGE-9).
                 if let ledge_moves::MoveKind::SideJump { .. } = mv.kind {
-                    // the table jump into a hang: +133 = the hand targets 0.3 m or more apart (`sub_DCBCD0`, RE/24 LEDGE-14)
-                    d.alt_flag = (mv.hand_l - mv.hand_r).length() >= 0.3;
+                    d.alt_flag = alternation_from_spacing(mv.hand_l, mv.hand_r);
                 } else if !matches!(mv.kind, ledge_moves::MoveKind::SwitchHang { .. }) {
-                    d.alt_flag = false;
+                    d.alt_flag = alternation_from_spacing(d.hand_l, d.hand_r);
                 }
             } else {
                 d.mv = Some(mv);
