@@ -971,3 +971,57 @@ fn probe_eye_track_clips() {
     println!("prefixes: {:?}", &v[..v.len().min(25)]);
     println!("movement-graph clips keying the eyes: {} {:?}", in_graph.len(), &in_graph[..in_graph.len().min(20)]);
 }
+
+/// Where classes live in the install (`PROBE_CLASSES`, comma list of class names; `PROBE_FORGES`, comma list of forge
+/// files, default DataPC.forge): every resource of that class, and every resource whose payload holds the class hash
+/// (an embedded object), with the stored file's name and the offsets.
+#[test]
+#[ignore]
+fn probe_find_classes() {
+    let names: Vec<String> = std::env::var("PROBE_CLASSES").unwrap_or("AssassinAbilitySet".into()).split(',').map(String::from).collect();
+    let hashes: Vec<(String, u32)> = names.iter().map(|n| (n.clone(), super::ac_formats::class_hash(n))).collect();
+    let forges: Vec<String> = std::env::var("PROBE_FORGES").unwrap_or("DataPC.forge".into()).split(',').map(String::from).collect();
+    for fname in forges {
+        let Ok(mut f) = Forge::open(&game_dir().join(&fname)) else { println!("{fname}: not found"); continue };
+        let entries = f.entries.clone();
+        for e in &entries {
+            let Ok(res) = f.resources(e) else { continue };
+            for r in &res {
+                for (n, h) in &hashes {
+                    if r.class_hash == *h {
+                        println!("{fname} [{}] {}: resource {:#010x} '{}' IS {n} ({} bytes)", e.index, e.name, r.id, r.name, r.payload.len());
+                    } else {
+                        let pat = h.to_le_bytes();
+                        let offs: Vec<usize> = r.payload.windows(4).enumerate().filter(|(_, w)| *w == pat).map(|(i, _)| i).take(8).collect();
+                        if !offs.is_empty() {
+                            println!("{fname} [{}] {}: resource {:#010x} '{}' class {:#010x} holds {n} at {offs:?}", e.index, e.name, r.id, r.name, r.class_hash);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Hex dump of resources by id (`PROBE_IDS` hex, `PROBE_FORGES`, `PROBE_LEN` bytes, default 160).
+#[test]
+#[ignore]
+fn probe_dump_resources() {
+    let ids: Vec<u32> = std::env::var("PROBE_IDS").unwrap_or_default().split(',').filter_map(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()).collect();
+    let len: usize = std::env::var("PROBE_LEN").ok().and_then(|v| v.parse().ok()).unwrap_or(160);
+    let forges: Vec<String> = std::env::var("PROBE_FORGES").unwrap_or("DataPC.forge".into()).split(',').map(String::from).collect();
+    for fname in forges {
+        let Ok(mut f) = Forge::open(&game_dir().join(&fname)) else { continue };
+        let entries = f.entries.clone();
+        for e in &entries {
+            let Ok(res) = f.resources(e) else { continue };
+            for r in res.iter().filter(|r| ids.contains(&r.id)) {
+                println!("== {:#010x} '{}' class {:#010x} {} bytes", r.id, r.name, r.class_hash, r.payload.len());
+                for (i, c) in r.payload[..r.payload.len().min(len)].chunks(16).enumerate() {
+                    let hex: Vec<String> = c.iter().map(|b| format!("{b:02x}")).collect();
+                    println!("{:04x}: {}", i * 16, hex.join(" "));
+                }
+            }
+        }
+    }
+}

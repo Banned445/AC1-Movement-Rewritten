@@ -288,7 +288,7 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SpawnPoint(Vec3::new(0.0, 0.0, 4.0)))
             .init_resource::<abilities::AbilitySet>()
-            .add_systems(Startup, spawn_player)
+            .add_systems(Startup, (spawn_player, abilities::load_abilities))
             .add_systems(
                 Update,
                 (interpreter::update_interpreter, social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
