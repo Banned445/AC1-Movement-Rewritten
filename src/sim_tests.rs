@@ -3854,6 +3854,17 @@ pub(crate) struct LabTrace {
     pub frames: Vec<crate::recorder::InputFrame>,
     pub start: Vec3,
     pub heading: f32,
+    /// The foot of the wait the recording starts in (the first ground wait action's last `_footl` / `_footr`): 0 = left.
+    pub wait_foot: Option<usize>,
+}
+
+impl LabTrace {
+    /// The replay starts in the recording's wait foot, so the next start and stop take the game's feet.
+    pub fn apply_start(&self, world: &mut World, player: Entity) {
+        if let (Some(foot), Some(mut d)) = (self.wait_foot, world.get_mut::<HumanDataBundle>(player)) {
+            d.ground.set_wait_foot(foot);
+        }
+    }
 }
 
 /// The camera yaw is not recorded; it follows from the raw stick and the interpreter's world move direction (the two
@@ -3876,6 +3887,10 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
     let (bx, bz) = (f(&rows[0], c_fx), -f(&rows[0], c_fy));
     let heading = (-bx).atan2(-bz);
     let start = Vec3::new(f(&rows[0], c_x), f(&rows[0], c_y), f(&rows[0], c_z));
+    let c_act = head.iter().position(|h| *h == "action_name");
+    let wait_foot = c_act.and_then(|c| rows.iter().take(30).map(|r| r[c]).find(|n| n.starts_with("HumanGround:") && n.contains("wait")))
+        .and_then(|n| n.rfind("_foot").map(|i| &n[i + 5..]))
+        .and_then(|s| match s.as_bytes().first() { Some(b'l') => Some(0), Some(b'r') => Some(1), _ => None });
     // the camera's yaw per frame in the port's convention (camera forward = (-sin yaw, 0, -cos yaw) in Bevy)
     let mut yaws: Vec<Option<f32>> = rows
         .iter()
@@ -3924,7 +3939,7 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
             }
         })
         .collect();
-    LabTrace { frames, start, heading }
+    LabTrace { frames, start, heading, wait_foot }
 }
 
 /// `port_trace.csv`'s columns.
@@ -3969,6 +3984,8 @@ fn replay_lab_trace() {
         .unwrap_or(Vec3::new(-30.0, 0.0, -30.0));
     let mut s = Sim::new(start, trace.heading);
     s.cam_follow = false;
+    let player = s.player;
+    trace.apply_start(s.app.world_mut(), player);
     let mut out = String::from(LAB_TRACE_HEADER);
     let mut t = 0.0f32;
     for (i, frame) in trace.frames.iter().enumerate() {

@@ -200,6 +200,8 @@ fn replay_lab_trace_city() {
     s.run(1.0);
     s.teleport(start);
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
+    let player = s.player;
+    trace.apply_start(s.app.world_mut(), player);
     let mut out = String::from(crate::sim_tests::LAB_TRACE_HEADER);
     let mut t = 0.0f32;
     for (i, frame) in trace.frames.iter().enumerate() {
