@@ -355,8 +355,15 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
     for &(p0, p1, n) in KIOSKS {
         guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::Kiosk });
     }
+    // haystacks are solid boxes on layer Dynamic, as Damascus's `Hay_Bale_*` collision is (a 12-triangle box, layer 2):
+    // the character collides with them on MainCharacter and on the aimed jump's OnlyDynamic alike, and the contact is
+    // what lets an aimed jump into one (RE/24 AIR-25)
+    collision.layers.resize(collision.boxes.len(), crate::layers::STATIC);
     for &(x, z, sx, sz, h) in HAYSTACKS {
-        guidance.haystacks.push(Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) });
+        let b = Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) };
+        guidance.haystacks.push(b);
+        collision.boxes.push(b);
+        collision.layers.push(crate::layers::DYNAMIC);
     }
     for &(p0, p1, n1) in WALL_LEDGES {
         guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1, subtype: GuidanceSubType::LedgeGrab });

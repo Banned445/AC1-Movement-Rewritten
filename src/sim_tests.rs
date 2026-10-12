@@ -4300,14 +4300,30 @@ fn flat_fall_height_scenarios_reach_the_expected_player_bands() {
     }
 }
 
+/// RE/24 AIR-25: a plain fall lands on a haystack like on a roof (it is solid; only a jump aimed at one knows it,
+/// `CheckHayStackEntry` 0xE05490 needs InAir+336); standing on top is ground, with no way in from there (event 122
+/// needs a wall contact).
 #[test]
-fn an_ordinary_ballistic_fall_enters_hay_without_ground_damage() {
-    let mut s=Sim::new(Vec3::new(37.5,13.0,26.0),0.0);
-    assert!(s.run_until(4.0, |s| s.loco().current==ActorContextId::HayStack));
-    // a drop straight onto the top: contact normal more than 0.9 up → entry Top (0xE05490 / 0xE00E30)
-    assert_eq!(s.data().hay.action.map(|a|a.id),Some(crate::player::hay::HAYSTACK_FAITH_LANDING));
+fn a_plain_fall_lands_on_top_of_a_haystack() {
+    let mut s = Sim::new(Vec3::new(37.5, 4.5, 26.0), 0.0);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
+    assert!((s.body().feet.y - 1.5).abs() < 0.05, "on the top: {:?}", s.body().feet);
+    s.pad(Vec3::NEG_Z, 0.3, false, false);
+    s.run(0.5);
+    assert_ne!(s.loco().current, ActorContextId::HayStack, "no way in from the top");
+}
+
+/// RE/24 AIR-25: the aimed jump at a haystack passes through the static world (layer 44) but still touches the haystack,
+/// and its contact enters it: a contact normal more than 0.9 up → Top (0xE05490 / 0xE00E30).
+#[test]
+fn a_fall_that_knows_the_haystack_enters_it_through_the_top() {
+    let from = Vec3::new(37.5, 4.5, 26.0);
+    let mut s = Sim::new(from, 0.0);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().air.hay_pass = true;
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::HayStack), "no entry: {:?} {:?}", s.loco().current, s.body().feet);
+    assert_eq!(s.data().hay.kind, crate::player::hay::HayEntry::Top);
     assert!(s.ground().last_landing.is_none());
-    assert!(s.run_until(3.0, |s| s.data().hay.phase==crate::player::hay::HayPhase::Waiting));
 }
 
 
@@ -5274,14 +5290,23 @@ fn a_static_jump_at_a_wall_top_hangs_from_it() {
 #[test]
 fn falling_against_a_haystacks_side_enters_it_from_the_air() {
     use crate::player::hay::{HayEntry, HAYSTACK_FROM_AIR};
-    // 0xE05490: a contact normal at most 0.9 up → SideJump (`xx_h_air_to_haystack`, 0xE42700). The haystack at
-    // (37.5, 26), x 36.4..38.6, z 24.9..27.1, top 1.5 m: fall toward its -Z side from 1.2 m
-    let from = Vec3::new(37.5, 1.2, 23.9);
-    let mut s = Sim::new(from, FACE_PZ);
-    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::new(0.0, 0.0, 4.0), origin: air::FallOrigin::Ground, speed_param: 0.0 }));
-    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::HayStack), "no entry: {:?} {:?}", s.loco().current, s.body().feet);
-    assert_eq!(s.data().hay.kind, HayEntry::SideJump);
-    assert_eq!(s.data().hay.action.map(|a| a.id), Some(HAYSTACK_FROM_AIR));
+    // 0xE05490: a contact normal at most 0.9 up → SideJump (`xx_h_air_to_haystack`, 0xE42700), for a fall that knows
+    // the haystack (an aimed jump's over-drop or a let-go record, RE/24 AIR-25); a plain fall drops beside it. The
+    // haystack at (37.5, 26), x 36.4..38.6, z 24.9..27.1, top 1.5 m: fall toward its -Z side from 1.2 m
+    for knows in [true, false] {
+        let from = Vec3::new(37.5, 1.2, 23.9);
+        let mut s = Sim::new(from, FACE_PZ);
+        force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::new(0.0, 0.0, 4.0), origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+        s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().air.hay_pass = knows;
+        if knows {
+            assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::HayStack), "no entry: {:?} {:?}", s.loco().current, s.body().feet);
+            assert_eq!(s.data().hay.kind, HayEntry::SideJump);
+            assert_eq!(s.data().hay.action.map(|a| a.id), Some(HAYSTACK_FROM_AIR));
+        } else {
+            assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
+            assert!(s.body().feet.y.abs() < 0.05 && s.body().feet.z < 24.9, "beside the haystack: {:?}", s.body().feet);
+        }
+    }
 }
 
 #[test]

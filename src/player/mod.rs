@@ -313,6 +313,11 @@ pub fn proxy_layer(mut q: Query<(&Locomotion, &HumanDataBundle, &mut Body), With
         body.proxy.height = (loco.current == ActorContextId::Ground && data.ground.crouch.is_some()).then_some(1.0);
         let layer = match loco.current {
             ActorContextId::Ledge | ActorContextId::Climb => crate::layers::MAIN_CHARACTER_NO_STATIC,
+            // a jump aimed at a haystack passes through it (0xE01E19 / 0xE01E83, RE/24 AIR-25)
+            ActorContextId::InAir if data.air.hay_pass => crate::layers::ONLY_DYNAMIC,
+            // inside a haystack: HollywoodMode, which collides with almost nothing (every `HumanHayStack__Enter*`,
+            // 0xE41D8C / 0xE421B4 / 0xE42444 / 0xE4273C); the hop out and the pass-over set Character back
+            ActorContextId::HayStack => crate::layers::HOLLYWOOD_MODE,
             _ => crate::layers::MAIN_CHARACTER,
         };
         if body.proxy.layer != layer {

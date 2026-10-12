@@ -1562,8 +1562,9 @@ pub fn update_ground(
         }
         // not during the free-step reception: the game is in NarrowObject then (PORT: the reception plays in Ground)
         let free_step = g.oneshot.is_some_and(|o| jump_blend::RECEPTION_FREESTEP.contains(&o.blend.id));
-        if moving && !busy && !free_step {
-            if let Some(e) = super::hay::ground_entry(body.feet, body.forward(), pad.dir, &guidance.haystacks) {
+        // the interpreter sends it with the stick past the dead zone (0xEE8E08), also when the haystack has stopped the walk
+        if pad.speed01 > 0.0 && !busy && !free_step {
+            if let Some(e) = super::hay::ground_entry(body.feet, body.forward(), pad.dir, &body.proxy.manifold, &guidance.haystacks, &collision) {
                 switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
                 continue;
             }

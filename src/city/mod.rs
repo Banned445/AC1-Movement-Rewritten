@@ -231,6 +231,33 @@ mod tests {
         assert!(spawner(&w.globals, "PlayerSpawner_Kingdom").is_some());
     }
 
+    /// The haystack objects' own collision: layers, triangle count, the hull's vertical extent against the hay volume
+    /// (AIR-25 probe).
+    #[test]
+    #[ignore]
+    fn probe_damascus_haystack_collision() {
+        let Some(w) = damascus() else { return };
+        let mut n = 0;
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in d.objects.iter().filter(|o| o.haystack.is_some()) {
+                let mut layers = std::collections::BTreeMap::new();
+                let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+                for t in &o.collision {
+                    *layers.entry(t.layer).or_insert(0) += 1;
+                    lo = lo.min(t.bounds.min.y);
+                    hi = hi.max(t.bounds.max.y);
+                }
+                let h = o.haystack.unwrap();
+                let up = o.collision.iter().filter(|t| t.normal.y > 0.7).count();
+                let down = o.collision.iter().filter(|t| t.normal.y < -0.7).count();
+                println!("{}: hay {:.2}..{:.2}; collision {layers:?} y {lo:.2}..{hi:.2}, up-facing {up}, down-facing {down}", o.name, h.min.y, h.max.y);
+                n += 1;
+                if n >= 12 { return; }
+            }
+        }
+    }
+
     /// Every cell decodes; entity placements lie in (or near: large objects overhang) their cell's rectangle.
     #[test]
     #[ignore]

@@ -212,6 +212,9 @@ impl CollisionWorld {
         let mut nearest = max;
         for (i, b) in self.boxes.iter().enumerate() {
             if !self.sees(layer, i) { continue; }
+            // a ray that starts inside a convex shape does not hit it (Havok; `ray_hit_layer` likewise): the searches
+            // from inside a haystack see past it (RE/24 AIR-25)
+            if origin.cmpgt(b.min).all() && origin.cmplt(b.max).all() { continue; }
             let (mut lo, mut hi) = (0.0f32, nearest);
             let mut hit = true;
             for axis in 0..3 {
@@ -470,9 +473,14 @@ impl CollisionWorld {
 
     /// Is an oriented box (centre, unit axes, half extents) clear of every box? Separating-axis test.
     pub fn obb_free(&self, centre: Vec3, axes: [Vec3; 3], half: Vec3) -> bool {
+        self.obb_free_except(centre, axes, half, |_| false)
+    }
+
+    /// `obb_free` ignoring the boxes `skip` names (a query that leaves an object out, e.g. the haystack being left).
+    pub fn obb_free_except(&self, centre: Vec3, axes: [Vec3; 3], half: Vec3, skip: impl Fn(&Aabb3) -> bool) -> bool {
         let world = [Vec3::X, Vec3::Y, Vec3::Z];
         let extent = Self::box_extent(axes, half);
-        !self.boxes.iter().any(|b| {
+        !self.boxes.iter().filter(|b| !skip(b)).any(|b| {
             let (bc, bh) = ((b.min + b.max) * 0.5, (b.max - b.min) * 0.5);
             let d = bc - centre;
             let mut tests: Vec<Vec3> = axes.to_vec();

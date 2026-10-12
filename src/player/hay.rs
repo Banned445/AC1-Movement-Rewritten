@@ -228,29 +228,52 @@ pub fn top_of(s: &Aabb3) -> Vec3 {
     Vec3::new((s.min.x + s.max.x) * 0.5, s.min.y + 1.6, (s.min.z + s.max.z) * 0.5)
 }
 
-/// Ground event 122's guard (0xD8F0B0): a controller contact with a haystack (entity descriptor 8; 9 = hiding place),
-/// the facing within 100 degrees of the contact (dot > -0.1736) and the stick within 45 degrees into it (dot >
-/// 0.7071). PORT: haystacks are not solid in the port, so the contact is the capsule (within 0.45 m) touching the
-/// haystack's side at foot height.
-pub fn ground_entry(feet: Vec3, facing: Vec3, stick: Vec3, stacks: &[Aabb3]) -> Option<HayStackEntry> {
-    for s in stacks {
-        if feet.y < s.min.y - 0.3 || feet.y > s.max.y - 0.3 {
-            continue;
-        }
-        let q = Vec3::new(feet.x.clamp(s.min.x, s.max.x), feet.y, feet.z.clamp(s.min.z, s.max.z));
-        let d = Vec3::new(feet.x - q.x, 0.0, feet.z - q.z);
-        // a contact on the haystack's side: the body outside its footprint, within the capsule's radius
-        if d.length() > 0.45 || d.length_squared() < 1e-8 {
-            continue;
-        }
-        // the contact normal points from the haystack to the body
-        let n = d.normalize();
-        if (-n).dot(facing) <= -0.173_648_18 || (-n).dot(stick) <= std::f32::consts::FRAC_1_SQRT_2 {
-            continue;
-        }
-        return Some(HayStackEntry { stack: *s, kind: HayEntry::Ground, from: feet, speed: 0.0 });
+/// The controller's contacts with a haystack: the haystack's collision (a box on layer Dynamic) whose contact point lies
+/// in a haystack volume (the game: the contact's entity is type 3 with descriptor 8, a haystack, or 9, a hiding place).
+/// Returns the stack and the contact normal (from the haystack toward the body) of each.
+pub fn haystack_contacts<'a>(manifold: &'a [crate::proxy::Contact], stacks: &'a [Aabb3], collision: &'a CollisionWorld) -> impl Iterator<Item = (Aabb3, Vec3)> + 'a {
+    manifold.iter().filter(|c| collision.layer_of(c.body) == crate::layers::DYNAMIC).filter_map(|c| {
+        let s = stacks.iter().find(|s| c.pos.cmpge(s.min - Vec3::splat(0.1)).all() && c.pos.cmple(s.max + Vec3::splat(0.1)).all())?;
+        Some((*s, c.normal))
+    })
+}
+
+/// `HumanInAir__CheckHayStackEntry` 0xE05490's dive branch (the faith dive playing, IHumanInAir vt72): a ray from the
+/// controller's last position along this frame's step, three times its length (`Human__RayClear`, layer Character); a
+/// hit near the known haystack enters it. PORT: the ray is tested against the haystack volumes.
+pub fn dive_hit(from: Vec3, to: Vec3, stacks: &[Aabb3]) -> Option<Aabb3> {
+    let d = (to - from) * 3.0;
+    if d.length_squared() < 1e-10 {
+        return None;
     }
-    None
+    stacks.iter().copied().find(|s| {
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        (0..3).all(|k| {
+            if d[k].abs() < 1e-8 {
+                return from[k] >= s.min[k] && from[k] <= s.max[k];
+            }
+            let (a, b) = ((s.min[k] - from[k]) / d[k], (s.max[k] - from[k]) / d[k]);
+            lo = lo.max(a.min(b));
+            hi = hi.min(a.max(b));
+            lo <= hi
+        })
+    })
+}
+
+/// Ground event 122's guard (`HumanGround__Guard_Event122_HayStack` 0xD8F0B0): a wall-class contact (`sub_4F8C40`(4):
+/// |normal z| <= 0.707) with a haystack, the facing within 100 degrees of the flattened contact (-n . facing > -0.1736)
+/// and the stick within 45 degrees into it (-n . stick > 0.7071). Standing on top is a ground contact: no entry there.
+pub fn ground_entry(feet: Vec3, facing: Vec3, stick: Vec3, manifold: &[crate::proxy::Contact], stacks: &[Aabb3], collision: &CollisionWorld) -> Option<HayStackEntry> {
+    haystack_contacts(manifold, stacks, collision).find_map(|(s, n)| {
+        if n.y.abs() > std::f32::consts::FRAC_1_SQRT_2 {
+            return None;
+        }
+        let n = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+        if (-n).dot(facing) <= -0.173_648_18 || (-n).dot(stick) <= std::f32::consts::FRAC_1_SQRT_2 {
+            return None;
+        }
+        Some(HayStackEntry { stack: s, kind: HayEntry::Ground, from: feet, speed: 0.0 })
+    })
 }
 
 fn single(id: u32) -> Option<ActionBlend> {
@@ -271,7 +294,8 @@ pub fn hop_out_exit(stack: &Aabb3, centre: Vec3, dir: Vec3, collision: &Collisio
     let tz = if dir.z.abs() > 1e-5 { ((if dir.z > 0.0 { stack.max.z } else { stack.min.z }) - centre.z) / dir.z } else { f32::INFINITY };
     let edge = centre + dir * tx.min(tz);
     let probe = Vec3::new(edge.x, centre.y, edge.z) + dir * 0.5;
-    let room = collision.obb_free(probe + Vec3::Y * 1.25, [super::right_of(dir), dir, Vec3::Y], Vec3::new(0.35, 0.5, 0.75));
+    // the query leaves the stack itself out
+    let room = collision.obb_free_except(probe + Vec3::Y * 1.25, [super::right_of(dir), dir, Vec3::Y], Vec3::new(0.35, 0.5, 0.75), |b| b.min == stack.min && b.max == stack.max);
     room.then_some(probe)
 }
 
