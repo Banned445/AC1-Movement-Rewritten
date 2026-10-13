@@ -829,10 +829,9 @@ fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWor
 /// S and 0.125 m into the wall (RE/24 CLIMB-25).
 fn side_grab_feet(hold: Vec3, n: Vec3, collision: &crate::collision::CollisionWorld) -> bool {
     let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let s = right_of(into);
     let c = hold - Vec3::Y + into * 0.125;
-    let foot = |p: Vec3| super::ledge::support_ray(p, n, 0.625, 0.0, collision);
-    foot(c - s * 0.2) && foot(c + s * 0.2)
+    let foot = |x: f32| super::ledge::wall_support(c, n, x, 0.0, super::ledge::SUPPORT_FEET, collision);
+    foot(-0.2) && foot(0.2)
 }
 
 /// The Ledge fill's actions by +2940 (`dword_1A2CC90` wall hang / `dword_1A2CCB8` free hang, written by 0xDE4F80):
@@ -1895,7 +1894,8 @@ mod tests {
         assert!((move_pose(&sparse, &d, m).root - fallback.root).length() < 1e-5, "an empty cell takes the other side's");
     }
 
-    /// RE/24 CLIMB-25: the side ledge grab is a wall hang only with the wall under both foot supports (±0.2 m).
+    /// RE/24 CLIMB-25: the side ledge grab is a wall hang only with the wall under both foot supports (±0.2 m), each by
+    /// its ray or by the Surface slices of its box (±0.25 m about the hold).
     #[test]
     fn the_side_ledge_grab_needs_both_feet_on_the_wall() {
         use crate::collision::{Aabb3, CollisionWorld};
@@ -1905,7 +1905,8 @@ mod tests {
             side_grab_feet(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c)
         };
         assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 3.0, 0.0)), "a wall under the hold");
-        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.1, 3.0, 0.0)), "the wall under one foot only");
+        assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.1, 3.0, 0.0)), "the wall under one foot's ray, in the other's box");
+        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(-0.3, 3.0, 0.0)), "the wall ending outside the boxes");
         assert!(!feet(Vec3::new(-2.0, 2.5, -2.0), Vec3::new(2.0, 3.0, 0.0)), "an overhang");
     }
 

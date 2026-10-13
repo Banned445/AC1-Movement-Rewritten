@@ -323,6 +323,74 @@ impl CollisionWorld {
         samples
     }
 
+    /// `GuidanceWorkspaceCastZPlanes` (vtable 0x1699B10, its slice 0x665690): the collision in a box (centre `origin`,
+    /// axes `across` / `into` / up, half extents `half`) cut by the horizontal planes `origin.y + h` for each `h` in
+    /// `heights` within the box's height: per triangle crossing a plane, the cut segment clipped to the box, with the
+    /// triangle's normal ((p1 − p0) × (p2 − p0)). Boxes count as their faces. Returns (start, end, normal).
+    pub fn surface_slices(&self, origin: Vec3, across: Vec3, into: Vec3, half: Vec3, heights: &[f32]) -> Vec<(Vec3, Vec3, Vec3)> {
+        let ext = Self::box_extent([across, into, Vec3::Y], half);
+        let (lo, hi) = (origin - ext, origin + ext);
+        let mut out = Vec::new();
+        let mut cut = |vs: [Vec3; 3], n: Vec3| {
+            for &h in heights.iter().filter(|h| h.abs() <= half.z) {
+                let y = origin.y + h;
+                let sd = vs.map(|v| v.y - y);
+                let mut pts: Vec<Vec3> = Vec::with_capacity(2);
+                for i in 0..3 {
+                    let j = (i + 1) % 3;
+                    if sd[i].abs() < 1e-7 {
+                        pts.push(vs[i]);
+                    } else if (sd[i] > 0.0) != (sd[j] > 0.0) && sd[j].abs() >= 1e-7 {
+                        pts.push(vs[i] + (vs[j] - vs[i]) * (sd[i] / (sd[i] - sd[j])));
+                    }
+                }
+                if pts.len() < 2 {
+                    continue;
+                }
+                let (p, q) = (pts[0], pts[1]);
+                let local = |v: Vec3| ((v - origin).dot(across), (v - origin).dot(into));
+                let (a, b) = (local(p), local(q));
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let (mut u0, mut u1) = (0.0f32, 1.0f32);
+                let mut inside = true;
+                // Liang–Barsky against |across| ≤ half.x, |into| ≤ half.y
+                for (pp, qq) in [(-dx, a.0 + half.x), (dx, half.x - a.0), (-dy, a.1 + half.y), (dy, half.y - a.1)] {
+                    if pp.abs() < 1e-9 {
+                        inside &= qq >= 0.0;
+                    } else if pp < 0.0 {
+                        u0 = u0.max(qq / pp);
+                    } else {
+                        u1 = u1.min(qq / pp);
+                    }
+                }
+                if inside && u0 <= u1 {
+                    out.push((p + (q - p) * u0, p + (q - p) * u1, n));
+                }
+            }
+        };
+        for b in self.boxes.iter() {
+            if b.max.cmplt(lo).any() || b.min.cmpgt(hi).any() {
+                continue;
+            }
+            let c = |x: usize, y: usize, z: usize| Vec3::new([b.min.x, b.max.x][x], [b.min.y, b.max.y][y], [b.min.z, b.max.z][z]);
+            for (p0, p1, p2, p3, n) in [
+                (c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0), Vec3::NEG_Z),
+                (c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1), Vec3::Z),
+                (c(0, 0, 0), c(1, 0, 0), c(1, 0, 1), c(0, 0, 1), Vec3::NEG_Y),
+                (c(0, 1, 0), c(1, 1, 0), c(1, 1, 1), c(0, 1, 1), Vec3::Y),
+                (c(0, 0, 0), c(0, 1, 0), c(0, 1, 1), c(0, 0, 1), Vec3::NEG_X),
+                (c(1, 0, 0), c(1, 1, 0), c(1, 1, 1), c(1, 0, 1), Vec3::X),
+            ] {
+                cut([p0, p1, p2], n);
+                cut([p0, p2, p3], n);
+            }
+        }
+        for t in self.triangles_in_bounds(lo, hi) {
+            cut(t.vertices, t.normal);
+        }
+        out
+    }
+
     /// As `ray_distance`, with the surface normal at the hit (against the ray): the foot IK's ground ray
     /// (`FootIK__RayDown` 0x432570). None when nothing is hit within `max`.
     pub fn ray_hit(&self, origin: Vec3, direction: Vec3, max: f32, layer: u8) -> Option<(f32, Vec3)> {

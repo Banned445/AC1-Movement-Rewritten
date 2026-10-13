@@ -644,7 +644,8 @@ pub fn try_side_jump(
             };
             return Some((mv, Some(climb)));
         }
-        // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
+        // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m). PORT: the ray only; this
+        // search's box and step (for its Surface slices) are not traced
         let new_hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
         let to = hang_root_at(hl, hr, nn, new_hang, collision);
         let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };
@@ -750,7 +751,8 @@ pub fn try_climb_reach(
     // both hand records are the hit (`ReachOtherSurfaceSide` 0xDF7FBC copies it into +3280 and +3360; RE/24 CLIMB-8); the
     // second hand's reach (state 17) spreads them
     let (hl, hr) = (hit.point, hit.point);
-    // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
+    // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m). PORT: the ray only; this
+    // search's box and step (for its Surface slices) are not traced
     let hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
     let to = hang_root_at(hl, hr, nn, hang, collision);
     let ty = if hang == LedgeHangType::Wall { 1 } else { 2 };

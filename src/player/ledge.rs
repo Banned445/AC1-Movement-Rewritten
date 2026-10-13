@@ -378,37 +378,81 @@ pub fn hands_on_pole(d: &HumanLedgeData, n: Vec3, guidance: &GuidanceWorld) -> b
     [d.hand_l, d.hand_r].iter().all(|h| guidance.on_edge(*h, n, 0.15).is_some_and(|hit| guidance.edges[hit.edge].subtype == crate::guidance::GuidanceSubType::Pole))
 }
 
-/// The ray part of `sub_11718B0` (a wall support for a foot): from `centre` + `up`·z, `half_depth` m out from the wall,
-/// a ray of 2·`half_depth` toward it, on layer 43 (`sub_11718B0`). A hit on a body owned by a component (flag
-/// 0x10000000, the same tag `ContactManager__GroundMaterial` 0x55A580 tests) is a support, which is all the port's
+/// The ray part of `Guidance__FindWallSupport` 0x11718B0 (a wall support for a foot): from `centre` + `up`·z,
+/// `half_depth` m out from the wall, a ray of 2·`half_depth` toward it, on layer 43. A hit on a body owned by a component
+/// (flag 0x10000000, the same tag `ContactManager__GroundMaterial` 0x55A580 tests) is a support, which is all the port's
 /// static collision; a hit on a FuzzyZone layer (24 / 26 / 25 / 33 / 41, `sub_E1C1F0`) aborts with no support (fuzzy
-/// zones are not imported). PORT: only a miss or an unowned body falls back to Surface guidance edges facing within 45°
-/// (sliced every `step`), which is not searched (RE/24 GUIDE-12).
+/// zones are not imported). A miss goes on to the Surface search (`wall_support`).
 pub fn support_ray(centre: Vec3, n: Vec3, half_depth: f32, z: f32, collision: &CollisionWorld) -> bool {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let start = centre + Vec3::Y * z - facing * half_depth;
     collision.sphere_free_distance(start, facing, 0.01, 2.0 * half_depth) < 2.0 * half_depth - 1e-3
 }
 
-/// `sub_B16130`: the wall-hang feet supports under a hold point `hand` (the free-hang drop 0xDDF390, the corners
-/// 0xDD3BB0, the climb's ledge grab 0xDF0980): two `sub_11718B0` searches 1.0 m below it and 0.125 m into the wall, one
-/// 0.2 m to the left raised 0.1 m and one under the point lowered 0.1 m (box half extents 0.25 / 0.625 / 0.15); either
-/// is enough (the other foot then shares it).
+/// A `Guidance__FindWallSupport` 0x11718B0 box: half extents across the wall (a6), out of it (a7, also the ray's half
+/// length) and up (a7 + 4), and the step between its z planes (a9).
+#[derive(Clone, Copy, Debug)]
+pub struct SupportBox {
+    pub across: f32,
+    pub depth: f32,
+    pub height: f32,
+    pub step: f32,
+}
+
+/// The air catch's wall-hang feet (`CheckAirCatch` 0xE0CDFF / 0xE0CEAC) and the jump reception's
+/// (`Human__FindReceptionFeetHolds` 0xB15D1C / 0xB15DAD).
+pub const SUPPORT_WIDE: SupportBox = SupportBox { across: 0.4, depth: 0.625, height: 0.2, step: 0.1 };
+/// The wall-hang feet (`Human__FindWallHangFeetSupports` 0xB1626C / 0xB16305) and the climb's side grab
+/// (`HumanClimb__TrySideLedgeGrab` 0xDF2541 / 0xDF2649).
+pub const SUPPORT_FEET: SupportBox = SupportBox { across: 0.25, depth: 0.625, height: 0.15, step: 0.07 };
+
+/// `Guidance__FindWallSupport` 0x11718B0: a foot's wall support at `origin` + (x across, z up) in the wall's frame
+/// (x along into × up, the wall's normal `n`). First the ray (`support_ray`); on a miss the Surface search
+/// (`GuidanceWorkspaceCastZPlanes`, type 6): the collision in the box (centred on `origin`, not the offset point) cut by
+/// the planes at z, z ± step, … within its height (`CollisionWorld::surface_slices`), and any piece whose triangle faces
+/// the character within 45° (its normal flattened, not renormalised, · into < −0.7071) is a support; the game returns the
+/// point on the nearest piece (shortened 5 cm at each end, `Guidance__NearestOnShortenedSegment`) to the offset point.
+pub fn wall_support(origin: Vec3, n: Vec3, x: f32, z: f32, b: SupportBox, collision: &CollisionWorld) -> bool {
+    let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let across = into.cross(Vec3::Y);
+    if support_ray(origin + across * x, n, b.depth, z, collision) {
+        return true;
+    }
+    let mut heights = vec![z];
+    let mut h = z + b.step;
+    while h <= b.height {
+        heights.push(h);
+        h += b.step;
+    }
+    let mut h = z - b.step;
+    while h >= -b.height {
+        heights.push(h);
+        h -= b.step;
+    }
+    collision
+        .surface_slices(origin, across, into, Vec3::new(b.across, b.depth, b.height), &heights)
+        .iter()
+        .any(|&(_, _, sn)| into.dot(Vec3::new(sn.x, 0.0, sn.z)) < -std::f32::consts::FRAC_1_SQRT_2)
+}
+
+/// `Human__FindWallHangFeetSupports` 0xB16130: the wall-hang feet supports under a hold point `hand` (the free-hang drop
+/// 0xDDF390, the corners 0xDD3BB0, the climb's ledge grab 0xDF0980): two `wall_support` searches 1.0 m below it and
+/// 0.125 m into the wall, one 0.2 m to the left raised 0.1 m and one under the point lowered 0.1 m (`SUPPORT_FEET`);
+/// either is enough (the other foot then shares it).
 pub fn feet_supports(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let c = hand - Vec3::Y + facing * 0.125;
-    support_ray(c - right_of(facing) * 0.2, n, 0.625, 0.1, collision) || support_ray(c, n, 0.625, -0.1, collision)
+    wall_support(c, n, -0.2, 0.1, SUPPORT_FEET, collision) || wall_support(c, n, 0.0, -0.1, SUPPORT_FEET, collision)
 }
 
-/// `sub_B15C30`: the jump arrival's foot holds under a hold point `hand` (`HumanInAir__CheckJumpTargetArrival`
-/// 0xE07D00, generic branch 0xE093FC): two `sub_11718B0` searches 1.0 m below it and 0.15 m into the wall, one
-/// 0.15 m to the left raised 0.05 m and one 0.15 m to the right lowered 0.05 m (box half extents 0.4 / 0.625 / 0.2;
-/// the offset is in the wall's frame, x across, z up). Both feet must find the wall.
+/// `Human__FindReceptionFeetHolds` 0xB15C30: the jump arrival's foot holds under a hold point `hand`
+/// (`HumanInAir__CheckJumpTargetArrival` 0xE07D00, generic branch 0xE093FC): two `wall_support` searches 1.0 m below it
+/// and 0.15 m into the wall, one 0.15 m to the left raised 0.05 m and one 0.15 m to the right lowered 0.05 m
+/// (`SUPPORT_WIDE`). Both feet must find the wall.
 pub fn reception_feet(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let c = hand - Vec3::Y + facing * 0.15;
-    let across = facing.cross(Vec3::Y);
-    support_ray(c - across * 0.15, n, 0.625, 0.05, collision) && support_ray(c + across * 0.15, n, 0.625, -0.05, collision)
+    wall_support(c, n, -0.15, 0.05, SUPPORT_WIDE, collision) && wall_support(c, n, 0.15, -0.05, SUPPORT_WIDE, collision)
 }
 
 /// Foot supports for a hang at `mid` (`sub_DE0A60` from TrySwitchHangType 0xDE1060): two rays of 1.2 m toward

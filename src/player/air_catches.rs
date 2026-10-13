@@ -205,17 +205,16 @@ pub fn catch_reports(feet: Vec3, guidance: &crate::guidance::GuidanceWorld, coll
 
 /// The wall catch's feet (`CheckAirCatch` 0xE0CD2F–0xE0CEBE, type 3): from the hands' midpoint at the higher hand's
 /// height − 1 m − 0.125·n̂ (n̂ the normalised flat sum of the two holds' wall normals), two `Guidance__FindWallSupport`
-/// 0x11718B0 boxes (half 0.4 / 0.625 / 0.2, step 0.1) toward −n̂, offset (−0.15, 0, +0.1) and (+0.15, 0, −0.1) in the
-/// wall's frame (x across, z up); both must hit. The free types test the body box (`sub_B2DEB0`), the wall catch does
+/// 0x11718B0 searches (`SUPPORT_WIDE`: half 0.4 / 0.625 / 0.2, step 0.1) toward −n̂, offset (−0.15, 0, +0.1) and
+/// (+0.15, 0, −0.1) in the wall's frame (x across, z up); both must find the wall (by the ray or the Surface slices). The free types test the body box (`sub_B2DEB0`), the wall catch does
 /// not (RE/24 AIR-14).
 pub fn wall_catch_feet(hl: Vec3, hr: Vec3, nl: Vec3, nr: Vec3, collision: &CollisionWorld) -> bool {
     let n = Vec3::new(nl.x + nr.x, 0.0, nl.z + nr.z).normalize_or(Vec3::new(nl.x, 0.0, nl.z).normalize_or(Vec3::Z));
     let mid = Vec3::new((hl.x + hr.x) * 0.5, hl.y.max(hr.y), (hl.z + hr.z) * 0.5);
     let into = -n;
     let c = mid - Vec3::Y + into * 0.125;
-    let across = into.cross(Vec3::Y);
-    use super::ledge::support_ray;
-    support_ray(c - across * 0.15, n, 0.625, 0.1, collision) && support_ray(c + across * 0.15, n, 0.625, -0.1, collision)
+    use super::ledge::{wall_support, SUPPORT_WIDE};
+    wall_support(c, n, -0.15, 0.1, SUPPORT_WIDE, collision) && wall_support(c, n, 0.15, -0.1, SUPPORT_WIDE, collision)
 }
 
 /// The knee catch (type 0), `xx_fall_tr_hangknee_min_a` / `_max_a` [fall < 3 m, ≥ 3 m].
@@ -408,7 +407,8 @@ mod ray_tests {
         assert!(ahead(root,target(Vec3::Z*3.0,1),&world));
     }
 
-    /// RE/24 AIR-14: the wall catch needs the wall under both feet (two support boxes 1 m below the hands).
+    /// RE/24 AIR-14: the wall catch needs the wall under both feet (two support boxes 1 m below the hands). A foot whose
+    /// ray misses still finds a wall that reaches into its box (±0.4 m about the hands' middle) by the Surface slices.
     #[test]
     fn the_wall_catch_needs_both_feet_on_the_wall() {
         let (hl, hr) = (Vec3::new(-0.3, 3.0, 0.0), Vec3::new(0.3, 3.0, 0.0));
@@ -419,7 +419,8 @@ mod ray_tests {
         };
         assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 3.0, 0.0)), "a wall under the hands");
         assert!(!feet(Vec3::new(-2.0, 2.5, -2.0), Vec3::new(2.0, 3.0, 0.0)), "an overhang");
-        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.0, 3.0, 0.0)), "the wall under one foot only");
+        assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.0, 3.0, 0.0)), "the wall under one foot's ray, in the other's box");
+        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(-0.45, 3.0, 0.0)), "the wall ending outside the boxes");
     }
 
     /// RE/24 AIR-34: the knee catch takes the edges of mask 386 (LedgeGrab, Quadruped, Kiosk), not a beam's.
