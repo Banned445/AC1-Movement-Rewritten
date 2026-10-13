@@ -1921,7 +1921,12 @@ pub const PULLDOWN_BEAM_DESCENT: [u32; 4] = [0x516D_5CF9, 0x516D_5D01, 0x516D_5D
 ///    PullDownSubState 4, ReleaseToInAir (`StatePullDown_Update` 0xDDFCF0 → 0xDDA100, the hang let-go 0xDD7810):
 ///    `Err` holds the orientation alone, which falls when it ends.
 /// 3. Reception: foot support (`sub_B16130`) → wall reception (angle blend `pulldown_wall_weights`) to the wall-hang
-///    root, else the free reception to the free-hang root.
+///    root, else the free reception to the free-hang root. Only the reception's `_a` plays in the pull-down: the root
+///    is interpolated over its length (`sub_501C90`(0) → `sub_711130`), and once it plays with the interpolation done
+///    (`HumanLedge__PullDownReceptionDone` 0xDCDAA0) the hang is in its Movement state; the idle it requests plays the
+///    graph's transition `_b` + `_tr` first (`_a`'s item transition to the idle, 0x082F9F3C / 0x082F820C). The free `_b`
+///    is not locked (word 0x0FC0: live 2026-10-13_210349/006, the turn under the beam starts 0.01 s into it); the wall
+///    `_b` is (0x0FF0), `ledge::reception_lock_time`.
 pub fn pulldown(p: Vec3, n: Vec3, from: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
     pulldown_with(p, n, from, PULLDOWN_ORIENT[wait as usize], PULLDOWN_DESCENT, guidance, collision)
 }
@@ -2030,7 +2035,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
     let reception = if wall {
         mk(
             3,
-            [item(PULLDOWN_WALL[0], 0, &w), item(PULLDOWN_WALL[1], 0, &w), item(PULLDOWN_WALL[1], 1, &w), None],
+            [item(PULLDOWN_WALL[0], 0, &w), None, None, None],
             p2,
             hang_root(hl, hr, n, LedgeHangType::Wall),
             facing_in,
@@ -2041,7 +2046,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
     } else {
         mk(
             3,
-            [single(PULLDOWN_FREE[0], 0), single(PULLDOWN_FREE[1], 0), single(PULLDOWN_FREE[1], 1), None],
+            [single(PULLDOWN_FREE[0], 0), None, None, None],
             p2,
             hang_root_at(hl, hr, n, LedgeHangType::Free, collision),
             facing_in,

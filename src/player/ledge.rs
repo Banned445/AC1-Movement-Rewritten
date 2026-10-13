@@ -187,6 +187,16 @@ pub fn swing_lock_time(s: f32) -> f32 {
     super::jump_blend::ActionBlend::new(ACT_HANGFREE_SWINGBACK, 0, &[1.0 - s, s]).duration()
 }
 
+/// How long the wall pull-down's reception holds the hang after its `_a` (the root's interpolation): the idle request
+/// plays the graph's transition `0x082F820C` first, whose first item (`_b`, word 0x0FF0) is locked
+/// (`Movement_ChooseAction` 0xDE29E0 → 0xDE2B1C), with the reception's angle weights. PORT: the transition plays with
+/// its authored weights (the port's ledges are straight).
+pub fn reception_lock_time(w: &[f32]) -> f32 {
+    use super::jump_blend::{action_items, ActionBlend};
+    let id = ledge_moves::PULLDOWN_WALL[1];
+    action_items(id).filter(|i| !i.is_empty()).map(|_| ActionBlend::new(id, 0, w).duration()).unwrap_or(0.0)
+}
+
 /// How long a catch holds the hang: both items of the catch action are locked (word 0x0FE0), and
 /// `HumanLedge__Movement_ChooseAction` 0xDE29E0 starts no move while the playing item is locked. The wall catch
 /// takes its straight clips (PORT: the port's ledges are straight, as the animator plays them).
@@ -877,6 +887,10 @@ pub fn update_ledge(
                 }
                 if mv.kind == ledge_moves::MoveKind::SwingBack {
                     d.swing_strength = Some((mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0), d.step_seq));
+                }
+                // the wall pull-down's locked `_b` (the free one is not)
+                if mv.kind == (ledge_moves::MoveKind::PullDown { stage: 3 }) && d.hang_type == LedgeHangType::Wall {
+                    d.swing_lock = reception_lock_time(mv.seq[0].map(|a| a.w).as_ref().map(|w| &w[..3]).unwrap_or(&[1.0, 0.0, 0.0]));
                 }
                 // the free idle after a swing plays the graph's swing first (`ACT_HANGFREE_SWINGBACK`)
                 if d.hang_type != LedgeHangType::Wall {
