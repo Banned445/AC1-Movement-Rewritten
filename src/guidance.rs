@@ -492,9 +492,8 @@ impl GuidanceWorld {
     /// edges exempt, GUIDE-3), every other edge with the ladder zones cut out (`sub_1170880` → `sub_116F060`: per ladder
     /// a box right = n × up, forward = n, up = along the ladder, origin its lower end, ±0.3 across, ±0.75 in front /
     /// behind, from 0.2 m below to 0.2 m past it; `CutReport` mode 2 Exclude, exempt mask 8) and, with `steep`, those
-    /// steeper than 40° removed (`GuidanceReport__RemoveSteepEdges` 0x66C350). PORT: the depth filter that follows
-    /// (`sub_B27E80` / `sub_B28180`: a 0.1 m depth map along each edge, intervals under the threshold rejected) is not
-    /// applied; its sampled segments and frame are not decoded yet.
+    /// steeper than 40° removed (`GuidanceReport__RemoveSteepEdges` 0x66C350). The depth filter that follows in the game
+    /// is `ledge_report_depth`; the ladder side jump has none (`HumanLadder__FindSideJump` 0xE228E0).
     pub fn ledge_report(&self, centre: Vec3, radius: f32, steep: bool) -> GuidanceWorld {
         let near = |e: &GuidanceEdge| {
             let (lo, hi) = (e.p0.min(e.p1), e.p0.max(e.p1));
@@ -562,6 +561,22 @@ impl GuidanceWorld {
         out
     }
 
+    /// `ledge_report` with the depth filter of `sub_B27E80` / `sub_B28180` (RE/26 §6): one detector 2 cm out and up from
+    /// the edge, `angle` × `length`, threshold `length`, on every edge but the ladders (extracted before it and added
+    /// back after, `GuidanceReport__ExtractByTypeMask` 8 / `sub_66BD80`). The ledge report (`HumanLedge__BuildLedgeReport`
+    /// 0xDDCA8E) and the climb grid's (`HumanClimb__BuildHoldGrid` 0xDF719E) use `LEDGE_DEPTH`, the pull-down's
+    /// (`sub_DDCB20` 0xDDCD2F) `PULLDOWN_DEPTH`.
+    pub fn ledge_report_depth(&self, centre: Vec3, radius: f32, steep: bool, (angle, length): (f32, f32), collision: &crate::collision::CollisionWorld) -> GuidanceWorld {
+        let base = self.ledge_report(centre, radius, steep);
+        let (ladders, others): (Vec<GuidanceEdge>, Vec<GuidanceEdge>) = base.edges.into_iter().partition(|e| e.subtype == GuidanceSubType::Ladder);
+        let world = GuidanceWorld { edges: others, ..Default::default() };
+        let filtered = Report::of(&world).depth_filter(collision, &[DepthDetector::new(DEPTH_OFFSET_EDGE, angle, length)], &[length]);
+        let mut out = GuidanceWorld { haystacks: base.haystacks, ..Default::default() };
+        out.edges = filtered.world.edges;
+        out.edges.extend(ladders);
+        out
+    }
+
     /// `report` with each report edge's index in this world and, for a clipped report, the lengths cut off its two ends
     /// (the contact's runtime scratch, `sub_6764E0`; none for Beam edges). These are the report's filter cuts: the game's
     /// query-time clipping records none (`GuidanceObject__AddClippedContact` 0x5AB340), only the report cuts and filters
@@ -586,10 +601,10 @@ impl GuidanceWorld {
                 let (pa, pb) = (world(a), world(b));
                 let cut = if e.subtype == GuidanceSubType::Beam { (0.0, 0.0) } else { (pa.distance(e.p0), pb.distance(e.p1)) };
                 out.world.edges.push(GuidanceEdge { p0: pa, p1: pb, ..e.clone() });
-                out.cuts.push(cut);
+                out.scratch.push(scratch_from_cut(cut));
             } else {
                 out.world.edges.push(e.clone());
-                out.cuts.push((0.0, 0.0));
+                out.scratch.push([0.0; 4]);
             }
             out.source.push(i);
         }
@@ -702,8 +717,8 @@ impl GuidanceWorld {
     /// `margin` less the positive trim; the target, along the line, is clamped onto that piece (its middle when none is
     /// left). That point is carried onto the links by the plane across the line (the chain's two free link ends pulled
     /// in by the positive trims, `sub_9765E0`); when no link meets the plane, the link end nearest along the line.
-    pub fn grab_point(&self, chain: &Chain, target: Vec3, offsets: &[f32], margin: f32, cuts: &[(f32, f32)]) -> Option<GuidanceHit> {
-        self.grab_point_toward(chain, target, None, None, offsets, margin, cuts)
+    pub fn grab_point(&self, chain: &Chain, target: Vec3, offsets: &[f32], margin: f32, scratch: &[Scratch]) -> Option<GuidanceHit> {
+        self.grab_point_toward(chain, target, None, None, offsets, margin, scratch)
     }
 
     /// `grab_point` with a preferred direction (the jumper's facing in 0xE165D0): the chain is measured across it (its end
@@ -712,14 +727,15 @@ impl GuidanceWorld {
     /// before the clamp (`Vec_ProjectOntoPlane` 0x9470B0; the air catches pass their box forward, RE/24 GUIDE-9); without
     /// it, perpendicularly.
     #[allow(clippy::too_many_arguments)]
-    pub fn grab_point_toward(&self, chain: &Chain, target: Vec3, pref: Option<Vec3>, along: Option<Vec3>, offsets: &[f32], margin: f32, cuts: &[(f32, f32)]) -> Option<GuidanceHit> {
-        let cut_at = |edge: usize, p: Vec3| {
-            let c = cuts.get(edge).copied().unwrap_or((0.0, 0.0));
+    pub fn grab_point_toward(&self, chain: &Chain, target: Vec3, pref: Option<Vec3>, along: Option<Vec3>, offsets: &[f32], margin: f32, scratch: &[Scratch]) -> Option<GuidanceHit> {
+        // the contact scratch of the chain's free end, for hand offset i: [side + 2·i] (0x66E466 / 0x66E481)
+        let cut_at = |edge: usize, p: Vec3, i: usize| {
+            let c = scratch.get(edge).copied().unwrap_or([0.0; 4]);
             let e = &self.edges[edge];
-            if p.distance_squared(e.p0) <= p.distance_squared(e.p1) { c.0 } else { c.1 }
+            let side = if p.distance_squared(e.p0) <= p.distance_squared(e.p1) { 0 } else { 1 };
+            c[side + 2 * i.min(1)]
         };
         let (first, last) = (chain.links[0], chain.links[chain.links.len() - 1]);
-        let (cut_s, cut_e) = (cut_at(first.0, first.1), cut_at(last.0, last.2));
         let (s, mut e) = (chain.start().with_y(target.y), chain.end().with_y(target.y));
         if let Some(p) = pref.map(|p| p.with_y(0.0).normalize_or_zero()).filter(|p| *p != Vec3::ZERO) {
             e -= p * (e - s).dot(p);
@@ -731,8 +747,8 @@ impl GuidanceWorld {
         let len = d.length();
         let u = d / len;
         let (mut trim_s, mut trim_e) = (-1000.0f32, -1000.0f32);
-        for &o in offsets {
-            let (si, ei) = (o - cut_s, o - cut_e);
+        for (i, &o) in offsets.iter().enumerate() {
+            let (si, ei) = (o - cut_at(first.0, first.1, i), o - cut_at(last.0, last.2, i));
             if si + ei + 0.0005 >= len {
                 return None;
             }
@@ -791,15 +807,45 @@ impl GuidanceWorld {
     /// `mask`), and for each hand reference (`refs`, in the box frame: right, forward, up) the grab point nearest it over
     /// all chains (`sub_E07820`: hand offsets 0.5 / 0.1, `margin`). Both hands must find one.
     pub fn handhold_pair(&self, centre: Vec3, forward: Vec3, half: Vec3, refs: [Vec3; 2], angle: f32, margin: f32, mask: u32) -> Option<[GuidanceHit; 2]> {
+        Report::of(self).handhold_pair(centre, forward, half, refs, angle, margin, mask)
+    }
+}
+
+impl Report {
+    /// The report cut to a box zone (centre, facing `forward`, local `min` / `max`: right, forward, up), as
+    /// `GuidanceZoneBox__CutReport` 0x6621D0 / FilterReport mode 1: the parts inside, the lengths cut off added to the
+    /// scratch (`GuidanceContact__AddCutLengths` 0x6764E0: [0] / [2] at p0, [1] / [3] at p1; none for Beam edges).
+    pub fn cut_box(&self, centre: Vec3, forward: Vec3, min: Vec3, max: Vec3) -> Report {
+        let cut = Report::of(&self.world);
+        let clipped = cut.world.report_indexed(centre, forward, min, max, true);
+        let mut out = Report::default();
+        for (k, e) in clipped.world.edges.iter().enumerate() {
+            let i = clipped.source[k];
+            let mut sc = self.scratch.get(i).copied().unwrap_or([0.0; 4]);
+            let c = clipped.scratch[k];
+            for j in 0..4 {
+                sc[j] += c[j];
+            }
+            out.world.edges.push(e.clone());
+            out.source.push(self.source.get(i).copied().unwrap_or(i));
+            out.scratch.push(sc);
+        }
+        out
+    }
+
+    /// `HumanInAir__FindHandholdPair` 0xE0A150 on this report (the air catch's pre-filtered one, RE/24 AIR-35): see
+    /// `GuidanceWorld::handhold_pair`. The hits carry the report's source indices.
+    #[allow(clippy::too_many_arguments)]
+    pub fn handhold_pair(&self, centre: Vec3, forward: Vec3, half: Vec3, refs: [Vec3; 2], angle: f32, margin: f32, mask: u32) -> Option<[GuidanceHit; 2]> {
         let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
         let right = forward.cross(Vec3::Y);
-        let report = self.report_indexed(centre, forward, -half, half, true);
+        let report = self.cut_box(centre, forward, -half, half);
         let chains = report.world.chains(&ChainParams { dir: -forward, right, ranges: [(-angle, 0.0), (0.0, angle)], parallel: angle, mask });
         let world = |l: Vec3| centre + right * l.x + forward * l.y + Vec3::Y * l.z;
         let grab = |r: Vec3| {
             chains
                 .iter()
-                .filter_map(|c| report.world.grab_point_toward(c, r, None, Some(forward), &[0.5, 0.1], margin, &report.cuts))
+                .filter_map(|c| report.world.grab_point_toward(c, r, None, Some(forward), &[0.5, 0.1], margin, &report.scratch))
                 .min_by(|a, b| a.point.distance_squared(r).total_cmp(&b.point.distance_squared(r)))
         };
         let (a, b) = (grab(world(refs[0]))?, grab(world(refs[1]))?);
@@ -808,13 +854,171 @@ impl GuidanceWorld {
     }
 }
 
-/// A guidance report: the edges a zone query kept, each one's index in the queried world and the lengths cut off its
-/// ends (p0, p1).
+/// A guidance contact's runtime scratch (+0..+12): for hand offset i of `GuidanceChain__FindGrabPoint` 0x66E150, the
+/// length the chain may reach past its p0 end ([2·i]) and its p1 end ([2·i + 1]). Report cuts add the lengths cut off
+/// (`GuidanceContact__AddCutLengths` 0x6764E0: [0] / [2] at p0, [1] / [3] at p1); the depth filter overwrites a
+/// detector's pair with the room it finds beyond the ends (`GuidanceDepth__FreeLengthBeyondEnds` 0x66FFD0).
+pub type Scratch = [f32; 4];
+
+/// A cut pair (p0, p1) as scratch: both hand offsets get it.
+pub fn scratch_from_cut((a, b): (f32, f32)) -> Scratch {
+    [a, b, a, b]
+}
+
+/// A guidance report: the edges a zone query kept, each one's index in the queried world and its contact scratch.
 #[derive(Default)]
 pub struct Report {
     pub world: GuidanceWorld,
     pub source: Vec<usize>,
-    pub cuts: Vec<(f32, f32)>,
+    pub scratch: Vec<Scratch>,
+}
+
+/// One depth detector of the guidance workspace (RE/26 §6): per edge, rays every `DEPTH_SPACING` along it, from
+/// `DEPTH_REACH` before p0 to `DEPTH_REACH` past p1, each from the edge point + `offset` (in the edge frame: along, out
+/// of the wall, up) in the direction "out" turned by `angle` toward up about the edge, `length` long. The settings are
+/// built by `Human__DepthDetectReport` 0xB28090 (two detectors), `sub_B27E80` (one) and `sub_B27F70` (two); the frame
+/// and the samples by `sub_675350` / `sub_670860`.
+#[derive(Clone, Copy, Debug)]
+pub struct DepthDetector {
+    pub offset: Vec3,
+    pub angle: f32,
+    pub length: f32,
+}
+
+/// The workspace's sample spacing (+0xD4 = 0.1) and the reach past the edge ends (+0xD8 = 0.5), set by every caller
+/// (0xB2813F / 0xB28150).
+pub const DEPTH_SPACING: f32 = 0.1;
+pub const DEPTH_REACH: f32 = 0.5;
+/// The detectors' offsets: 0.27 out and 0.23 below the edge (0xB28090's callers: the wall run, the jump query, the air
+/// catch), or 2 cm out and up (`sub_B27E80` / `sub_B27F70`).
+pub const DEPTH_OFFSET_LIP: Vec3 = Vec3::new(0.0, 0.27, -0.23);
+pub const DEPTH_OFFSET_EDGE: Vec3 = Vec3::new(0.0, 0.02, 0.02);
+/// (angle, length) of the ledge report's and the climb grid's detector (−10° × 1.0) and the pull-down's (−60° × 1.2).
+pub const LEDGE_DEPTH: (f32, f32) = (-0.174_532_92, 1.0);
+pub const PULLDOWN_DEPTH: (f32, f32) = (-1.047_197_6, 1.2);
+
+impl DepthDetector {
+    pub const fn new(offset: Vec3, angle: f32, length: f32) -> Self {
+        Self { offset, angle, length }
+    }
+}
+
+/// The edge frame of `sub_675350`: t along p0 → p1; s = t × up, turned to the lower normal's side (out of the wall); the
+/// frame's x = s × (the upper normal), σ = its sign along t, z = −σ·(s × t) (up for a flat-topped edge). Returns (t, x,
+/// s, z, length).
+fn depth_frame(e: &GuidanceEdge) -> Option<(Vec3, Vec3, Vec3, Vec3, f32)> {
+    let d = e.p1 - e.p0;
+    let len = d.length();
+    if len <= 1e-4 {
+        return None;
+    }
+    let t = d / len;
+    let (upper, lower) = if e.n1.y <= e.n0.y { (e.n0, e.n1) } else { (e.n1, e.n0) };
+    let mut s = t.cross(Vec3::Y).normalize_or_zero();
+    if s.dot(lower) < 0.0 {
+        s = -s;
+    }
+    let x = s.cross(upper).normalize_or_zero();
+    let sigma = if x.dot(t) < 0.0 { -1.0 } else { 1.0 };
+    let z = s.cross(t) * -sigma;
+    Some((t, x, s, z, len))
+}
+
+impl Report {
+    /// The depth filter (`Human__DepthFilterReport` 0xB28260 / `sub_B28180` → `Human__ApplyDepthToEdges` 0xB264F0 →
+    /// `GuidanceDepth__FilterEdge` 0x6744D0): every edge is sampled by each detector (`DepthDetector`); a sample is free
+    /// for detector d when its ray meets nothing closer than `thresholds[d]`. The runs where every detector is free
+    /// become the edge's pieces (`sub_671740`: [first free, first blocked) × spacing, clamped to the edge, kept when over
+    /// 0.5 mm, `sub_671910`); each piece's scratch pair d is the free length past its ends for detector d (counted from
+    /// the sample at its start downward and from the one after its end upward, × spacing; the whole reach when nothing
+    /// blocks; 0x66FFD0). The other pairs keep the edge's scratch. The depths are the game's rasterised map
+    /// (`CollisionWorld::depth_samples`, matched sample for sample against live arrays, RE/26 §6.3) on the character
+    /// layer.
+    pub fn depth_filter(&self, collision: &crate::collision::CollisionWorld, detectors: &[DepthDetector], thresholds: &[f32]) -> Report {
+        let mut out = Report::default();
+        for (i, e) in self.world.edges.iter().enumerate() {
+            let Some((t, x, s, z, len)) = depth_frame(e) else { continue };
+            let span = len + 2.0 * DEPTH_REACH;
+            let count = (span / DEPTH_SPACING) as usize + 1;
+            let start = e.p0 - t * DEPTH_REACH;
+            let free: Vec<Vec<bool>> = detectors
+                .iter()
+                .zip(thresholds)
+                .map(|(d, &thr)| {
+                    let origin = start + x * d.offset.x + s * d.offset.y + z * d.offset.z;
+                    let dir = s * d.angle.cos() + z * d.angle.sin();
+                    collision
+                        .depth_samples(origin, t, dir, span, d.length, DEPTH_SPACING, crate::layers::CHARACTER)
+                        .into_iter()
+                        .map(|depth| depth >= thr)
+                        .collect::<Vec<bool>>()
+                })
+                .collect();
+            let all = |k: usize| free.iter().all(|f| f[k]);
+            let scratch = self.scratch.get(i).copied().unwrap_or([0.0; 4]);
+            let mut k = 0;
+            while k < count {
+                if !all(k) {
+                    k += 1;
+                    continue;
+                }
+                let mut j = k + 1;
+                while j < count && all(j) {
+                    j += 1;
+                }
+                // both ends clamped into the edge (0x671910)
+                let a = (k as f32 * DEPTH_SPACING).clamp(DEPTH_REACH, DEPTH_REACH + len);
+                let b = (j as f32 * DEPTH_SPACING).clamp(DEPTH_REACH, DEPTH_REACH + len);
+                if (b - a).abs() > 0.0005 {
+                    let mut sc = scratch;
+                    for (di, f) in free.iter().enumerate().take(2) {
+                        // before the piece: from the sample at its start, downward
+                        // the game divides in x87 double precision (0x66FFD0): 0.5 / 0.1f floors to 4
+                        let k0 = ((a as f64 / DEPTH_SPACING as f64) as usize).min(count - 1);
+                        let mut before = a;
+                        let mut n = 0;
+                        for idx in (0..=k0).rev() {
+                            if !f[idx] {
+                                before = n as f32 * DEPTH_SPACING;
+                                break;
+                            }
+                            n += 1;
+                        }
+                        // past the piece: from the sample after its end, upward
+                        let k1 = (b as f64 / DEPTH_SPACING as f64) as usize + 1;
+                        let mut after = span - b;
+                        let mut n = 0;
+                        for idx in k1..count {
+                            if !f[idx] {
+                                after = n as f32 * DEPTH_SPACING;
+                                break;
+                            }
+                            n += 1;
+                        }
+                        sc[2 * di] = before;
+                        sc[2 * di + 1] = after;
+                    }
+                    out.world.edges.push(GuidanceEdge { p0: start + t * a, p1: start + t * b, ..e.clone() });
+                    out.source.push(self.source.get(i).copied().unwrap_or(i));
+                    out.scratch.push(sc);
+                }
+                k = j + 1;
+            }
+        }
+        out
+    }
+
+    /// `GuidanceReport__SetScratch` 0xE14DB0: every contact's scratch set to `v` (the jump query without an entity).
+    pub fn set_scratch(&mut self, v: f32) {
+        for s in &mut self.scratch {
+            *s = [v; 4];
+        }
+    }
+
+    /// A world as a report of all its edges (scratch zero).
+    pub fn of(world: &GuidanceWorld) -> Report {
+        Report { world: GuidanceWorld { edges: world.edges.clone(), ..Default::default() }, source: (0..world.edges.len()).collect(), scratch: vec![[0.0; 4]; world.edges.len()] }
+    }
 }
 
 /// The type mask of the air catches' hand searches (306 = 0x132: LedgeGrab, Pole, Rope, Kiosk; 0xE0A990 / 0xE0AC70 /
@@ -1014,7 +1218,7 @@ mod tests {
         let h = g.grab_point(&chain, Vec3::new(-1.0, 2.0, -0.3), &[0.5, 0.1], 0.1, &[]).unwrap();
         assert!((h.point.x - 0.5).abs() < 1e-4, "the hands' 0.5 m offset keeps the free end: {:?}", h.point);
         // the same edge cut 2 m short of its start by the report: the hands may use it
-        let h = g.grab_point(&chain, Vec3::new(-1.0, 2.0, -0.3), &[0.5, 0.1], 0.1, &[(2.0, 0.0)]).unwrap();
+        let h = g.grab_point(&chain, Vec3::new(-1.0, 2.0, -0.3), &[0.5, 0.1], 0.1, &[scratch_from_cut((2.0, 0.0))]).unwrap();
         assert!(h.point.x.abs() < 1e-4, "the edge continues past the cut: {:?}", h.point);
         // a 0.9 m chain with nothing cut cannot take hands 0.5 m from each end
         let short = Chain { links: vec![(0, Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.9, 2.0, 0.0))] };

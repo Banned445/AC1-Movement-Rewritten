@@ -147,7 +147,9 @@ fn play_anim_sounds(
         for e in &p.events {
             let event = match e.kind {
                 EventKind::Audio { sound } => bank.event_for_resource(sound),
-                EventKind::Contact { ty, .. } => bank.contact.get(ty as usize).copied().flatten(),
+                // ContactEvent +12 bit 0: play the contact sound (bit 1 spawns the FX, `particles`) (0x55B1E0)
+                EventKind::Contact { ty, bits } if bits & 1 != 0 => bank.contact.get(ty as usize).copied().flatten(),
+                EventKind::Contact { .. } => None,
                 EventKind::Other(_) => None,
             };
             let Some(event) = event else { continue };

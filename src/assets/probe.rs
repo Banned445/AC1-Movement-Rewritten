@@ -648,7 +648,7 @@ fn probe_resolve_actions() {
     ids.extend(std::env::var("PROBE_DEC").unwrap_or_default().split(',').filter_map(|s| s.trim().parse::<u32>().ok()));
     for id in ids {
         let Some(a) = graph.actions.get(&id) else { println!("{id} ({id:#x}): not found"); continue };
-        println!("{id} ({id:#x}) -> action {:#010x} request {} [{}] repeat {} flags {:#x} channel {:#x}", a.id, a.request_id, a.block, a.repeat, a.flags, a.channel);
+        println!("{id} ({id:#x}) -> action {:#010x} request {} [{}] repeat {} flags {:#x} channel {:#x} item ids {:x?} assoc {:x?}", a.id, a.request_id, a.block, a.repeat, a.flags, a.channel, a.item_ids, a.assoc);
         if let Some(t) = a.in_transition { println!("    in  {t:x?}"); }
         if let Some(t) = a.out_transition { println!("    out {t:x?}"); }
         for (k, it) in a.items.iter().enumerate() {
@@ -659,6 +659,59 @@ fn probe_resolve_actions() {
             }
         }
     }
+}
+
+/// Movement items whose word says "feet after: parallel" (bits 2–3 = 3, RE/13 §7.6): what can lead to a `_footm` wait.
+#[test]
+#[ignore]
+fn probe_items_feet_after_parallel() {
+    use super::ac_actions::{ActionGraph, CLASS_ACTION_BLOCK};
+    let res = game_fix();
+    let mut graph = ActionGraph::default();
+    for r in res.iter().filter(|r| r.class_hash == CLASS_ACTION_BLOCK) {
+        graph.add_block(&r.name, &r.payload).unwrap();
+    }
+    let names: HashMap<u32, &str> = res.iter().filter(|r| r.class_hash == CLASS_ANIMATION).map(|r| (r.id, r.name.as_str())).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for a in graph.actions.values() {
+        if !a.block.starts_with("Human") || a.block.contains("Fight") || a.block.contains("Assassination") { continue; }
+        for it in &a.items {
+            if it.flags & 0xC == 0xC {
+                let clip = it.animations.first().and_then(|x| names.get(x).copied()).unwrap_or("?");
+                if seen.insert(clip.to_string()) { println!("[{}] {clip} word {:#06x}", a.block, it.flags); }
+            }
+        }
+    }
+}
+
+/// Names for every action (resource id and Action+8 request id): `<id hex>\t<block>: <clip of each item>`, written to
+/// `PROBE_OUT` (a live-analysis overlay shows the playing action by name). Both ids map to the same text.
+#[test]
+#[ignore]
+fn probe_dump_action_names() {
+    use super::ac_actions::{ActionGraph, CLASS_ACTION_BLOCK};
+    use std::fmt::Write as _;
+    let res = game_fix();
+    let mut graph = ActionGraph::default();
+    for r in res.iter().filter(|r| r.class_hash == CLASS_ACTION_BLOCK) {
+        graph.add_block(&r.name, &r.payload).unwrap();
+    }
+    let names: HashMap<u32, &str> = res.iter().filter(|r| r.class_hash == CLASS_ANIMATION).map(|r| (r.id, r.name.as_str())).collect();
+    let mut acts: Vec<_> = graph.actions.values().collect();
+    acts.sort_by_key(|a| a.id);
+    acts.dedup_by_key(|a| a.id);
+    let mut out = String::from("# action id (resource or Action+8 request id)\tblock: first clip of each item\n");
+    for a in acts {
+        let clips: Vec<&str> = a.items.iter().map(|it| it.animations.first().and_then(|x| names.get(x).copied()).unwrap_or("?")).collect();
+        let text = format!("{}: {}", a.block, if clips.is_empty() { "(associated group)".to_string() } else { clips.join(" + ") });
+        writeln!(out, "{:08X}\t{text}", a.id).unwrap();
+        if a.request_id != a.id {
+            writeln!(out, "{:08X}\t{text}", a.request_id).unwrap();
+        }
+    }
+    let path = std::env::var("PROBE_OUT").unwrap_or("actions.tsv".into());
+    std::fs::write(&path, out).unwrap();
+    println!("wrote {path}");
 }
 
 /// Find action / item ids (`PROBE_IDS`, comma list of hex) in every ActionBlock: block, items, clips, transitions.
@@ -971,3 +1024,81 @@ fn probe_eye_track_clips() {
     println!("prefixes: {:?}", &v[..v.len().min(25)]);
     println!("movement-graph clips keying the eyes: {} {:?}", in_graph.len(), &in_graph[..in_graph.len().min(20)]);
 }
+
+/// Where classes live in the install (`PROBE_CLASSES`, comma list of class names; `PROBE_FORGES`, comma list of forge
+/// files, default DataPC.forge): every resource of that class, and every resource whose payload holds the class hash
+/// (an embedded object), with the stored file's name and the offsets.
+#[test]
+#[ignore]
+fn probe_find_classes() {
+    let names: Vec<String> = std::env::var("PROBE_CLASSES").unwrap_or("AssassinAbilitySet".into()).split(',').map(String::from).collect();
+    let hashes: Vec<(String, u32)> = names.iter().map(|n| (n.clone(), super::ac_formats::class_hash(n))).collect();
+    let forges: Vec<String> = std::env::var("PROBE_FORGES").unwrap_or("DataPC.forge".into()).split(',').map(String::from).collect();
+    for fname in forges {
+        let Ok(mut f) = Forge::open(&game_dir().join(&fname)) else { println!("{fname}: not found"); continue };
+        let entries = f.entries.clone();
+        for e in &entries {
+            let Ok(res) = f.resources(e) else { continue };
+            for r in &res {
+                for (n, h) in &hashes {
+                    if r.class_hash == *h {
+                        println!("{fname} [{}] {}: resource {:#010x} '{}' IS {n} ({} bytes)", e.index, e.name, r.id, r.name, r.payload.len());
+                    } else {
+                        let pat = h.to_le_bytes();
+                        let offs: Vec<usize> = r.payload.windows(4).enumerate().filter(|(_, w)| *w == pat).map(|(i, _)| i).take(8).collect();
+                        if !offs.is_empty() {
+                            println!("{fname} [{}] {}: resource {:#010x} '{}' class {:#010x} holds {n} at {offs:?}", e.index, e.name, r.id, r.name, r.class_hash);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Hex dump of resources by id (`PROBE_IDS` hex, `PROBE_FORGES`, `PROBE_LEN` bytes, default 160).
+#[test]
+#[ignore]
+fn probe_dump_resources() {
+    let ids: Vec<u32> = std::env::var("PROBE_IDS").unwrap_or_default().split(',').filter_map(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()).collect();
+    let len: usize = std::env::var("PROBE_LEN").ok().and_then(|v| v.parse().ok()).unwrap_or(160);
+    let forges: Vec<String> = std::env::var("PROBE_FORGES").unwrap_or("DataPC.forge".into()).split(',').map(String::from).collect();
+    for fname in forges {
+        let Ok(mut f) = Forge::open(&game_dir().join(&fname)) else { continue };
+        let entries = f.entries.clone();
+        for e in &entries {
+            let Ok(res) = f.resources(e) else { continue };
+            for r in res.iter().filter(|r| ids.contains(&r.id)) {
+                println!("== {:#010x} '{}' class {:#010x} {} bytes", r.id, r.name, r.class_hash, r.payload.len());
+                for (i, c) in r.payload[..r.payload.len().min(len)].chunks(16).enumerate() {
+                    let hex: Vec<String> = c.iter().map(|b| format!("{b:02x}")).collect();
+                    println!("{:04x}: {}", i * 16, hex.join(" "));
+                }
+            }
+        }
+    }
+}
+
+/// Find a byte pattern (`PROBE_HEX`, e.g. "0000c04000007041") in the resources of the stored files named in
+/// `PROBE_FILES` (comma list; default the Rank 9 file) of DataPC.forge; prints the resource and offset with 24 bytes
+/// around.
+#[test]
+#[ignore]
+fn probe_find_bytes() {
+    let hex = std::env::var("PROBE_HEX").unwrap_or_default();
+    let pat: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect();
+    let files: Vec<String> = std::env::var("PROBE_FILES").unwrap_or("Rank 9".into()).split(',').map(String::from).collect();
+    let mut f = Forge::open(&game_dir().join("DataPC.forge")).unwrap();
+    for name in files {
+        let Some(e) = f.find(&name).cloned() else { println!("{name}: not found"); continue };
+        for r in f.resources(&e).unwrap() {
+            for (i, _) in r.payload.windows(pat.len()).enumerate().filter(|(_, w)| *w == pat.as_slice()) {
+                let a = i.saturating_sub(24);
+                let b = (i + pat.len() + 24).min(r.payload.len());
+                let around: Vec<String> = r.payload[a..b].iter().map(|x| format!("{x:02x}")).collect();
+                println!("{name}: {:#010x} '{}' class {:#010x} at {i}: {}", r.id, r.name, r.class_hash, around.join(" "));
+            }
+        }
+    }
+}
+

@@ -23,6 +23,9 @@ pub struct JumpTarget {
     pub pass: Option<(Vec3, Vec3)>,
     /// Ladder target (type 0x1000): the Ladder context's entry on arrival (0xE07D00 → EntryType 1, ladder state 2).
     pub ladder: Option<super::ladder::LadderEntry>,
+    /// The candidate's normal (pointing back at the jumper) and whether its hit type is 4 (a beam): what the free-step
+    /// arrival writes to NarrowObjectData +0x100 / +0x140 (0xE09A13–0xE09A94, RE/05 §2.15).
+    pub support: Option<(Vec3, bool)>,
 }
 
 /// Roof-edge landing spot: the game's free-step target type 1 (narrow object / edge; its flight is
@@ -93,7 +96,7 @@ pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: 
 
 /// The port's jump target for a candidate and the scorer's jump type.
 pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
-    let base = JumpTarget { position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None };
+    let base = JumpTarget { position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None, support: Some((c.wall, c.ty == 4)) };
     match ty {
         1 | 0x10000 => {
             // beams and far-edge landings already lie on the surface
@@ -102,15 +105,14 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             }
             // the target is the candidate on the edge: 0xB1EC40 pulls the flight's aim 0.5 m back toward the jumper and
             // the free-step arrival interpolates the root 0.5 m forward, onto the edge (`air::pull_back`, RE/24 AIR-2);
-            // the roof is checked just inside it.
-            // PORT: a top narrower than 0.9 m (a post) is landed on in its middle: the game's candidate point there
-            // (the pilotis search 0xE50190 from the arrival) is not decoded
+            // the roof is checked just inside it. A post's top too: the free-step stay's reception carries the root on
+            // and `TryPilotisFreeStep` 0xE50190 interpolates it to the top's centre (RE/05 §2.15)
             let narrow = super::passover::far_edge(c.pos, -c.wall, guidance).map(|(_, t)| t).filter(|t| *t < 0.9);
             let insets: &[f32] = match narrow { Some(t) => &[t * 0.5][..], None => &[0.1, 0.25, 0.45][..] };
             for &inset in insets {
                 let probe = c.pos - c.wall * inset;
                 if let Some(h) = collision.ground_height(probe + Vec3::Y * 0.05, 0.2) {
-                    let on = if narrow.is_some() { probe } else { c.pos };
+                    let on = c.pos;
                     let target = JumpTarget { position: Vec3::new(on.x, h, on.z), ..base };
                     // PORT: a thin wall top is a pass-over (type 2). The query gives a railing type 1 | 2 like a
                     // roof; which of the two the game jumps at there is not established (LIVE, RE/20 #7 / #8; RE/18 §9 item 2)
@@ -173,7 +175,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
 /// 0x800. A Leap of Faith when it lies 3 m or more below (bands −30 m / 7.5 m), else the haystack bands (0xB1EC40).
 pub fn haystack_target(feet: Vec3, want_dir: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
     let s = super::hay::search(feet, want_dir, facing, &super::hay::LEAP_OF_FAITH, &guidance.haystacks, collision)?;
-    Some(JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None })
+    Some(JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None })
 }
 
 /// True when there is no floor a short way ahead (approaching a roof edge).

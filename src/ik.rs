@@ -221,6 +221,8 @@ const HEAD: u32 = 0x07c1_59a2;
 #[derive(Component, Default)]
 pub struct LimbIk {
     pub limbs: [LimbState; 4],
+    /// The hands' rail effectors (`LimbTargets::rails`): weight and goal.
+    pub rails: [(f32, Vec3); 2],
     /// Last hips translation of the post-adjustments (world), for the log.
     pub fit: Vec3,
     /// LimbIK +660: the head-clearance hips drop (m), +664: the chest lean (0..0.5), both moving at 1 /s.
@@ -334,6 +336,92 @@ pub struct GroundFoot {
 
 /// `IKGroundBiped` fade time (`sub_42D5E0(0.2)`, `sub_42F290(…, 0.2)`).
 const GROUND_IK_FADE: f32 = 0.2;
+/// The ladder rail effectors' blend in and out (`dword_1681860` = 0.1, `sub_E20DC0`).
+const LADDER_RAIL_BLEND: f32 = 0.1;
+
+/// The standing foot IK's on / off switch (IKGroundBiped +4 state, +1488 fade, +1492 its timer, +1496 delay, +1500 its
+/// timer) and the stick-to-ground smoothing enable (+1520 bit value 2), which the ground states set (RE/24 GROUND-16):
+/// `sub_B0E1B0` → vt56 0x430000 (`on`), `sub_B0E1F0` → vt60 0x42DC30 (`off`), `sub_B0E230` (the smoothing bit, set
+/// with each of them). States: 0 delay → 1 fading in → 2 on; 3 delay → 4 fading out → 5 off (`sub_42D9C0`).
+/// `weight` is the feet's +72 (IKGroundBiped +120 / +840): `FootIK__Advance` 0x42F130 puts each ankle at
+/// anim + weight · (IK − anim).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct GroundIkSwitch {
+    pub state: u8,
+    fade: f32,
+    t: f32,
+    delay: f32,
+    delay_t: f32,
+    pub weight: f32,
+    pub smooth: bool,
+    /// vt60 fades both feet out at once (`FootIK__FadeOut`(fade − 1.25·dt)); vt56 from off resets them (`sub_42FDD0`).
+    feet_out: Option<f32>,
+    feet_reset: bool,
+}
+
+impl Default for GroundIkSwitch {
+    /// On: the character starts on the ground (`HumanGround__OnActivateSetup` 0xDAE949 switched it on).
+    fn default() -> Self {
+        Self { state: 2, fade: 0.0, t: 0.0, delay: 0.0, delay_t: 0.0, weight: 1.0, smooth: true, feet_out: None, feet_reset: false }
+    }
+}
+
+impl GroundIkSwitch {
+    /// `sub_B0E1B0`(fade, 0) + `sub_B0E230`(1): vt56 acts only while fading out or off (state ≥ 3); from off it resets the
+    /// feet. The fade timer +1492 is not reset.
+    pub fn on(&mut self, fade: f32) {
+        self.smooth = true;
+        if (3..=5).contains(&self.state) {
+            self.feet_reset |= self.state == 5;
+            (self.fade, self.delay_t, self.delay, self.state) = (fade, 0.0, 0.0, 0);
+        }
+    }
+
+    /// The fade time of the running switch (+1488).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn fade(&self) -> f32 {
+        self.fade
+    }
+
+    /// `sub_B0E1F0`(fade, 0) + `sub_B0E230`(0): vt60 acts only while on or fading in (state ≤ 2). The fade timer +1492
+    /// is not reset.
+    pub fn off(&mut self, fade: f32, dt: f32) {
+        self.smooth = false;
+        if self.state <= 2 {
+            (self.fade, self.delay_t, self.delay, self.state) = (fade, 0.0, 0.0, 3);
+            self.feet_out = Some(fade - 1.25 * dt);
+        }
+    }
+
+    /// `sub_42D9C0`, run by `IKGroundBiped__Update` 0x432AC0 in every state but 2 (on) and 5 (off). **Hypothesis
+    /// (needs the live check, RE/20 #64):** the decoded ramps run 1 − t/T while fading in and t/T while fading out.
+    fn advance(&mut self, dt: f32) {
+        if matches!(self.state, 0 | 3) {
+            self.delay_t += dt;
+            if self.delay_t >= self.delay {
+                self.state = if self.state == 0 { 1 } else { 4 };
+                (self.delay_t, self.delay) = (0.0, 0.0);
+            }
+            self.t += dt;
+            if self.t >= self.fade {
+                (self.fade, self.t) = (0.0, 0.0);
+            }
+        }
+        if matches!(self.state, 1 | 4) {
+            self.t += dt;
+            if self.t >= self.fade {
+                self.state = if self.state == 1 { 2 } else { 5 };
+                (self.fade, self.t) = (0.0, 0.0);
+            }
+        }
+        self.weight = match self.state {
+            1 if self.fade.abs() > 0.0005 => 1.0 - self.t / self.fade,
+            4 if self.fade.abs() > 0.0005 => self.t / self.fade,
+            4 | 5 => 0.0,
+            _ => 1.0,
+        };
+    }
+}
 
 impl GroundFoot {
     fn fade_in(&mut self, from: f32) {
@@ -419,13 +507,14 @@ impl StickToGround {
         self.offset
     }
 
-    fn update(&mut self, body: &mut Body, ground: &[GroundFoot; 2], dt: f32) -> f32 {
+    /// `enabled`: +1520 bit value 2, which the ground states switch with the foot IK (`GroundIkSwitch::smooth`).
+    fn update(&mut self, body: &mut Body, ground: &[GroundFoot; 2], enabled: bool, dt: f32) -> f32 {
         // PostIntegrate 0x57D693: consume even when IK is gated off; never replay an old residual.
         let residual = std::mem::take(&mut body.stick_residual);
         let normal_y = body.stick_normal_y.take();
         // IKGroundBiped__Update 0x432B2F / 0x43303E: layer 28 bypasses this update.
         if body.proxy.layer == crate::layers::HOLLYWOOD_MODE { return 0.0; }
-        if !crate::tuning::GAME_SMOOTHING || body.velocity.length() <= 0.001 || ground.iter().any(|f| f.state != 0) {
+        if !crate::tuning::GAME_SMOOTHING || !enabled || body.velocity.length() <= 0.001 || ground.iter().any(|f| f.state != 0) {
             self.active = false;
             self.offset = 0.0;
             return 0.0;
@@ -495,17 +584,32 @@ fn ground_foot_target(ankle: Vec3, collision: &crate::collision::CollisionWorld)
 pub(crate) fn solve_limbs(
     time: Res<Time>,
     collision: Option<Res<crate::collision::CollisionWorld>>,
-    mut q: Query<(Entity, &Rig, &mut Body, &LimbTargets, &mut LimbIk, Option<&crate::anim::AnimPlayer>)>,
+    mut q: Query<(Entity, &Rig, &mut Body, &LimbTargets, &mut LimbIk, Option<&crate::anim::AnimPlayer>, Option<&mut GroundIkSwitch>)>,
     mut joints: Query<&mut Transform>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
-    for (entity, rig, mut body, targets, mut ik, player) in &mut q {
+    for (entity, rig, mut body, targets, mut ik, player, switch) in &mut q {
+        // the ground states' foot IK switch (RE/24 GROUND-16): the feet's fade-out or reset the calls asked for, then
+        // `sub_42D9C0` at the start of `IKGroundBiped__Update` 0x432AC0 (not when on or off)
+        let mut sw = switch.as_deref().copied().unwrap_or_default();
+        if let Some(d) = sw.feet_out.take() {
+            ik.ground.iter_mut().for_each(|f| f.fade_out_for(d));
+        }
+        if std::mem::take(&mut sw.feet_reset) {
+            ik.ground = Default::default();
+        }
+        if !matches!(sw.state, 2 | 5) {
+            sw.advance(dt);
+        }
+        if let Some(mut s) = switch {
+            *s = sw;
+        }
         let ground = ik.ground;
         // the ground probes' expiry runs on the game clock (0x432730), whatever the body does
         for e in ik.ground_cache.iter_mut().flatten() {
             e.2 -= time.delta_secs();
         }
-        let stick_offset = ik.stick.update(&mut body, &ground, time.delta_secs());
+        let stick_offset = ik.stick.update(&mut body, &ground, sw.smooth, time.delta_secs());
         if std::env::var_os("AC_SINK_LOG").is_some() && (ik.pelvis < -0.1 || stick_offset.abs() > 0.1) {
             info!("sink: t={:.2} pelvis {:.3} stick {:.3} feet y {:.3} grounded {}", time.elapsed_secs(), ik.pelvis, stick_offset, body.feet.y, body.grounded);
         }
@@ -585,6 +689,20 @@ pub(crate) fn solve_limbs(
             };
             goals[i] = g.map(|g| (g, ik.limbs[i].weight));
         }
+        // the ladder's rail effectors (`sub_E20DC0`): set at weight 1 with a 0.1 s blend (`sub_E13C50`), moved while on
+        // (`sub_E12ED0`), released over 0.1 s (`sub_E128A0`). PORT (hypothesis): the blends are linear. The goal is the
+        // hand bone's (the chain's end), so the solver's contact is it plus the animated offset to the effector
+        let rail_offs = effector_offsets(&global);
+        for h in 0..2 {
+            let r = &mut ik.rails[h];
+            match targets.rails[h] {
+                Some(p) => *r = ((r.0 + dt / LADDER_RAIL_BLEND).min(1.0), p),
+                None => r.0 = (r.0 - dt / LADDER_RAIL_BLEND).max(0.0),
+            }
+            if goals[h].is_none() && r.0 > 0.0 {
+                goals[h] = Some((r.1 + rail_offs[h].unwrap_or(Vec3::ZERO), r.0));
+            }
+        }
         // feet without a hold: kept above the surface under them
         let mut ground_fix: [Option<Vec3>; 4] = [None; 4];
         if let Some(c) = collision.as_deref() {
@@ -617,7 +735,8 @@ pub(crate) fn solve_limbs(
                         && reference.is_none_or(|r| (r.rot * Vec3::Z).y >= 0.5 && Vec2::new(r.pos.x - body.feet.x, r.pos.z - body.feet.z).length() <= 0.25);
                     if ik.ground_off || !gate {
                         ik.ground.iter_mut().for_each(GroundFoot::fade_out);
-                    } else {
+                    } else if !matches!(sw.state, 4 | 5) {
+                        // the ground search and the fade-in only while the switch is not fading out or off (0x432D3B)
                         let mut cache = ik.ground_cache;
                         let mut rng = ik.rng;
                         let sockets: [Option<f32>; 2] = std::array::from_fn(|f| cached_socket(c, &mut cache[f], &mut rng, ankle[f], knee[f], ankle[f].y - body.feet.y));
@@ -666,8 +785,12 @@ pub(crate) fn solve_limbs(
             } else {
                 ik.ground.iter_mut().for_each(GroundFoot::fade_out);
             }
+            // off (state 5): `IKGroundBiped__Update` only smooths, the feet are neither advanced nor applied; otherwise
+            // each ankle goes to anim + weight · (goal − anim) (`FootIK__Advance` 0x42F130, the switch's +72)
+            let off = crate::tuning::GAME_SMOOTHING && sw.state == 5;
+            let w = if crate::tuning::GAME_SMOOTHING { sw.weight } else { 1.0 };
             for f in 0..2 {
-                ground_goal[f] = ik.ground[f].advance(ankle[f].y, dt);
+                ground_goal[f] = if off { None } else { ik.ground[f].advance(ankle[f].y, dt).map(|g| ankle[f].y + w * (g - ankle[f].y)) };
             }
             if crate::tuning::GAME_SMOOTHING {
                 // `IKGroundBiped__UpdatePelvis` 0x431240 (only while a foot runs): the Reference goes down by how far the
@@ -951,6 +1074,50 @@ mod tests {
         assert_eq!(foot.advance(0.1, 0.1), Some(-0.2));
     }
 
+    /// RE/24 GROUND-16: vt60 only from on, vt56 only from fading out or off; the states run delay → fade → on / off, the
+    /// weight ramping as decoded (1 − t/T in, t/T out); the smoothing bit follows every call.
+    #[test]
+    fn the_ground_ik_switch_runs_the_decoded_states() {
+        let dt = 1.0 / 60.0;
+        let mut sw = GroundIkSwitch::default();
+        assert_eq!((sw.state, sw.weight, sw.smooth), (2, 1.0, true));
+        sw.on(0.3);
+        assert_eq!(sw.state, 2, "already on: vt56 does nothing");
+        sw.off(0.2, dt);
+        assert_eq!((sw.state, sw.smooth), (3, false));
+        assert!((sw.feet_out.unwrap() - (0.2 - 1.25 * dt)).abs() < 1e-6, "the feet fade out at once");
+        sw.off(0.5, dt);
+        assert_eq!(sw.fade, 0.2, "fading out: vt60 does nothing");
+        // state 3 → 4 on the first advance (no delay), the weight rising from about 0 to 1, then off at 0
+        sw.advance(dt);
+        assert_eq!(sw.state, 4);
+        let first = sw.weight;
+        assert!(first > 0.0 && first < 0.25, "{first}");
+        let mut last = first;
+        while sw.state == 4 {
+            sw.advance(dt);
+            if sw.state == 4 {
+                assert!(sw.weight > last);
+                last = sw.weight;
+            }
+        }
+        assert_eq!((sw.state, sw.weight), (5, 0.0));
+        assert!(last > 0.8, "{last}");
+        // from off: on resets the feet, then falls from about 1 to 0 and ends on at 1
+        sw.on(0.35);
+        assert_eq!((sw.state, sw.smooth, sw.feet_reset), (0, true, true));
+        sw.advance(dt);
+        assert_eq!(sw.state, 1);
+        assert!(sw.weight > 0.85 && sw.weight < 1.0, "{}", sw.weight);
+        let mut frames = 1;
+        while sw.state == 1 {
+            sw.advance(dt);
+            frames += 1;
+        }
+        assert_eq!((sw.state, sw.weight), (2, 1.0));
+        assert!((19..=22).contains(&frames), "about 0.35 s: {frames}");
+    }
+
     #[test]
     fn stick_step_up_decays_at_the_native_accelerating_rate_and_resets() {
         let mut stick = StickToGround::default();
@@ -1015,19 +1182,19 @@ mod tests {
             stick_normal_y: Some(1.0), ..Default::default() };
         let ground = [GroundFoot::default(); 2];
         let mut stick = StickToGround::default();
-        assert_eq!(stick.update(&mut body, &ground, 0.0), -0.3);
+        assert_eq!(stick.update(&mut body, &ground, true, 0.0), -0.3);
         assert_eq!(body.stick_residual, 0.0);
         assert_eq!(body.stick_normal_y, None);
         assert_eq!(body.feet.y, 0.3, "visual smoothing must not move the controller");
-        assert_eq!(stick.update(&mut body, &ground, 0.0), -0.3, "residual is not accumulated again");
+        assert_eq!(stick.update(&mut body, &ground, true, 0.0), -0.3, "residual is not accumulated again");
         body.proxy.layer = crate::layers::HOLLYWOOD_MODE;
         body.stick_residual = -0.3;
-        assert_eq!(stick.update(&mut body, &ground, 0.0), 0.0);
+        assert_eq!(stick.update(&mut body, &ground, true, 0.0), 0.0);
         assert_eq!(body.stick_residual, 0.0);
         assert_eq!(stick.offset, -0.3, "Hollywood bypass leaves the IK state untouched");
         body.proxy.layer = crate::layers::MAIN_CHARACTER;
         body.velocity = Vec3::X * 0.001;
-        assert_eq!(stick.update(&mut body, &ground, 0.0), 0.0);
+        assert_eq!(stick.update(&mut body, &ground, true, 0.0), 0.0);
         assert!(!stick.active);
         assert_eq!(stick.offset, 0.0);
         body.velocity = Vec3::X;
@@ -1036,7 +1203,7 @@ mod tests {
                 let mut ground = ground;
                 ground[f].state = state;
                 body.stick_residual = -0.3;
-                assert_eq!(stick.update(&mut body, &ground, 0.0), 0.0);
+                assert_eq!(stick.update(&mut body, &ground, true, 0.0), 0.0);
                 assert!(!stick.active);
                 assert_eq!(stick.offset, 0.0);
                 assert_eq!(body.stick_residual, 0.0);

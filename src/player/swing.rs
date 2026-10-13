@@ -51,7 +51,6 @@ pub struct Swing {
     pub jump_req: bool,
     pub target: Option<JumpTarget>,
     pub seq: u32,
-    impact_w: f32,
     /// Both hands hold Pole edges (contact kind 3, +1792 / +1796; RE/24 LEDGE-17): only then does the landing go on into
     /// the cycle and can the swing be started or jumped from.
     pub on_pole: bool,
@@ -84,14 +83,14 @@ pub fn enter(from: Vec3, root: Vec3, fwd: Vec3, hands_mid: Vec3, flight: Option<
         }
     }
     let action = ActionBlend::new(SWING_LANDING, 0, &w);
-    Some(Swing { phase: SwingPhase::Landing, action, t: 0.0, from, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), impact_w: 0.0, on_pole: false })
+    Some(Swing { phase: SwingPhase::Landing, action, t: 0.0, from, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), on_pole: false })
 }
 
 /// Event 5 (`HumanLedge` guard 0xDD3750, action 0xDD2940 → SwingReception, Human+2704 = 3): start swinging from a still
 /// free hang on a pole: the cycle from its first item at the hang root.
 pub fn start(root: Vec3, fwd: Vec3, hands_mid: Vec3, seq: u32) -> Option<Swing> {
     let action = single(SWING_CYCLE, 0, &[])?;
-    Some(Swing { phase: SwingPhase::Cycle(0), action, t: 0.0, from: root, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), impact_w: 0.0, on_pole: true })
+    Some(Swing { phase: SwingPhase::Cycle(0), action, t: 0.0, from: root, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), on_pole: true })
 }
 
 fn single(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -107,20 +106,20 @@ fn single(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
 /// `HumanLedge__PickSwingImpact` 0xDCFBC0: base = the hands (LedgeData+144) + 0.5·forward + 0.5·up; two box queries
 /// (`sub_B2A070` 0xB2A070: half 0.2 across, 0.5 along the flat forward, 0.35 / 0.6 up) centred at base lowered 0.65 m
 /// (shoulders) and 1.6 m (legs), pulled back 0.25 m along LedgeData+192; each returns the nearest geometry's distance from
-/// the box's rear face (local y + 0.5), 1000 with nothing in it. The legs blocked (< 1) → the legs impact (weight = that
-/// distance; PORT: piecewise over [00, 50, 150 cm]); else the shoulders → the shoulder impact; else the elbow impact
-/// (RE/24 NARROW-17). PORT: LedgeData+192 is taken as the swing's facing.
-fn impact(s: &Swing, collision: &CollisionWorld) -> (u32, f32) {
+/// the box's rear face (local y + 0.5), 1000 with nothing in it. The legs blocked (< 1) → the legs impact (at the fixed
+/// `LEGS_IMPACT_WEIGHTS`, not the distance); else the shoulders → the shoulder impact; else the elbow impact (RE/24
+/// NARROW-17). PORT: LedgeData+192 is taken as the swing's facing.
+fn impact(s: &Swing, collision: &CollisionWorld) -> u32 {
     let base = s.hands_mid + s.fwd * 0.5 + Vec3::Y * 0.5;
     let probe = |drop: f32| base - Vec3::Y * drop - s.fwd * 0.25;
     let upper = box_depth(collision, probe(0.65), s.fwd, 0.35);
     let lower = box_depth(collision, probe(1.6), s.fwd, 0.6);
     if lower < 1.0 {
-        (IMPACT_LEGS, lower)
+        IMPACT_LEGS
     } else if upper < 1.0 {
-        (IMPACT_SHOULDER, upper)
+        IMPACT_SHOULDER
     } else {
-        (IMPACT_ELBOW, 1.0)
+        IMPACT_ELBOW
     }
 }
 
@@ -182,17 +181,16 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
             // 0xDD24F0: legs blocked → the legs impact for any bar (`SwingLandingToImpactLegs` 0xDCFE90 runs first); on a
             // pole (both hands, `SwingLandingToSettle` 0xDCD300) the landing goes on into the cycle; on a ledge-type free
             // hang it settles (`PlaySwingImpact` 0xDD0140)
-            let (impact_id, impact_f) = impact(s, collision);
+            let impact_id = impact(s, collision);
             if impact_id != IMPACT_LEGS && s.on_pole {
                 if let Some(a) = single(SWING_CYCLE, 0, &[]) {
                     s.phase = SwingPhase::Cycle(0);
                     s.action = a;
                 }
             } else {
-                let (id, f) = (impact_id, impact_f);
-                s.impact_w = f;
-                let w = if id == IMPACT_LEGS { legs_weights(f) } else { vec![1.0] };
-                if let Some(a) = single(id, 0, &w) {
+                let id = impact_id;
+                let w: &[f32] = if id == IMPACT_LEGS { &LEGS_IMPACT_WEIGHTS } else { &[1.0] };
+                if let Some(a) = single(id, 0, w) {
                     s.phase = SwingPhase::Settle(id, 0);
                     s.action = a;
                 } else {
@@ -244,8 +242,6 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
             // the legs impact requests the controller root hands + 0.5·forward + 0.5·up − 2.4·up (+1296, flag +1360,
             // `HumanLedge__SwingLandingToImpactLegs` 0xDD0077), reached in one frame (`CharacterController__RequestMoveTo`
             // 0x710B40: the velocity (target − position) / dt) (RE/24 NARROW-17); the others stay on the hang root.
-            // PORT: its blend parameters (`sub_4FEBF0` 0 / 1 / 2 = 0, 0.5, 0.5) are not mapped onto the clips; the
-            // weights come from the legs box's depth (`legs_weights`)
             *feet = if id == IMPACT_LEGS { legs_impact_root(s) } else { s.root };
             if !done {
                 return SwingOut::Stay;
@@ -262,8 +258,9 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
             }
             // the impact actions' second item is their transition into the free hang
             if (id == IMPACT_LEGS || id == IMPACT_ELBOW || id == IMPACT_SHOULDER) && item == 0 {
-                let w = if id == IMPACT_LEGS { legs_weights(s.impact_w) } else { vec![1.0] };
-                if let Some(a) = single(id, 1, &w) {
+                // the weights live on the slot: item b keeps item a's
+                let w: &[f32] = if id == IMPACT_LEGS { &LEGS_IMPACT_WEIGHTS } else { &[1.0] };
+                if let Some(a) = single(id, 1, w) {
                     s.phase = SwingPhase::Settle(id, 1);
                     s.action = a;
                     s.t = 0.0;
@@ -282,9 +279,11 @@ pub fn legs_impact_root(s: &Swing) -> Vec3 {
     s.hands_mid + f * 0.5 - Vec3::Y * 1.9
 }
 
-fn legs_weights(f: f32) -> Vec<f32> {
-    if f <= 0.5 { vec![1.0 - f * 2.0, f * 2.0, 0.0] } else { vec![0.0, 2.0 - f * 2.0, f * 2.0 - 1.0] }
-}
+/// The legs impact's clip weights [`_00cm`, `_50cm`, `_150cm`]: `SwingLandingToImpactLegs` 0xDCFE90 plays the free idle
+/// 0x012719F1 with the impact as its transition and sets the playing (transition) item's weights through `sub_4FEBF0`
+/// → `sub_725AD0` (0, 0.5, 0.5) and the queued idle's through `sub_502F40` → `sub_725BB0` → `sub_72E350` (1, 0: the
+/// `xx_h_hangfree_wait` alone). The probe distance is not used (RE/24 NARROW-17).
+pub const LEGS_IMPACT_WEIGHTS: [f32; 3] = [0.0, 0.5, 0.5];
 
 #[cfg(test)]
 mod stop_tests {
@@ -336,6 +335,26 @@ mod stop_tests {
         let mut feet = s.root;
         let _ = update(&mut s, 1.0 / 60.0, false, false, &mut feet, &CollisionWorld::default(), |_, _| None);
         assert!((feet - Vec3::new(0.0, 1.1, -0.5)).length() < 1e-4, "{feet:?}");
+    }
+
+    /// RE/24 NARROW-17: a landing with the legs blocked plays the legs impact at the fixed [0, 0.5, 0.5] through both of
+    /// its items, whatever the obstacle's distance.
+    #[test]
+    fn the_legs_impact_plays_its_fixed_weights() {
+        use crate::collision::Aabb3;
+        let mut s = start(Vec3::new(0.0, 0.6, 0.0), Vec3::NEG_Z, Vec3::new(0.0, 3.0, 0.0), 0).expect("swing cycle");
+        let Some(a) = single(SWING_LANDING, 0, &[]) else { return };
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(-1.0, 0.0, -2.0), max: Vec3::new(1.0, 4.0, -0.4) });
+        (s.phase, s.action, s.t) = (SwingPhase::Landing, a, 100.0);
+        let mut feet = s.root;
+        let _ = update(&mut s, 1.0 / 60.0, false, false, &mut feet, &c, |_, _| None);
+        assert_eq!(s.phase, SwingPhase::Settle(IMPACT_LEGS, 0));
+        assert_eq!(s.action.w[..3], LEGS_IMPACT_WEIGHTS);
+        s.t = 100.0;
+        let _ = update(&mut s, 1.0 / 60.0, false, false, &mut feet, &c, |_, _| None);
+        assert_eq!(s.phase, SwingPhase::Settle(IMPACT_LEGS, 1));
+        assert_eq!(s.action.w[..3], LEGS_IMPACT_WEIGHTS);
     }
 
     /// RE/24 NARROW-16: let go on front_down (item 1), the swing finishes the item, then plays the back stop's four

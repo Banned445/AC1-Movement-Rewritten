@@ -122,6 +122,11 @@ pub const ACT_CATCH_FREE: [u32; 2] = [0x1F0C_2EB8, 0x1F0C_2EB9];
 /// Actions the clip generator dumps for the ledge (the catches, for their lengths; the wall-free → wall switch).
 /// The shimmy actions (`StartHandStep` 0xDDE0C0): [wall, free] × [left open, left close, right open, right close].
 pub const ACT_SHIMMY: [[u32; 4]; 2] = [[0x01B7_0B35, 0x01B7_0B36, 0x01B7_0B37, 0x01B7_0B38], [0x01A2_490A, 0x01A2_490B, 0x01A2_490C, 0x01A2_490D]];
+/// `HumanLedge__SetAlternationFromHandSpacing` 0xDCBCD0: +133 = the hand targets 0.3 m or more apart.
+fn alternation_from_spacing(l: Vec3, r: Vec3) -> bool {
+    (l - r).length() >= 0.3
+}
+
 /// The `ACT_SHIMMY` column: the move's side and whether this step opened the hands (the alternation flag after it).
 pub fn shimmy_index(right: bool, open: bool) -> usize {
     (right as usize) * 2 + (!open) as usize
@@ -240,8 +245,8 @@ pub struct HumanLedgeData {
     /// The last lateral move that was blocked went right (picks `PlayIdleOrBlocked`'s blocked action, 0xDD3A10).
     pub blocked_right: bool,
     /// LedgeData +108 = 3 (HangFreeReceptionType) and +112 (SwingStrength), with the `step_seq` it was stored at: the swing
-    /// back's `_b` (`PlayHopUpSecondPart` 0xDDAB00) and walling's free hangs B / C (0xE3807F–0xE380D7, 0xE3898C–0xE389E8)
-    /// store h = w[2] + w[3]; the free idle that follows (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0) plays its two clips
+    /// back's `_b` (`PlayHopUpSecondPart` 0xDDAB00), walling's free hangs B / C (0xE3807F–0xE380D7, 0xE3898C–0xE389E8)
+    /// and the climb's jump up (0xDF9650) store h = w[2] + w[3]; the free idle that follows (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0) plays its two clips
     /// (`xx_h_hangfree_wait`, `xx_h_hangwallfree_wait`) at [1 − h, h] (`sub_502E30`) until the next move (RE/24 LEDGE-24,
     /// WALL-21).
     pub swing_strength: Option<(f32, u32)>,
@@ -280,7 +285,9 @@ impl HumanLedgeData {
         self.sub_state = e.sub_state;
         self.pass_over = None;
         self.swing = None;
-        self.alt_flag = false; // EnterCommon 0xDE26D0 clears +0x85
+        // EnterCommon 0xDE26D0 clears +0x85, then `HumanLedge__OnEnter` 0xDE3460 sets it from the hand targets
+        // (`HumanLedge__SetAlternationFromHandSpacing` 0xDCBCD0: 0.3 m or more apart → the trailing hand closes first)
+        self.alt_flag = alternation_from_spacing(e.hand_l, e.hand_r);
         self.repose_at_entry_end = false;
         self.last_hand = 0; // and +1844
         self.blocked_up = false;
@@ -303,6 +310,11 @@ impl HumanLedgeData {
         // walling's free hangs B / C: +108 = 3, +112 = w₂ + w₃ of their 4-way blend (WALL-21)
         let walling_free = |a: &super::jump_blend::ActionBlend| [super::walling::ENTRY_TO_HANGFREE, super::walling::STEP1_TO_HANGFREE].contains(&a.id);
         if let Some(a) = e.entry_move.and_then(|m| m.seq[0]).filter(walling_free) {
+            self.swing_strength = Some((a.w[2] + a.w[3], self.step_seq));
+        }
+        // the climb's jump up the same way: +108 = 3, +112 = w₂ + w₃ of the swingback's 4-way blend
+        // (`HumanClimb__FillLedge_JumpToOverhang` 0xDF9A9A–0xDF9AD1)
+        if let Some(a) = e.entry_move.and_then(|m| m.seq[1]).filter(|a| a.id == super::climb::CLIMB_JUMP_SWINGBACK) {
             self.swing_strength = Some((a.w[2] + a.w[3], self.step_seq));
         }
         if let Some(m) = e.entry_move {
@@ -366,37 +378,81 @@ pub fn hands_on_pole(d: &HumanLedgeData, n: Vec3, guidance: &GuidanceWorld) -> b
     [d.hand_l, d.hand_r].iter().all(|h| guidance.on_edge(*h, n, 0.15).is_some_and(|hit| guidance.edges[hit.edge].subtype == crate::guidance::GuidanceSubType::Pole))
 }
 
-/// The ray part of `sub_11718B0` (a wall support for a foot): from `centre` + `up`·z, `half_depth` m out from the wall,
-/// a ray of 2·`half_depth` toward it, on layer 43 (`sub_11718B0`). A hit on a body owned by a component (flag
-/// 0x10000000, the same tag `ContactManager__GroundMaterial` 0x55A580 tests) is a support, which is all the port's
+/// The ray part of `Guidance__FindWallSupport` 0x11718B0 (a wall support for a foot): from `centre` + `up`·z,
+/// `half_depth` m out from the wall, a ray of 2·`half_depth` toward it, on layer 43. A hit on a body owned by a component
+/// (flag 0x10000000, the same tag `ContactManager__GroundMaterial` 0x55A580 tests) is a support, which is all the port's
 /// static collision; a hit on a FuzzyZone layer (24 / 26 / 25 / 33 / 41, `sub_E1C1F0`) aborts with no support (fuzzy
-/// zones are not imported). PORT: only a miss or an unowned body falls back to Surface guidance edges facing within 45°
-/// (sliced every `step`), which is not searched (RE/24 GUIDE-12).
+/// zones are not imported). A miss goes on to the Surface search (`wall_support`).
 pub fn support_ray(centre: Vec3, n: Vec3, half_depth: f32, z: f32, collision: &CollisionWorld) -> bool {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let start = centre + Vec3::Y * z - facing * half_depth;
     collision.sphere_free_distance(start, facing, 0.01, 2.0 * half_depth) < 2.0 * half_depth - 1e-3
 }
 
-/// `sub_B16130`: the wall-hang feet supports under a hold point `hand` (the free-hang drop 0xDDF390, the corners
-/// 0xDD3BB0, the climb's ledge grab 0xDF0980): two `sub_11718B0` searches 1.0 m below it and 0.125 m into the wall, one
-/// 0.2 m to the left raised 0.1 m and one under the point lowered 0.1 m (box half extents 0.25 / 0.625 / 0.15); either
-/// is enough (the other foot then shares it).
+/// A `Guidance__FindWallSupport` 0x11718B0 box: half extents across the wall (a6), out of it (a7, also the ray's half
+/// length) and up (a7 + 4), and the step between its z planes (a9).
+#[derive(Clone, Copy, Debug)]
+pub struct SupportBox {
+    pub across: f32,
+    pub depth: f32,
+    pub height: f32,
+    pub step: f32,
+}
+
+/// The air catch's wall-hang feet (`CheckAirCatch` 0xE0CDFF / 0xE0CEAC) and the jump reception's
+/// (`Human__FindReceptionFeetHolds` 0xB15D1C / 0xB15DAD).
+pub const SUPPORT_WIDE: SupportBox = SupportBox { across: 0.4, depth: 0.625, height: 0.2, step: 0.1 };
+/// The wall-hang feet (`Human__FindWallHangFeetSupports` 0xB1626C / 0xB16305) and the climb's side grab
+/// (`HumanClimb__TrySideLedgeGrab` 0xDF2541 / 0xDF2649).
+pub const SUPPORT_FEET: SupportBox = SupportBox { across: 0.25, depth: 0.625, height: 0.15, step: 0.07 };
+
+/// `Guidance__FindWallSupport` 0x11718B0: a foot's wall support at `origin` + (x across, z up) in the wall's frame
+/// (x along into × up, the wall's normal `n`). First the ray (`support_ray`); on a miss the Surface search
+/// (`GuidanceWorkspaceCastZPlanes`, type 6): the collision in the box (centred on `origin`, not the offset point) cut by
+/// the planes at z, z ± step, … within its height (`CollisionWorld::surface_slices`), and any piece whose triangle faces
+/// the character within 45° (its normal flattened, not renormalised, · into < −0.7071) is a support; the game returns the
+/// point on the nearest piece (shortened 5 cm at each end, `Guidance__NearestOnShortenedSegment`) to the offset point.
+pub fn wall_support(origin: Vec3, n: Vec3, x: f32, z: f32, b: SupportBox, collision: &CollisionWorld) -> bool {
+    let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let across = into.cross(Vec3::Y);
+    if support_ray(origin + across * x, n, b.depth, z, collision) {
+        return true;
+    }
+    let mut heights = vec![z];
+    let mut h = z + b.step;
+    while h <= b.height {
+        heights.push(h);
+        h += b.step;
+    }
+    let mut h = z - b.step;
+    while h >= -b.height {
+        heights.push(h);
+        h -= b.step;
+    }
+    collision
+        .surface_slices(origin, across, into, Vec3::new(b.across, b.depth, b.height), &heights)
+        .iter()
+        .any(|&(_, _, sn)| into.dot(Vec3::new(sn.x, 0.0, sn.z)) < -std::f32::consts::FRAC_1_SQRT_2)
+}
+
+/// `Human__FindWallHangFeetSupports` 0xB16130: the wall-hang feet supports under a hold point `hand` (the free-hang drop
+/// 0xDDF390, the corners 0xDD3BB0, the climb's ledge grab 0xDF0980): two `wall_support` searches 1.0 m below it and
+/// 0.125 m into the wall, one 0.2 m to the left raised 0.1 m and one under the point lowered 0.1 m (`SUPPORT_FEET`);
+/// either is enough (the other foot then shares it).
 pub fn feet_supports(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let c = hand - Vec3::Y + facing * 0.125;
-    support_ray(c - right_of(facing) * 0.2, n, 0.625, 0.1, collision) || support_ray(c, n, 0.625, -0.1, collision)
+    wall_support(c, n, -0.2, 0.1, SUPPORT_FEET, collision) || wall_support(c, n, 0.0, -0.1, SUPPORT_FEET, collision)
 }
 
-/// `sub_B15C30`: the jump arrival's foot holds under a hold point `hand` (`HumanInAir__CheckJumpTargetArrival`
-/// 0xE07D00, generic branch 0xE093FC): two `sub_11718B0` searches 1.0 m below it and 0.15 m into the wall, one
-/// 0.15 m to the left raised 0.05 m and one 0.15 m to the right lowered 0.05 m (box half extents 0.4 / 0.625 / 0.2;
-/// the offset is in the wall's frame, x across, z up). Both feet must find the wall.
+/// `Human__FindReceptionFeetHolds` 0xB15C30: the jump arrival's foot holds under a hold point `hand`
+/// (`HumanInAir__CheckJumpTargetArrival` 0xE07D00, generic branch 0xE093FC): two `wall_support` searches 1.0 m below it
+/// and 0.15 m into the wall, one 0.15 m to the left raised 0.05 m and one 0.15 m to the right lowered 0.05 m
+/// (`SUPPORT_WIDE`). Both feet must find the wall.
 pub fn reception_feet(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let c = hand - Vec3::Y + facing * 0.15;
-    let across = facing.cross(Vec3::Y);
-    support_ray(c - across * 0.15, n, 0.625, 0.05, collision) && support_ray(c + across * 0.15, n, 0.625, -0.05, collision)
+    wall_support(c, n, -0.15, 0.05, SUPPORT_WIDE, collision) && wall_support(c, n, 0.15, -0.05, SUPPORT_WIDE, collision)
 }
 
 /// Foot supports for a hang at `mid` (`sub_DE0A60` from TrySwitchHangType 0xDE1060): two rays of 1.2 m toward
@@ -596,7 +652,7 @@ pub fn update_ledge(
                 super::passover::PassOverOut::PullDown { far, normal } => {
                     // pull-down type 4 (0xDE0220): Ledge SubState 11 from the far edge
                     data.ledge.pass_over = None;
-                    let entry = match ledge_moves::pulldown_passover(far, normal, body.feet, p.hand, p.w, &guidance.ledge_report(far, 2.5, true), &collision) {
+                    let entry = match ledge_moves::pulldown_passover(far, normal, body.feet, p.hand, p.w, &guidance.ledge_report_depth(far, 2.5, true, crate::guidance::PULLDOWN_DEPTH, &collision), &collision) {
                         Ok(moves) => super::ground::pulldown_ledge_entry(moves, normal, body.feet),
                         Err(orient) => super::ground::pulldown_release_entry(orient, normal, body.feet),
                     };
@@ -653,6 +709,34 @@ pub fn update_ledge(
             body.feet = p;
             body.heading = heading_of(mv.facing());
             limbs.hands = None;
+            // the stand-up's last item plays in NarrowObject: at the hangknee item's release `Pullup_Tick` 0xDE2EE0 calls
+            // `HumanLedge__SwitchToNarrowObject_Enter` 0xDD2A50 (`hangknee_tr_freestep_entry`, SubState 6, +0xF0 = the root,
+            // +0x100 = −the facing); the step-up's reception 0x012B33F1 likewise (0xE09752). The free-step stay
+            // (RE/05 §2.15) then hands over to the Ground. PORT: the root keeps the move's path onto the top over the rest
+            // of the item (the game's follows the clip; the pull-up's root path is RE/25 #47)
+            if mv.end_stand {
+                if let Some((b, ph)) = mv.current().filter(|(b, _)| ledge_moves::FREE_STEP_STAY.contains(&b.id)) {
+                    let facing = mv.facing();
+                    let e = super::free_step::FreeStepEntry {
+                        action: b,
+                        t: ph * b.duration(),
+                        from: body.feet,
+                        to: mv.to,
+                        root_time: (mv.duration() - mv.t).max(0.0),
+                        follow_clip: false,
+                        point: body.feet,
+                        normal: -Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero(),
+                        small_box: false,
+                        heading: body.heading,
+                    };
+                    d.mv = None;
+                    d.queue.clear();
+                    limbs.hands = None;
+                    limbs.feet = None;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToFreeStep(e));
+                    continue;
+                }
+            }
             if done && !d.queue.is_empty() {
                 // next queued stage (pull-down: orientation → descent → reception)
                 let mut next = d.queue.remove(0);
@@ -702,8 +786,7 @@ pub fn update_ledge(
                 continue;
             }
             if done && mv.end_stand {
-                // knee / waist arrivals end standing on top (Ledge SubState 4 → pull-up). Game: NarrowObject
-                // on the edge; PORT: Ground
+                // a stand-up without its free-step item (not loaded): Ground
                 d.mv = None;
                 limbs.hands = None;
                 limbs.feet = None;
@@ -728,9 +811,11 @@ pub fn update_ledge(
                 // the Entry state's end (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0, RE/24 LEDGE-22): the entries in the
                 // Entry state (+76 = 0: walling's hangs, the climb's jump up, the swing back's second part) re-pose the
                 // hands from the hand bones, unless `step1_to_hangwall` plays. The bones are last frame's pose at the root
-                // where it stands now (`bone_pose`); without the install the move's own hand points stay (PORT)
-                let entry_end = std::mem::take(&mut d.repose_at_entry_end) || mv.kind == ledge_moves::MoveKind::SwingBack;
+                // where it stands now (`bone_pose`); without the install the move's own hand points stay (PORT).
+                // `HumanLedge__Pullup_Tick` 0xDE2EE0 re-poses the same way when `hangwallfree_tr_hangwall` is released
+                // into the wall hang (its pass-over twins 0x0109BB58 / 59 follow walling pass-overs, which never happen)
                 let last = mv.seq.iter().flatten().last().map(|a| a.id);
+                let entry_end = std::mem::take(&mut d.repose_at_entry_end) || mv.kind == ledge_moves::MoveKind::SwingBack || last == Some(ledge_moves::WALLFREE_TO_WALL);
                 if entry_end && last != Some(super::walling::STEP1_TO_HANGWALL) {
                     use crate::bone_pose::{LEFT_HAND, RIGHT_HAND};
                     let bones = skeleton.as_deref().zip(pose).and_then(|(s, p)| Some([p.world_pos(s, LEFT_HAND, &body)?, p.world_pos(s, RIGHT_HAND, &body)?]));
@@ -745,11 +830,15 @@ pub fn update_ledge(
                 if mv.kind == ledge_moves::MoveKind::SwingBack {
                     d.swing_strength = Some((mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0), d.step_seq));
                 }
+                // Every hang settle sets +133 from the hand targets (`HumanLedge__SetAlternationFromHandSpacing` 0xDCBCD0,
+                // called by OnEnter, the entry, the receptions, the grasp, the ledge jump, the swing stops and the free-hang
+                // drop): a hang whose hands end apart closes the trailing hand first (RE/24 LEDGE-14; live RE/25 #36: after
+                // the pull-down, hands 0.51 m apart, the first shimmy step is `strafe_*_close`). The switch does not touch
+                // it (LEDGE-9).
                 if let ledge_moves::MoveKind::SideJump { .. } = mv.kind {
-                    // the table jump into a hang: +133 = the hand targets 0.3 m or more apart (`sub_DCBCD0`, RE/24 LEDGE-14)
-                    d.alt_flag = (mv.hand_l - mv.hand_r).length() >= 0.3;
+                    d.alt_flag = alternation_from_spacing(mv.hand_l, mv.hand_r);
                 } else if !matches!(mv.kind, ledge_moves::MoveKind::SwitchHang { .. }) {
-                    d.alt_flag = false;
+                    d.alt_flag = alternation_from_spacing(d.hand_l, d.hand_r);
                 }
             } else {
                 d.mv = Some(mv);
@@ -825,7 +914,7 @@ pub fn update_ledge(
         // the ledge report (`HumanLedge__BuildLedgeReport` 0xDDC620 → HumanData +116): ladder zones carved, steep edges
         // removed; ProbeLateral, FindCornerEdges, FindVerticalRows, the side jumps and TryJumpUpToClimb read it
         // (RE/24 GUIDE-2). Its largest box reaches 3 m sideways from the hands.
-        let report = guidance.ledge_report(hand_mid(d), 3.5, true);
+        let report = guidance.ledge_report_depth(hand_mid(d), 3.5, true, crate::guidance::LEDGE_DEPTH, &collision);
         // the interpreter's ledge state (`GoAssassinActionInterpreter__LedgeState` 0xEEBFD0, RE/03 7.12): the
         // empty-hand buffer lets go (event 4, 0xDDB450 -> LetGoToInAir) ...
         if pad.hand_buffered() {
@@ -842,7 +931,7 @@ pub fn update_ledge(
                 .flatten();
             let entry = match dive {
                 Some(s) => {
-                    let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None };
+                    let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
                     InAirEntry::LetGoDive { from: body.feet, target, origin }
                 }
                 None => InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 },
@@ -1054,8 +1143,9 @@ pub fn update_ledge(
                 // Movement_ChooseAction 0xDE29E0, left / right, with the preference +1856 = 0 (the ctor's value; nothing
                 // else sets it): ProbeLateral 0xDD9640 first (the rows and the shimmy target)
                 let (rows, target) = ledge_moves::probe_lateral(mover, other, n, dv, d.alt_flag, d.hang_type, &report, &collision);
-                // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side
-                if let Some((mv, e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance) {
+                // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side, skipped during a closing
+                // step (+133 set, RE/03 §7.6e; live RE/25: the shimmy closes the trailing hand before the ladder move)
+                if let Some((mv, e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance).filter(|_| !d.alt_flag) {
                     start_move(d, mv, "side to ladder");
                     d.then_ladder = Some(e);
                     continue;

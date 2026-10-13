@@ -57,6 +57,65 @@ pub fn in_zone(slot: usize, origin: Vec3, p: Vec3, k: f32) -> bool {
     inside
 }
 
+/// `sub_E153C0`: the outline of zone `slot` from its second vertex on (`count` vertices), in the frame of a jumper at
+/// `origin` facing `dir` (x forward, y up; vertices from the third on stretched by `k`, as in `in_zone`).
+fn zone_outline(slot: usize, origin: Vec3, dir: Vec3, count: usize, k: f32) -> Vec<Vec3> {
+    let poly = ZONES[slot];
+    let f = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
+    (1..=count).filter(|&i| i < poly.len()).map(|i| {
+        let q = poly[i];
+        let x = if i >= 2 { q[0] * k } else { q[0] };
+        origin + f * x + Vec3::Y * q[1]
+    }).collect()
+}
+
+/// `sub_116E070` (with `sub_976A50`, the segment–segment closest approach): the point of `a`–`b` nearest the polyline.
+fn nearest_to_outline(a: Vec3, b: Vec3, outline: &[Vec3]) -> Vec3 {
+    let mut best = (f32::MAX, 0.0f32);
+    for w in outline.windows(2) {
+        let (t, d) = segment_closest(a, b, w[0], w[1]);
+        if d < best.0 {
+            best = (d, t);
+        }
+    }
+    if outline.len() < 2 || best.1 <= 0.0 { a } else if best.1 >= 1.0 { b } else { a.lerp(b, best.1) }
+}
+
+/// The closest approach of segments p0–p1 and q0–q1: (the parameter on the first, the distance).
+fn segment_closest(p0: Vec3, p1: Vec3, q0: Vec3, q1: Vec3) -> (f32, f32) {
+    let (d1, d2, r) = (p1 - p0, q1 - q0, p0 - q0);
+    let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
+    let (s, t);
+    if a <= 1e-9 && e <= 1e-9 {
+        return (0.0, r.length());
+    }
+    if a <= 1e-9 {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = d1.dot(r);
+        if e <= 1e-9 {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let bb = d1.dot(d2);
+            let denom = a * e - bb * bb;
+            let mut s0 = if denom > 1e-9 { ((bb * f - c * e) / denom).clamp(0.0, 1.0) } else { 0.0 };
+            let mut t0 = (bb * s0 + f) / e;
+            if t0 < 0.0 {
+                t0 = 0.0;
+                s0 = (-c / a).clamp(0.0, 1.0);
+            } else if t0 > 1.0 {
+                t0 = 1.0;
+                s0 = ((bb - c) / a).clamp(0.0, 1.0);
+            }
+            s = s0;
+            t = t0;
+        }
+    }
+    (s, ((p0 + d1 * s) - (q0 + d2 * t)).length())
+}
+
 /// The request (the query's a7 / a8 / a10 / a12 / a13).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Query {
@@ -148,7 +207,7 @@ fn flat(v: Vec3) -> Vec3 {
 }
 
 /// The wall normal of an edge: the face normal with the lower vertical part, flattened (`v221`).
-fn wall_of(n0: Vec3, n1: Vec3) -> Vec3 {
+pub(crate) fn wall_of(n0: Vec3, n1: Vec3) -> Vec3 {
     flat(if n1.y <= n0.y { n1 } else { n0 })
 }
 
@@ -170,7 +229,70 @@ struct Piece {
     subtype: GuidanceSubType,
     /// The chain sets the piece belongs to (bit k = set k).
     sets: u8,
+    /// The contact scratch: the depth filter's room past `a` ([0] / [2]) and `b` ([1] / [3]) plus the lengths the wedge
+    /// cut off there (`GuidanceContact__AddCutLengths` 0x6764E0).
+    cut: crate::guidance::Scratch,
 }
+
+/// The jump wedge: the `MeshShape` of the shared `GuidanceZoneMesh` at `sub_4155B0()` +208 (vertices and triangles read
+/// from the running game, live 2026-10-12), in its own frame: x right (dir × up), y forward, z up. A sector about ±12.5°
+/// wide from its apex, reaching 3 m up to 3 m out, 1.8 m at 4.8, −0.5 at 7.0, −3 at 8.5, its floor 5 m down. Not
+/// quite convex: the arc's second vertices stand at 13.4° against 12.7° for their neighbours.
+const WEDGE_VERTS: [[f32; 3]; 22] = [
+    [0.0, 0.0, 3.0], [0.633, 2.924, 3.0], [1.113, 4.670, 1.8], [1.553, 6.803, -0.5], [1.812, 8.288, -3.0],
+    [0.0, 0.0, -5.0], [0.204, 3.0, 3.0], [0.375, 4.801, 1.8], [0.523, 6.985, -0.5], [0.610, 8.5, -3.0],
+    [-0.232, 3.0, 3.0], [-0.375, 4.801, 1.8], [-0.523, 6.985, -0.5], [-0.610, 8.5, -3.0], [-0.661, 2.924, 3.0],
+    [-1.113, 4.670, 1.8], [-1.553, 6.803, -0.5], [-1.812, 8.288, -3.0], [1.812, 8.288, -5.0], [0.610, 8.5, -5.0],
+    [-0.610, 8.5, -5.0], [-1.812, 8.288, -5.0],
+];
+const WEDGE_TRIS: [[usize; 3]; 40] = [
+    [0, 1, 6], [1, 2, 7], [1, 7, 6], [2, 3, 8], [2, 8, 7], [3, 4, 9], [3, 9, 8], [18, 5, 19], [0, 6, 10], [6, 7, 11],
+    [6, 11, 10], [7, 8, 12], [7, 12, 11], [8, 9, 13], [8, 13, 12], [19, 5, 20], [0, 10, 14], [10, 11, 15], [10, 15, 14],
+    [11, 12, 16], [11, 16, 15], [12, 13, 17], [12, 17, 16], [20, 5, 21], [3, 5, 4], [3, 2, 5], [2, 1, 5], [5, 1, 0],
+    [16, 17, 5], [14, 5, 0], [15, 16, 5], [15, 5, 14], [9, 4, 18], [18, 19, 9], [5, 18, 4], [13, 9, 19], [19, 20, 13],
+    [17, 13, 20], [20, 21, 17], [5, 17, 21],
+];
+
+/// Where the line `o + t·d` crosses the wedge's triangles (Möller–Trumbore), as parameters t.
+fn wedge_crossings(o: Vec3, d: Vec3) -> Vec<f32> {
+    let v = WEDGE_VERTS.map(|[x, y, z]| Vec3::new(x, y, z));
+    WEDGE_TRIS.iter().filter_map(|&[i, j, k]| {
+        let (e1, e2) = (v[j] - v[i], v[k] - v[i]);
+        let p = d.cross(e2);
+        let det = e1.dot(p);
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let s = o - v[i];
+        let u = s.dot(p) / det;
+        let q = s.cross(e1);
+        let w = d.dot(q) / det;
+        (u >= 0.0 && w >= 0.0 && u + w <= 1.0).then(|| e2.dot(q) / det)
+    }).collect()
+}
+
+/// Is `p` (wedge frame) inside the wedge: an odd number of crossings on a ray from it (a skew direction, clear of
+/// the mesh's vertices and edges).
+fn in_wedge(p: Vec3) -> bool {
+    wedge_crossings(p, Vec3::new(0.123, 0.311, 0.942)).into_iter().filter(|&t| t > 0.0).count() % 2 == 1
+}
+
+/// The part of `a`→`b` (wedge frame) inside the wedge, as segment parameters: from `a` (inside) or the first crossing
+/// to `b` (inside) or the last (`sub_5AD070` → 0x6334D0: the hits from either end; mode 1 of `GuidanceZoneMesh` vslot
+/// 12, 0x659570).
+fn wedge_clip(a: Vec3, b: Vec3) -> Option<(f32, f32)> {
+    let mut ts: Vec<f32> = wedge_crossings(a, b - a).into_iter().filter(|t| (0.0..=1.0).contains(t)).collect();
+    ts.sort_by(f32::total_cmp);
+    let t0 = if in_wedge(a) { 0.0 } else { *ts.first()? };
+    let t1 = if in_wedge(b) { 1.0 } else { *ts.last()? };
+    (t1 > t0).then_some((t0, t1))
+}
+
+/// The jump query's depth detectors (0xE19113–0xE1914F): 0.27 out and 0.23 below the edge, −75° × 0.27 and 135° × 0.42.
+const JUMP_DEPTH: [crate::guidance::DepthDetector; 2] = [
+    crate::guidance::DepthDetector::new(crate::guidance::DEPTH_OFFSET_LIP, -1.308_997, 0.27),
+    crate::guidance::DepthDetector::new(crate::guidance::DEPTH_OFFSET_LIP, 2.356_194_5, 0.42),
+];
 
 /// The query. `pos` = feet, `dir` = the wanted direction.
 pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<Candidate> {
@@ -212,6 +334,8 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
     let mut pieces: Vec<Piece> = Vec::new();
     let mut ladders: Vec<(usize, Vec3, Vec3)> = Vec::new();
     let mut authored_beams: Vec<(Vec3, Vec3)> = Vec::new();
+    // the report's LedgeGrab pieces, paired into beams below (0xE19BE0 `sub_680260` on this report)
+    let mut ledge_pieces: Vec<crate::guidance::GuidanceEdge> = Vec::new();
     for (i, e) in guidance.edges.iter().enumerate() {
         if !in_bounds(e.p0, e.p1) {
             continue;
@@ -232,6 +356,12 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
                 authored_beams.push((a, b));
                 continue;
             }
+            GuidanceSubType::LedgeGrab if q.beams => {
+                let mut piece = e.clone();
+                piece.p0 = a;
+                piece.p1 = b;
+                ledge_pieces.push(piece);
+            }
             _ => {}
         }
         // steep edges are removed (0x66C350; 40 degrees as in 0xB12480)
@@ -242,29 +372,63 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
         if w == Vec3::ZERO {
             continue;
         }
-        // the three chain sets (`GuidanceChain__Build` 0x116CD50 at 0xE19AD6 / 0xE19B13 / 0xE19B70, RE/24 AIR-27):
-        // (reference, axis, turn range), right = dir × up (var_EAC, 0xE198F0). An edge belongs to a set when its
-        // direction runs within 45° of the axis and its outward perpendicular is turned from the reference by a signed
-        // angle in the range (`GuidanceWorld::chains`' convention, RE/24 GUIDE-8): set 0 the walls within 45° of facing
-        // the jumper, sets 1 / 2 a single 45° wedge from ±right toward the jumper. A wall facing away is in none.
-        let q4 = std::f32::consts::FRAC_PI_4;
-        let d = (b - a).normalize();
-        let low = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
-        let mut perp = d.cross(up).normalize_or_zero();
-        if perp.dot(low) < 0.0 {
-            perp = -perp;
-        }
-        let mut sets = 0u8;
-        for (k, (r, axis, lo, hi)) in [(-dir, right, -q4, q4), (right, dir, 0.0, q4), (-right, dir, -q4, 0.0)].into_iter().enumerate() {
-            if d.dot(axis).abs() < q4.cos() - 1e-6 {
+        // the depth filter (a14, the entity, is always passed for the player: `Human__DepthDetectReport` 0xE1914F /
+        // 0xE19466, `Human__DepthFilterReport` 0xE19181 / 0xE19498, after the box filter and before the wedge):
+        // detectors 0.27 out and 0.23 below the edge, −75° × 0.27 and 135° × 0.42, the same thresholds. It splits the
+        // edge where the samples are blocked and gives each piece the room past its ends as its scratch, which the grab
+        // point's offset (0 here) may reach into (RE/26 §6); the wedge's cut lengths are added to it (0x6764E0).
+        let depth = {
+            let one = crate::guidance::Report {
+                world: GuidanceWorld { edges: vec![crate::guidance::GuidanceEdge { p0: a, p1: b, ..e.clone() }], ..Default::default() },
+                source: vec![i],
+                scratch: vec![[0.0; 4]],
+            };
+            one.depth_filter(collision, &JUMP_DEPTH, &[0.27, 0.42])
+        };
+        for (piece, sc) in depth.world.edges.iter().zip(&depth.scratch) {
+            let (a, b) = (piece.p0, piece.p1);
+            // the wedge (a11: every player jump query but a long one passes it, 0xEE8026 / 0xEE81E0 / 0xEE8757 /
+            // 0xEE9712; a10 clears it): the report is clipped to the jump wedge at pos + 0.5·dir (0.7 m higher in mode 3),
+            // kiosks exempt (mask 256), after the ladders, the beams' copy and the steep removal (0xE191D0, `sub_5AA970` →
+            // 0x659570 mode 1); a piece outside it is dropped and a clipped one keeps its cut lengths. Live (RE/25
+            // freerun_east): it drops a corner's side face 0.6 m off the jump line, which the game then does not jump to.
+            let (a, b, cut) = if q.long || e.subtype == GuidanceSubType::Kiosk {
+                (a, b, *sc)
+            } else {
+                let origin = pos + dir * 0.5 + if q.mode == 3 { up * 0.7 } else { Vec3::ZERO };
+                let wl = |p: Vec3| { let d = p - origin; Vec3::new(d.dot(right), d.dot(dir), d.dot(up)) };
+                let Some((t0, t1)) = wedge_clip(wl(a), wl(b)) else { continue };
+                let len = a.distance(b);
+                let (ca, cb) = (t0 * len, (1.0 - t1) * len);
+                (a.lerp(b, t0), a.lerp(b, t1), [sc[0] + ca, sc[1] + cb, sc[2] + ca, sc[3] + cb])
+            };
+            if a.distance(b) <= 0.0005 {
                 continue;
             }
-            let turn = perp.cross(r).dot(up).atan2(perp.dot(r));
-            if turn >= lo - 1e-4 && turn <= hi + 1e-4 {
-                sets |= 1 << k;
+            // the three chain sets (`GuidanceChain__Build` 0x116CD50 at 0xE19AD6 / 0xE19B13 / 0xE19B70, RE/24 AIR-27):
+            // (reference, axis, turn range), right = dir × up (var_EAC, 0xE198F0). An edge belongs to a set when its
+            // direction runs within 45° of the axis and its outward perpendicular is turned from the reference by a signed
+            // angle in the range (`GuidanceWorld::chains`' convention, RE/24 GUIDE-8): set 0 the walls within 45° of facing
+            // the jumper, sets 1 / 2 a single 45° wedge from ±right toward the jumper. A wall facing away is in none.
+            let q4 = std::f32::consts::FRAC_PI_4;
+            let d = (b - a).normalize();
+            let low = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
+            let mut perp = d.cross(up).normalize_or_zero();
+            if perp.dot(low) < 0.0 {
+                perp = -perp;
             }
+            let mut sets = 0u8;
+            for (k, (r, axis, lo, hi)) in [(-dir, right, -q4, q4), (right, dir, 0.0, q4), (-right, dir, -q4, 0.0)].into_iter().enumerate() {
+                if d.dot(axis).abs() < q4.cos() - 1e-6 {
+                    continue;
+                }
+                let turn = perp.cross(r).dot(up).atan2(perp.dot(r));
+                if turn >= lo - 1e-4 && turn <= hi + 1e-4 {
+                    sets |= 1 << k;
+                }
+            }
+            pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sets, cut });
         }
-        pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sets });
     }
 
     // ---------------------------------------------------------------- chains (sub_116CD50 × 3 → sub_678670)
@@ -295,12 +459,18 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
     }
 
     // ---------------------------------------------------------------- the main loop (grab point per chain)
+    // the pieces as a guidance report (each piece an edge from `a` to `b`, its scratch) for the grab point
+    let piece_world = GuidanceWorld {
+        edges: pieces.iter().map(|p| crate::guidance::GuidanceEdge { p0: p.a, p1: p.b, ..guidance.edges[p.edge].clone() }).collect(),
+        ..Default::default()
+    };
+    let piece_scratch: Vec<crate::guidance::Scratch> = pieces.iter().map(|p| p.cut).collect();
     for chain in &chains {
         let piece0 = &pieces[chain[0].0];
         if (1u32 << piece0.subtype as u32) & q.exclude != 0 {
             continue;
         }
-        let Some((pi, g)) = grab_point(chain, centre, dir) else { continue };
+        let Some((pi, g)) = grab_point(chain, &piece_world, &piece_scratch, centre, dir) else { continue };
         let piece = &pieces[pi];
         let e = &guidance.edges[piece.edge];
         let kind = piece.subtype;
@@ -432,22 +602,27 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
 
     if q.beams {
         // ------------------------------------------------------------ beams (type 4 / sub-type 1 / 0x10000)
-        let mut beams: Vec<(Vec3, Vec3)> = beam_contacts::detect(guidance, collision, (lo + hi) * 0.5, (hi - lo) * 0.5).into_iter().map(|b| (b.p0, b.p1)).collect();
+        // the beams paired from the box-clipped report (0xE19BE0), not the whole neighbourhood: a beam outside the
+        // kind's box (kind 3 / 4: 0.45–1.3 m up) is no candidate
+        let mut beams: Vec<(Vec3, Vec3)> = beam_contacts::pair_report(std::mem::take(&mut ledge_pieces), collision).into_iter().map(|b| (b.p0, b.p1)).collect();
         beams.extend(authored_beams);
         for (a, b) in beams {
             let along = flat(b - a);
             if along == Vec3::ZERO || along.dot(dir).abs() <= 0.766_044_4 {
                 continue;
             }
-            // PORT: 0x116E070 clips the beam to the primary zone's front vertices (not decoded); the port takes the
-            // in-zone point (sampled every 0.1 m, 0.3 m from the beam's ends) closest to 4 m ahead, as before
-            let len = a.distance(b);
-            let steps = (len / 0.1).ceil().max(1.0) as usize;
-            let ahead = pos + dir * 4.0;
-            let margin = (0.3 / len.max(1e-3)).min(0.5);
-            let p = (0..=steps).map(|s| s as f32 / steps as f32).filter(|t| (margin..=1.0 - margin).contains(t)).map(|t| a.lerp(b, t)).filter(|p| in1_test(*p))
-                .min_by(|x, y| x.distance_squared(ahead).total_cmp(&y.distance_squared(ahead)));
-            let Some(p) = p else { continue };
+            // `sub_116E070` (0xE19D3E): the point on the beam nearest the zone's outline, the primary polygon from its
+            // second vertex on (4 vertices for the kinds 1 / 2 or mode 4, else 5; `sub_E153C0` 0xE19C18) set in the
+            // jump's frame (forward = dir, up); then `JumpZone__Contains` (0xE19D5A). A beam running along the jump
+            // gives its far end
+            let p = nearest_to_outline(a, b, &zone_outline(z.primary, pos, dir, if q.kind == 1 || q.kind == 2 || q.mode == 4 { 4 } else { 5 }, k));
+            // PORT: a beam crossing the outline gives the crossing point itself, on the zone's boundary, where the
+            // game's float test is untraced: it counts when 1 mm toward the beam's nearer end lies inside
+            let near = if a.distance_squared(pos) <= b.distance_squared(pos) { a } else { b };
+            let p = if in1_test(p) { p } else { p + (near - p).normalize_or_zero() * 0.001 };
+            if !in1_test(p) {
+                continue;
+            }
             let eye = pos + up * 0.75;
             if !clear(collision, eye, p + up * 0.05) {
                 continue;
@@ -510,38 +685,15 @@ fn nearest_on_shortened(p: Vec3, a: Vec3, b: Vec3, step: f32) -> Vec3 {
     crate::guidance::closest_on_segment(a + d * step, b - d * step, p)
 }
 
-/// `GuidanceChain__FindGrabPoint` 0x66E150 (margin 0.5, no hand offsets): `centre` projected along `dir` onto the
-/// chain's vertical plane, kept 0.5 m from the chain's ends; the piece carrying it and the point on that piece.
-fn grab_point(chain: &[(usize, Vec3, Vec3)], centre: Vec3, dir: Vec3) -> Option<(usize, Vec3)> {
-    let s = chain.first()?.1;
-    let e = chain.last()?.2;
-    let u = flat(e - s);
-    if u == Vec3::ZERO {
-        // a chain without horizontal extent: its first piece's middle
-        let (pi, a, b) = chain[0];
-        return Some((pi, (a + b) * 0.5));
-    }
-    let n = u.cross(Vec3::Y);
-    let denom = dir.dot(n);
-    let proj = if denom.abs() > 1e-6 { centre + dir * ((s - centre).dot(n) / denom) } else { centre - n * (centre - s).dot(n) };
-    let len = Vec2::new(e.x - s.x, e.z - s.z).length();
-    let t = (proj - s).dot(u);
-    let t = if len > 1.0 { t.clamp(0.5, len - 0.5) } else { len * 0.5 };
-    // the piece whose flat extent along the chain carries t
-    let mut best: Option<(f32, usize, Vec3)> = None;
-    for &(pi, a, b) in chain {
-        let (ta, tb) = ((a - s).dot(u), (b - s).dot(u));
-        if (tb - ta).abs() > 1e-6 && (ta.min(tb)..=ta.max(tb)).contains(&t) {
-            return Some((pi, a.lerp(b, (t - ta) / (tb - ta))));
-        }
-        for (q, tq) in [(a, ta), (b, tb)] {
-            let d = (tq - t).abs();
-            if best.is_none_or(|x| d < x.0) {
-                best = Some((d, pi, q));
-            }
-        }
-    }
-    best.map(|b| (b.1, b.2))
+/// `GuidanceChain__FindGrabPoint` 0x66E150 as the jump query calls it (0xE1A11B): the hand offsets 0.5 / 0.1 (the
+/// list built at 0xE1A03B), margin 0.5, no preferred direction, `centre` carried onto the chain's plane along `dir`.
+/// Each piece's scratch is the depth filter's room past its ends plus the wedge's cut lengths, so a piece the wedge cut
+/// reaches back over the part it lost (live 2026-10-13, course `freerun_east_depth`: the post's west edge 6.999 → 6.202,
+/// all samples free (room 0.5), the wedge leaves 6.544 → 6.202; the grab point is the whole edge's middle, 6.601). The
+/// piece carrying the point and the point.
+fn grab_point(chain: &[(usize, Vec3, Vec3)], world: &GuidanceWorld, scratch: &[crate::guidance::Scratch], centre: Vec3, dir: Vec3) -> Option<(usize, Vec3)> {
+    let chain = crate::guidance::Chain { links: chain.to_vec() };
+    world.grab_point_toward(&chain, centre, None, Some(dir), &[0.5, 0.1], 0.5, scratch).map(|h| (h.edge, h.point))
 }
 
 /// The scorer 0xE96BF0. `actor` = feet, `facing` = the actor's forward, `want` = the wanted direction (the stick or
@@ -653,9 +805,18 @@ pub struct EdgeReport {
     pub normal: Vec3,
     /// +48: the drop beyond the edge.
     pub drop: f32,
-    /// +52: the horizontal distance to the edge, negative once the feet are past it.
+    /// The horizontal distance to the edge, negative once the feet are past it (the game stores its square, `sq`).
     pub dist: f32,
     pub edge: usize,
+}
+
+impl EdgeReport {
+    /// +52 as the game stores it: the **squared** horizontal distance (`sub_42EC70` is the squared length), negative
+    /// once the feet are past the edge. The game's thresholds on it are squared distances (live RE/25: the halt's 0.16
+    /// fired with the feet 0.393 m from the edge, +52 = 0.154).
+    pub fn sq(&self) -> f32 {
+        self.dist * self.dist.abs()
+    }
 }
 
 /// `Human__BuildEdgeReports` 0xB1BC50 (pos, radius, min drop; the floor case is not ported): every guidance piece
@@ -689,7 +850,7 @@ pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWo
         if n == Vec3::ZERO {
             continue;
         }
-        let drop = measure_drop(p, n, 7.0, 0.02, collision);
+        let drop = measure_drop_stepped(p, n, 7.0, 0.02, collision, Some(guidance));
         if drop < min_drop {
             continue;
         }
@@ -700,11 +861,62 @@ pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWo
     out
 }
 
-/// `Human__MeasureDropBeyondEdge` 0xB19620 (max, step out). PORT: one ray down from just past the edge; the exe
-/// sweeps angled rays and follows stepped drops with nested edge reports.
+/// `Human__MeasureDropBeyondEdge` 0xB19620 (max, step out), without the stepped-drop refinement (no guidance at hand).
 pub(crate) fn measure_drop(p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld) -> f32 {
-    let o = p + n * (step + 0.05) + Vec3::Y * 0.05;
-    collision.ray_distance(o, -Vec3::Y, max + 0.05, RAY_LAYER) - 0.05
+    measure_drop_stepped(p, n, max, step, collision, None)
+}
+
+/// `Human__MeasureDropBeyondEdge` 0xB19620 (max, step out): the edge height minus the floor found beyond it.
+/// - From `step` past the edge a ray 45 deg out and down (the axis up × normal), to 0.5 m below the edge (at most
+///   `max`). A hit is the floor.
+/// - Else, from its end, a ray 10 deg off straight down, outward, to `max` below the edge. Nothing → `max`.
+/// - A floor steeper than 45 deg (`Math__SignedAngleAroundAxis` from up) is slid down: from 0.01 m off it along its
+///   flattened normal, a ray 45 deg down and out from it to 0.5 m below the hit, then the 10 deg ray again.
+/// - Stairs: with a drop d, the edge reports at the floor (IHuman vt132 with radius 0.2 · clamp(d / 3, 0, 1) when that
+///   exceeds 0.01, minimum drop 0.45, no floor report) add the deepest one's drop (`sub_B14CA0`), so a ledge below the
+///   edge adds the drop beyond it (RE/25 #2: the 1.61 m roof edge over a 0.6 m shelf halts the walk).
+/// PORT: the two checks before the sweep are left out (the edge's lip from 0.05 m inside, 50 deg down, and the line
+/// from 1 m above the feet to the point past the edge; a hit on either is the drop); the rays use one layer.
+pub(crate) fn measure_drop_stepped(p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld, guidance: Option<&GuidanceWorld>) -> f32 {
+    let n = flat(n);
+    if n == Vec3::ZERO {
+        let o = p + Vec3::Y * 0.05;
+        return collision.ray_distance(o, -Vec3::Y, max + 0.05, RAY_LAYER) - 0.05;
+    }
+    let tilted = |axis: Vec3, deg: f32| Quat::from_axis_angle(axis, (-deg).to_radians()) * -Vec3::Y;
+    // the ray from `o` along `d` down to the height `h` (`Vec_ProjectOntoPlane` 0x9470B0 with a horizontal plane)
+    let to_plane = |o: Vec3, d: Vec3, h: f32| if d.y < -1e-6 { ((o.y - h) / -d.y).max(0.0) } else { 0.0 };
+    let stepped = |hit: Vec3| {
+        let drop = p.y - hit.y;
+        let r = 0.2 * (drop / 3.0).clamp(0.0, 1.0);
+        let below = guidance.filter(|_| r > 0.01).map_or(0.0, |g| {
+            edge_reports(hit, r, 0.45, g, collision).iter().map(|e| e.drop).fold(0.0, f32::max)
+        });
+        drop + below
+    };
+    let mut axis = Vec3::Y.cross(n);
+    let mut from = p + n * step;
+    let mut dir = tilted(axis, 45.0);
+    let mut len = to_plane(from, dir, p.y - max.min(0.5));
+    for _ in 0..32 {
+        if let Some((d, _)) = collision.ray_hit(from, dir, len, RAY_LAYER) {
+            return stepped(from + dir * d);
+        }
+        from += dir * len;
+        dir = tilted(axis, 10.0);
+        len = to_plane(from, dir, p.y - max);
+        let Some((d, normal)) = collision.ray_hit(from, dir, len, RAY_LAYER) else { return max };
+        let hit = from + dir * d;
+        let side = flat(normal);
+        if side == Vec3::ZERO || normal.angle_between(Vec3::Y) <= 45f32.to_radians() {
+            return stepped(hit);
+        }
+        axis = Vec3::Y.cross(side);
+        from = hit + side * 0.01;
+        dir = tilted(axis, 45.0);
+        len = to_plane(from, dir, hit.y - 0.5);
+    }
+    max
 }
 
 /// IHuman vt136 0xB17EF0: the report within `radius` whose normal is closest in angle to `dir`, at most `max_angle`.
@@ -819,6 +1031,23 @@ mod tests {
         assert!(found(Vec3::new(-co, 0.0, s)), "facing left, turned toward the jumper");
         assert!(!found(Vec3::new(co, 0.0, -s)), "facing right, turned away");
         assert!(!found(Vec3::new(-co, 0.0, -s)), "facing left, turned away");
+    }
+
+    /// The wedge's side at 0.89 m up, where the live clips cut the corner's edges (RE/25 freerun_east, in the wedge
+    /// frame: forward, left of the jump line): (2.44, 0.56), (2.54, 0.58), (2.58, 0.59), (3.46, 0.81). The mesh's surface
+    /// meets them within 6 mm (the logs give 3 decimals of position and direction).
+    #[test]
+    fn the_wedge_cuts_where_the_game_cut() {
+        for (f, l) in [(2.438, 0.559), (2.541, 0.579), (2.578, 0.594), (3.460, 0.813)] {
+            // a lateral segment from the jump line out to the left (x is right)
+            let (t0, t1) = wedge_clip(Vec3::new(0.0, f, 0.887), Vec3::new(-2.0, f, 0.887)).unwrap();
+            assert!(t0 == 0.0, "{t0}");
+            let edge = 2.0 * t1;
+            assert!((edge - l).abs() < 0.01, "at {f}: the wedge ends {edge:.3} to the left, the game cut at {l}");
+        }
+        // behind the apex and above 3 m nothing is inside
+        assert!(wedge_clip(Vec3::new(-1.0, -0.5, 0.0), Vec3::new(1.0, -0.5, 0.0)).is_none());
+        assert!(wedge_clip(Vec3::new(-1.0, 2.0, 3.2), Vec3::new(1.0, 2.0, 3.2)).is_none());
     }
 
     #[test]

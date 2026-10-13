@@ -128,8 +128,17 @@ fn trim(beam:BeamContact, world:&CollisionWorld) -> Vec<BeamContact> {
 
 pub fn detect(guidance:&GuidanceWorld, world:&CollisionWorld, centre:Vec3, half:Vec3) -> Vec<BeamContact> {
     // PORT: recompute an immutable local report instead of HumanGuidance's live per-entity cached workspace.
-    let mut edges:Vec<_>=guidance.edges.iter().filter(|e| e.subtype==GuidanceSubType::LedgeGrab
+    let edges:Vec<_>=guidance.edges.iter().filter(|e| e.subtype==GuidanceSubType::LedgeGrab
         && e.p0.min(e.p1).cmple(centre+half+Vec3::ONE).all() && e.p0.max(e.p1).cmpge(centre-half-Vec3::ONE).all()).cloned().collect();
+    let mut report=pair_report(edges, world);
+    // PORT: greybox-authored centre lines have no paired contact widths; retain them with zero half-width.
+    if world.triangles.is_empty() {report.extend(guidance.edges.iter().filter(|e|e.subtype==GuidanceSubType::Beam).map(|e|BeamContact{p0:e.p0,p1:e.p1,widths:[0.0;2],up:e.n0}));}
+    report
+}
+
+/// The pairing pass (0x680260 / 0x67C2F0) over a given report's LedgeGrab edges: the jump query pairs the edges of its
+/// own box-clipped report (`Human__QueryJumpCandidates` 0xE19BE0).
+pub fn pair_report(mut edges:Vec<GuidanceEdge>, world:&CollisionWorld) -> Vec<BeamContact> {
     edges.sort_by(|a,b|a.p0.distance_squared(a.p1).total_cmp(&b.p0.distance_squared(b.p1)));
     let mut report=Vec::new();
     while let Some(seed)=edges.pop() {
@@ -153,8 +162,6 @@ pub fn detect(guidance:&GuidanceWorld, world:&CollisionWorld, centre:Vec3, half:
             report.extend(trim(beam,world));
         }
     }
-    // PORT: greybox-authored centre lines have no paired contact widths; retain them with zero half-width.
-    if world.triangles.is_empty() {report.extend(guidance.edges.iter().filter(|e|e.subtype==GuidanceSubType::Beam).map(|e|BeamContact{p0:e.p0,p1:e.p1,widths:[0.0;2],up:e.n0}));}
     report
 }
 

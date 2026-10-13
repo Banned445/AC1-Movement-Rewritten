@@ -149,8 +149,10 @@ pub struct LadderEntry {
     pub catch_out: Option<Vec3>,
     /// Controller speed for the catch blend (0xE0BB70).
     pub catch_speed: f32,
+    /// The ladder's buried part (`sub_E25B20`, LadderState +788), the entry from the ground's attach rung floor.
+    pub buried: f32,
     /// The back-approach turn (`sub_E24FD0`: the attach box blocked on the approach side, RE/24 LADDER-4): `Some(true)`
-    /// = `TURN[0]` (signed approach angle > 0), `Some(false)` = `TURN[1]`; `n` is then the far side.
+    /// = `TURN[0]` (signed approach angle > 0), `Some(false)` = `TURN[1]`; `n` stays the approach side (live RE/25 #68).
     pub back_turn: Option<bool>,
 }
 
@@ -269,6 +271,26 @@ impl HumanLadderData {
         let a = self.axis();
         (self.n - a * self.n.dot(a)).normalize_or(self.n)
     }
+    /// The hands' rail goals (`sub_E20DC0`, Main's update pass 1; RE/24 LADDER-20): a hand bone above the ladder's top
+    /// goes to the closest point of its rail, base … top offset ∓0.25 m along the ladder's X turned to the character's
+    /// right (left hand −, right hand +); a hand at or below the top has none. (The right hand is also let go in the
+    /// ladder attack, +909 & 2, `HumanLadder__EnterAttack` 0xE1D330: no combat in the port.) PORT: base … top is the
+    /// guidance ladder edge, not the entity's origin and length (+76).
+    pub fn rail_goals(&self, hands: [Vec3; 2], right: Vec3) -> [Option<Vec3>; 2] {
+        let mut x = self.axis().cross(self.out()).normalize_or(right);
+        if x.dot(right) < 0.0 {
+            x = -x;
+        }
+        std::array::from_fn(|h| {
+            let off = x * if h == 0 { -0.25 } else { 0.25 };
+            (hands[h].y > self.top.y).then(|| {
+                let (a, b) = (self.base + off, self.top + off);
+                let ab = b - a;
+                a + ab * ((hands[h] - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0)
+            })
+        })
+    }
+
     /// The root on the ladder at `h`: the point on the axis − 0.5·F (`sub_E21600`).
     pub fn root_at(&self, h: f32) -> Vec3 {
         self.base + self.out() * ATTACH_OUT + self.axis() * h
@@ -430,12 +452,18 @@ impl HumanLadderData {
             // ladder's height − 1.95 m; high profile 0.5 m higher (0xE26AB5–0xE26AE2, RE/24 LADDER-5). PORT: the buried
             // base (`sub_E25B20`) is not measured
             let h_in = self.height_of(e.from).max(0.0);
-            let k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
+            let mut k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
+            // a ladder buried more than 0.1 m starts at the rung 1 + trunc(2 × buried) at least (0xE1F95D: `1 − (int)(−2·b)`;
+            // live RE/25: the Bureau ladder, 0.67 m below the ground, attached at 1.0 m)
+            if e.buried > 0.1 {
+                k = k.max(1.0 + (2.0 * e.buried).trunc());
+            }
             self.height = 0.5 * k + if e.high { 0.5 } else { 0.0 };
             let to = self.root_at(self.height);
             if let Some(left) = e.back_turn {
-                // the back-approach turn onto the far side (+908 bit 2: 0x0A64400C / D, items a then b into the wait,
-                // single-weight blend; RE/24 LADDER-4). PORT: the heading snaps (the game slerps at rate 1.6)
+                // the back-approach turn (+908 bit 2: 0x0A64400C / D, items a then b into the wait, single-weight blend;
+                // RE/24 LADDER-4), ending on the approach side (live RE/25 #68). PORT: the heading snaps (the game slerps
+                // at rate 1.6)
                 self.chain = true;
                 self.play(LadderPhase::Entry, blend(TURN[(!left) as usize], 0, &[]), e.from, to, false);
                 return;
@@ -444,6 +472,26 @@ impl HumanLadderData {
             self.fwd = Vec3::new(e.facing.x, 0.0, e.facing.z).normalize_or(-self.n);
             self.play(LadderPhase::EnterGround, blend(ENTER_GROUND[hi][e.foot], 0, &w), e.from, to, true);
         }
+    }
+}
+
+/// `sub_E25B20` (from the ground entry, 0xE26A75): how deep the ladder's base lies under what stands on it: the highest hit
+/// of a ray from half-way up the ladder down to its base (layer 8, not the ladder), its height over the base over cos(tilt);
+/// 0 with none above the base or a ladder tilted more than 60°.
+pub fn buried_depth(base: Vec3, top: Vec3, collision: &CollisionWorld) -> f32 {
+    let axis = top - base;
+    let tilt = axis.normalize_or(Vec3::Y).y.clamp(-1.0, 1.0).acos();
+    let from = base + axis * 0.5;
+    let len = (from - base).length();
+    if len < 1e-4 || tilt > 60f32.to_radians() {
+        return 0.0;
+    }
+    match collision.ray_hit(from, (base - from) / len, len, crate::layers::NO_CHARACTER_COLLISION) {
+        Some((d, _)) => {
+            let hit = from + (base - from) / len * d;
+            ((hit.y - base.y) / tilt.cos()).max(0.0)
+        }
+        None => 0.0,
     }
 }
 
@@ -547,8 +595,10 @@ pub fn top_exit_free(top: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
 ///   ladder's own height); the character faces the ladder within 90° (−forward against the closest point → root); the
 ///   ladder's side is not tested (LADDER-3: the climb frame is signed toward the climber);
 /// - from the top when the root is within 1.5 m of the top's height.
-/// Returns (base, top, the outward normal on the climb side, from the top). PORT: the head is the feet + 1.7 m.
-pub fn find_ladder(feet: Vec3, stick: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3, Vec3, bool)> {
+/// Returns (base, top, the outward normal on the climb side, from the top). `head` is the Head bone (it leans ahead of
+/// the root in the walk: live, RE/25, the walk-in entry came with the head 0.60 m from the ladder line and the root
+/// 0.62–0.69 m). PORT: without a pose the head is the feet + 1.7 m.
+pub fn find_ladder(feet: Vec3, head: Option<Vec3>, stick: Vec3, forward: Vec3, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3, Vec3, bool)> {
     const REACH: f32 = 0.6;
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
     let closest = |a: Vec3, b: Vec3, p: Vec3| {
@@ -577,7 +627,7 @@ pub fn find_ladder(feet: Vec3, stick: Vec3, forward: Vec3, guidance: &GuidanceWo
         }
         // CanGrabLadder: the root or the head within reach of base … top
         let q = closest(base, top, feet);
-        let head = feet + Vec3::Y * 1.7;
+        let head = head.unwrap_or(feet + Vec3::Y * 1.7);
         if (feet - q).length() > REACH && (head - closest(base, top, head)).length() > REACH {
             continue;
         }
@@ -707,11 +757,12 @@ pub fn update_ladder(
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
+    skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, &mut super::LimbTargets, Option<&crate::bone_pose::BonePose>), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
     let ab = super::abilities::of(abilities.as_deref());
-    for (mut loco, mut body, mut data) in &mut q {
+    for (mut loco, mut body, mut data, mut limbs, pose) in &mut q {
         if loco.current != ActorContextId::Ladder {
             continue;
         }
@@ -726,6 +777,14 @@ pub fn update_ladder(
         body.velocity = Vec3::ZERO;
         body.grounded = false;
         let Some(phase) = l.phase else { continue };
+        // the hands' rail goals in Main (the wait, the climbs, the revolve; the entries and exits are other states), from
+        // last frame's hand bones at the root where it stands (`bone_pose`); none without the install
+        let main = matches!(phase, LadderPhase::Wait | LadderPhase::ClimbUp | LadderPhase::ClimbDown | LadderPhase::Revolve(_));
+        let bones = skeleton.as_deref().zip(pose).filter(|_| main).and_then(|(s, p)| {
+            use crate::bone_pose::{LEFT_HAND, RIGHT_HAND};
+            Some([p.world_pos(s, LEFT_HAND, &body)?, p.world_pos(s, RIGHT_HAND, &body)?])
+        });
+        limbs.rails = bones.map_or([None; 2], |h| l.rail_goals(h, super::right_of(body.forward())));
         let dur = l.action.map(|a| a.duration()).unwrap_or(0.3).max(1e-3);
         let k = (l.t / dur).min(1.0);
         let done = l.t >= dur;
@@ -1082,6 +1141,24 @@ pub fn update_ladder(
 #[cfg(test)]
 mod catch_tests {
     use super::*;
+
+    /// RE/24 LADDER-20: a hand bone above the top goes to the closest point of its rail, 0.25 m to its side along the
+    /// ladder's X turned to the character's right; a hand at or below the top has no rail goal.
+    #[test]
+    fn a_hand_above_the_top_goes_to_its_rail() {
+        let l = HumanLadderData { base: Vec3::ZERO, top: Vec3::Y * 5.0, n: Vec3::Z, ..Default::default() };
+        // facing the ladder (−Z): the right is −X
+        let right = super::super::right_of(Vec3::NEG_Z);
+        let [lg, rg] = l.rail_goals([Vec3::new(0.4, 5.3, 0.2), Vec3::new(-0.1, 5.2, 0.1)], right);
+        let lg = lg.expect("left above the top");
+        let rg = rg.expect("right above the top");
+        assert!((lg - (Vec3::Y * 5.0 - right * 0.25)).length() < 1e-5, "left rail, clamped to the top: {lg}");
+        assert!((rg - (Vec3::Y * 5.0 + right * 0.25)).length() < 1e-5, "right rail: {rg}");
+        // the ladder's X turns to the character's side either way
+        let [lg2, _] = l.rail_goals([Vec3::new(0.4, 5.3, 0.2), Vec3::ZERO], -right);
+        assert!((lg2.unwrap() - (Vec3::Y * 5.0 + right * 0.25)).length() < 1e-5);
+        assert_eq!(l.rail_goals([Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 4.0, 0.0)], right), [None, None], "at or below the top");
+    }
     /// RE/24 LADDER-23: from the top the climb side is the one away from the character, unless its box is blocked.
     #[test]
     fn the_top_entry_takes_the_far_side_unless_its_box_is_blocked() {
@@ -1091,7 +1168,7 @@ mod catch_tests {
         let mut g = GuidanceWorld::default();
         g.edges.push(GuidanceEdge { p0: base, p1: top, n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::Ladder });
         // at the top's height on the guidance front (-Z), facing the ladder
-        let (_, _, n, from_top) = find_ladder(Vec3::new(0.0, 5.0, -0.5), Vec3::Z, Vec3::Z, &g).expect("the ladder");
+        let (_, _, n, from_top) = find_ladder(Vec3::new(0.0, 5.0, -0.5), None, Vec3::Z, Vec3::Z, &g).expect("the ladder");
         assert!(from_top && n.dot(Vec3::Z) > 0.99, "the side away from the character: {n:?}");
         assert_eq!(top_entry_side(base, top, n, &CollisionWorld::default()), n);
         let mut wall = CollisionWorld::default();

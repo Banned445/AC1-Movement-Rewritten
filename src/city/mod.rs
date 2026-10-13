@@ -151,13 +151,13 @@ const VOID_Y: f32 = -150.0;
 
 pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn: Res<crate::player::SpawnPoint>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>,
-    mut guidance: ResMut<crate::guidance::GuidanceWorld>, mut players: Query<&mut crate::player::Body, With<crate::player::Player>>,
+    mut guidance: ResMut<crate::guidance::GuidanceWorld>, mut players: Query<(&mut crate::player::Body, &mut crate::player::Locomotion, &mut crate::player::HumanDataBundle), With<crate::player::Player>>,
     cams: Query<(&GlobalTransform, Option<&Projection>), With<crate::camera::MainCamera>>) {
     let Some(state) = city.0.as_mut() else { return };
-    let Ok(mut body) = players.single_mut() else { return };
-    // PORT: falling out of the world (past the grid's ground) puts the player back at the spawn; the game's
-    // OutOfBounds / desynchronisation handling is not ported.
-    if body.feet.y < VOID_Y { body.feet = spawn.0; body.velocity = Vec3::ZERO; body.proxy.manifold.clear(); }
+    let Ok((mut body, mut loco, mut data)) = players.single_mut() else { return };
+    // PORT: falling out of the world (past the grid's ground) puts the player back at the spawn through the game's
+    // teleport (re-entering Ground, RE/24 CENSUS-6); the game's OutOfBounds / desynchronisation handling is not ported.
+    if body.feet.y < VOID_Y { crate::player::teleport(&mut loco, &mut data, &mut body, spawn.0); }
     // AC_CITY_TOUR=<m/s>: debug fly-through, 25 m above the spawn, straight across the grid (streaming / LOD stress)
     if let Some(speed) = std::env::var("AC_CITY_TOUR").ok().and_then(|v| v.parse::<f32>().ok()) {
         let height = std::env::var("AC_CITY_TOUR_HEIGHT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(25.0);
@@ -229,6 +229,224 @@ mod tests {
         assert_eq!(g.cells.len(), 1365);
         assert_eq!(g.cells[1364].level, 5);
         assert!(spawner(&w.globals, "PlayerSpawner_Kingdom").is_some());
+    }
+
+    /// The collision triangles under `LAB_POS` ("x y z", game coordinates, Z up), from 0.5 m above it to 3 m below:
+    /// object, cell, layer, height and normal (live-analysis probe for surfaces the port's Damascus has and the game
+    /// doesn't).
+    #[test]
+    #[ignore]
+    fn probe_collision_under() {
+        let Some(w) = damascus() else { return };
+        let Some(p) = std::env::var("LAB_POS").ok().map(|s| s.split_whitespace().filter_map(|x| x.parse().ok()).collect::<Vec<f32>>()) else { return };
+        let (x, z, top) = (p[0], -p[1], p[2]);
+        let game = |v: Vec3| Vec3::new(v.x, -v.z, v.y);
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in &d.objects {
+                for t in &o.collision {
+                    let [a, b, c] = t.vertices;
+                    if t.normal.y.abs() < 1e-4 { continue; }
+                    // inside the triangle in the horizontal plane, then the plane's height there
+                    let s = |u: Vec3, v: Vec3| (v.x - u.x) * (z - u.z) - (v.z - u.z) * (x - u.x);
+                    let (s0, s1, s2) = (s(a, b), s(b, c), s(c, a));
+                    if !((s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0) || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0)) { continue; }
+                    let y = a.y - (t.normal.x * (x - a.x) + t.normal.z * (z - a.z)) / t.normal.y;
+                    if y <= top + 0.5 && y >= top - 3.0 {
+                        println!("{} (cell {cell}) layer {} height {y:.3} normal {:.2?} material {} at {:.2?}", o.name, t.layer, game(t.normal), t.material, game(o.transform.w_axis.truncate()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes the entity bodies of cell `LAB_CELL` whose name contains `LAB_OBJ` to `LAB_OUT`-<n>.bin (live-analysis
+    /// probe: their component classes are then looked up against the reflected class hashes).
+    #[test]
+    #[ignore]
+    fn probe_dump_bodies() {
+        let Some(w) = damascus() else { return };
+        let (Ok(cell), Ok(obj), Ok(out)) = (std::env::var("LAB_CELL"), std::env::var("LAB_OBJ"), std::env::var("LAB_OUT")) else { return };
+        let cells: Vec<usize> = if cell == "all" { (0..w.data.grid.cells.len()).collect() } else { vec![cell.parse().unwrap()] };
+        let mut n = 0;
+        for cell in cells {
+        let c = &w.data.grid.cells[cell];
+        let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+        let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+        let Some(entry) = w.data.archives.find(a, &file) else { continue };
+        let Ok(res) = w.data.archives.file(a, entry) else { continue };
+        for r in res.values() {
+            for body in decode::bodies(r) {
+                let name = if body.as_ptr() == r.payload.as_ptr() { r.name.clone() } else { format!("{}/{:08x}", r.name, u32::from_le_bytes(body[..4].try_into().unwrap())) };
+                if name.contains(&obj) {
+                    std::fs::write(format!("{out}-{n}.bin"), body).unwrap();
+                    println!("{name} (cell {cell}): {} bytes -> {out}-{n}.bin", body.len());
+                    n += 1;
+                }
+            }
+        }
+        }
+    }
+
+    /// Every entity with collision that a Scene moves (`BlendPosClip`): the scripted movers the decoder leaves out.
+    #[test]
+    #[ignore]
+    fn probe_scene_movers() {
+        let Some(w) = damascus() else { return };
+        let mut n = 0;
+        for cell in 0..w.data.grid.cells.len() {
+            let c = &w.data.grid.cells[cell];
+            let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+            let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+            let Some(entry) = w.data.archives.find(a, &file) else { continue };
+            let Ok(res) = w.data.archives.file(a, entry) else { continue };
+            for r in res.values() {
+                for body in decode::bodies(r) {
+                    if decode::markers(body, "BlendPosClip").is_empty() || decode::markers(body, "RigidBody").is_empty() { continue; }
+                    let name = if body.as_ptr() == r.payload.as_ptr() { r.name.clone() } else { format!("{}/{:08x}", r.name, u32::from_le_bytes(body[..4].try_into().unwrap())) };
+                    println!("{name} (cell {cell})");
+                    n += 1;
+                }
+            }
+        }
+        println!("{n} scene-moved entities with collision");
+    }
+
+    /// How many entities carry the procedural guidance systems (`GuidanceSystemCapsule` / `GuidanceSystemBarrel`, RE/06
+    /// §2), with a few names and positions (game coordinates).
+    #[test]
+    #[ignore]
+    fn probe_procedural_guidance() {
+        let Some(w) = damascus() else { return };
+        let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+        let mut names = std::collections::BTreeMap::<String, usize>::new();
+        for cell in 0..w.data.grid.cells.len() {
+            let c = &w.data.grid.cells[cell];
+            let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+            let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+            let Some(entry) = w.data.archives.find(a, &file) else { continue };
+            let Ok(res) = w.data.archives.file(a, entry) else { continue };
+            for r in res.values() {
+                for body in decode::bodies(r) {
+                    for class in ["GuidanceSystemCapsule", "GuidanceSystemBarrel", "GuidanceSystem"] {
+                        if !decode::markers(body, class).is_empty() {
+                            *counts.entry(class).or_default() += 1;
+                            if class != "GuidanceSystem" {
+                                let base = r.name.split('_').take(3).collect::<Vec<_>>().join("_");
+                                *names.entry(format!("{class} {base}")).or_default() += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("{counts:?}");
+        let mut v: Vec<_> = names.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        for (n, k) in v.iter().take(40) { println!("{k:5} {n}"); }
+    }
+
+    /// The guidance components whose active byte is clear: their entities, edge counts and positions (game coordinates);
+    /// with `LAB_POS` ("x y", game) only those within 15 m.
+    #[test]
+    #[ignore]
+    fn probe_inactive_guidance() {
+        let Some(w) = damascus() else { return };
+        let near = std::env::var("LAB_POS").ok().map(|s| { let v: Vec<f32> = s.split_whitespace().filter_map(|x| x.parse().ok()).collect(); Vec2::new(v[0], v[1]) });
+        let (mut comps, mut edges) = (0, 0);
+        let mut names = std::collections::BTreeMap::<String, usize>::new();
+        for cell in 0..w.data.grid.cells.len() {
+            let c = &w.data.grid.cells[cell];
+            let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+            let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+            let Some(entry) = w.data.archives.find(a, &file) else { continue };
+            let Ok(res) = w.data.archives.file(a, entry) else { continue };
+            for r in res.values() {
+                for body in decode::bodies(r) {
+                    for g in decode::markers(body, "GuidanceSystem") {
+                        let Some(start) = g.checked_sub(4) else { continue };
+                        let Ok(parsed) = crate::assets::world::parse_guidance(&body[start..]) else { continue };
+                        if parsed.active { continue; }
+                        let m = &body[8..72];
+                        let f = |i: usize| f32::from_le_bytes(m[i * 4..i * 4 + 4].try_into().unwrap());
+                        let pos = Vec3::new(f(12), f(13), f(14));
+                        if near.is_some_and(|n| Vec2::new(pos.x, pos.y).distance(n) > 15.0) { continue; }
+                        comps += 1; edges += parsed.edges.len();
+                        let base = r.name.split('_').take(4).collect::<Vec<_>>().join("_");
+                        *names.entry(base).or_default() += parsed.edges.len();
+                        if near.is_some() { println!("inactive {} at {pos:.2}: {} edges", r.name, parsed.edges.len()); }
+                    }
+                }
+            }
+        }
+        println!("{comps} inactive components, {edges} edges");
+        let mut v: Vec<_> = names.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        for (n, k) in v.iter().take(25) { println!("{k:5} {n}"); }
+    }
+
+    /// The haystack objects' own collision: layers, triangle count, the hull's vertical extent against the hay volume
+    /// (AIR-25 probe).
+    #[test]
+    #[ignore]
+    fn probe_damascus_haystack_collision() {
+        let Some(w) = damascus() else { return };
+        let mut n = 0;
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in d.objects.iter().filter(|o| o.haystack.is_some()) {
+                let mut layers = std::collections::BTreeMap::new();
+                let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+                for t in &o.collision {
+                    *layers.entry(t.layer).or_insert(0) += 1;
+                    lo = lo.min(t.bounds.min.y);
+                    hi = hi.max(t.bounds.max.y);
+                }
+                let h = o.haystack.unwrap();
+                let up = o.collision.iter().filter(|t| t.normal.y > 0.7).count();
+                let down = o.collision.iter().filter(|t| t.normal.y < -0.7).count();
+                println!("{}: hay {:.2}..{:.2}; collision {layers:?} y {lo:.2}..{hi:.2}, up-facing {up}, down-facing {down}", o.name, h.min.y, h.max.y);
+                n += 1;
+                if n >= 12 { return; }
+            }
+        }
+    }
+
+    /// Live-analysis courses: every player spawner, then the haystacks, ladders, beams, poles, kiosks and long
+    /// ledge edges within `LAB_RADIUS` (default 40) m of `LAB_CENTER` ("x y", game coordinates, Z up; default the
+    /// Bureau spawner), all printed in game coordinates.
+    #[test]
+    #[ignore]
+    fn probe_lab_courses() {
+        let Some(w) = damascus() else { return };
+        let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+        for r in w.globals.iter().filter(|r| r.name.starts_with("PlayerSpawner")) {
+            if let Some((p, h)) = spawner(&w.globals, &r.name) {
+                println!("spawner {} at {:.2?} heading {h:.2}", r.name, game(p));
+            }
+        }
+        let center = std::env::var("LAB_CENTER").ok().and_then(|s| {
+            let v: Vec<f32> = s.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            (v.len() == 2).then(|| Vec2::new(v[0], v[1]))
+        }).unwrap_or_else(|| { let p = game(spawner(&w.globals, "PlayerSpawner_DEBUG_Bureau").unwrap().0); Vec2::new(p.x, p.y) });
+        let radius: f32 = std::env::var("LAB_RADIUS").ok().and_then(|s| s.parse().ok()).unwrap_or(40.0);
+        let near = |p: Vec3| { let g = game(p); Vec2::new(g.x, g.y).distance(center) < radius };
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in &d.objects {
+                if let Some(h) = o.haystack.filter(|h| near((h.min + h.max) * 0.5)) {
+                    println!("haystack {} centre {:.2?} top {:.2}", o.name, game((h.min + h.max) * 0.5), h.max.y);
+                }
+                for e in o.edges.iter().filter(|e| near((e.p0 + e.p1) * 0.5)) {
+                    use crate::guidance::GuidanceSubType as T;
+                    let len = e.p0.distance(e.p1);
+                    let keep = match e.subtype { T::Ladder | T::Beam | T::Pole | T::Kiosk | T::Rope => true, T::LedgeGrab => len > 4.0, _ => false };
+                    if keep {
+                        println!("{:?} {} {:.2?} -> {:.2?} len {len:.1} wall {:.2?}", e.subtype, o.name, game(e.p0), game(e.p1), game(e.n1));
+                    }
+                }
+            }
+        }
     }
 
     /// Every cell decodes; entity placements lie in (or near: large objects overhang) their cell's rectangle.

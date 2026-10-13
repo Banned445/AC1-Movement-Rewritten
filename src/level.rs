@@ -57,7 +57,7 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     (42.0, 50.0, 4.0, 0.6, 2.6),   // swing-back wall E (x 40..44): hang at 2.6 m, a beam behind it (BEAMS) …
     (42.0, 50.15, 4.0, 0.3, 4.2),  // … and a wall rising above it, set back 0.3 m (E2): no room to pull up
     // --- standing straight jump bands (0xB21DA0) ---
-    (50.0, 50.3, 3.0, 1.0, 1.6),   // knee height: jump, hangknee, stand on top
+    (50.0, 50.5, 3.0, 1.4, 1.6),   // knee height: jump, hangknee, stand on top (deeper than 1 m: not a beam)
     (56.0, 50.3, 3.0, 1.0, 2.2),   // 2.0–2.5 m with a wall below: jump into a wall hang
     // --- hang-type switch (0xDE1060): wall F (x 60..63) continues as an overhang slab (SLABS) with no wall below
     (61.5, 50.0, 3.0, 0.6, 2.6),
@@ -213,10 +213,10 @@ const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
     // the free-hang balcony: 2.9 m, inside the tap jump's 3.0 m reach zone (JumpZones slot 3, RE/18 §1.2)
     (2.0, 2.9, 36.0, 6.0, 1.2, 0.3),
     (64.5, 2.6, 50.0, 3.0, 0.6, 0.3), // overhang continuing wall F's ledge (hang-type switch test)
-    (60.0, 3.4, 90.0, 3.0, 0.2, 0.2), // swing bars 3.5 m apart
-    (60.0, 3.4, 93.5, 3.0, 0.2, 0.2),
-    (60.0, 3.4, 97.0, 3.0, 0.2, 0.2),
-    (89.0, 6.3, 70.0, 2.0, 1.0, 0.3), // above the free beam: the beam's straight jump at a hand target (2.3 m)
+    (60.0, 3.4, 90.0, 3.0, 0.1, 0.2), // swing bars 3.5 m apart, 0.1 m deep: their Pole edges on the top corners as in Damascus (0.095 m apart), clear of the depth filter's rays (RE/26 §6)
+    (60.0, 3.4, 93.5, 3.0, 0.1, 0.2),
+    (60.0, 3.4, 97.0, 3.0, 0.1, 0.2),
+    (89.0, 6.3, 70.0, 2.0, 1.4, 0.3), // above the free beam: the beam's straight jump at a hand target (2.3 m); deeper than 1 m: not a beam
     // an overhang 1 m out from the climb tower over its left gap: the climb's jump up to it (TryBackEject 0xDF2F50)
     (-22.0, 3.5, 26.5, 1.2, 1.0, 0.2),
     // overhang H: free hang at its -Z edge (3.6 m), 0.9 m in front of wall H's 2.4 m ledge (TryFreeHangDropToClimb 0xDDF390)
@@ -355,8 +355,15 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
     for &(p0, p1, n) in KIOSKS {
         guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::Kiosk });
     }
+    // haystacks are solid boxes on layer Dynamic, as Damascus's `Hay_Bale_*` collision is (a 12-triangle box, layer 2):
+    // the character collides with them on MainCharacter and on the aimed jump's OnlyDynamic alike, and the contact is
+    // what lets an aimed jump into one (RE/24 AIR-25)
+    collision.layers.resize(collision.boxes.len(), crate::layers::STATIC);
     for &(x, z, sx, sz, h) in HAYSTACKS {
-        guidance.haystacks.push(Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) });
+        let b = Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) };
+        guidance.haystacks.push(b);
+        collision.boxes.push(b);
+        collision.layers.push(crate::layers::DYNAMIC);
     }
     for &(p0, p1, n1) in WALL_LEDGES {
         guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1, subtype: GuidanceSubType::LedgeGrab });
@@ -421,7 +428,12 @@ pub(crate) fn build_level(
     mut collision: ResMut<CollisionWorld>,
     mut guidance: ResMut<GuidanceWorld>,
 ) {
-    let (c, g) = geometry();
+    let (mut c, mut g) = geometry();
+    // the demo course (`AC_DEMO_COURSE`), appended after the greybox
+    if crate::demo_course::enabled() {
+        crate::demo_course::add(&mut c, &mut g);
+        crate::demo_course::spawn(&mut commands, &mut meshes, &mut materials);
+    }
     *collision = c;
     *guidance = g;
 

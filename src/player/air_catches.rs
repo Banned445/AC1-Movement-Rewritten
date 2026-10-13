@@ -1,7 +1,6 @@
 //! Air-catch eligibility (0xE0BB70, timers 0xE01C00; RE/05 §5).
 use bevy::prelude::*;
 use crate::collision::CollisionWorld;
-use super::targets::JumpTarget;
 
 /// Manual ladder search remains height-gated even after the grasp-blend timer expires.
 pub fn manual(hand: bool, fall_height: f32, drop_type: Option<usize>) -> bool {
@@ -12,13 +11,16 @@ pub fn narrow(fall_height: f32, elapsed: f32, drop: bool) -> bool {
     !drop && fall_height < 9.0 && (fall_height > 0.3 || elapsed >= 0.4)
 }
 
-/// 0xE044D0: a clear path, regardless of which side of the root the target lies on.
-pub fn target_ahead(root: Vec3, target: Option<JumpTarget>, world: &CollisionWorld) -> bool {
-    let Some(target) = target.filter(|t| matches!(t.type_flags, 1 | 0x10000 | 2)) else { return false };
+/// `HumanInAir__IsJumpTargetAhead` 0xE044D0: only during the target-driven part of a jump (Data+505, the port's
+/// `AirMode::Jump`: `stored` is its aim), a target of type 1 / 0x10000 / 2, and a clear ray (layer 5) from the root to
+/// the **stored** target Data+560 (the aim pulled back 0.5 m toward the jumper, `pull_back`), not the candidate point:
+/// a ray to a point on a beam's top grazes the beam. Regardless of which side of the root the target lies on.
+pub fn target_ahead(root: Vec3, stored: Option<Vec3>, type_flags: Option<u32>, world: &CollisionWorld) -> bool {
+    let (Some(aim), Some(ty)) = (stored, type_flags.filter(|t| matches!(t, 1 | 0x10000 | 2))) else { return false };
     // PORT: immutable jump targets have no native entity lifetime / cell handle to invalidate.
-    let delta = target.position - root;
+    let delta = aim - root;
     let distance = delta.length();
-    let slack = if target.type_flags == 0x10000 { 0.0005 } else { 0.0 };
+    let slack = if ty == 0x10000 { 0.0005 } else { 0.0 };
     world.ray_distance(root, delta, distance, crate::layers::CHARACTER) >= distance - slack
 }
 
@@ -74,6 +76,7 @@ pub enum CatchFound {
 ///    Under 3 m: `FindClimbCatch` 0xE0AC70 (the ledge catch's search around the feet + 1.95 m) → **type 5**,
 ///    `hangfree_min`.
 /// Every search ignores holds less than 0.5 m below the last released hold (InAirData +0x190 / +0x1F4).
+/// The searches read `CheckAirCatch`'s pre-filtered reports (`catch_reports`), not the world.
 /// PORT: the free hangs' clearance test (`sub_B2DEB0`) is the port's hang boxes.
 pub fn ledge_search(
     feet: Vec3,
@@ -97,11 +100,12 @@ pub fn ledge_search(
     let along = 0.5;
     let half_z = if manual { 0.3 } else { 0.9 };
     let auto = |stand_in: f32| hips.map_or(feet + Vec3::Y * stand_in, |h| h) + Vec3::Y * 0.2;
-    let pair_along = |base: Vec3, dir: Vec3, half_z: f32| {
+    let (hands_report, feet_report) = catch_reports(feet, guidance, collision);
+    let pair_along = |report: &crate::guidance::Report, base: Vec3, dir: Vec3, half_z: f32| {
         let refs = [Vec3::new(-0.25, -0.4, 0.3), Vec3::new(0.25, -0.4, 0.3)];
-        guidance.handhold_pair(base + dir * along, dir, Vec3::new(0.4, along, half_z), refs, angle, 0.1, crate::guidance::MASK_CATCH)
+        report.handhold_pair(base + dir * along, dir, Vec3::new(0.4, along, half_z), refs, angle, 0.1, crate::guidance::MASK_CATCH)
     };
-    let catch_pair = |base: Vec3| pair_along(base, dir, half_z);
+    let catch_pair = |base: Vec3| pair_along(&hands_report, base, dir, half_z);
     // 1. the ledge catch: a hand pair at the feet + 1.4 m
     let ledge_base = if manual { feet + Vec3::Y * 1.4 } else { auto(1.4) };
     if let Some([a, b]) = catch_pair(ledge_base).filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y)) {
@@ -112,7 +116,7 @@ pub fn ledge_search(
         // the feet holds (FindCatchFeetHolds 0xE0A810): the same search from the feet's position at the higher hand's
         // height − 1.2 m, along −(the two hands' wall normals) (into the wall)
         let feet_dir = -Vec3::new(a.wall_normal.x + b.wall_normal.x, 0.0, a.wall_normal.z + b.wall_normal.z).normalize_or(-into);
-        if let Some([fl, fr]) = pair_along(Vec3::new(feet.x, hl.y.max(hr.y) - 1.2, feet.z), feet_dir, 0.3) {
+        if let Some([fl, fr]) = pair_along(&feet_report, Vec3::new(feet.x, hl.y.max(hr.y) - 1.2, feet.z), feet_dir, 0.3) {
             let entry = super::climb::ClimbEntry {
                 // the catch's Ledge fill (SubState 13) enters with type 1 and ClimbData+40 = the hands 0.3 m or more
                 // apart (0xE0CCC7; RE/24 AIR-15 / CLIMB-24). PORT: the Ledge step is skipped
@@ -149,7 +153,8 @@ pub fn ledge_search(
         let centre = if manual { feet + Vec3::Y * 1.95 } else { auto(1.4) } + dir * along;
         let half = Vec3::new(0.4, along, if manual { 0.25 } else { 0.9 });
         let reference = centre - dir * 0.4 + Vec3::Y * 0.25;
-        let hit = guidance
+        let hit = hands_report
+            .world
             .probe_box(centre, super::right_of(dir), dir, Vec3::Y, half, reference, angle, 0.1, crate::guidance::MASK_CATCH)
             .filter(|h| below_release(h.point.y));
         if let Some((mid, n)) = hit.and_then(free) {
@@ -177,19 +182,39 @@ pub fn ledge_search(
     None
 }
 
+/// `CheckAirCatch`'s two pre-filtered reports (0xE0BC9D–0xE0BF12, RE/24 AIR-35, RE/26 §6): the whole edges a box at the
+/// feet meets ((−1, −1, −0.2) … (1, 1, 2.2), no clip; the catch types exempt from the box filter, 0xE0BDD1), ladders
+/// out (mask 8), steep edges removed, then the depth filter: detectors 0.27 out and 0.23 below the edge, −45° × 1.2
+/// and 135° × 0.38; thresholds 1.2 / 0.38 for the hand searches (the ledge, climb and free-hang catches) and 0.35 / 0.38
+/// for the feet holds and the edges at the feet. Returns (hands, feet).
+pub fn catch_reports(feet: Vec3, guidance: &crate::guidance::GuidanceWorld, collision: &CollisionWorld) -> (crate::guidance::Report, crate::guidance::Report) {
+    use crate::guidance::{DepthDetector, GuidanceSubType, Report, DEPTH_OFFSET_LIP};
+    let all = guidance.report_indexed(feet, Vec3::NEG_Z, Vec3::new(-1.0, -1.0, -0.2), Vec3::new(1.0, 1.0, 2.2), false);
+    let mut pre = Report::default();
+    for (k, e) in all.world.edges.iter().enumerate() {
+        if e.subtype == GuidanceSubType::Ladder || crate::guidance::steep(e.p1 - e.p0) {
+            continue;
+        }
+        pre.world.edges.push(e.clone());
+        pre.source.push(all.source[k]);
+        pre.scratch.push([0.0; 4]);
+    }
+    let detectors = [DepthDetector::new(DEPTH_OFFSET_LIP, -std::f32::consts::FRAC_PI_4, 1.2), DepthDetector::new(DEPTH_OFFSET_LIP, 2.356_194_5, 0.38)];
+    (pre.depth_filter(collision, &detectors, &[1.2, 0.38]), pre.depth_filter(collision, &detectors, &[0.35, 0.38]))
+}
+
 /// The wall catch's feet (`CheckAirCatch` 0xE0CD2F–0xE0CEBE, type 3): from the hands' midpoint at the higher hand's
 /// height − 1 m − 0.125·n̂ (n̂ the normalised flat sum of the two holds' wall normals), two `Guidance__FindWallSupport`
-/// 0x11718B0 boxes (half 0.4 / 0.625 / 0.2, step 0.1) toward −n̂, offset (−0.15, 0, +0.1) and (+0.15, 0, −0.1) in the
-/// wall's frame (x across, z up); both must hit. The free types test the body box (`sub_B2DEB0`), the wall catch does
+/// 0x11718B0 searches (`SUPPORT_WIDE`: half 0.4 / 0.625 / 0.2, step 0.1) toward −n̂, offset (−0.15, 0, +0.1) and
+/// (+0.15, 0, −0.1) in the wall's frame (x across, z up); both must find the wall (by the ray or the Surface slices). The free types test the body box (`sub_B2DEB0`), the wall catch does
 /// not (RE/24 AIR-14).
 pub fn wall_catch_feet(hl: Vec3, hr: Vec3, nl: Vec3, nr: Vec3, collision: &CollisionWorld) -> bool {
     let n = Vec3::new(nl.x + nr.x, 0.0, nl.z + nr.z).normalize_or(Vec3::new(nl.x, 0.0, nl.z).normalize_or(Vec3::Z));
     let mid = Vec3::new((hl.x + hr.x) * 0.5, hl.y.max(hr.y), (hl.z + hr.z) * 0.5);
     let into = -n;
     let c = mid - Vec3::Y + into * 0.125;
-    let across = into.cross(Vec3::Y);
-    use super::ledge::support_ray;
-    support_ray(c - across * 0.15, n, 0.625, 0.1, collision) && support_ray(c + across * 0.15, n, 0.625, -0.1, collision)
+    use super::ledge::{wall_support, SUPPORT_WIDE};
+    wall_support(c, n, -0.15, 0.1, SUPPORT_WIDE, collision) && wall_support(c, n, 0.15, -0.1, SUPPORT_WIDE, collision)
 }
 
 /// The knee catch (type 0), `xx_fall_tr_hangknee_min_a` / `_max_a` [fall < 3 m, ≥ 3 m].
@@ -210,8 +235,10 @@ pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidance
     let eye = feet + Vec3::Y * 0.15 - f * 0.2;
     let reference = feet + Vec3::Y * 0.5 - f * 0.2;
     let mut best: Option<(f32, Vec3, Vec3)> = None;
-    // mask 386: LedgeGrab, Quadruped and Kiosk edges (RE/24 AIR-34)
-    for e in guidance.edges.iter().filter(|e| (1u32 << e.subtype as u32) & crate::guidance::MASK_KNEE != 0) {
+    // the edges of the catch's feet report (`HumanInAir__GatherEdgesAtFeet` 0xE0C4E7 reads it; `catch_reports`); mask
+    // 386: LedgeGrab, Quadruped and Kiosk edges (RE/24 AIR-34)
+    let (_, feet_report) = catch_reports(feet, guidance, collision);
+    for e in feet_report.world.edges.iter().filter(|e| (1u32 << e.subtype as u32) & crate::guidance::MASK_KNEE != 0) {
         let n = Vec3::new(e.n1.x, 0.0, e.n1.z);
         if n.length_squared() < 1e-6 {
             continue;
@@ -362,22 +389,26 @@ mod tests {
 mod ray_tests {
     use super::*;
     use crate::collision::Aabb3;
-    fn target(position:Vec3,ty:u32)->JumpTarget {JumpTarget{position,type_flags:ty,hang:None,straight:None,pass:None,ladder:None}}
+    fn target(position:Vec3,ty:u32)->(Option<Vec3>,Option<u32>) {(Some(position),Some(ty))}
+    fn ahead(root:Vec3,(p,t):(Option<Vec3>,Option<u32>),world:&CollisionWorld)->bool {target_ahead(root,p,t,world)}
     #[test]
     fn target_guard_is_a_ray_not_a_forward_cone() {
         let mut world=CollisionWorld::default();let root=Vec3::ZERO;
-        assert!(target_ahead(root,Some(target(Vec3::NEG_Z*3.0,1)),&world));
-        assert!(!target_ahead(root,Some(target(Vec3::Z*3.0,0x40)),&world));
+        assert!(ahead(root,target(Vec3::NEG_Z*3.0,1),&world));
+        assert!(!ahead(root,target(Vec3::Z*3.0,0x40),&world));
+        // the flight's target-driven part has ended (Data+505 clear): no target ahead
+        assert!(!target_ahead(root,None,Some(1),&world));
         world.boxes.push(Aabb3{min:Vec3::new(-0.5,-0.5,1.0),max:Vec3::new(0.5,0.5,1.5)});
-        assert!(!target_ahead(root,Some(target(Vec3::Z*3.0,1)),&world));
-        assert!(target_ahead(root,Some(target(Vec3::Z,1)),&world));
-        assert!(!target_ahead(root,Some(target(Vec3::Z*1.0004,1)),&world));
-        assert!(target_ahead(root,Some(target(Vec3::Z*1.0004,0x10000)),&world));
+        assert!(!ahead(root,target(Vec3::Z*3.0,1),&world));
+        assert!(ahead(root,target(Vec3::Z,1),&world));
+        assert!(!ahead(root,target(Vec3::Z*1.0004,1),&world));
+        assert!(ahead(root,target(Vec3::Z*1.0004,0x10000),&world));
         world.layers.push(crate::layers::NOTHING);
-        assert!(target_ahead(root,Some(target(Vec3::Z*3.0,1)),&world));
+        assert!(ahead(root,target(Vec3::Z*3.0,1),&world));
     }
 
-    /// RE/24 AIR-14: the wall catch needs the wall under both feet (two support boxes 1 m below the hands).
+    /// RE/24 AIR-14: the wall catch needs the wall under both feet (two support boxes 1 m below the hands). A foot whose
+    /// ray misses still finds a wall that reaches into its box (±0.4 m about the hands' middle) by the Surface slices.
     #[test]
     fn the_wall_catch_needs_both_feet_on_the_wall() {
         let (hl, hr) = (Vec3::new(-0.3, 3.0, 0.0), Vec3::new(0.3, 3.0, 0.0));
@@ -388,7 +419,8 @@ mod ray_tests {
         };
         assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 3.0, 0.0)), "a wall under the hands");
         assert!(!feet(Vec3::new(-2.0, 2.5, -2.0), Vec3::new(2.0, 3.0, 0.0)), "an overhang");
-        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.0, 3.0, 0.0)), "the wall under one foot only");
+        assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.0, 3.0, 0.0)), "the wall under one foot's ray, in the other's box");
+        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(-0.45, 3.0, 0.0)), "the wall ending outside the boxes");
     }
 
     /// RE/24 AIR-34: the knee catch takes the edges of mask 386 (LedgeGrab, Quadruped, Kiosk), not a beam's.

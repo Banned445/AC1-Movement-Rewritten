@@ -23,6 +23,7 @@ pub mod ground;
 pub mod ground_extras;
 pub mod ground_tree;
 pub mod falls;
+pub mod free_step;
 pub mod hay;
 pub mod interpreter;
 pub mod item_flags;
@@ -131,6 +132,9 @@ pub struct LimbTargets {
     /// Bumped when the context sets the contacts directly, outside the clips' contact tags (`LimbIK__ReleaseAll` and a
     /// contact at weight 1, e.g. `HumanLedge__RePoseHandsFromBones` 0xDE1970): the IK takes the new holds at once.
     pub contact_set: u32,
+    /// The ladder's rail goals for the left / right hand, set outside the contact tags (effectors 8 / 13, weight 1,
+    /// blended in and out over 0.1 s; `sub_E20DC0`, RE/24 LADDER-20).
+    pub rails: [Option<Vec3>; 2],
 }
 
 /// Linear root interpolation used by all discrete moves (`sub_711130` / `sub_7113F0(human+80)`).
@@ -185,11 +189,25 @@ pub enum TransitionSetup {
     ToWalling(walling::WallingEntry),
     ToBeam(narrow::BeamEntry),
     ToPilotis(narrow::PilotisEntry),
+    /// NarrowObject SubState 6: the free-step stay (RE/05 §2.15).
+    ToFreeStep(free_step::FreeStepEntry),
     ToPassOver(passover::PassOverEntry),
     ToLadder(ladder::LadderEntry),
     ToKiosk(kiosk::KioskEntry),
     /// Ghost mode (0xE46190): `debug_fly` moves the body while the player contexts are skipped.
     ToDebug,
+}
+
+/// IHumanTeleport (HumanGround +36: `CanTeleport` 0xDB6BF0 = CanHandleEvent(123), `Teleport` 0xDBF5A0 posts event 123,
+/// always accepted, → 0xD89860 with the fill `sub_D7D380`): the character is put at `to` and re-enters Ground's
+/// Movement through a ToMovement setup that is zero but for +28 = 0.5 and the MoveBlend layout 1, i.e. entry mode 0,
+/// Idle in low profile (RE/24 CENSUS-6). PORT: the port's respawns (a fatal landing, the city's floor of the world).
+pub fn teleport(loco: &mut Locomotion, data: &mut HumanDataBundle, body: &mut Body, to: Vec3) {
+    body.feet = to;
+    body.velocity = Vec3::ZERO;
+    body.proxy.manifold.clear();
+    body.grounded = true;
+    switch_context(loco, data, TransitionSetup::ToMovement { landing: None });
 }
 
 /// Immediate context switch (0x55F7E0): exit old, apply setup to destination data, enter new.
@@ -237,6 +255,10 @@ pub fn switch_context(loco: &mut Locomotion, data: &mut HumanDataBundle, setup: 
             data.narrow.enter_pilotis(entry);
             ActorContextId::NarrowObject
         }
+        TransitionSetup::ToFreeStep(entry) => {
+            data.narrow.enter_free_step(entry);
+            ActorContextId::NarrowObject
+        }
         TransitionSetup::ToDebug => ActorContextId::Debug,
         TransitionSetup::ToKiosk(entry) => {
             data.kiosk.enter(entry);
@@ -273,7 +295,7 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SpawnPoint(Vec3::new(0.0, 0.0, 4.0)))
             .init_resource::<abilities::AbilitySet>()
-            .add_systems(Startup, spawn_player)
+            .add_systems(Startup, (spawn_player, abilities::load_abilities))
             .add_systems(
                 Update,
                 (interpreter::update_interpreter, social::update_social, crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, hay::update_hay, kiosk::update_kiosk, walling::update_walling, narrow::update_narrow, ladder::update_ladder, release_limbs, proxy_layer, sync_visuals)
@@ -298,6 +320,11 @@ pub fn proxy_layer(mut q: Query<(&Locomotion, &HumanDataBundle, &mut Body), With
         body.proxy.height = (loco.current == ActorContextId::Ground && data.ground.crouch.is_some()).then_some(1.0);
         let layer = match loco.current {
             ActorContextId::Ledge | ActorContextId::Climb => crate::layers::MAIN_CHARACTER_NO_STATIC,
+            // a jump aimed at a haystack passes through it (0xE01E19 / 0xE01E83, RE/24 AIR-25)
+            ActorContextId::InAir if data.air.hay_pass => crate::layers::ONLY_DYNAMIC,
+            // inside a haystack: HollywoodMode, which collides with almost nothing (every `HumanHayStack__Enter*`,
+            // 0xE41D8C / 0xE421B4 / 0xE42444 / 0xE4273C); the hop out and the pass-over set Character back
+            ActorContextId::HayStack => crate::layers::HOLLYWOOD_MODE,
             _ => crate::layers::MAIN_CHARACTER,
         };
         if body.proxy.layer != layer {
@@ -318,6 +345,10 @@ pub fn release_limbs(mut q: Query<(&Locomotion, &mut LimbTargets), With<Player>>
         if loco.current != ActorContextId::Ledge {
             limbs.suspended = false;
         }
+        // leaving the ladder's main state releases both rails (`sub_E21160`)
+        if loco.current != ActorContextId::Ladder {
+            limbs.rails = [None; 2];
+        }
     }
 }
 
@@ -332,6 +363,7 @@ pub fn player_components(feet: Vec3, heading: f32) -> impl Bundle {
         Body { feet, heading, grounded: true, ..default() },
         HumanDataBundle::default(),
         LimbTargets::default(),
+        crate::ik::GroundIkSwitch::default(),
         interpreter::Interpreter::default(),
     )
 }

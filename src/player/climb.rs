@@ -829,10 +829,9 @@ fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWor
 /// S and 0.125 m into the wall (RE/24 CLIMB-25).
 fn side_grab_feet(hold: Vec3, n: Vec3, collision: &crate::collision::CollisionWorld) -> bool {
     let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let s = right_of(into);
     let c = hold - Vec3::Y + into * 0.125;
-    let foot = |p: Vec3| super::ledge::support_ray(p, n, 0.625, 0.0, collision);
-    foot(c - s * 0.2) && foot(c + s * 0.2)
+    let foot = |x: f32| super::ledge::wall_support(c, n, x, 0.0, super::ledge::SUPPORT_FEET, collision);
+    foot(-0.2) && foot(0.2)
 }
 
 /// The Ledge fill's actions by +2940 (`dword_1A2CC90` wall hang / `dword_1A2CCB8` free hang, written by 0xDE4F80):
@@ -1510,7 +1509,7 @@ pub fn update_climb(
         let dir = quantize(pad.actor_dir(facing, false), facing);
         // ChooseMove's report: ladder zones carved and steep edges removed; the grid's cell probes and every reach read
         // it (`HumanClimb__BuildHoldGrid` 0xDF6A40, the cell probes pass `arg_8` at 0xDF740A; RE/24 GUIDE-2 / CLIMB-14)
-        let guidance = guidance.ledge_report(body.feet + Vec3::Y, 3.5, true);
+        let guidance = guidance.ledge_report_depth(body.feet + Vec3::Y, 3.5, true, crate::guidance::LEDGE_DEPTH, &collision);
         // ChooseMove 0xDFDE90 step 2: a ladder at the side (TryLadder 0xDF10C0) before any grid move
         if let Some(mut e) = side_ladder(&guidance, body.feet, facing, dir) {
             e.from = body.feet;
@@ -1895,7 +1894,8 @@ mod tests {
         assert!((move_pose(&sparse, &d, m).root - fallback.root).length() < 1e-5, "an empty cell takes the other side's");
     }
 
-    /// RE/24 CLIMB-25: the side ledge grab is a wall hang only with the wall under both foot supports (±0.2 m).
+    /// RE/24 CLIMB-25: the side ledge grab is a wall hang only with the wall under both foot supports (±0.2 m), each by
+    /// its ray or by the Surface slices of its box (±0.25 m about the hold).
     #[test]
     fn the_side_ledge_grab_needs_both_feet_on_the_wall() {
         use crate::collision::{Aabb3, CollisionWorld};
@@ -1905,7 +1905,8 @@ mod tests {
             side_grab_feet(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c)
         };
         assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 3.0, 0.0)), "a wall under the hold");
-        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.1, 3.0, 0.0)), "the wall under one foot only");
+        assert!(feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(0.1, 3.0, 0.0)), "the wall under one foot's ray, in the other's box");
+        assert!(!feet(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(-0.3, 3.0, 0.0)), "the wall ending outside the boxes");
         assert!(!feet(Vec3::new(-2.0, 2.5, -2.0), Vec3::new(2.0, 3.0, 0.0)), "an overhang");
     }
 

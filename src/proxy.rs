@@ -9,7 +9,7 @@
 //! 1. closest points around the shape and a cast along the planned displacement;
 //! 2. the manifold is refreshed from them (persistent across frames);
 //! 3. every manifold contact becomes a plane (minus the keep distance; penetration adds a push-out velocity), and a
-//!    walkable-facing contact steeper than 45° adds a vertical plane;
+//!    walkable-facing contact steeper than the max slope (53°) adds a vertical plane;
 //! 4. the simplex solver moves through the planes in time, sliding the velocity along those it hits;
 //! 5. when the solved displacement differs from the planned one, it is cast; a hit that is new beyond the first one
 //!    stops the move at it.
@@ -22,8 +22,10 @@ use crate::tuning::{CAPSULE_HEIGHT, CAPSULE_RADIUS};
 /// Ctor 0x57B4F0 +204: keep distance (the shape is this much smaller than the capsule radius, and planes are pushed
 /// out by it).
 pub const KEEP_DISTANCE: f32 = 0.05;
-/// +176: walkable slope, cos 45°.
-pub const MAX_SLOPE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// +176: walkable slope. The ctor (0x57B4F0) computes cos 45°, but the player's controller holds cos 53° = 0.6018
+/// (live read of CharacterComponent +176, RE/20 #53); no code writes it, so it comes from the character's data
+/// (hypothesis).
+pub const MAX_SLOPE_COS: f32 = 0.601_815;
 /// +188: dynamic friction.
 const DYNAMIC_FRICTION: f32 = 1.0;
 /// +212: contact angle sensitivity (manifold metric 0x579330).
@@ -293,7 +295,7 @@ fn planes_from(manifold: &[Contact], moving: bool) -> Vec<Plane> {
         planes.push(p);
         let up = p.n.dot(Vec3::Y);
         if up > 0.01 && up < MAX_SLOPE_COS {
-            // a walkable-facing surface steeper than 45° also stops the character like a wall
+            // a walkable-facing surface steeper than the max slope also stops the character like a wall
             let h = p.n - Vec3::Y * up;
             let inv = 1.0 / h.length();
             planes.push(Plane { n: h * inv, d: p.d * inv, ..p });
@@ -609,6 +611,13 @@ pub fn stick_to_ground_height(world:&CollisionWorld,feet:Vec3,lift:f32,reach:f32
     let h = hits.iter().find(|h| h.normal.y >= STICK_MIN_UP)?;
     let rest = p + cast * h.fraction + Vec3::Y * (KEEP_DISTANCE / h.normal.y);
     Some((rest.y, h.normal.y))
+}
+
+/// The same cast's hit as the controller keeps it (`sub_579BE0` → controller +320, flag +312; read by `sub_57ABD0`):
+/// (contact point, contact normal).
+pub fn stick_contact(world: &CollisionWorld, feet: Vec3, lift: f32, reach: f32) -> Option<(Vec3, Vec3)> {
+    let hits = linear_cast(world, crate::layers::MAIN_CHARACTER, feet + Vec3::Y * lift, Vec3::NEG_Y * (reach + lift), lift, CAPSULE_HEIGHT);
+    hits.iter().find(|h| h.normal.y >= STICK_MIN_UP).map(|h| (h.pos, h.normal))
 }
 
 /// The controller's contact class (`sub_71B840`, contact +40): 1 ground (normal up > 0.707), 8 ceiling (< −0.707), else 4

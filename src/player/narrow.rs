@@ -119,6 +119,8 @@ pub enum NarrowKind {
     #[default]
     Beam,
     Pilotis,
+    /// Inner state 1, Movement: the free-step stay (`free_step`, RE/05 §2.15).
+    FreeStep,
 }
 
 #[cfg(test)]
@@ -265,6 +267,8 @@ pub enum BeamState {
     HopEnd,
     /// Main mode 8: ground locomotion over 0.8 m (0xF7B720 / 0xF78320).
     StepOff,
+    /// Inner state 1, Movement: the free-step stay (`free_step`, RE/05 §2.15).
+    FreeStep,
 }
 
 /// A corner hop target (`HumanNarrowObjectBeam` vt0 0xF7A310 → sub_1173CD0): the other beam's segment, the point
@@ -364,6 +368,8 @@ pub struct HumanNarrowObjectData {
     pub desired: f32,
     /// Beam +2224 bit 0: the root clamped at the beam's end this tick.
     clamped: bool,
+    /// The free-step stay (`NarrowKind::FreeStep`).
+    pub free_step: Option<super::free_step::FreeStep>,
 }
 
 /// The beam's speed bands (beam +164, `sub_F7D3E0` 0xF7D600–0xF7D61B): [walk, walk, jog, jog, jog], each the walk
@@ -463,6 +469,16 @@ impl HumanNarrowObjectData {
         }
     }
 
+    /// NarrowObject SubState 6 → the Movement state (`SelectInitialState` 0xE528C0): the free-step stay.
+    pub fn enter_free_step(&mut self, e: super::free_step::FreeStepEntry) {
+        self.kind = NarrowKind::FreeStep;
+        self.state = BeamState::FreeStep;
+        self.free_step = Some(super::free_step::FreeStep::new(e));
+        self.action = None;
+        self.t = 0.0;
+        self.seq = self.seq.wrapping_add(1);
+    }
+
     pub fn enter_pilotis(&mut self, e: PilotisEntry) {
         self.kind = NarrowKind::Pilotis;
         self.top = e.top;
@@ -531,6 +547,7 @@ impl HumanNarrowObjectData {
             NarrowKind::Beam if self.across.is_some() => self.across.unwrap_or_default(),
             NarrowKind::Beam if self.toward_p1 => self.dir(),
             NarrowKind::Beam => -self.dir(),
+            NarrowKind::FreeStep => Vec3::NEG_Z,
         }
     }
 
@@ -545,6 +562,7 @@ impl HumanNarrowObjectData {
         match self.kind {
             NarrowKind::Beam => self.point(self.s) + if BEAM_COMPLETION { self.lateral } else { Vec3::ZERO },
             NarrowKind::Pilotis => self.top,
+            NarrowKind::FreeStep => self.entry_from,
         }
     }
 
@@ -554,6 +572,9 @@ impl HumanNarrowObjectData {
     }
 
     pub fn current(&self) -> Option<(ActionBlend, f32)> {
+        if self.kind == NarrowKind::FreeStep {
+            return self.free_step.map(|f| (f.e.action, f.phase()));
+        }
         self.action.map(|a| {
             let ph = self.t / a.duration().max(1e-4);
             // loops: the waits
@@ -574,6 +595,7 @@ impl HumanNarrowObjectData {
                 let w = item(PILOTIS_WAIT, 0, &pilotis_weights(self.lean));
                 self.play(BeamState::PilotisWait, w);
             }
+            NarrowKind::FreeStep => {}
         }
     }
 }
@@ -757,6 +779,7 @@ pub fn beam_entry_mode(axis: Vec3, forward: Vec3, stick: Option<Vec3>) -> BeamEn
 /// The beam entry for a free-step arrival at `feet` facing `forward` (0xE07D00 → NarrowObject Movement →
 /// `TryMountBeam` 0xE52AD0 / `HumanNarrowObjectBeam` enter 0xF7AAA0). `reception` = the free-step reception the
 /// arrival plays (mode 3 keeps it); `jog` picks the jog clips of the side entries.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn free_step_beam_entry(
     feet: Vec3,
     forward: Vec3,
@@ -768,6 +791,13 @@ pub fn free_step_beam_entry(
     collision: &CollisionWorld,
 ) -> Option<BeamEntry> {
     let (p0, p1, point) = beam_at(feet, forward, guidance, collision)?;
+    Some(beam_entry_on(p0, p1, point, feet, forward, stick, foot, reception, jog))
+}
+
+/// The beam entry onto the piece `p0`–`p1` at `point` (`TryMountBeam` 0xE52AD0's entry modes and
+/// `HumanNarrowObjectBeam__EnterByMode` 0xF7AAA0's actions).
+#[allow(clippy::too_many_arguments)]
+pub fn beam_entry_on(p0: Vec3, p1: Vec3, point: Vec3, feet: Vec3, forward: Vec3, stick: Option<Vec3>, foot: usize, reception: Option<ActionBlend>, jog: bool) -> BeamEntry {
     let axis = Vec3::new(p1.x - p0.x, 0.0, p1.z - p0.z).normalize_or_zero();
     let mode = beam_entry_mode(axis, forward, stick);
     let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::NEG_Z);
@@ -808,7 +838,7 @@ pub fn free_step_beam_entry(
         // the beam direction nearest the facing
         _ => (axis.dot(f) >= 0.0, None),
     };
-    Some(BeamEntry { p0, p1, point, from: feet, toward_p1, mode, foot, action, facing: f })
+    BeamEntry { p0, p1, point, from: feet, toward_p1, mode, foot, action, facing: f }
 }
 
 /// `sub_B2B600`: is there a pilotis (a small post) here? Guidance in the box around `support` (from the air
@@ -961,10 +991,10 @@ fn try_pull_down(n: &HumanNarrowObjectData, stick: Option<Vec3>, camera: Vec3, g
             let side = super::right_of(n.facing());
             if side.dot(camera) >= 0.0 { side } else { -side }
         }
-        NarrowKind::Pilotis => camera,
+        NarrowKind::Pilotis | NarrowKind::FreeStep => camera,
     }} else { match n.kind {
         NarrowKind::Beam => super::right_of(n.facing()),
-        NarrowKind::Pilotis => n.facing(),
+        NarrowKind::Pilotis | NarrowKind::FreeStep => n.facing(),
     }});
     let (p, normal, side) = pull_down_edge(feet, dir, guidance, collision)?;
     let moves = super::ledge_moves::pulldown_with(
@@ -983,6 +1013,10 @@ fn try_pull_down(n: &HumanNarrowObjectData, stick: Option<Vec3>, camera: Vec3, g
 }
 
 /// Clip a segment to an oriented box (centre, unit axes, half extents); returns the parameter range kept.
+pub(crate) fn clip_piece(a: Vec3, b: Vec3, c: Vec3, axes: [Vec3; 3], half: [f32; 3]) -> Option<(f32, f32)> {
+    clip_segment(a, b, c, axes, half)
+}
+
 fn clip_segment(a: Vec3, b: Vec3, c: Vec3, axes: [Vec3; 3], half: [f32; 3]) -> Option<(f32, f32)> {
     let (mut t0, mut t1) = (0.0f32, 1.0f32);
     for k in 0..3 {
@@ -1164,9 +1198,11 @@ pub fn update_narrow(
     collision: Res<CollisionWorld>,
     guidance: Res<GuidanceWorld>,
     camera: Res<crate::camera::CameraRig>,
+    abilities: Option<Res<super::abilities::AbilitySet>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
+    let ab = super::abilities::of(abilities.as_deref());
     for (mut loco, mut body, mut data) in &mut q {
         if loco.current != ActorContextId::NarrowObject {
             continue;
@@ -1176,6 +1212,10 @@ pub fn update_narrow(
             if loco.switched_this_frame {
                 continue;
             }
+        }
+        if data.narrow.kind == NarrowKind::FreeStep {
+            super::free_step::update(&mut loco, &mut body, &mut data, &mut pad, &ab, &guidance, &collision, dt);
+            continue;
         }
         let n = &mut data.narrow;
         n.t += dt;
@@ -1277,7 +1317,7 @@ pub fn update_narrow(
         if can_pull_down && pad.hand_held {
             let camera_dir = Vec3::new(camera.yaw.sin(), 0.0, camera.yaw.cos());
             // the pull-down report (`sub_DDCB20`, RE/24 GUIDE-2)
-            if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), camera_dir, &guidance.ledge_report(n.stand(), 2.5, true), &collision) {
+            if let Some(entry) = try_pull_down(n, stick.then_some(pad.dir), camera_dir, &guidance.ledge_report_depth(n.stand(), 2.5, true, crate::guidance::PULLDOWN_DEPTH, &collision), &collision) {
                 pad.hand_pressed_ago = f32::INFINITY;
                 body.feet = n.stand();
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
@@ -1721,6 +1761,8 @@ pub fn update_narrow(
                     *a = ActionBlend::new(PILOTIS_WAIT, 0, &pilotis_weights(n.lean));
                 }
             }
+            // the free-step stay runs in `free_step::update` before this match
+            BeamState::FreeStep => {}
             BeamState::StepOff => {
                 // Main mode 8 moves freely until the target is passed or forward contact (0xF78320).
                 let delta = n.action.map(|a| a.disp((n.t / dur).min(1.0))[1]

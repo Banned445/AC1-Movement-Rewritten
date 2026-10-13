@@ -24,6 +24,34 @@ pub fn wait_action(high: bool, foot: usize) -> u32 {
     if foot >= 2 { WAITS_PARALLEL[high as usize] } else { WAITS[high as usize][foot] }
 }
 
+/// The stance-change waits, the same table with HG+1524 = 1 (`InitAnimTables` 0xDB6E50), [to low, to high] x [left,
+/// right foot ahead]: 0xF0000049 / 0xF000008C (request ids of 0x00F3935C / 0x00F39360, `xx_hl_wait_hipm_foot{l,r}`,
+/// 1.6 s), 0x00F39416 `xx_l_waithigh_hipm_footl` (1.07 s), 0x00F39417 `xx_lh_wait_hipm_footr` (0.07 s). The
+/// parallel-feet column is −1 (RE/24 GROUND-14).
+pub const STANCE_WAITS: [[u32; 2]; 2] = [[0x00F3_935C, 0x00F3_9360], [0x00F3_9416, 0x00F3_9417]];
+/// How long a stance-change wait plays at least, [after a low wait, after a high one]: HG+772 / HG+768 (`OnEnterInit`
+/// 0xDA7F1F / 0xDA7F0F), armed by `sub_D7E5C0` with the old profile.
+pub const STANCE_TIME: [f32; 2] = [0.1, 0.5];
+
+/// The walking fidgets, [the player's variant 0, variant 1] (`sub_DC4980`: 0x339881DE / 0x5624EE1D, played with a 0.15 s
+/// blend on the upper-body channel 0x1B99C0A): actions with no items whose `AssociatedActionGroup` lists the actions to
+/// pick from by weight, `xx_walk_cyclebreaker_footr_v01` … `v08` (variant 1: the pickpocket walk cycle breakers), RE/24
+/// GROUND-18.
+pub const CYCLE_BREAKER: [u32; 2] = [0x3398_81DE, 0x5624_EE1D];
+/// The fidget's blend in (`sub_DC4980`: 0x3E19999A).
+pub const CYCLE_BREAKER_BLEND: f32 = 0.15;
+
+/// The wait Idle plays (`HumanGround__IdleWait_Enter` 0xD94580: `dword_1A2BFE0[3·(HG+1524 + 2·HG+1500) + foot]`; HG+1492,
+/// the current move mode, is 0 there): the stance-change wait while HG+1524 is set. Its parallel-feet entry, −1, plays
+/// nothing (`Anim__PlayActionById` 0x500740 finds no action, **hypothesis**), so the old profile's wait goes on.
+pub fn idle_wait(high: bool, foot: usize, stance_change: bool) -> u32 {
+    match stance_change {
+        true if foot < 2 => STANCE_WAITS[high as usize][foot],
+        true => WAITS_PARALLEL[!high as usize],
+        false => wait_action(high, foot),
+    }
+}
+
 /// The destinations whose authored item transitions the simulation follows: the locomotion and the four waits.
 pub const GROUND_DESTINATIONS: [u32; 7] = [ACT_GROUND_LOCOMOTION, WAITS[0][0], WAITS[0][1], WAITS[1][0], WAITS[1][1], WAITS_PARALLEL[0], WAITS_PARALLEL[1]];
 
@@ -46,7 +74,15 @@ pub const ROLL_ENDING_EXIT: u32 = 0x082F_B27C;
 pub const DUMPED_ACTIONS: &[u32] = &[
     RUN_STOP_EXIT[0], RUN_STOP_EXIT[1], RUN_TURN[0], RUN_TURN[1], RUN_TURN_EXIT[0], RUN_TURN_EXIT[1],
     ROLL_ENDING[0], ROLL_ENDING[1], ROLL_ENDING_EXIT,
+    STANCE_WAITS[0][0], STANCE_WAITS[0][1], STANCE_WAITS[1][0], STANCE_WAITS[1][1],
+    IDLE_FROM_MOVE[0][0], IDLE_FROM_MOVE[0][1], IDLE_FROM_MOVE[1][0], IDLE_FROM_MOVE[1][1],
 ];
+
+/// The transition `HumanGround__Idle_EnterFromMove` 0xD8B220 passes when it plays the wait (it wins over the item
+/// transitions, RE/13 §7.1; blend type 1, 0.2 s): `xx_h_accel_tr_{l,h}_wait_foot{l,r}` 0x0D997722–25, [low, high: HG+1500,
+/// which the function first sets to the wanted profile HG+1504] × [left foot ahead (`Human__GetLeadingFoot` = 1), right].
+/// Live (RE/25): every walk stop into the wait played `xx_h_accel_tr_l_wait_foot*` (0.25–0.67 s) before the wait.
+pub const IDLE_FROM_MOVE: [[u32; 2]; 2] = [[0x0D99_7722, 0x0D99_7723], [0x0D99_7724, 0x0D99_7725]];
 
 /// The landings whose authored ending is the wait (`HumanGround__Guard_LandingToIdle` 0xD7F090): forward → wait
 /// by foot and straight → wait. Every other landing hands over to the locomotion (0xD7F0F0).
@@ -176,11 +212,15 @@ pub struct MoveTransition {
     pub blend_in: Option<crate::assets::ac_actions::ActBlend>,
     /// Restart key for the animator.
     pub seq: u32,
+    /// The forward speed (m/s) of what played before when `blend_in` blends the displacement of both (BLENDAB): its root
+    /// motion fades out over the blend while the transition's fades in (the accel into the wait, 0xD8B220: the walk
+    /// coasts on about speed × 0.1 s; live RE/25: 0.15–0.3 m after the edge halt).
+    pub coast: f32,
 }
 
 impl MoveTransition {
     pub fn new(action: ActionBlend, layout: u8, dest_item: usize, from: Option<(u32, usize)>, seq: u32) -> Self {
-        MoveTransition { action, phase: 0.0, applied: [0.0; 3], yaw_applied: 0.0, layout, dest_item, fast_start: false, from, to_wait: false, blend_in: None, seq }
+        MoveTransition { action, phase: 0.0, applied: [0.0; 3], yaw_applied: 0.0, layout, dest_item, fast_start: false, from, to_wait: false, blend_in: None, seq, coast: 0.0 }
     }
 
     /// One frame of the transition path after the speed parameter `s` was updated: new weights, then the clock.
@@ -205,7 +245,15 @@ impl MoveTransition {
         self.phase = (self.phase + dt * rate / duration).min(1.0);
         let d1 = self.action.disp(self.phase);
         let y1 = self.action.yaw(self.phase);
-        ([d1[0] - d0[0], d1[1] - d0[1], d1[2] - d0[2]], y1 - y0, self.phase >= 1.0)
+        // the outgoing action's share of the displacement (BLENDAB): 1 − t / T at the middle of the frame
+        let coast = match self.blend_in {
+            Some(b) if self.coast > 0.0 && b.disp_src == 0 && b.time > 0.0 => {
+                let mid = (self.phase - dt * rate / duration * 0.5).max(0.0) * duration;
+                self.coast * (1.0 - mid / b.time).max(0.0) * dt
+            }
+            _ => 0.0,
+        };
+        ([d1[0] - d0[0], d1[1] - d0[1] + coast, d1[2] - d0[2]], y1 - y0, self.phase >= 1.0)
     }
 }
 

@@ -45,13 +45,9 @@ pub struct Landing {
     /// The action the Ground context plays on entry (landing 0xE05940 or free-step reception 0xE07D00);
     /// its root motion moves the character until it ends.
     pub action: Option<ActionBlend>,
-    /// Seconds of `action` already played on entry: the free-step reception starts at the arrival, under the root
-    /// interpolation (`AirMode::Arrive`), so the Ground picks it up that far in (RE/24 AIR-2).
+    /// Seconds of `action` already played on entry.
     pub skip: f32,
 }
-
-/// PORT: the capsule's radius against a greybox haystack's side (the native contact is the controller's).
-const HAY_SIDE_R: f32 = 0.45;
 
 /// Drop sub-state (4) animations (`HumanInAir__EnterDropState` 0xE064C0, tables 0x1A2EAE0 / 0x1A2EB30 filled by
 /// 0xDFF680; HumanGround_Hurt block): the entry item by [drop type][side 0 front, 1 back], then the falling loop
@@ -120,6 +116,10 @@ pub enum InAirEntry {
     /// A free-step jump (jump kind 1: the `freestep_*_to_air` takeoff) from a beam or a pilotis to a target
     /// (NarrowObject event 4 → `Human__SetupJumpToTarget` 0xB20200 with kind 1, 0xE4D950).
     FreeStepJump { from: Vec3, target: JumpTarget, foot_left: bool },
+    /// The free-step stay's jump without a candidate (NarrowObjectState 0xEE99A9: IHuman vt68 → `Human__BuildFreeJumpTarget`
+    /// 0xB1E7F0, `ahead` along `dir` and `down` below by its mode, type 1), posted as event 4: kind 1, ended by the
+    /// ground contact.
+    FreeStepFreeJump { from: Vec3, dir: Vec3, ahead: f32, down: f32, foot_left: bool },
     /// A jump without a target that plays one action's root motion, then falls (the beam's jump on the spot,
     /// 0xF73B80: `beam_jumpstraight_clear`, then InAir +416 = `…_clear_tr_fall`).
     OnPlace { from: Vec3, fwd: Vec3, action: ActionBlend, fall: Option<ActionBlend> },
@@ -146,6 +146,7 @@ impl InAirEntry {
             InAirEntry::JumpToTarget { target, speed_param, foot_left, .. } => InAirEntry::JumpToTarget { from: p, target, speed_param, foot_left },
             InAirEntry::FreeJump { dir, ahead, speed_param, foot_left, .. } => InAirEntry::FreeJump { from: p, dir, ahead, speed_param, foot_left },
             InAirEntry::FreeStepJump { target, foot_left, .. } => InAirEntry::FreeStepJump { from: p, target, foot_left },
+            InAirEntry::FreeStepFreeJump { dir, ahead, down, foot_left, .. } => InAirEntry::FreeStepFreeJump { from: p, dir, ahead, down, foot_left },
             InAirEntry::OnPlace { fwd, action, fall, .. } => InAirEntry::OnPlace { from: p, fwd, action, fall },
             InAirEntry::SwingJump { target, dir, .. } => InAirEntry::SwingJump { from: p, target, dir },
             InAirEntry::ReboundJump { target, dir, foot_left, .. } => InAirEntry::ReboundJump { from: p, target, dir, foot_left },
@@ -175,10 +176,6 @@ pub enum AirMode {
     },
     /// Ballistic fall (optionally steered toward `steer_to`).
     Fall { steer_to: Option<Vec3> },
-    /// The free-step arrival's root interpolation (`CheckJumpTargetArrival` 0xE07D00 case 1 / 0x10000, 0xE09A13 →
-    /// `sub_711130` 0xE09B26): from the arrival point to the stored (pulled-back) target + 0.5·forward over
-    /// `FREESTEP_ARRIVE` s while the reception plays; then the landing (RE/24 AIR-2).
-    Arrive { from: Vec3, to: Vec3, t: f32 },
 }
 
 /// The let-go from a free hang (`sub_DD7810`; 0x1120E17B from a wall hang is `climb::LOST_GRIP`).
@@ -248,6 +245,11 @@ pub struct HumanInAirData {
     /// The HollywoodMode layer (28) of the let-go dive: it collides with almost nothing (0xEEC622). PORT: the dive's
     /// step is set directly, without the capsule.
     pub hollywood: bool,
+    /// The jump is aimed at a haystack (`HumanInAir__ResetAndPickEntrySubState` 0xE01E19 / 0xE01E83: the target's or
+    /// the free-fall target's owner is a haystack entity): the controller is on layer 44 (OnlyDynamic) for the flight, so
+    /// it passes through the haystack, and InAir knows the haystack (+336), which `CheckHayStackEntry` 0xE05490 needs
+    /// (RE/24 AIR-25). Any other fall lands on a haystack like on a roof.
+    pub hay_pass: bool,
     /// HumanInAir+0x16C: live air-control speed ratio (0xEDBAF0 -> 0xE102B0).
     pub speed_ratio: f32,
     /// Takeoff and flight items of the current jump (+0x1A4 / +0x1A8 and the weight arrays +0x1BC..).
@@ -293,6 +295,7 @@ impl HumanInAirData {
         self.side_setup = None;
         self.dive_wait = None;
         self.hollywood = false;
+        self.hay_pass = false;
         self.apex_reached = false;
         self.fall_origin = FallOrigin::Ground;
         self.target_flags = 0;
@@ -318,6 +321,7 @@ impl HumanInAirData {
                 self.prev_y = from.y;
                 self.target_flags = target.type_flags;
                 self.target = Some(target);
+                self.hay_pass = target.type_flags == jump_blend::TARGET_HAYSTACK;
                 // over-drop rule (0xB1B8C0): target > 5 m below → aim 5 m down, then free-fall.
                 let mut aim = target.position;
                 let mut then_fall_to = None;
@@ -422,7 +426,23 @@ impl HumanInAirData {
                 // it (live: 0.66 s, 4.8 m), off a roof it falls on from there
                 let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
                 let aim = from + flat * ahead - Vec3::Y * FREE_JUMP_DOWN;
+                // its candidate is type 1 (`Human__MakeFreeJumpTarget` 0xB13630), so the automatic catch is armed
+                // during the flight (live RE/25 freerun_east 016: a wall hang caught off the free jump)
+                self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
+                self.free_target = true;
+            }
+            InAirEntry::FreeStepFreeJump { from, dir, ahead, down, foot_left } => {
+                self.start_y = from.y;
+                self.start = from;
+                self.apex_y = from.y;
+                self.prev_y = from.y;
+                self.speed_ratio = 0.0;
+                self.foot_left = foot_left;
+                let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
+                let aim = from + flat * ahead - Vec3::Y * down;
+                self.target_flags = TARGET_FREESTEP;
+                self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 1);
                 self.free_target = true;
             }
             InAirEntry::LetGoDive { from, target, origin } => {
@@ -443,6 +463,8 @@ impl HumanInAirData {
                 let d = [id, super::climb::LOST_GRIP].into_iter().map(|a| ActionBlend::new(a, 0, &[1.0]).duration()).find(|d| *d > 0.0).unwrap_or(0.3);
                 self.dive_wait = Some(d);
                 self.hollywood = true;
+                // the let-go record knows the haystack (0xDD7810)
+                self.hay_pass = true;
                 self.mode = AirMode::Fall { steer_to: Some(target.position) };
             }
             InAirEntry::Fall { from, velocity, origin, speed_param } => {
@@ -770,6 +792,8 @@ pub fn update_air(
         let mut hay_on: Option<super::hay::HayStackEntry> = None;
         let mut kiosk_on: Option<super::kiosk::KioskEntry> = None;
         let mut narrow_on: Option<TransitionSetup> = None;
+        // the free-step arrival: NarrowObject SubState 6, the free-step stay (RE/05 §2.15)
+        let mut stay_on: Option<super::free_step::FreeStepEntry> = None;
         let mut pass_on: Option<super::passover::PassOverEntry> = None;
         let mut swing_on = false;
         let mut ladder_on: Option<super::ladder::LadderEntry> = None;
@@ -938,9 +962,31 @@ pub fn update_air(
                             air.free_step_abort = true;
                             air.mode = AirMode::Fall { steer_to: None };
                         }
-                        // a free-step arrival (case 1 / 0x10000) interpolates the root onto the target first
+                        // a free-step arrival (case 1 / 0x10000, 0xE097A7–0xE09B58): the reception (the flight's weights,
+                        // normal / `_fast` by +0x16C) plays in NarrowObject SubState 6 while the root is interpolated
+                        // from the arrival point to the stored (pulled-back) target + 0.5·forward over `FREESTEP_ARRIVE`
+                        // s (`sub_711130` 0xE09B26, RE/24 AIR-2); +0xF0 = the target + 0.5 · the jump direction, +0x100
+                        // the target's normal, +0x140 its hit type 4 (`GuidanceHit__Set` 0xE09A94)
                         None if air.target.is_some() && matches!(air.target_flags, 1 | 0x10000) => {
-                            air.mode = AirMode::Arrive { from: body.feet, to: aim + body.forward() * 0.5, t: 0.0 };
+                            let flat = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(body.forward());
+                            let target = air.target.map(|t| t.position).unwrap_or(aim);
+                            let (normal, small_box) = air.target.and_then(|t| t.support).unwrap_or((-flat, false));
+                            let fw = air.flight.map(|f| f.weights().to_vec()).unwrap_or_default();
+                            let id = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
+                            let action = ActionBlend::new(id, 0, &jump_blend::reception_weights(&fw, air.speed_ratio));
+                            stay_on = Some(super::free_step::FreeStepEntry {
+                                action,
+                                t: 0.0,
+                                from: body.feet,
+                                to: aim + body.forward() * 0.5,
+                                root_time: FREESTEP_ARRIVE,
+                                follow_clip: true,
+                                point: target + flat * 0.5,
+                                normal,
+                                small_box,
+                                heading: body.heading,
+                            });
+                            on_target = true;
                         }
                         None => {
                             landed_at = Some(body.feet.y);
@@ -1078,31 +1124,24 @@ pub fn update_air(
                 if GAME_FALLS && narrow_on.is_none() {
                     // 0xE05490 checks hay before ordinary landing: a controller contact with a haystack (type 3,
                     // descriptor 8 / 9); InAir+340 = the contact normal's z ≤ 0.9, so through the top → Top, against a
-                    // side → SideJump (`EnterFromAir` 0xE42700, `xx_h_air_to_haystack`). The game takes it only while
-                    // InAir knows the haystack (+336, `sub_E03A90`: within 3.5 m in height), i.e. from a jump at a
-                    // haystack target that ends in a free fall (0xB1B8C0) or a let-go record (0xDD7810). PORT: the
-                    // greybox haystacks are not solid; their box stands in for the contact (the top crossed, or a side
-                    // entered by the capsule's 0.45 m), and every fall takes it (LIVE, RE/20 #1: a plain fall onto a haystack).
-                    let next = body.feet;
-                    let previous = next - body.velocity * dt;
-                    let top = guidance.haystacks.iter().find(|stack| {
-                        body.velocity.y < 0.0 && previous.y >= stack.max.y && next.y <= stack.max.y
-                            && next.x >= stack.min.x && next.x <= stack.max.x
-                            && next.z >= stack.min.z && next.z <= stack.max.z
-                    });
-                    let side = |p: Vec3, s: &crate::collision::Aabb3| {
-                        p.x >= s.min.x - HAY_SIDE_R && p.x <= s.max.x + HAY_SIDE_R && p.z >= s.min.z - HAY_SIDE_R && p.z <= s.max.z + HAY_SIDE_R
+                    // side → SideJump (`EnterFromAir` 0xE42700, `xx_h_air_to_haystack`). Any contact enters: the branch
+                    // takes the contact's haystack before asking whether InAir knows one (+336, `sub_E03A90` 0xE057D7)
+                    // and keeps it when it does not, so the known haystack only replaces the handle (RE/25 #1: a plain
+                    // fall from 6 m entered `Hay_Bale_01` through the top, InAir+336 empty). Layer 44 (an aimed jump)
+                    // lets the flight through the static world, not through the haystack: its Dynamic box gives the
+                    // contact. While the faith dive plays (the Leap of Faith, the let-go dive) the dive branch's ray
+                    // decides instead, and that one does need the known haystack (`hay_pass`).
+                    let hit = if air.faith_dive() || air.hollywood {
+                        air.hay_pass
+                            .then(|| super::hay::dive_hit(body.feet - body.velocity * dt, body.feet, &guidance.haystacks))
+                            .flatten()
+                            .map(|stack| (stack, super::hay::HayEntry::Top))
+                    } else {
+                        super::hay::haystack_contacts(&body.proxy.manifold, &guidance.haystacks, &collision)
+                            .next()
+                            .map(|(stack, n)| (stack, if n.y > 0.9 { super::hay::HayEntry::Top } else { super::hay::HayEntry::SideJump }))
                     };
-                    hay_on = top
-                        .map(|stack| (stack, super::hay::HayEntry::Top))
-                        .or_else(|| {
-                            guidance
-                                .haystacks
-                                .iter()
-                                .find(|s| side(next, s) && !side(previous, s) && next.y < s.max.y && next.y + 1.8 > s.min.y)
-                                .map(|stack| (stack, super::hay::HayEntry::SideJump))
-                        })
-                        .map(|(stack, kind)| super::hay::HayStackEntry { stack: *stack, kind, from: body.feet, speed: body.velocity.length() });
+                    hay_on = hit.map(|(stack, kind)| super::hay::HayStackEntry { stack, kind, from: body.feet, speed: body.velocity.length() });
                 }
                 // InAir sub-state 3, the edge landing (0xE0D684): a flat contact with edges at the feet, under 9 m; it is
                 // searched last, after the catches (below, RE/24 AIR-16)
@@ -1136,34 +1175,21 @@ pub fn update_air(
                     }
                 }
             }
-            AirMode::Arrive { from, to, t } => {
-                let t1 = (t + dt).min(FREESTEP_ARRIVE);
-                let next = from.lerp(to, t1 / FREESTEP_ARRIVE);
-                let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, next - b.feet, false, dt) };
-                body.feet = r.position;
-                body.velocity = Vec3::ZERO;
-                if t1 >= FREESTEP_ARRIVE {
-                    landed_at = Some(body.feet.y);
-                    on_target = true;
-                } else {
-                    air.mode = AirMode::Arrive { from, to, t: t1 };
-                }
-            }
             AirMode::Idle => {
                 air.mode = AirMode::Fall { steer_to: None };
             }
         }
 
-        // no catch during the free-step arrival: the game has already arrived (it switched context with the root
-        // interpolation running, 0xE07D00)
-        let arriving = matches!(air.mode, AirMode::Arrive { .. });
-        if AIR_CATCHES && !arriving && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
+        // no catch at the free-step arrival: it switches context with the root interpolation running (0xE07D00)
+        if AIR_CATCHES && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
             let fall_height = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
             // the empty-hand catch needs `!vt72()`: none during the faith dive (0xE0BF71, RE/24 AIR-32)
             let manual = grasp && !air.faith_dive() && super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
             // Data+505: set by the jump's set-up, cleared when its flight ends without an arrival (0xE0F268)
             let jumping = matches!(air.mode, AirMode::Jump { .. });
-            let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, air.target.map(|t| t.type_flags), body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
+            // the jump's type is InAirData +0x290 (`target_flags`): a target's type, or 1 for the free jumps
+            let jump_type = Some(air.target_flags).filter(|&f| f != 0);
+            let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, jump_type, body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
             // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
             let reach = if manual && pad.speed01 > 0.0 && pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { body.forward() };
             if manual || automatic {
@@ -1188,7 +1214,8 @@ pub fn update_air(
                 }
             }
             if ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && super::air_catches::narrow(fall_height, air.time_in_air, air.drop.is_some()) {
-                let ahead = super::air_catches::target_ahead(body.feet, air.target, &collision);
+                let stored = match air.mode { AirMode::Jump { aim, .. } => Some(aim), _ => None };
+                let ahead = super::air_catches::target_ahead(body.feet, stored, jump_type, &collision);
                 // the beam too only with no jump target ahead: its call (0xE0D41D) sits outside the pilotis'
                 // `IsJumpTargetAhead` block, but `HumanInAir__FindBeamCatch` 0xE0B890 runs the same test itself. The
                 // gate's InAir+104 is a deadline armed once at the InAir entry (0.4 s, 0xE01D4A) (RE/24 AIR-16)
@@ -1291,19 +1318,17 @@ pub fn update_air(
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, TransitionSetup::ToHayStack(e));
+        } else if let Some(e) = stay_on {
+            air.mode = AirMode::Idle;
+            body.velocity = Vec3::ZERO;
+            body.grounded = true;
+            switch_context(&mut loco, &mut data, TransitionSetup::ToFreeStep(e));
         } else if let Some(y) = landed_at {
             body.grounded = true;
             let impact_velocity = body.velocity;
             body.velocity.y = 0.0;
             let mut landing = classify_landing(air.apex_y, air.apex_reached, air.start_y, y);
-            landing.action = Some(if on_target && matches!(air.target_flags, 1 | 0x10000) {
-                // free-step reception: the flight's weights, normal / `_fast` by +0x16C (0xE07D00).
-                // PORT: the game continues in NarrowObject (on the edge); the port stays in Ground.
-                let fw = air.flight.map(|f| f.weights().to_vec()).unwrap_or_default();
-                let id = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
-                landing.skip = FREESTEP_ARRIVE;
-                ActionBlend::new(id, 0, &jump_blend::reception_weights(&fw, air.speed_ratio))
-            } else {
+            landing.action = Some({
                 // ground landing (0xE05940): drop and horizontal distance from the jump/fall start; the
                 // forward/straight test uses the trajectory pitch, not the pad (0xE05B64).
                 let horiz = Vec2::new(body.feet.x - air.start.x, body.feet.z - air.start.z).length();
@@ -1313,19 +1338,7 @@ pub fn update_air(
             });
             landing.roll = landing.action.is_some_and(|a| a.id == jump_blend::LAND_DAMAGE_ROLL);
             air.mode = AirMode::Idle;
-            // A free-step arrival continues in NarrowObject (0xE07D00: SubState 6 → Movement); its Movement state
-            // tries a pilotis first (`TryPilotisFreeStep` 0xE50190), then a beam (`TryMountBeam` 0xE52AD0), and
-            // returns to Ground on wide support (0xE51190, the port's default).
-            // Both mounts wait for the reception's end (IHumanNarrowObject vt152 0xE4C670: the playing action done;
-            // RE/24 NARROW-4): the port plays the reception in Ground and tries them there (`ground::narrow_pending`).
-            // the beam and the pilotis pick their clips by the reception's exit feet: `(word & 0xC) != 4` → footr, else
-            // footl (PlayWait 0xF704B9, TryPilotisFreeStep 0xE502BA; RE/24 NARROW-7): 0x010DE1FE (after a footl flight)
-            // ends right foot ahead, 0x010DF150 left foot ahead
-            let reception = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
-            let exit_foot = super::anim_gate::item_word(reception, 0).map_or(air.foot_left as usize, |w| ((w & 0xC) != 4) as usize);
-            let pending = (on_target && matches!(air.target_flags, 1 | 0x10000)).then(|| (exit_foot, body.forward(), body.feet));
             switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: Some(landing) });
-            data.ground.narrow_pending = pending;
         }
     }
 }
@@ -1426,7 +1439,7 @@ mod fall_tests {
     /// own item before the dive are not.
     #[test]
     fn the_faith_dive_is_the_faith_actions() {
-        let target = JumpTarget { position: Vec3::new(0.0, -10.0, -4.0), type_flags: jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None };
+        let target = JumpTarget { position: Vec3::new(0.0, -10.0, -4.0), type_flags: jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
         let mut air = HumanInAirData::default();
         air.enter(InAirEntry::JumpToTarget { from: Vec3::ZERO, target, speed_param: 0.5, foot_left: true });
         assert!(air.faith_dive());

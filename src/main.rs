@@ -10,6 +10,7 @@ mod assets;
 mod camera;
 mod collision;
 mod debug_capture;
+mod demo_course;
 mod debug_fly;
 mod guidance;
 mod hud;
@@ -37,6 +38,7 @@ mod city;
 mod map_menu;
 mod wind;
 mod sound;
+mod particles;
 
 use bevy::prelude::*;
 
@@ -67,7 +69,11 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "AC1 Movement Rewritten".into(),
-                resolution: (1600, 900).into(),
+                // `AC_WINDOW=<w>x<h>` (demo recordings), else 1600 x 900
+                resolution: std::env::var("AC_WINDOW").ok().and_then(|v| {
+                    let (w, h) = v.split_once('x')?;
+                    Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+                }).unwrap_or((1600, 900)).into(),
                 ..default()
             }),
             ..default()
@@ -92,6 +98,6 @@ fn main() {
             city::CityPlugin,
         ))
         // a tuple takes at most 15 plugins
-        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin, sound::SoundPlugin))
+        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin, sound::SoundPlugin, particles::ParticlesPlugin))
         .run();
 }

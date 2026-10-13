@@ -644,7 +644,8 @@ pub fn try_side_jump(
             };
             return Some((mv, Some(climb)));
         }
-        // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
+        // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m). PORT: the ray only; this
+        // search's box and step (for its Surface slices) are not traced
         let new_hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
         let to = hang_root_at(hl, hr, nn, new_hang, collision);
         let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };
@@ -750,7 +751,8 @@ pub fn try_climb_reach(
     // both hand records are the hit (`ReachOtherSurfaceSide` 0xDF7FBC copies it into +3280 and +3360; RE/24 CLIMB-8); the
     // second hand's reach (state 17) spreads them
     let (hl, hr) = (hit.point, hit.point);
-    // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m)
+    // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m). PORT: the ray only; this
+    // search's box and step (for its Surface slices) are not traced
     let hang = if super::ledge::support_ray(found.hand_centre - Vec3::Y, nn, 0.3, 0.0, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
     let to = hang_root_at(hl, hr, nn, hang, collision);
     let ty = if hang == LedgeHangType::Wall { 1 } else { 2 };
@@ -1209,6 +1211,9 @@ pub fn try_side_to_ladder(
         if Vec2::new(p.x - q.x, p.z - q.z).length() > 0.6 {
             continue;
         }
+        // the climb side is the hanger's (the ladder frame is signed toward the climber, RE/24 LADDER-3; live RE/25: from
+        // the Bureau roof-edge hang the game climbs on the hang's side, 0.5 m out, still facing the wall)
+        let ln = if ln.dot(Vec3::new(root.x - q.x, 0.0, root.z - q.z)) < 0.0 { -ln } else { ln };
         let to = q + ln * super::ladder::ATTACH_OUT;
         let id = FROM_LEDGE_SIDE[free as usize][right as usize];
         let seq = [single(id, 0), None, None, None];
@@ -1377,6 +1382,9 @@ pub const ACT_KNEE_TO_WAIT: u32 = 0x0106_C58B;
 /// item's leading foot (+60 & 0xC == 4 → left), then NarrowObject SubState 6 (the transient free-step stay, back to
 /// Ground on wide support). [footl, footr].
 pub const ACT_KNEE_TO_FREESTEP: [u32; 2] = [0x248E_9730, 0x248E_9731];
+/// The items a stand-up hands over to the free-step stay with (NarrowObject SubState 6, RE/05 §2.15): the knee's free
+/// step (two hands / one hand, 0xDD2A50) and the step-up's reception (0xE09752).
+pub const FREE_STEP_STAY: [u32; 4] = [ACT_KNEE_TO_FREESTEP[0], ACT_KNEE_TO_FREESTEP[1], ACT_KNEE_ONEHAND_TO_FREESTEP, RECEPTION_STEP_UP];
 /// Running jump onto a wall-hang ledge (target type 0x40): `air_surface_tr_hangwall_reception_{straight,
 /// 30_out,45_in}_{min,max}` then `hangwall_reception_*_{a,b}` (3 items × 6 clips; 0xE07D00 → 0xE02BA0).
 pub const RECEPTION_SURFACE_WALL: u32 = 0x011F_F16A;

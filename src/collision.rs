@@ -3,7 +3,7 @@
 //! The game's `CharacterController` (vftable 0x168C484, ctor 0x57B4F0) is Havok's `hkpCharacterProxy`: each frame
 //! `CharacterController__Integrate` 0x57C7C0 casts its shape along the velocity (≤ 10 iterations), turns the contacts
 //! into planes (0x57A6B0: the plane is pushed out by the keep distance 0.05; a walkable contact steeper than the
-//! max slope, cos 45° at +176, also gets a vertical plane, 0x57A1D0), and lets the simplex solver (0x101F3F0) slide
+//! max slope at +176, cos 53° for the player, also gets a vertical plane, 0x57A1D0), and lets the simplex solver (0x101F3F0) slide
 //! the velocity along them. With the "stick to ground" flag (+127) it then casts the shape down and sets it on what
 //! it finds (`CharacterController__StickToGround` 0x57D240).
 //!
@@ -23,10 +23,13 @@ use bevy::prelude::*;
 
 use crate::tuning::*;
 
-/// Ctor 0x57B4F0 +176: max walkable slope, cos 45°.
-pub const MAX_SLOPE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// The controller's max walkable slope (+176, cos 53° live; `proxy::MAX_SLOPE_COS`).
+pub const MAX_SLOPE_COS: f32 = crate::proxy::MAX_SLOPE_COS;
 /// `Human__ShouldFallOffSupport` 0xB23CB0: with no contact flatter than 45°, a ray straight down of 0.8 m.
 pub const OFF_SUPPORT_RAY: f32 = 0.8;
+/// `CharacterController__PostIntegrate` 0x57D6FC: an entity below `dword_18CF194` (−200 m) is put back at −200 (the body
+/// matrix through `sub_1074F80`; the velocity is kept), RE/24 GUIDE-16.
+pub const KILL_PLANE: f32 = -200.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Aabb3 {
@@ -209,6 +212,9 @@ impl CollisionWorld {
         let mut nearest = max;
         for (i, b) in self.boxes.iter().enumerate() {
             if !self.sees(layer, i) { continue; }
+            // a ray that starts inside a convex shape does not hit it (Havok; `ray_hit_layer` likewise): the searches
+            // from inside a haystack see past it (RE/24 AIR-25)
+            if origin.cmpgt(b.min).all() && origin.cmplt(b.max).all() { continue; }
             let (mut lo, mut hi) = (0.0f32, nearest);
             let mut hit = true;
             for axis in 0..3 {
@@ -227,6 +233,162 @@ impl CollisionWorld {
         self.triangles_in_bounds(origin.min(end), origin.max(end))
             .filter(|t| layer == 0 || crate::layers::collides(layer, t.layer))
             .filter_map(|t| t.ray(origin, direction, nearest)).fold(nearest, f32::min)
+    }
+
+    /// The guidance workspace's depth map of one detector along one edge (`sub_675D60`): `count` samples every `spacing`
+    /// along `along` from `origin`, each starting at `length`. The collision is cut by the detector's plane (spanned by
+    /// `along` and the ray direction `dir`) into segments, clipped to the rectangle [0, span] × [0, length] (along, depth),
+    /// and each is written as `sub_6712D0` does: its end nearer the start at sample ⌊a₀ / spacing⌋, its far end at
+    /// ⌊a₁ / spacing⌋ (each the min of the sample and that end's depth), the samples between by the line through them.
+    /// So sample k covers [k, k + 1) × spacing, and a solid on the sampling line writes depth 0 (its segments clipped at
+    /// depth 0; the game's inside intervals, `sub_6720C0`). Boxes are cut as their 12 triangles.
+    #[allow(clippy::too_many_arguments)]
+    pub fn depth_samples(&self, origin: Vec3, along: Vec3, dir: Vec3, span: f32, length: f32, spacing: f32, layer: u8) -> Vec<f32> {
+        let count = (span / spacing) as usize + 1;
+        let mut samples = vec![length; count];
+        let m = along.cross(dir).normalize_or_zero();
+        if m == Vec3::ZERO {
+            return samples;
+        }
+        let corners = [origin, origin + along * span, origin + dir * length, origin + along * span + dir * length];
+        let (lo, hi) = corners.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), c| (l.min(*c), h.max(*c)));
+        let mut write = |p: Vec3, q: Vec3| {
+            let (a0, d0) = ((p - origin).dot(along), (p - origin).dot(dir));
+            let (a1, d1) = ((q - origin).dot(along), (q - origin).dot(dir));
+            // Liang–Barsky against [0, span] × [0, length]
+            let (mut u0, mut u1) = (0.0f32, 1.0f32);
+            let (da, dd) = (a1 - a0, d1 - d0);
+            for (pp, qq) in [(-da, a0), (da, span - a0), (-dd, d0), (dd, length - d0)] {
+                if pp.abs() < 1e-9 {
+                    if qq < 0.0 {
+                        return;
+                    }
+                } else {
+                    let r = qq / pp;
+                    if pp < 0.0 { u0 = u0.max(r) } else { u1 = u1.min(r) }
+                }
+            }
+            if u0 > u1 {
+                return;
+            }
+            let (mut a, mut b) = ((a0 + da * u0, d0 + dd * u0), (a0 + da * u1, d0 + dd * u1));
+            if a.0 > b.0 {
+                std::mem::swap(&mut a, &mut b);
+            }
+            let last = count - 1;
+            // floored in x87 double precision, as the game (0x6712D0)
+            let i0 = ((a.0 as f64 / spacing as f64) as usize).min(last);
+            let i1 = ((b.0 as f64 / spacing as f64) as usize).min(last);
+            samples[i0] = samples[i0].min(a.1);
+            samples[i1] = samples[i1].min(b.1);
+            if i1 > i0 + 1 && b.0 - a.0 > 1e-9 {
+                let slope = (b.1 - a.1) / (b.0 - a.0);
+                for (k, v) in samples.iter_mut().enumerate().take(i1).skip(i0 + 1) {
+                    *v = v.min(a.1 + slope * (k as f32 * spacing - a.0));
+                }
+            }
+        };
+        let mut cut = |vs: [Vec3; 3]| {
+            let sd = vs.map(|v| (v - origin).dot(m));
+            let mut pts: Vec<Vec3> = Vec::with_capacity(2);
+            for i in 0..3 {
+                let j = (i + 1) % 3;
+                if sd[i].abs() < 1e-7 {
+                    pts.push(vs[i]);
+                } else if (sd[i] > 0.0) != (sd[j] > 0.0) && sd[j].abs() >= 1e-7 {
+                    pts.push(vs[i] + (vs[j] - vs[i]) * (sd[i] / (sd[i] - sd[j])));
+                }
+            }
+            if pts.len() >= 2 {
+                write(pts[0], pts[1]);
+            }
+        };
+        for (i, b) in self.boxes.iter().enumerate() {
+            if !self.sees(layer, i) || b.max.cmplt(lo).any() || b.min.cmpgt(hi).any() {
+                continue;
+            }
+            let c = |x: usize, y: usize, z: usize| Vec3::new([b.min.x, b.max.x][x], [b.min.y, b.max.y][y], [b.min.z, b.max.z][z]);
+            for (p0, p1, p2, p3) in [
+                (c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0)), (c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1)),
+                (c(0, 0, 0), c(1, 0, 0), c(1, 0, 1), c(0, 0, 1)), (c(0, 1, 0), c(1, 1, 0), c(1, 1, 1), c(0, 1, 1)),
+                (c(0, 0, 0), c(0, 1, 0), c(0, 1, 1), c(0, 0, 1)), (c(1, 0, 0), c(1, 1, 0), c(1, 1, 1), c(1, 0, 1)),
+            ] {
+                cut([p0, p1, p2]);
+                cut([p0, p2, p3]);
+            }
+        }
+        for t in self.triangles_in_bounds(lo, hi).filter(|t| layer == 0 || crate::layers::collides(layer, t.layer)) {
+            cut(t.vertices);
+        }
+        samples
+    }
+
+    /// `GuidanceWorkspaceCastZPlanes` (vtable 0x1699B10, its slice 0x665690): the collision in a box (centre `origin`,
+    /// axes `across` / `into` / up, half extents `half`) cut by the horizontal planes `origin.y + h` for each `h` in
+    /// `heights` within the box's height: per triangle crossing a plane, the cut segment clipped to the box, with the
+    /// triangle's normal ((p1 − p0) × (p2 − p0)). Boxes count as their faces. Returns (start, end, normal).
+    pub fn surface_slices(&self, origin: Vec3, across: Vec3, into: Vec3, half: Vec3, heights: &[f32]) -> Vec<(Vec3, Vec3, Vec3)> {
+        let ext = Self::box_extent([across, into, Vec3::Y], half);
+        let (lo, hi) = (origin - ext, origin + ext);
+        let mut out = Vec::new();
+        let mut cut = |vs: [Vec3; 3], n: Vec3| {
+            for &h in heights.iter().filter(|h| h.abs() <= half.z) {
+                let y = origin.y + h;
+                let sd = vs.map(|v| v.y - y);
+                let mut pts: Vec<Vec3> = Vec::with_capacity(2);
+                for i in 0..3 {
+                    let j = (i + 1) % 3;
+                    if sd[i].abs() < 1e-7 {
+                        pts.push(vs[i]);
+                    } else if (sd[i] > 0.0) != (sd[j] > 0.0) && sd[j].abs() >= 1e-7 {
+                        pts.push(vs[i] + (vs[j] - vs[i]) * (sd[i] / (sd[i] - sd[j])));
+                    }
+                }
+                if pts.len() < 2 {
+                    continue;
+                }
+                let (p, q) = (pts[0], pts[1]);
+                let local = |v: Vec3| ((v - origin).dot(across), (v - origin).dot(into));
+                let (a, b) = (local(p), local(q));
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let (mut u0, mut u1) = (0.0f32, 1.0f32);
+                let mut inside = true;
+                // Liang–Barsky against |across| ≤ half.x, |into| ≤ half.y
+                for (pp, qq) in [(-dx, a.0 + half.x), (dx, half.x - a.0), (-dy, a.1 + half.y), (dy, half.y - a.1)] {
+                    if pp.abs() < 1e-9 {
+                        inside &= qq >= 0.0;
+                    } else if pp < 0.0 {
+                        u0 = u0.max(qq / pp);
+                    } else {
+                        u1 = u1.min(qq / pp);
+                    }
+                }
+                if inside && u0 <= u1 {
+                    out.push((p + (q - p) * u0, p + (q - p) * u1, n));
+                }
+            }
+        };
+        for b in self.boxes.iter() {
+            if b.max.cmplt(lo).any() || b.min.cmpgt(hi).any() {
+                continue;
+            }
+            let c = |x: usize, y: usize, z: usize| Vec3::new([b.min.x, b.max.x][x], [b.min.y, b.max.y][y], [b.min.z, b.max.z][z]);
+            for (p0, p1, p2, p3, n) in [
+                (c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0), Vec3::NEG_Z),
+                (c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1), Vec3::Z),
+                (c(0, 0, 0), c(1, 0, 0), c(1, 0, 1), c(0, 0, 1), Vec3::NEG_Y),
+                (c(0, 1, 0), c(1, 1, 0), c(1, 1, 1), c(0, 1, 1), Vec3::Y),
+                (c(0, 0, 0), c(0, 1, 0), c(0, 1, 1), c(0, 0, 1), Vec3::NEG_X),
+                (c(1, 0, 0), c(1, 1, 0), c(1, 1, 1), c(1, 0, 1), Vec3::X),
+            ] {
+                cut([p0, p1, p2], n);
+                cut([p0, p2, p3], n);
+            }
+        }
+        for t in self.triangles_in_bounds(lo, hi) {
+            cut(t.vertices, t.normal);
+        }
+        out
     }
 
     /// As `ray_distance`, with the surface normal at the hit (against the ray): the foot IK's ground ray
@@ -327,7 +489,10 @@ impl CollisionWorld {
         let lift = if grounded { STEP_HEIGHT } else { 0.0 };
         let dt = dt.max(1e-4);
         let (p, velocity, t) = crate::proxy::integrate(self, proxy, feet + Vec3::Y * lift, delta / dt, dt, lift);
-        MoveResult { position: p - Vec3::Y * lift, velocity, hit_wall: t.wall, hit_ceiling: t.ceiling, landed: t.floor }
+        let mut position = p - Vec3::Y * lift;
+        // PostIntegrate's kill plane
+        position.y = position.y.max(KILL_PLANE);
+        MoveResult { position, velocity, hit_wall: t.wall, hit_ceiling: t.ceiling, landed: t.floor }
     }
 
     /// The stick-to-ground cast (`CharacterController__StickToGround` 0x57D240, `crate::proxy::stick_to_ground`): the
@@ -336,6 +501,11 @@ impl CollisionWorld {
     /// contact normal.
     pub fn support(&self, feet: Vec3) -> Option<Support> {
         crate::proxy::stick_to_ground(self, feet, STEP_HEIGHT, SNAP_DOWN).map(|(y, normal_y)| Support { y, normal_y })
+    }
+
+    /// The stick-to-ground cast's contact (point, normal) for feet at `feet` (`sub_57ABD0`).
+    pub fn support_contact(&self, feet: Vec3) -> Option<(Vec3, Vec3)> {
+        crate::proxy::stick_contact(self, feet, STEP_HEIGHT, SNAP_DOWN)
     }
 
     /// Same stick/fall rule with the live shape height (crouch 0xD859D0).
@@ -360,7 +530,7 @@ impl CollisionWorld {
         self.floor_height_below(p, max).is_some()
     }
 
-    /// Ground's support rule: the stick-to-ground support, kept while its contact is within 45° of vertical, or with a
+    /// Ground's support rule: the stick-to-ground support, kept while its contact is within the max slope (53°) of vertical, or with a
     /// floor within 0.8 m straight below (`Human__ShouldFallOffSupport` 0xB23CB0). `None` = the character falls.
     pub fn ground_support(&self, feet: Vec3) -> Option<Support> {
         let s = self.support(feet)?;
@@ -459,9 +629,14 @@ impl CollisionWorld {
 
     /// Is an oriented box (centre, unit axes, half extents) clear of every box? Separating-axis test.
     pub fn obb_free(&self, centre: Vec3, axes: [Vec3; 3], half: Vec3) -> bool {
+        self.obb_free_except(centre, axes, half, |_| false)
+    }
+
+    /// `obb_free` ignoring the boxes `skip` names (a query that leaves an object out, e.g. the haystack being left).
+    pub fn obb_free_except(&self, centre: Vec3, axes: [Vec3; 3], half: Vec3, skip: impl Fn(&Aabb3) -> bool) -> bool {
         let world = [Vec3::X, Vec3::Y, Vec3::Z];
         let extent = Self::box_extent(axes, half);
-        !self.boxes.iter().any(|b| {
+        !self.boxes.iter().filter(|b| !skip(b)).any(|b| {
             let (bc, bh) = ((b.min + b.max) * 0.5, (b.max - b.min) * 0.5);
             let d = bc - centre;
             let mut tests: Vec<Vec3> = axes.to_vec();
@@ -596,6 +771,16 @@ mod tests {
         f
     }
 
+    /// RE/24 GUIDE-16: nothing falls below −200 m; the velocity is kept.
+    #[test]
+    fn the_kill_plane_holds_a_fall_at_minus_200() {
+        let w = CollisionWorld::default();
+        let mut proxy = crate::proxy::ProxyState::default();
+        let r = w.move_capsule(&mut proxy, Vec3::new(0.0, -199.9, 0.0), Vec3::new(0.1, -1.0, 0.0), false, 1.0 / 60.0);
+        assert_eq!(r.position.y, KILL_PLANE);
+        assert!((r.position.x - 0.1).abs() < 1e-4 && r.velocity.y < 0.0, "{:?} {:?}", r.position, r.velocity);
+    }
+
     #[test]
     fn the_lifted_capsule_steps_over_low_obstacles_and_is_stopped_by_high_ones() {
         let w = world();
@@ -618,7 +803,7 @@ mod tests {
         // 0.2 m past: on the rim, sunk by r − √(r² − d²)
         let s = on(0.2).unwrap();
         assert!(s.y < 3.0 && s.y > 2.9, "{s:?}");
-        // 0.3 m past (contact > 45°, 0.4·sin45 = 0.283): falls
+        // 0.3 m past: off the rim (the contact past the max slope): falls
         assert!(on(0.3).is_none());
     }
 }

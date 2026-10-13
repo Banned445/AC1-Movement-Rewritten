@@ -40,6 +40,13 @@ fn update_hud(
     mut hud: Query<(&mut Text, &mut Visibility), With<HudText>>,
 ) {
     let Ok((mut text, mut vis)) = hud.single_mut() else { return };
+    // `AC_NO_HUD`: hidden (demo recordings)
+    if std::env::var_os("AC_NO_HUD").is_some() {
+        if let Ok((_, mut vis)) = hud.single_mut() {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    }
     if keys.just_pressed(KeyCode::F1) {
         *vis = if *vis == Visibility::Hidden { Visibility::Inherited } else { Visibility::Hidden };
     }
@@ -60,7 +67,6 @@ fn update_hud(
         AirMode::Jump { .. } => "Jump (target-warped clip)",
         AirMode::Fall { steer_to: Some(_) } => "Fall (steered to target)",
         AirMode::Fall { steer_to: None } => "Fall",
-        AirMode::Arrive { .. } => "Arrive (free-step root interpolation)",
         AirMode::Idle => "-",
     };
     let landing = g
