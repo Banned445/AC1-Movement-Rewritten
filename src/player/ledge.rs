@@ -151,6 +151,7 @@ pub fn vstep_index(down: bool, second: bool, first_left: bool) -> usize {
 }
 
 pub const DUMPED_ACTIONS: &[u32] = &[
+    ACT_HANGFREE_SWINGBACK,
     ACT_CATCH_WALL[0], ACT_CATCH_WALL[1], ACT_CATCH_FREE[0], ACT_CATCH_FREE[1], super::ledge_moves::WALLFREE_TO_WALL,
     // the hand steps, for their lengths (RE/24 LEDGE-21)
     ACT_SHIMMY[0][0], ACT_SHIMMY[0][1], ACT_SHIMMY[0][2], ACT_SHIMMY[0][3], ACT_SHIMMY[1][0], ACT_SHIMMY[1][1], ACT_SHIMMY[1][2], ACT_SHIMMY[1][3],
@@ -171,6 +172,19 @@ pub fn action_time(id: u32) -> f32 {
         .sum::<f32>()
         + super::jump_blend::item_blend_adjust(id);
     if t > 0.0 { t } else { GRAB_TIME }
+}
+
+/// `xx_h_hangfree_swingback_{min,max}_a` + `_b`: the graph's transition action into the free idle 0x012719F1 from walling's
+/// free hangs (items 0x0564BB1F / 0x0564BB20), the climb's jump up (0x1EB21812) and the swing back's `_b` (0x4CD68F52).
+/// Its first item is locked (word 0x0FF0), the second not (0x0FC0).
+pub const ACT_HANGFREE_SWINGBACK: u32 = 0x0564_BB0E;
+
+/// How long the swing into the free idle holds the hang: `HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0 requests the free idle,
+/// the graph plays `ACT_HANGFREE_SWINGBACK` first, and the weights [1 − s, s] (`sub_502E30`, s = SwingStrength +112) go to
+/// its playing first item (min / max); `HumanLedge__Movement_ChooseAction` 0xDE29E0 starts no move while that item plays
+/// (locked, 0xDE2B1C). Live (2026-10-13, wall 00): the swing from 1.15 s, the climb at 1.85 s.
+pub fn swing_lock_time(s: f32) -> f32 {
+    super::jump_blend::ActionBlend::new(ACT_HANGFREE_SWINGBACK, 0, &[1.0 - s, s]).duration()
 }
 
 /// How long a catch holds the hang: both items of the catch action are locked (word 0x0FE0), and
@@ -250,6 +264,9 @@ pub struct HumanLedgeData {
     /// (`xx_h_hangfree_wait`, `xx_h_hangwallfree_wait`) at [1 − h, h] (`sub_502E30`) until the next move (RE/24 LEDGE-24,
     /// WALL-21).
     pub swing_strength: Option<(f32, u32)>,
+    /// The time left on the swing into the free idle (`swing_lock_time`): no move starts meanwhile; let-go, the jump off
+    /// and the swing start are events and still run (event 4's guard 0xDCCDD0 accepts during the swing, `sub_DCCD50`).
+    pub swing_lock: f32,
     moves: Vec<RootInterp>,
     after: Option<After>,
     /// Running corner turn / ledge jump / swing back (`ledge_moves`).
@@ -294,6 +311,7 @@ impl HumanLedgeData {
         self.pending_vstep = None;
         self.jump_off = None;
         self.swing_strength = None;
+        self.swing_lock = 0.0;
         self.moves.clear();
         self.mv = None;
         self.hang_set = false;
@@ -830,6 +848,12 @@ pub fn update_ledge(
                 if mv.kind == ledge_moves::MoveKind::SwingBack {
                     d.swing_strength = Some((mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0), d.step_seq));
                 }
+                // the free idle after a swing plays the graph's swing first (`ACT_HANGFREE_SWINGBACK`)
+                if d.hang_type != LedgeHangType::Wall {
+                    if let Some(s) = d.swing_idle() {
+                        d.swing_lock = swing_lock_time(s);
+                    }
+                }
                 // Every hang settle sets +133 from the hand targets (`HumanLedge__SetAlternationFromHandSpacing` 0xDCBCD0,
                 // called by OnEnter, the entry, the receptions, the grasp, the ledge jump, the swing stops and the free-hang
                 // drop): a hang whose hands end apart closes the trailing hand first (RE/24 LEDGE-14; live RE/25 #36: after
@@ -964,6 +988,13 @@ pub fn update_ledge(
                     continue;
                 }
             }
+        }
+        // `Movement_ChooseAction` 0xDE29E0 returns while the playing item is locked (0xDE2B1C): the swing into the free idle
+        if d.swing_lock > 0.0 {
+            d.swing_lock -= dt;
+            // the idle request stands: the graph plays the swing in front of it
+            d.last_action = "idle";
+            continue;
         }
         let Some(dir) = dir else {
             d.blocked_up = false;
@@ -1253,6 +1284,15 @@ mod tests {
     use super::*;
     use crate::collision::Aabb3;
     use crate::guidance::GuidanceHit;
+
+    /// The swing into the free idle holds the hang for its first item, min / max blended by the swing strength
+    /// (`xx_h_hangfree_swingback_min_a` 0.533 s, `max_a` 0.733 s); live, wall 00's walling free hang held 0.70 s.
+    #[test]
+    fn the_swing_into_the_free_idle_lasts_its_first_item() {
+        assert!((swing_lock_time(0.0) - 0.5333).abs() < 1e-3);
+        assert!((swing_lock_time(1.0) - 0.7333).abs() < 1e-3);
+        assert!((swing_lock_time(0.835) - 0.70).abs() < 0.01);
+    }
 
     /// RE/24 LEDGE-10: past a corner the turn fails when the new face needs the other hang type; `TrySwitchHangType`
     /// with the corner variant switches onto that face instead. A wall hang (face z 0) whose corner face (x 0, normal +X)

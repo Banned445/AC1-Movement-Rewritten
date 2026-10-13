@@ -516,6 +516,12 @@ struct Request {
     /// The blend into the requested action when the simulation knows it (a ground transition action: the authored
     /// item transition's blend A, or the code's explicit one); `None`: the graph's lookup (`sub_725950`).
     blend: Option<ActBlend>,
+    /// The two weight sets the code applies right after the request (0xDE1FE0's swing into the free idle): the playing
+    /// item's (`sub_502E30`) and then `AnimGraph__SetItemBlendWeights` 0x503040's. When the graph queues a transition
+    /// action in front, the first set goes to that action's first item, which is the one playing, and the second to the
+    /// requested action queued behind it (hypothesis: live, the swing's length matches the first set). Without a queued
+    /// action the request's own weights stand.
+    playing_w: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 const CROSSFADE: f32 = 0.2;
@@ -542,11 +548,11 @@ fn single(name: &str) -> Vec<ItemPlay> {
 }
 
 fn looped(clip: &str, fade: f32) -> Request {
-    Request { key: clip.into(), items: single(clip), sim: false, looping: true, fit: None, token: 0, fade, hold: false, blend: None }
+    Request { key: clip.into(), items: single(clip), sim: false, looping: true, fit: None, token: 0, fade, hold: false, blend: None, playing_w: None }
 }
 
 fn once(clip: String, token: u64, fit: Option<f32>, fade: f32) -> Request {
-    Request { items: single(&clip), key: clip, sim: false, looping: false, fit, token, fade, hold: false, blend: None }
+    Request { items: single(&clip), key: clip, sim: false, looping: false, fit, token, fade, hold: false, blend: None, playing_w: None }
 }
 
 /// A graph action (by the id the exe uses). Falls back to `fallback` (a clip name) if the action or its
@@ -561,7 +567,7 @@ fn action(lib: &AnimLibrary, ids: &[u32], looping: bool, token: u64, fade: Optio
     }
     let fade = fade.unwrap_or(items[0].blend.time.max(0.05));
     let key = ids.iter().map(|i| format!("act_{i:08x}")).collect::<Vec<_>>().join("+");
-    Some(Request { key, items, sim: false, looping, fit: None, token, fade, hold: false, blend: None })
+    Some(Request { key, items, sim: false, looping, fit: None, token, fade, hold: false, blend: None, playing_w: None })
 }
 
 /// PORT: a named clip (outside the graph) enters as the default transition does (A frozen, B playing, linear)
@@ -712,7 +718,7 @@ fn sim_request(p: &mut AnimPlayer, lib: &AnimLibrary, b: &crate::player::jump_bl
         p.set_sim_item(it);
         return None;
     }
-    Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false, blend: None })
+    Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false, blend: None, playing_w: None })
 }
 
 /// The seam from a queued transition action's last item into the requested action's first item (`loop_from`, on the
@@ -828,7 +834,7 @@ fn choose_clip(
                 let dest = authored.map(|a| a.action_b).unwrap_or(if t.to_wait { 0 } else { ACT_GROUND_LOCOMOTION });
                 let blend_b = authored.map(|a| a.blend_b).unwrap_or_default();
                 p.pending_b = Some((dest, blend_b));
-                Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade: 0.0, hold: false, blend: Some(blend_a) })
+                Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade: 0.0, hold: false, blend: Some(blend_a), playing_w: None })
             }
             // (a landing without its action, e.g. the clips are missing: nothing extra plays; the one-shot branch above
             // shows the game's landing action)
@@ -850,7 +856,7 @@ fn choose_clip(
                     p.set_sim_item(it);
                     continue;
                 }
-                Some(Request { key, items: vec![it], sim: true, looping: true, fit: None, token: 0, fade: CROSSFADE, hold: false, blend: None })
+                Some(Request { key, items: vec![it], sim: true, looping: true, fit: None, token: 0, fade: CROSSFADE, hold: false, blend: None, playing_w: None })
             }
             // standing: the game's wait action of the leading foot (MoveBlend foot: 0 = left ahead), entered through the
             // graph's transition like every action (RE/13 §7)
@@ -1077,10 +1083,12 @@ fn choose_clip(
                         };
                         action(&lib, &ids, false, token, Some(0.1), None)
                     }
-                    // the free idle after the swing back or a walling free hang (Entry end 0xDE1FE0, HangFreeReceptionType
-                    // 3), until the next move: its two clips `xx_h_hangfree_wait` / `xx_h_hangwallfree_wait` at
-                    // [1 − SwingStrength, SwingStrength] (`sub_502E30`, RE/24 LEDGE-24). PORT: the second set (0x503040 →
-                    // 0x726280, [1, 0]) goes to the running transition's blend node (hypothesis) and is not played.
+                    // the free idle after the swing back, a walling free hang or the climb's jump up (Entry end 0xDE1FE0,
+                    // HangFreeReceptionType 3), until the next move. The graph plays its transition action first, the swing
+                    // `ACT_HANGFREE_SWINGBACK` (min / max), and the weights go [1 − SwingStrength, SwingStrength] to its
+                    // playing first item (`sub_502E30`, the length the simulation holds, `ledge::swing_lock_time`) and
+                    // [1, 0] to the idle behind it (0x503040; RE/24 LEDGE-24). With no transition action the idle takes
+                    // the first set itself.
                     _ if !wall && l.swing_idle().is_some() => {
                         let s = l.swing_idle().unwrap_or(0.0).clamp(0.0, 1.0);
                         action(&lib, &[ACT_HANG_FREE], true, 0, Some(0.15), Some("hang_free")).map(|mut r| {
@@ -1090,6 +1098,7 @@ fn choose_clip(
                                 it.layers[0].1 = w[0];
                                 it.layers[1].1 = w[1];
                             }
+                            r.playing_w = Some((vec![1.0 - s, s], vec![1.0, 0.0]));
                             r
                         })
                     }
@@ -1185,6 +1194,23 @@ fn choose_clip(
                     let skipped = t.action_a != 0 && !queued;
                     if t.action_a != 0 && queued {
                         if let Some(mut ti) = lib.action_items(t.action_a) {
+                            if let Some((playing, queued)) = req.playing_w.as_ref() {
+                                let set = |it: &mut ItemPlay, w: &[f32]| {
+                                    if it.layers.len() == w.len() {
+                                        let mut w = w.to_vec();
+                                        crate::player::jump_blend::normalize_item_weights(&mut w);
+                                        for (l, w) in it.layers.iter_mut().zip(w) {
+                                            l.1 = w;
+                                        }
+                                    }
+                                };
+                                if let Some(it) = ti.first_mut() {
+                                    set(it, playing);
+                                }
+                                if let Some(it) = items.first_mut() {
+                                    set(it, queued);
+                                }
+                            }
                             if req.sim {
                                 for it in &mut ti {
                                     it.root_motion = false;
