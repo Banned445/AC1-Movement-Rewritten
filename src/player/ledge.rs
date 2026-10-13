@@ -335,6 +335,14 @@ impl HumanLedgeData {
         if let Some(a) = e.entry_move.and_then(|m| m.seq[1]).filter(|a| a.id == super::climb::CLIMB_JUMP_SWINGBACK) {
             self.swing_strength = Some((a.w[2] + a.w[3], self.step_seq));
         }
+        // `sub_DCDA10` (`HumanLedge__EnterCommon` 0xDE284E): entered while the climb's overhang move plays, the hands are a
+        // row apart and the lower one's step is pending, upward (+1848 / +1852 = 0), the higher one moved last (+1844):
+        // `1lu` (0x1DBDB3D8) leaves the right hand pending, `1ru` (0x1DBDB3D9) the left. The next stick up finishes it
+        // (`xx_h_hangfree_climb_1lu_u_1m`, live wall 00)
+        if let Some(k) = e.entry_move.and_then(|m| m.seq[0]).and_then(|a| super::climb::OVERHANG_TO_HANG.iter().position(|&id| id == a.id)) {
+            self.pending_vstep = Some((1 - k, true));
+            self.last_hand = k;
+        }
         if let Some(m) = e.entry_move {
             // the game's reception for the jump that arrived (0xE07D00), or the pull-down's first stage
             self.mv = Some(m);
