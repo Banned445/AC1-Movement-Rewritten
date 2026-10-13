@@ -378,6 +378,8 @@ pub struct HumanNarrowObjectData {
     /// measured for (a new one, entered, rebound or switched, is measured once). `p0` / `p1` stay the report's piece.
     ext: (f32, f32),
     ext_of: Option<(Vec3, Vec3)>,
+    /// The foot ahead on last frame's pose (0 left), when the install's skeleton is loaded.
+    leading_foot: Option<usize>,
 }
 
 /// The beam's speed bands (beam +164, `sub_F7D3E0` 0xF7D600–0xF7D61B): [walk, walk, jog, jog, jog], each the walk
@@ -608,6 +610,15 @@ impl HumanNarrowObjectData {
         self.speed = 0.0;
         match self.kind {
             NarrowKind::Beam => {
+                // `HumanNarrowObjectBeam__PlayWait` 0xF70820: the wait of the playing item's foot (its word's bits 0xC, 4 =
+                // left); without them the foot ahead on the pose (`Human__GetLeadingFoot` 0xB18850; without the install's
+                // skeleton the walk's own foot). RE/28 §6: the walk's next-item foot played the other wait
+                // in five of six live stops
+                if let Some(w) = self.action.and_then(|a| super::anim_gate::word(&a)).filter(|w| w & 0xC != 0) {
+                    self.foot = ((w & 0xC) != 4) as usize;
+                } else if let Some(f) = self.leading_foot {
+                    self.foot = f.min(1);
+                }
                 let w = item(BEAM_WAIT[self.foot], 0, &[]);
                 self.play(BeamState::Wait, w);
             }
@@ -1341,11 +1352,14 @@ pub fn update_narrow(
     guidance: Res<GuidanceWorld>,
     camera: Res<crate::camera::CameraRig>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>, Option<&mut crate::ik::GroundIkSwitch>), With<Player>>,
+    skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>, Option<&mut crate::ik::GroundIkSwitch>, Option<&crate::bone_pose::BonePose>), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
     let ab = super::abilities::of(abilities.as_deref());
-    for (mut loco, mut body, mut data, anim, mut ik_switch) in &mut q {
+    for (mut loco, mut body, mut data, anim, mut ik_switch, pose) in &mut q {
+        // `Human__GetLeadingFoot` 0xB18850 on last frame's pose (`bone_pose`): the wait's foot when the item has none
+        data.narrow.leading_foot = skeleton.as_deref().zip(pose).filter(|(_, p)| p.seq > 0).and_then(|(s, p)| p.leading_foot(s));
         if loco.current != ActorContextId::NarrowObject {
             continue;
         }
