@@ -608,7 +608,7 @@ pub fn update_ledge(
                 super::passover::PassOverOut::PullDown { far, normal } => {
                     // pull-down type 4 (0xDE0220): Ledge SubState 11 from the far edge
                     data.ledge.pass_over = None;
-                    let entry = match ledge_moves::pulldown_passover(far, normal, body.feet, p.hand, p.w, &guidance.ledge_report(far, 2.5, true), &collision) {
+                    let entry = match ledge_moves::pulldown_passover(far, normal, body.feet, p.hand, p.w, &guidance.ledge_report_depth(far, 2.5, true, crate::guidance::PULLDOWN_DEPTH, &collision), &collision) {
                         Ok(moves) => super::ground::pulldown_ledge_entry(moves, normal, body.feet),
                         Err(orient) => super::ground::pulldown_release_entry(orient, normal, body.feet),
                     };
@@ -870,7 +870,7 @@ pub fn update_ledge(
         // the ledge report (`HumanLedge__BuildLedgeReport` 0xDDC620 → HumanData +116): ladder zones carved, steep edges
         // removed; ProbeLateral, FindCornerEdges, FindVerticalRows, the side jumps and TryJumpUpToClimb read it
         // (RE/24 GUIDE-2). Its largest box reaches 3 m sideways from the hands.
-        let report = guidance.ledge_report(hand_mid(d), 3.5, true);
+        let report = guidance.ledge_report_depth(hand_mid(d), 3.5, true, crate::guidance::LEDGE_DEPTH, &collision);
         // the interpreter's ledge state (`GoAssassinActionInterpreter__LedgeState` 0xEEBFD0, RE/03 7.12): the
         // empty-hand buffer lets go (event 4, 0xDDB450 -> LetGoToInAir) ...
         if pad.hand_buffered() {

@@ -1588,7 +1588,7 @@ pub fn update_ground(
         // (`sub_ED4A20(3, 0.2)`, dword_170861C). Either profile.
         if pad.hand_pressed_ago <= PULLDOWN_HAND_WINDOW && !busy && ab.allows(Ability::Climb) {
             // the pull-down report (`sub_DDCB20`: ladders carved, steep removed; RE/24 GUIDE-2)
-            if let Some(entry) = try_pulldown(body.feet, body.forward(), &guidance.ledge_report(body.feet, 2.5, true), &collision) {
+            if let Some(entry) = try_pulldown(body.feet, body.forward(), &guidance.ledge_report_depth(body.feet, 2.5, true, crate::guidance::PULLDOWN_DEPTH, &collision), &collision) {
                 pad.consume_hand();
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
                 continue;
@@ -2025,14 +2025,16 @@ fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bo
 
 /// The standing request's hand targets (`Human__EvaluateStaticHandTargets` 0xE165D0; the box initialised by
 /// 0x1610920 / 0x1610970 and consumed by 0xB10990: the feet + 0.5 m ahead + 1.85 m up, half extents 0.5 / 1.0 / 1.35).
-/// The box's edges of mask 306 cut to it, none steeper than 40°, every end's scratch set to 0.5 (`sub_E14DB0`); three
+/// The box's edges of mask 306 cut to it, none steeper than 40°, then the depth filter (the player passes the entity
+/// and a10 = 1, 0xB10990, so 0xE16717 / 0xE16749 run: detectors 2 cm out and up, −60° × 0.3 and 135° × 0.05, the same
+/// thresholds; without them every end's scratch would be 0.5, `GuidanceReport__SetScratch` 0xE1677C); three
 /// chain sets (`sub_116CD50`): walls facing the jumper (within 45° of −forward), and the two sides (walls turned up to
 /// 45° from right / left, edges along the forward axis). On each chain the grab point toward the facing from the feet
 /// (`GuidanceChain__FindGrabPoint` with the forward as the preferred direction, hand offsets 0.5 / 0.5, margin 0.25: the
-/// 0.5 scratch cancels the offsets), not Quadruped, the wall within 120° of the facing; then its type and path rays
-/// (`ground_extras::static_target_type`), and 0xE97720 picks one (`choose_static_report`).
-/// PORT: the owner entity's validity (0xE165D0's +100 / +102 checks) and the a10 chain variant (sub_B27F70 /
-/// sub_B28260) are not modelled.
+/// depth filter's scratch is what the offsets may reach past a chain's ends), not Quadruped, the wall within 120° of the
+/// facing; then its type and path rays (`ground_extras::static_target_type`), and 0xE97720 picks one
+/// (`choose_static_report`).
+/// PORT: the owner entity's validity (0xE165D0's +100 / +102 checks) is not modelled.
 pub fn static_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld, beam: bool) -> Option<JumpTarget> {
     use crate::guidance::{ChainParams, GuidanceSubType as S, MASK_CATCH};
     let fwd = forward.with_y(0.0).normalize_or_zero();
@@ -2046,8 +2048,15 @@ pub fn static_hand_target(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, c
             (1u32 << e.subtype as u32) & MASK_CATCH != 0 && !crate::guidance::steep(e.p1 - e.p0)
         })
         .collect();
-    let world = GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() };
-    let cuts = vec![(0.5f32, 0.5f32); world.edges.len()];
+    let kept = crate::guidance::Report {
+        world: GuidanceWorld { edges: keep.iter().map(|&i| report.world.edges[i].clone()).collect(), ..Default::default() },
+        source: keep.clone(),
+        scratch: vec![[0.0; 4]; keep.len()],
+    };
+    use crate::guidance::{DepthDetector, DEPTH_OFFSET_EDGE};
+    let detectors = [DepthDetector::new(DEPTH_OFFSET_EDGE, -1.047_197_6, 0.3), DepthDetector::new(DEPTH_OFFSET_EDGE, 2.356_194_5, 0.05)];
+    let filtered = kept.depth_filter(collision, &detectors, &[0.3, 0.05]);
+    let (world, cuts) = (filtered.world, filtered.scratch);
     let q = std::f32::consts::FRAC_PI_4;
     let sets = [
         ChainParams { dir: -fwd, right, ranges: [(-q, 0.0), (0.0, q)], parallel: q, mask: u32::MAX },

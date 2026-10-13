@@ -76,6 +76,7 @@ pub enum CatchFound {
 ///    Under 3 m: `FindClimbCatch` 0xE0AC70 (the ledge catch's search around the feet + 1.95 m) → **type 5**,
 ///    `hangfree_min`.
 /// Every search ignores holds less than 0.5 m below the last released hold (InAirData +0x190 / +0x1F4).
+/// The searches read `CheckAirCatch`'s pre-filtered reports (`catch_reports`), not the world.
 /// PORT: the free hangs' clearance test (`sub_B2DEB0`) is the port's hang boxes.
 pub fn ledge_search(
     feet: Vec3,
@@ -99,11 +100,12 @@ pub fn ledge_search(
     let along = 0.5;
     let half_z = if manual { 0.3 } else { 0.9 };
     let auto = |stand_in: f32| hips.map_or(feet + Vec3::Y * stand_in, |h| h) + Vec3::Y * 0.2;
-    let pair_along = |base: Vec3, dir: Vec3, half_z: f32| {
+    let (hands_report, feet_report) = catch_reports(feet, guidance, collision);
+    let pair_along = |report: &crate::guidance::Report, base: Vec3, dir: Vec3, half_z: f32| {
         let refs = [Vec3::new(-0.25, -0.4, 0.3), Vec3::new(0.25, -0.4, 0.3)];
-        guidance.handhold_pair(base + dir * along, dir, Vec3::new(0.4, along, half_z), refs, angle, 0.1, crate::guidance::MASK_CATCH)
+        report.handhold_pair(base + dir * along, dir, Vec3::new(0.4, along, half_z), refs, angle, 0.1, crate::guidance::MASK_CATCH)
     };
-    let catch_pair = |base: Vec3| pair_along(base, dir, half_z);
+    let catch_pair = |base: Vec3| pair_along(&hands_report, base, dir, half_z);
     // 1. the ledge catch: a hand pair at the feet + 1.4 m
     let ledge_base = if manual { feet + Vec3::Y * 1.4 } else { auto(1.4) };
     if let Some([a, b]) = catch_pair(ledge_base).filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y)) {
@@ -114,7 +116,7 @@ pub fn ledge_search(
         // the feet holds (FindCatchFeetHolds 0xE0A810): the same search from the feet's position at the higher hand's
         // height − 1.2 m, along −(the two hands' wall normals) (into the wall)
         let feet_dir = -Vec3::new(a.wall_normal.x + b.wall_normal.x, 0.0, a.wall_normal.z + b.wall_normal.z).normalize_or(-into);
-        if let Some([fl, fr]) = pair_along(Vec3::new(feet.x, hl.y.max(hr.y) - 1.2, feet.z), feet_dir, 0.3) {
+        if let Some([fl, fr]) = pair_along(&feet_report, Vec3::new(feet.x, hl.y.max(hr.y) - 1.2, feet.z), feet_dir, 0.3) {
             let entry = super::climb::ClimbEntry {
                 // the catch's Ledge fill (SubState 13) enters with type 1 and ClimbData+40 = the hands 0.3 m or more
                 // apart (0xE0CCC7; RE/24 AIR-15 / CLIMB-24). PORT: the Ledge step is skipped
@@ -151,7 +153,8 @@ pub fn ledge_search(
         let centre = if manual { feet + Vec3::Y * 1.95 } else { auto(1.4) } + dir * along;
         let half = Vec3::new(0.4, along, if manual { 0.25 } else { 0.9 });
         let reference = centre - dir * 0.4 + Vec3::Y * 0.25;
-        let hit = guidance
+        let hit = hands_report
+            .world
             .probe_box(centre, super::right_of(dir), dir, Vec3::Y, half, reference, angle, 0.1, crate::guidance::MASK_CATCH)
             .filter(|h| below_release(h.point.y));
         if let Some((mid, n)) = hit.and_then(free) {
@@ -177,6 +180,27 @@ pub fn ledge_search(
         return Some(CatchFound::Hang { mid, normal: n, wall: false, action: super::ledge::ACT_CATCH_FREE[0], one_hand: None });
     }
     None
+}
+
+/// `CheckAirCatch`'s two pre-filtered reports (0xE0BC9D–0xE0BF12, RE/24 AIR-35, RE/26 §6): the whole edges a box at the
+/// feet meets ((−1, −1, −0.2) … (1, 1, 2.2), no clip; the catch types exempt from the box filter, 0xE0BDD1), ladders
+/// out (mask 8), steep edges removed, then the depth filter: detectors 0.27 out and 0.23 below the edge, −45° × 1.2
+/// and 135° × 0.38; thresholds 1.2 / 0.38 for the hand searches (the ledge, climb and free-hang catches) and 0.35 / 0.38
+/// for the feet holds and the edges at the feet. Returns (hands, feet).
+pub fn catch_reports(feet: Vec3, guidance: &crate::guidance::GuidanceWorld, collision: &CollisionWorld) -> (crate::guidance::Report, crate::guidance::Report) {
+    use crate::guidance::{DepthDetector, GuidanceSubType, Report, DEPTH_OFFSET_LIP};
+    let all = guidance.report_indexed(feet, Vec3::NEG_Z, Vec3::new(-1.0, -1.0, -0.2), Vec3::new(1.0, 1.0, 2.2), false);
+    let mut pre = Report::default();
+    for (k, e) in all.world.edges.iter().enumerate() {
+        if e.subtype == GuidanceSubType::Ladder || crate::guidance::steep(e.p1 - e.p0) {
+            continue;
+        }
+        pre.world.edges.push(e.clone());
+        pre.source.push(all.source[k]);
+        pre.scratch.push([0.0; 4]);
+    }
+    let detectors = [DepthDetector::new(DEPTH_OFFSET_LIP, -std::f32::consts::FRAC_PI_4, 1.2), DepthDetector::new(DEPTH_OFFSET_LIP, 2.356_194_5, 0.38)];
+    (pre.depth_filter(collision, &detectors, &[1.2, 0.38]), pre.depth_filter(collision, &detectors, &[0.35, 0.38]))
 }
 
 /// The wall catch's feet (`CheckAirCatch` 0xE0CD2F–0xE0CEBE, type 3): from the hands' midpoint at the higher hand's
@@ -212,8 +236,10 @@ pub fn knee_catch(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidance
     let eye = feet + Vec3::Y * 0.15 - f * 0.2;
     let reference = feet + Vec3::Y * 0.5 - f * 0.2;
     let mut best: Option<(f32, Vec3, Vec3)> = None;
-    // mask 386: LedgeGrab, Quadruped and Kiosk edges (RE/24 AIR-34)
-    for e in guidance.edges.iter().filter(|e| (1u32 << e.subtype as u32) & crate::guidance::MASK_KNEE != 0) {
+    // the edges of the catch's feet report (`HumanInAir__GatherEdgesAtFeet` 0xE0C4E7 reads it; `catch_reports`); mask
+    // 386: LedgeGrab, Quadruped and Kiosk edges (RE/24 AIR-34)
+    let (_, feet_report) = catch_reports(feet, guidance, collision);
+    for e in feet_report.world.edges.iter().filter(|e| (1u32 << e.subtype as u32) & crate::guidance::MASK_KNEE != 0) {
         let n = Vec3::new(e.n1.x, 0.0, e.n1.z);
         if n.length_squared() < 1e-6 {
             continue;

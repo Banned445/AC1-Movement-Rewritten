@@ -287,6 +287,12 @@ fn wedge_clip(a: Vec3, b: Vec3) -> Option<(f32, f32)> {
     (t1 > t0).then_some((t0, t1))
 }
 
+/// The jump query's depth detectors (0xE19113–0xE1914F): 0.27 out and 0.23 below the edge, −75° × 0.27 and 135° × 0.42.
+const JUMP_DEPTH: [crate::guidance::DepthDetector; 2] = [
+    crate::guidance::DepthDetector::new(crate::guidance::DEPTH_OFFSET_LIP, -1.308_997, 0.27),
+    crate::guidance::DepthDetector::new(crate::guidance::DEPTH_OFFSET_LIP, 2.356_194_5, 0.42),
+];
+
 /// The query. `pos` = feet, `dir` = the wanted direction.
 pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<Candidate> {
     let dir = flat(dir);
@@ -365,46 +371,62 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
         if w == Vec3::ZERO {
             continue;
         }
-        // the wedge (a11: every player jump query but a long one passes it, 0xEE8026 / 0xEE81E0 / 0xEE8757 /
-        // 0xEE9712; a10 clears it): the report is clipped to the jump wedge at pos + 0.5·dir (0.7 m higher in mode 3),
-        // kiosks exempt (mask 256), after the ladders, the beams' copy and the steep removal (0xE191D0, `sub_5AA970` →
-        // 0x659570 mode 1); a piece outside it is dropped and a clipped one keeps its cut lengths. Live (RE/25
-        // freerun_east): it drops a corner's side face 0.6 m off the jump line, which the game then does not jump to.
-        let (a, b, cut) = if q.long || e.subtype == GuidanceSubType::Kiosk {
-            (a, b, [0.0, 0.0])
-        } else {
-            let origin = pos + dir * 0.5 + if q.mode == 3 { up * 0.7 } else { Vec3::ZERO };
-            let wl = |p: Vec3| { let d = p - origin; Vec3::new(d.dot(right), d.dot(dir), d.dot(up)) };
-            let Some((t0, t1)) = wedge_clip(wl(a), wl(b)) else { continue };
-            let len = a.distance(b);
-            (a.lerp(b, t0), a.lerp(b, t1), [t0 * len, (1.0 - t1) * len])
+        // the depth filter (a14, the entity, is always passed for the player: `Human__DepthDetectReport` 0xE1914F /
+        // 0xE19466, `Human__DepthFilterReport` 0xE19181 / 0xE19498, after the box filter and before the wedge):
+        // detectors 0.27 out and 0.23 below the edge, −75° × 0.27 and 135° × 0.42, the same thresholds. It splits the
+        // edge where the samples are blocked and gives each piece the room past its ends as its scratch, which the grab
+        // point's offset (0 here) may reach into (RE/26 §6); the wedge's cut lengths are added to it (0x6764E0).
+        let depth = {
+            let one = crate::guidance::Report {
+                world: GuidanceWorld { edges: vec![crate::guidance::GuidanceEdge { p0: a, p1: b, ..e.clone() }], ..Default::default() },
+                source: vec![i],
+                scratch: vec![[0.0; 4]],
+            };
+            one.depth_filter(collision, &JUMP_DEPTH, &[0.27, 0.42])
         };
-        if a.distance(b) <= 0.0005 {
-            continue;
-        }
-        // the three chain sets (`GuidanceChain__Build` 0x116CD50 at 0xE19AD6 / 0xE19B13 / 0xE19B70, RE/24 AIR-27):
-        // (reference, axis, turn range), right = dir × up (var_EAC, 0xE198F0). An edge belongs to a set when its
-        // direction runs within 45° of the axis and its outward perpendicular is turned from the reference by a signed
-        // angle in the range (`GuidanceWorld::chains`' convention, RE/24 GUIDE-8): set 0 the walls within 45° of facing
-        // the jumper, sets 1 / 2 a single 45° wedge from ±right toward the jumper. A wall facing away is in none.
-        let q4 = std::f32::consts::FRAC_PI_4;
-        let d = (b - a).normalize();
-        let low = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
-        let mut perp = d.cross(up).normalize_or_zero();
-        if perp.dot(low) < 0.0 {
-            perp = -perp;
-        }
-        let mut sets = 0u8;
-        for (k, (r, axis, lo, hi)) in [(-dir, right, -q4, q4), (right, dir, 0.0, q4), (-right, dir, -q4, 0.0)].into_iter().enumerate() {
-            if d.dot(axis).abs() < q4.cos() - 1e-6 {
+        for (piece, sc) in depth.world.edges.iter().zip(&depth.scratch) {
+            let (a, b) = (piece.p0, piece.p1);
+            // the wedge (a11: every player jump query but a long one passes it, 0xEE8026 / 0xEE81E0 / 0xEE8757 /
+            // 0xEE9712; a10 clears it): the report is clipped to the jump wedge at pos + 0.5·dir (0.7 m higher in mode 3),
+            // kiosks exempt (mask 256), after the ladders, the beams' copy and the steep removal (0xE191D0, `sub_5AA970` →
+            // 0x659570 mode 1); a piece outside it is dropped and a clipped one keeps its cut lengths. Live (RE/25
+            // freerun_east): it drops a corner's side face 0.6 m off the jump line, which the game then does not jump to.
+            let (a, b, cut) = if q.long || e.subtype == GuidanceSubType::Kiosk {
+                (a, b, [sc[0], sc[1]])
+            } else {
+                let origin = pos + dir * 0.5 + if q.mode == 3 { up * 0.7 } else { Vec3::ZERO };
+                let wl = |p: Vec3| { let d = p - origin; Vec3::new(d.dot(right), d.dot(dir), d.dot(up)) };
+                let Some((t0, t1)) = wedge_clip(wl(a), wl(b)) else { continue };
+                let len = a.distance(b);
+                (a.lerp(b, t0), a.lerp(b, t1), [sc[0] + t0 * len, sc[1] + (1.0 - t1) * len])
+            };
+            if a.distance(b) <= 0.0005 {
                 continue;
             }
-            let turn = perp.cross(r).dot(up).atan2(perp.dot(r));
-            if turn >= lo - 1e-4 && turn <= hi + 1e-4 {
-                sets |= 1 << k;
+            // the three chain sets (`GuidanceChain__Build` 0x116CD50 at 0xE19AD6 / 0xE19B13 / 0xE19B70, RE/24 AIR-27):
+            // (reference, axis, turn range), right = dir × up (var_EAC, 0xE198F0). An edge belongs to a set when its
+            // direction runs within 45° of the axis and its outward perpendicular is turned from the reference by a signed
+            // angle in the range (`GuidanceWorld::chains`' convention, RE/24 GUIDE-8): set 0 the walls within 45° of facing
+            // the jumper, sets 1 / 2 a single 45° wedge from ±right toward the jumper. A wall facing away is in none.
+            let q4 = std::f32::consts::FRAC_PI_4;
+            let d = (b - a).normalize();
+            let low = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
+            let mut perp = d.cross(up).normalize_or_zero();
+            if perp.dot(low) < 0.0 {
+                perp = -perp;
             }
+            let mut sets = 0u8;
+            for (k, (r, axis, lo, hi)) in [(-dir, right, -q4, q4), (right, dir, 0.0, q4), (-right, dir, -q4, 0.0)].into_iter().enumerate() {
+                if d.dot(axis).abs() < q4.cos() - 1e-6 {
+                    continue;
+                }
+                let turn = perp.cross(r).dot(up).atan2(perp.dot(r));
+                if turn >= lo - 1e-4 && turn <= hi + 1e-4 {
+                    sets |= 1 << k;
+                }
+            }
+            pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sets, cut });
         }
-        pieces.push(Piece { edge: i, a, b, subtype: e.subtype, sets, cut });
     }
 
     // ---------------------------------------------------------------- chains (sub_116CD50 × 3 → sub_678670)

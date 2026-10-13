@@ -213,9 +213,9 @@ const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
     // the free-hang balcony: 2.9 m, inside the tap jump's 3.0 m reach zone (JumpZones slot 3, RE/18 §1.2)
     (2.0, 2.9, 36.0, 6.0, 1.2, 0.3),
     (64.5, 2.6, 50.0, 3.0, 0.6, 0.3), // overhang continuing wall F's ledge (hang-type switch test)
-    (60.0, 3.4, 90.0, 3.0, 0.2, 0.2), // swing bars 3.5 m apart
-    (60.0, 3.4, 93.5, 3.0, 0.2, 0.2),
-    (60.0, 3.4, 97.0, 3.0, 0.2, 0.2),
+    (60.0, 3.4, 90.0, 3.0, 0.1, 0.2), // swing bars 3.5 m apart, 0.1 m deep: their Pole edges on the top corners as in Damascus (0.095 m apart), clear of the depth filter's rays (RE/26 §6)
+    (60.0, 3.4, 93.5, 3.0, 0.1, 0.2),
+    (60.0, 3.4, 97.0, 3.0, 0.1, 0.2),
     (89.0, 6.3, 70.0, 2.0, 1.4, 0.3), // above the free beam: the beam's straight jump at a hand target (2.3 m); deeper than 1 m: not a beam
     // an overhang 1 m out from the climb tower over its left gap: the climb's jump up to it (TryBackEject 0xDF2F50)
     (-22.0, 3.5, 26.5, 1.2, 1.0, 0.2),

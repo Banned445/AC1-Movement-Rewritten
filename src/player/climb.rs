@@ -1510,7 +1510,7 @@ pub fn update_climb(
         let dir = quantize(pad.actor_dir(facing, false), facing);
         // ChooseMove's report: ladder zones carved and steep edges removed; the grid's cell probes and every reach read
         // it (`HumanClimb__BuildHoldGrid` 0xDF6A40, the cell probes pass `arg_8` at 0xDF740A; RE/24 GUIDE-2 / CLIMB-14)
-        let guidance = guidance.ledge_report(body.feet + Vec3::Y, 3.5, true);
+        let guidance = guidance.ledge_report_depth(body.feet + Vec3::Y, 3.5, true, crate::guidance::LEDGE_DEPTH, &collision);
         // ChooseMove 0xDFDE90 step 2: a ladder at the side (TryLadder 0xDF10C0) before any grid move
         if let Some(mut e) = side_ladder(&guidance, body.feet, facing, dir) {
             e.from = body.feet;
