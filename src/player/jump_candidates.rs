@@ -229,8 +229,9 @@ struct Piece {
     subtype: GuidanceSubType,
     /// The chain sets the piece belongs to (bit k = set k).
     sets: u8,
-    /// The lengths the wedge cut off at `a` and `b` (`GuidanceContact__AddCutLengths` 0x6764E0).
-    cut: [f32; 2],
+    /// The contact scratch: the depth filter's room past `a` ([0] / [2]) and `b` ([1] / [3]) plus the lengths the wedge
+    /// cut off there (`GuidanceContact__AddCutLengths` 0x6764E0).
+    cut: crate::guidance::Scratch,
 }
 
 /// The jump wedge: the `MeshShape` of the shared `GuidanceZoneMesh` at `sub_4155B0()` +208 (vertices and triangles read
@@ -392,13 +393,14 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
             // 0x659570 mode 1); a piece outside it is dropped and a clipped one keeps its cut lengths. Live (RE/25
             // freerun_east): it drops a corner's side face 0.6 m off the jump line, which the game then does not jump to.
             let (a, b, cut) = if q.long || e.subtype == GuidanceSubType::Kiosk {
-                (a, b, [sc[0], sc[1]])
+                (a, b, *sc)
             } else {
                 let origin = pos + dir * 0.5 + if q.mode == 3 { up * 0.7 } else { Vec3::ZERO };
                 let wl = |p: Vec3| { let d = p - origin; Vec3::new(d.dot(right), d.dot(dir), d.dot(up)) };
                 let Some((t0, t1)) = wedge_clip(wl(a), wl(b)) else { continue };
                 let len = a.distance(b);
-                (a.lerp(b, t0), a.lerp(b, t1), [sc[0] + t0 * len, sc[1] + (1.0 - t1) * len])
+                let (ca, cb) = (t0 * len, (1.0 - t1) * len);
+                (a.lerp(b, t0), a.lerp(b, t1), [sc[0] + ca, sc[1] + cb, sc[2] + ca, sc[3] + cb])
             };
             if a.distance(b) <= 0.0005 {
                 continue;
@@ -457,12 +459,18 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
     }
 
     // ---------------------------------------------------------------- the main loop (grab point per chain)
+    // the pieces as a guidance report (each piece an edge from `a` to `b`, its scratch) for the grab point
+    let piece_world = GuidanceWorld {
+        edges: pieces.iter().map(|p| crate::guidance::GuidanceEdge { p0: p.a, p1: p.b, ..guidance.edges[p.edge].clone() }).collect(),
+        ..Default::default()
+    };
+    let piece_scratch: Vec<crate::guidance::Scratch> = pieces.iter().map(|p| p.cut).collect();
     for chain in &chains {
         let piece0 = &pieces[chain[0].0];
         if (1u32 << piece0.subtype as u32) & q.exclude != 0 {
             continue;
         }
-        let Some((pi, g)) = grab_point(chain, &pieces, centre, dir) else { continue };
+        let Some((pi, g)) = grab_point(chain, &piece_world, &piece_scratch, centre, dir) else { continue };
         let piece = &pieces[pi];
         let e = &guidance.edges[piece.edge];
         let kind = piece.subtype;
@@ -677,51 +685,15 @@ fn nearest_on_shortened(p: Vec3, a: Vec3, b: Vec3, step: f32) -> Vec3 {
     crate::guidance::closest_on_segment(a + d * step, b - d * step, p)
 }
 
-/// `GuidanceChain__FindGrabPoint` 0x66E150 (margin 0.5, no hand offsets): `centre` projected along `dir` onto the
-/// chain's vertical plane, kept 0.5 m from the chain's ends; the piece carrying it and the point on that piece.
-fn grab_point(chain: &[(usize, Vec3, Vec3)], pieces: &[Piece], centre: Vec3, dir: Vec3) -> Option<(usize, Vec3)> {
-    let s = chain.first()?.1;
-    let e = chain.last()?.2;
-    // the cut lengths at the chain's free ends lengthen it (0x66E150: each hand offset, here 0, less the end's cut
-    // scratch; live RE/25 freerun_east: the grab point lies past the wedge-clipped end, at the middle of the piece the
-    // box left)
-    let cut_at = |pi: usize, q: Vec3| { let p = &pieces[pi]; if p.a.distance(q) <= p.b.distance(q) { p.cut[0] } else { p.cut[1] } };
-    let (cs, ce) = (cut_at(chain[0].0, s), cut_at(chain[chain.len() - 1].0, e));
-    let u = flat(e - s);
-    if u == Vec3::ZERO {
-        // a chain without horizontal extent: its first piece's middle
-        let (pi, a, b) = chain[0];
-        return Some((pi, (a + b) * 0.5));
-    }
-    let n = u.cross(Vec3::Y);
-    let denom = dir.dot(n);
-    let proj = if denom.abs() > 1e-6 { centre + dir * ((s - centre).dot(n) / denom) } else { centre - n * (centre - s).dot(n) };
-    let len = Vec2::new(e.x - s.x, e.z - s.z).length();
-    let t = (proj - s).dot(u);
-    let (lo, hi) = (-cs, len + ce);
-    let t = if hi - lo > 1.0 { t.clamp(lo + 0.5, hi - 0.5) } else { (lo + hi) * 0.5 };
-    // past a free end: on the end piece's line
-    for (&(pi, a, b), out) in [(chain.first()?, t < 0.0), (chain.last()?, t > len)] {
-        let (ta, tb) = ((a - s).dot(u), (b - s).dot(u));
-        if out && (tb - ta).abs() > 1e-6 {
-            return Some((pi, a.lerp(b, (t - ta) / (tb - ta))));
-        }
-    }
-    // the piece whose flat extent along the chain carries t
-    let mut best: Option<(f32, usize, Vec3)> = None;
-    for &(pi, a, b) in chain {
-        let (ta, tb) = ((a - s).dot(u), (b - s).dot(u));
-        if (tb - ta).abs() > 1e-6 && (ta.min(tb)..=ta.max(tb)).contains(&t) {
-            return Some((pi, a.lerp(b, (t - ta) / (tb - ta))));
-        }
-        for (q, tq) in [(a, ta), (b, tb)] {
-            let d = (tq - t).abs();
-            if best.is_none_or(|x| d < x.0) {
-                best = Some((d, pi, q));
-            }
-        }
-    }
-    best.map(|b| (b.1, b.2))
+/// `GuidanceChain__FindGrabPoint` 0x66E150 as the jump query calls it (0xE1A11B): the hand offsets 0.5 / 0.1 (the
+/// list built at 0xE1A03B), margin 0.5, no preferred direction, `centre` carried onto the chain's plane along `dir`.
+/// Each piece's scratch is the depth filter's room past its ends plus the wedge's cut lengths, so a piece the wedge cut
+/// reaches back over the part it lost (live 2026-10-13, course `freerun_east_depth`: the post's west edge 6.999 → 6.202,
+/// all samples free (room 0.5), the wedge leaves 6.544 → 6.202; the grab point is the whole edge's middle, 6.601). The
+/// piece carrying the point and the point.
+fn grab_point(chain: &[(usize, Vec3, Vec3)], world: &GuidanceWorld, scratch: &[crate::guidance::Scratch], centre: Vec3, dir: Vec3) -> Option<(usize, Vec3)> {
+    let chain = crate::guidance::Chain { links: chain.to_vec() };
+    world.grab_point_toward(&chain, centre, None, Some(dir), &[0.5, 0.1], 0.5, scratch).map(|h| (h.edge, h.point))
 }
 
 /// The scorer 0xE96BF0. `actor` = feet, `facing` = the actor's forward, `want` = the wanted direction (the stick or
