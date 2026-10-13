@@ -918,3 +918,17 @@ fn damascus_pulls_up_onto_a_beam_from_a_hang() {
     let feet = s.body().feet;
     assert!((feet.x - 51.97).abs() < 0.15 && (feet.y - 11.17).abs() < 0.05, "on the beam's line: {feet}");
 }
+
+/// RE/28 §2 (live 2026-10-12_123944/014): standing on the Bureau courtyard beam in the Ground, the stick across it
+/// mounts the beam in the frame it moves (the interpreter asks event 72's guard with the stick, before the edge halt
+/// and the pivot); the port had stayed in the Ground, turning on the spot.
+#[test]
+fn damascus_standing_on_a_beam_the_stick_mounts_it() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.place(Vec3::new(51.97, 11.17, 1.0), Vec3::Z);
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    // the game's stick in 014: back and to the left of the facing (game md (−0.59, 0.81))
+    s.pad(Vec3::new(-0.588, 0.0, -0.81), 1.0, false, false);
+    assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted: {:?} {}", s.loco().current, s.body().feet);
+}
