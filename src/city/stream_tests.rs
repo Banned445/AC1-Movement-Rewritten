@@ -117,6 +117,20 @@ impl CitySim {
     pub fn body(&self) -> &Body { self.app.world().get::<Body>(self.player).unwrap() }
     pub fn loco(&self) -> &Locomotion { self.app.world().get::<Locomotion>(self.player).unwrap() }
     pub fn stats(&self) -> super::stream::CityStats { self.app.world().resource::<super::stream::City>().0.as_ref().unwrap().stats.clone() }
+    /// A fresh player in place of the old one (all its components rebuilt: contexts, data, animation), and the pad,
+    /// the camera rig and the player's resources reset: a batch replay starts each recording as a new process would.
+    pub fn respawn_player(&mut self, feet: Vec3, heading: f32) {
+        let animated = self.app.world().get::<crate::anim::AnimPlayer>(self.player).is_some();
+        self.app.world_mut().despawn(self.player);
+        let player = self.app.world_mut().spawn((crate::player::player_components(feet, heading), Transform::default())).id();
+        if animated {
+            self.app.world_mut().entity_mut(player).insert(crate::anim::AnimPlayer::default());
+        }
+        self.player = player;
+        self.app.insert_resource(crate::map_menu::neutral_pad());
+        self.app.insert_resource(crate::camera::CameraRig::default());
+    }
+
     pub fn teleport(&mut self, feet: Vec3) {
         let mut b = self.app.world_mut().get_mut::<Body>(self.player).unwrap();
         b.feet = feet; b.velocity = Vec3::ZERO; b.proxy.manifold.clear();
@@ -189,15 +203,42 @@ fn replay_lab_trace_city() {
         eprintln!("set AC_LAB_TRACE to a lab frames.csv");
         return;
     };
-    let trace = crate::sim_tests::load_lab_trace(&path);
     let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    replay_trace(&mut s, &path, false);
+}
+
+/// Every recording listed in the file `AC_LAB_TRACES` (one frames.csv per line) in one process: the city is loaded once
+/// and each replay starts with a fresh player at its recording's start (`CitySim::respawn_player`), so nothing carries
+/// over from the one before. Writes each `port_trace.csv` as `replay_lab_trace_city` does (livelab/tools/compare_all.py).
+#[test]
+#[ignore = "live-analysis replay; requires the local game install"]
+fn replay_lab_traces_city() {
+    let Ok(list) = std::env::var("AC_LAB_TRACES") else {
+        eprintln!("set AC_LAB_TRACES to a file listing frames.csv paths");
+        return;
+    };
+    let paths: Vec<String> = std::fs::read_to_string(&list).expect("read AC_LAB_TRACES").lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    for (i, path) in paths.iter().enumerate() {
+        let started = std::time::Instant::now();
+        replay_trace(&mut s, path, i > 0);
+        eprintln!("replayed {}/{} in {:.1} s: {path}", i + 1, paths.len(), started.elapsed().as_secs_f32());
+    }
+}
+
+fn replay_trace(s: &mut CitySim, path: &str, respawn: bool) {
+    let trace = crate::sim_tests::load_lab_trace(path);
     // game (x, y, z) -> Bevy (x, z, -y)
     let start = Vec3::new(trace.start.x, trace.start.z, -trace.start.y);
+    if respawn {
+        s.respawn_player(start, trace.heading);
+    }
     s.teleport(start);
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
     // let the cells around the start stream in, standing (a recording far from the spawn waited on the streaming hold
     // while its inputs ran on)
     s.app.insert_resource(crate::map_menu::neutral_pad());
+    s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(1.0 / 60.0)));
     s.settle_streaming(120.0, Some(start));
     s.teleport(start);
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
@@ -217,7 +258,7 @@ fn replay_lab_trace_city() {
         let clip = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()).unwrap_or_default();
         out.push_str(&crate::sim_tests::lab_trace_row(i, t, s.loco().current, &clip, s.body().feet - start, s.body().velocity, s.app.world(), s.player));
     }
-    let dst = std::path::Path::new(&path).with_file_name("port_trace.csv");
+    let dst = std::path::Path::new(path).with_file_name("port_trace.csv");
     std::fs::write(&dst, out).expect("write port_trace.csv");
     eprintln!("{} frames from {:?} -> {}", trace.frames.len(), trace.start, dst.display());
 }
