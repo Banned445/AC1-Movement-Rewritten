@@ -2783,13 +2783,12 @@ fn swing_from_bar_to_bar() {
     assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some()), "never swung: {:?} {:?}", s.loco().current, s.body().feet);
     assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_LANDING);
     // both hands on a pole (the bars are Pole edges) → the swing cycle; high profile and Legs held keep it going and
-    // jump with the stick toward the facing (RE/24 LEDGE-17)
+    // jump with the stick toward the facing, without a press (Legs held, 0xEECE5E; RE/24 LEDGE-17, RE/27 C1)
     assert!(s.data().ledge.swing.unwrap().on_pole, "the bar is a pole");
     s.pad(Vec3::Z, 1.0, true, true);
     assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle: {:?}", s.data().ledge.swing.map(|w| w.phase));
     assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_CYCLE);
     for z in [93.5f32, 97.0] {
-        s.press_legs();
         assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no swing jump toward {z}");
         assert_eq!(s.data().air.takeoff.unwrap().id, TAKEOFF_SWING);
         assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some() && s.loco().current == ActorContextId::Ledge), "never reached bar {z}: {:?} {:?}", s.loco().current, s.body().feet);
@@ -2797,8 +2796,7 @@ fn swing_from_bar_to_bar() {
         assert!((mid.z - (z - 0.1)).abs() < 0.05, "hands on bar {z}: {mid:?}");
         assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle on {z}");
     }
-    // and onto the far platform
-    s.press_legs();
+    // and onto the far platform, still only holding
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir));
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?} {:?}", s.loco().current, s.body().feet);
     // on its edge: the free-step arrival ends on the candidate (RE/24 AIR-2)

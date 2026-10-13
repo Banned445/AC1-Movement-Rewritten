@@ -651,13 +651,12 @@ pub fn update_ledge(
             body.heading = heading_of(s.fwd);
             let mut feet = body.feet;
             // the interpreter's ledge state (0xEECCF9–0xEED11F): +4397 = high profile and Legs held; the jump (event 7) with
-            // the stick past the dead zone within 75° of the facing (1.3089969) and Legs pressed (RE/24 LEDGE-17)
+            // the stick past the dead zone within 75° of the facing (1.3089969) and Legs held (`sub_6D0F50(0)` =
+            // `Pad__IsPressed`, 0xEECE5E; RE/24 LEDGE-17, RE/27 C1): holding Legs with the stick forward jumps off at the
+            // release point, no press needed
             let held = pad.high_profile && pad.legs_held;
             let toward = pad.speed01 > 0.0 && pad.dir_snap.dot(s.fwd) > 1.308_997f32.cos();
-            let jump = held && toward && pad.jump_buffered();
-            if jump {
-                pad.consume_jump();
-            }
+            let jump = held && toward;
             let out = super::swing::update(&mut s, dt, held, jump, &mut feet, &collision, |p, f| super::targets::swing_jump_target(p, f, &guidance, &collision));
             body.feet = feet;
             match out {
