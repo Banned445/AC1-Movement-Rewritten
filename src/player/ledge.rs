@@ -1070,6 +1070,15 @@ pub fn update_ledge(
             d.last_action = if up { "hand step up" } else { "hand step down" };
             continue;
         }
+        // Ledge event 10, the turn round under a beam (RE/28 §7): the interpreter sends it for the stick more than 135°
+        // from the facing (0xEECCCA) when its guard passes. PORT (order): taken before the vertical moves the same stick
+        // asks for (the game posts the event from the interpreter and the Movement choice runs in the ledge update).
+        if dir == LedgeDir::Down {
+            if let Some(mv) = ledge_moves::try_turn_under_beam(d.hand_l, d.hand_r, n, body.feet, d.hang_type, &guidance, &collision) {
+                start_move(d, mv, "turn under beam");
+                continue;
+            }
+        }
         match dir {
             LedgeDir::Up | LedgeDir::Down => {
                 let sign = if dir == LedgeDir::Up { 1.0 } else { -1.0 };

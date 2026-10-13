@@ -919,6 +919,52 @@ fn damascus_pulls_up_onto_a_beam_from_a_hang() {
     assert!((feet.x - 51.97).abs() < 0.15 && (feet.y - 11.17).abs() < 0.05, "on the beam's line: {feet}");
 }
 
+/// RE/28 §7 (live 2026-10-13_210349/006): hanging free from the Bureau courtyard beam, the stick back (more than 135°
+/// from the facing) turns round under the beam onto its other side (Ledge event 10, `xx_h_hangfree_turn_beam_180`), the
+/// hands on the far edge, still in a free hang.
+#[test]
+fn damascus_hanging_from_a_beam_the_stick_back_turns_under_it() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.place(Vec3::new(51.97, 11.48, -4.0), Vec3::Z);
+    s.run(0.5);
+    s.pad(Vec3::Z, 0.6, false, false);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted the beam");
+    s.run(1.2);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0);
+    s.pad(Vec3::X, 1.0, false, false);
+    s.run(0.3);
+    s.app.world_mut().resource_mut::<crate::input::PadInput>().hand_held = true;
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
+    s.app.world_mut().resource_mut::<crate::input::PadInput>().hand_held = false;
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(2.0);
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "hanging");
+    let f = Vec3::new(-s.body().heading.sin(), 0.0, -s.body().heading.cos());
+    let side = (s.body().feet.x - 51.97).signum();
+    // the stick back, away from the beam
+    s.pad(-f, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ledge.last_action == "turn under beam"), "no turn: {:?}", s.data().ledge.last_action);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    // the facing turns with the clip, no frame jumps through the half turn
+    let mut h = s.body().heading;
+    let mut worst = 0.0f32;
+    for _ in 0..180 {
+        s.step();
+        let mut dh = s.body().heading - h;
+        dh = (dh + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        worst = worst.max(dh.abs());
+        h = s.body().heading;
+    }
+    assert!(worst < 0.25, "the heading jumps {worst} rad in one frame");
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "still hanging");
+    let g = Vec3::new(-s.body().heading.sin(), 0.0, -s.body().heading.cos());
+    assert!(g.dot(f) < -0.95, "turned round: {f} → {g}");
+    assert_eq!(s.data().ledge.hang_type, crate::player::ledge::LedgeHangType::Free);
+    let feet = s.body().feet;
+    assert!((feet.x - 51.97).signum() == -side && (feet.x - 51.97).abs() > 0.1, "on the beam's other side: {feet}");
+}
+
 /// RE/28 §2 (live 2026-10-12_123944/014): standing on the Bureau courtyard beam in the Ground, the stick across it
 /// mounts the beam in the frame it moves (the interpreter asks event 72's guard with the stick, before the edge halt
 /// and the pivot); the port had stayed in the Ground, turning on the spot.
