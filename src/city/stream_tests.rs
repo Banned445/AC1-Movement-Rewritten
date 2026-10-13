@@ -827,3 +827,55 @@ fn probe_city_climb_survey() {
     eprintln!("SUMMARY {summary:?}");
 }
 
+
+/// RE/27 S8: the city's long beams are chains of ≈ 3 m pieces in HumanGuidance's runtime report. Walking one goes on
+/// from piece to piece (`DetectBeamSegments` 0xF753A0's next segment) and stops once at the chain's end; before, it
+/// stepped off into the Ground at every piece's end, and at a short cap piece over an end it started and stopped
+/// every few frames.
+#[test]
+fn damascus_beam_chains_walk_through_without_stopping() {
+    use crate::guidance::GuidanceSubType;
+    let mut walked = 0;
+    for spawn in ["PlayerSpawner_DEBUG_Palace", "PlayerSpawner_DEBUG_Academy"] {
+        let Some(mut s) = CitySim::new(spawn) else { return };
+        let (c, g) = (s.collision(), s.guidance());
+        let mut beams: Vec<(Vec3, Vec3)> = Vec::new();
+        for e in g.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.p0.distance(e.p1) > 2.5 && e.n0.y > 0.9) {
+            for b in crate::guidance::beam_contacts::detect(g, c, (e.p0 + e.p1) * 0.5, Vec3::new(1.5, 0.6, 1.5)) {
+                if b.p0.distance(b.p1) > 2.5 && (b.p1.y - b.p0.y).abs() < 0.3 && !beams.iter().any(|x| x.0.distance(b.p0) < 0.5) { beams.push((b.p0, b.p1)); }
+            }
+        }
+        let mut spots = Vec::new();
+        for &(p0, p1) in &beams {
+            for (a, b) in [(p0, p1), (p1, p0)] {
+                let dir = (b - a).with_y(0.0).normalize();
+                let from = a - dir * 1.2;
+                let Some(floor) = c.floor_height_below(from + Vec3::Y * 0.4, 0.8) else { continue };
+                let feet = Vec3::new(from.x, floor, from.z);
+                if (floor - a.y).abs() > 0.3 || !c.capsule_fits(feet) || !c.capsule_fits(a.lerp(b, 0.5) + Vec3::Y * 0.05) { continue; }
+                spots.push((feet, dir));
+            }
+        }
+        for &(feet, dir) in spots.iter().take(6) {
+            s.place(feet, dir);
+            s.run(0.2);
+            s.pad(dir, 1.0, false, false);
+            if !s.run_until(3.0, |s| s.loco().current == ActorContextId::NarrowObject) { s.pad(dir, 0.0, false, false); s.run(1.0); continue; }
+            walked += 1;
+            let start = s.body().feet;
+            let (mut starts, mut last) = (0, None);
+            for _ in 0..300 {
+                s.run(1.0 / 60.0);
+                if s.loco().current != ActorContextId::NarrowObject { break; }
+                let st = s.data().narrow.state;
+                if st == crate::player::narrow::BeamState::Start && last != Some(st) { starts += 1; }
+                last = Some(st);
+            }
+            let along = (s.body().feet - start).dot(dir);
+            assert!(starts <= 1, "{spawn} from {start}: the walk started {starts} times");
+            assert!(along > 2.5, "{spawn} from {start}: only {along:.2} m along before {:?} {:?}", s.loco().current, s.data().narrow.state);
+            s.pad(dir, 0.0, false, false); s.run(1.0);
+        }
+    }
+    assert!(walked >= 6, "only {walked} beams mounted");
+}
