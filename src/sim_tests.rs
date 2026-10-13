@@ -2167,7 +2167,8 @@ fn walking_a_bent_beam_carries_on_round_the_bend() {
     force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::Z }));
     s.run(0.2);
     s.pad(Vec3::Z, 1.0, false, false);
-    assert!(s.run_until(6.0, |s| s.data().narrow.p0 == Vec3::new(105.0, 4.0, 76.0)), "never switched segments: {:?} {:?} p0 {:?} p1 {:?} s {}", s.data().narrow.state, s.body().feet, s.data().narrow.p0, s.data().narrow.p1, s.data().narrow.s);
+    // (the segment's ends run on to the drop edges beyond them, `sub_F72FD0`, RE/28 §3: its far end is the bend's)
+    assert!(s.run_until(6.0, |s| s.data().narrow.p1 == Vec3::new(106.5, 4.0, 78.6)), "never switched segments: {:?} {:?} p0 {:?} p1 {:?} s {}", s.data().narrow.state, s.body().feet, s.data().narrow.p0, s.data().narrow.p1, s.data().narrow.s);
     s.pad((Vec3::new(1.5, 0.0, 2.6)).normalize(), 1.0, false, false);
     assert!(s.run_until(6.0, |s| s.body().feet.z > 77.5), "never walked on: {:?} {:?}", s.data().narrow.state, s.body().feet);
     let f = s.body().feet;

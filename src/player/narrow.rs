@@ -374,6 +374,10 @@ pub struct HumanNarrowObjectData {
     /// searches go along (0xEE9F34 / 0xEE9026); cleared by the impulsion (event 2, 0xEEB15C / 0xEE9AE0). Kept across
     /// entries, as the interpreter keeps it.
     pub jump_dir: Vec3,
+    /// The walkable run past the segment's ends (`extend_segment`): before `p0`, after `p1` (m); `ext_of` the piece it was
+    /// measured for (a new one, entered, rebound or switched, is measured once). `p0` / `p1` stay the report's piece.
+    ext: (f32, f32),
+    ext_of: Option<(Vec3, Vec3)>,
 }
 
 /// The beam's speed bands (beam +164, `sub_F7D3E0` 0xF7D600–0xF7D61B): [walk, walk, jog, jog, jog], each the walk
@@ -556,8 +560,11 @@ impl HumanNarrowObjectData {
     }
 
     /// Root on the beam line at `s`.
+    /// The point `s` along the segment's line. Not clamped to its ends: between two pieces (a gap the next one starts
+    /// beyond) the root goes on along the line (RE/28 §4: clamped, it jumped the gap to the next piece's start); the
+    /// end clamp of the root motion keeps the walk on the run.
     pub fn point(&self, s: f32) -> Vec3 {
-        let u = (s / self.len().max(1e-4)).clamp(0.0, 1.0);
+        let u = s / self.len().max(1e-4);
         self.p0.lerp(self.p1, u)
     }
 
@@ -572,7 +579,16 @@ impl HumanNarrowObjectData {
 
     /// Distance left to the end the character faces.
     fn to_end(&self) -> f32 {
-        if self.toward_p1 { self.len() - self.s } else { self.s }
+        if self.toward_p1 { self.hi_end() - self.s } else { self.s - self.lo_end() }
+    }
+
+    /// The run's ends along the segment (`s`), the extension past its ends included (RE/28 §3).
+    fn lo_end(&self) -> f32 {
+        -self.ext.0
+    }
+
+    fn hi_end(&self) -> f32 {
+        self.len() + self.ext.1
     }
 
     pub fn current(&self) -> Option<(ActionBlend, f32)> {
@@ -912,7 +928,7 @@ fn clear_above(p: Vec3, collision: &CollisionWorld) -> bool {
 
 /// Preview `CanStepOffBeamEnd` 0xF77C00 clearance beyond the end. PORT: requires floor support too.
 fn can_step_off(n: &HumanNarrowObjectData, collision: &CollisionWorld) -> bool {
-    let end = if n.toward_p1 { n.p1 } else { n.p0 };
+    let end = if n.toward_p1 { n.point(n.hi_end()) } else { n.point(n.lo_end()) };
     let beyond = end + n.facing() * 0.5;
     // 0xF77C00: an oriented clearance box. Floor probing is a PORT guard while native controller
     // support/fall handling for mode 8 is incomplete; it prevents walking in the air.
@@ -1181,6 +1197,45 @@ fn beam_report(root: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld)
     crate::guidance::beam_contacts::detect(guidance, collision, root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0)).into_iter().map(|b| (b.p0, b.p1)).collect()
 }
 
+/// `sub_F72FD0` (DetectBeamSegments' segment ends, RE/28 §3): from each end of the chosen segment, along it, the drop
+/// edge ahead (IHuman vt144 `Human__FindDropEdgeAhead` 0xB1C100: −0.1 … 1.25 m on, ±0.5 m up, a drop of 0.3 m or more
+/// along the segment, step 0.02) becomes the end: the walkable run of a beam reaches over what it rests against (live,
+/// the Bureau courtyard beam's end runs on over the cross plank 0.41 m higher, to its far edge). PORT: the search reach
+/// beyond a connected piece (`sub_1174260`'s distance, added to the 1.25 m) is not modelled.
+fn extend_segment(p0: Vec3, p1: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> (Vec3, Vec3) {
+    let d = Vec3::new(p1.x - p0.x, 0.0, p1.z - p0.z).normalize_or_zero();
+    if d == Vec3::ZERO {
+        return (p0, p1);
+    }
+    let end = |p: Vec3, dir: Vec3| super::free_step::drop_edge_report(p, dir, (-0.1, 1.25), (-0.5, 0.5), 0.3, false, guidance, collision)
+        .map(|(x, _)| {
+            // the crossing point on the segment's vertical plane, kept at the segment's height (the game sets it to the
+            // root's, which follows the support)
+            let t = (x - p).dot(dir);
+            Vec3::new(p.x + dir.x * t, p.y, p.z + dir.z * t)
+        })
+        .filter(|q| (*q - p).dot(dir) > 0.0)
+        .unwrap_or(p);
+    (end(p0, -d), end(p1, d))
+}
+
+/// The beam root's height (PORT for the controller, RE/28 §3): on the beam the game's root rests on the support under
+/// it (the segment's z is set to the root's), so it steps up onto what the beam runs into and stays on a ledge lip until
+/// the capsule's rim leaves it; the stick-to-ground support within ±0.45 m of the beam's line, else the line.
+fn beam_root(n: &HumanNarrowObjectData, collision: &CollisionWorld) -> Vec3 {
+    let p = n.stand();
+    if n.kind != NarrowKind::Beam
+        || !matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Stop | BeamState::Turn
+            | BeamState::TurnTo90 | BeamState::Wait90 | BeamState::TurnBack | BeamState::Turn90 | BeamState::ImpulseIn | BeamState::ImpulseWait)
+    {
+        return p;
+    }
+    match collision.support(p + Vec3::Y * 0.05) {
+        Some(s) if (s.y - p.y).abs() <= 0.45 => Vec3::new(p.x, s.y, p.z),
+        _ => p,
+    }
+}
+
 /// The same beam piece: equal ends, or (PORT: the runtime report is paired again each query, so the same piece can come
 /// back with slightly different ends) on the same line within 5 cm and overlapping it by more than 0.1 m.
 fn same_piece(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> bool {
@@ -1325,7 +1380,17 @@ pub fn update_narrow(
                 n.p0 = p0;
                 n.p1 = p1;
                 n.toward_p1 = n.dir().dot(facing) >= 0.0;
-                n.s = (body.feet - p0).dot(n.dir()).clamp(0.0, n.len());
+                n.s = (body.feet - p0).dot(n.dir());
+                // the facing along the new piece (DetectBeamSegments' first pass is along the facing): the 90° wait across
+                // the old one is a wait along this one (RE/28 §3: live, turned across the courtyard beam's end it walks
+                // off along the cross plank)
+                if n.across.is_some_and(|c| c.dot(n.dir()).abs() > std::f32::consts::FRAC_1_SQRT_2) {
+                    let c = n.across.take().unwrap();
+                    n.toward_p1 = c.dot(n.dir()) >= 0.0;
+                    if n.state == BeamState::Wait90 {
+                        n.wait_state();
+                    }
+                }
                 }
             } else {
                 let entry = InAirEntry::Fall { from: body.feet, velocity: body.velocity, origin: super::air::FallOrigin::Ground, speed_param: 0.0 };
@@ -1333,6 +1398,13 @@ pub fn update_narrow(
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 continue;
             }
+        }
+        // a segment new this frame (entered, rebound) runs on to the drop edges at its ends (`sub_F72FD0`)
+        if n.kind == NarrowKind::Beam && n.ext_of != Some((n.p0, n.p1)) {
+            let (q0, q1) = extend_segment(n.p0, n.p1, &guidance, &collision);
+            let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).length();
+            n.ext = (flat(n.p0 - q0), flat(q1 - n.p1));
+            n.ext_of = Some((n.p0, n.p1));
         }
         let facing = n.facing();
         body.velocity = Vec3::ZERO;
@@ -1472,7 +1544,8 @@ pub fn update_narrow(
         // the press buffer with the stored stick past 0.35 and Legs let go (0xEEABFB / 0xEE95AF)
         let pressed = pad.jump_buffered() && n.jump_dir != Vec3::ZERO;
         if can_jump && ab.allows(super::abilities::Ability::Jump) {
-            let feet = n.stand();
+            // the root as it stands (on what the beam runs into, RE/28 §3), the queries' origin
+            let feet = beam_root(n, &collision);
             // the pilotis wait runs NarrowObjectState (vt240 = 2); the pilotis impulsion is a beam in state 10 (PilotisToBeam
             // mode 8, `HumanNarrowObjectBeam__EnterByMode` 0xF7AB45) and runs BeamState
             let (kind, free) = if n.kind == NarrowKind::Pilotis && !impulsion {
@@ -1557,15 +1630,16 @@ pub fn update_narrow(
                 // a next segment ahead (0xF753A0) lets the root run to the end and on along it
                 let next = next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance, &report);
                 let stop = if next.is_some() { 0.0 } else if can_step_off(n, &collision) { BEAM_STEP_OFF } else { BEAM_END_STOP };
-                let limit_lo = if n.toward_p1 { 0.0 } else { stop };
-                let limit_hi = if n.toward_p1 { n.len() - stop } else { n.len() };
+                let (lo_end, hi_end) = (n.lo_end(), n.hi_end());
+                let limit_lo = if n.toward_p1 { lo_end } else { lo_end + stop };
+                let limit_hi = if n.toward_p1 { hi_end - stop } else { hi_end };
                 let over = if n.toward_p1 { s - limit_hi } else { limit_lo - s };
                 // the end clamp only while the facing runs along the beam (|f·dir| > cos 80°, 0xF7C664; RE/24 NARROW-14)
                 let along_beam = body.forward().dot(n.dir()).abs() > 0.173_648_18;
                 n.clamped = next.is_none() && over >= 0.0 && along_beam;
                 // PORT: the clamp stops the motion past the limit; a root already past it (the next segment was seen from
                 // farther back, then left the look-ahead box near the end) stays where it is instead of being pulled back
-                s = if along_beam { s.clamp(limit_lo.min(limit_hi).min(n.s), limit_hi.max(limit_lo).max(n.s)) } else { s.clamp(0.0, n.len()) };
+                s = if along_beam { s.clamp(limit_lo.min(limit_hi).min(n.s), limit_hi.max(limit_lo).max(n.s)) } else { s.clamp(lo_end, hi_end) };
                 n.s = s;
                 if let (Some((q0, q1)), true) = (next, over >= 0.0) {
                     // `ConstrainRootMotionToBeam` 0xF7C3A0 switches to the next segment; going along it from the
@@ -1578,8 +1652,10 @@ pub fn update_narrow(
                     n.p1 = q1;
                     let d = n.dir();
                     n.toward_p1 = d.dot(fwd) >= 0.0;
-                    let sj = (junction - q0).dot(d).clamp(0.0, n.len());
-                    n.s = (sj + over.max(0.0) * if n.toward_p1 { 1.0 } else { -1.0 }).clamp(0.0, n.len());
+                    // the root goes on from where it is on the new piece's line (RE/28 §4: clamped to the piece's start
+                    // it jumped the 0.32 m gap at the courtyard beam's cross beams in one frame)
+                    let sj = (junction - q0).dot(d);
+                    n.s = sj + over.max(0.0) * if n.toward_p1 { 1.0 } else { -1.0 };
                     // Re-express the prior lateral offset in the new segment's perpendicular plane.
                     n.lateral -= n.dir() * n.lateral.dot(n.dir());
                 }
@@ -1917,7 +1993,7 @@ pub fn update_narrow(
             body.heading = super::heading_of(data.narrow.facing());
         }
         let n = &data.narrow;
-        body.feet = n.stand();
+        body.feet = beam_root(n, &collision);
         if BEAM_COMPLETION && matches!(n.state, BeamState::Walk | BeamState::Start | BeamState::Stop | BeamState::HopEnd) {
             // Heading toward a point 0.6 m along the next segment, lerp fraction min(4*dt,1)
             // (0xF79B30). Translation continues to use the beam constraint.

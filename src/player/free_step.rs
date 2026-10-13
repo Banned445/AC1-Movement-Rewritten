@@ -132,13 +132,21 @@ pub fn stay_edge(point: Vec3, normal: Vec3, small_box: bool, guidance: &Guidance
 /// flattened) faces along `dir`, with a drop of 0.5 m or more beyond them (`Human__MeasureDropBeyondEdge` 0xB19620 along
 /// the normal, 10 m, step 0.02); the nearest to the zone's rear point. Returns its drop.
 pub fn drop_edge_ahead(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<f32> {
+    drop_edge_report(pos, dir, (-0.3, 1.1), (-0.3, 0.3), 0.5, true, guidance, collision).map(|r| r.1)
+}
+
+/// `Human__FindDropEdgeAhead` 0xB1C100 with the caller's zone: `along` (a5, a6) ahead of `pos` along `dir`, `up` (a7, a8),
+/// the least drop `min_drop` (a9), the drop measured along the edge's normal (`along_normal`, a11) or along `dir`.
+/// Returns the edge's crossing point and its drop.
+#[allow(clippy::too_many_arguments)]
+pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32), min_drop: f32, along_normal: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, f32)> {
     let f = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     if f == Vec3::ZERO {
         return None;
     }
     let side = super::right_of(f);
-    let rear = pos + f * -0.3 + Vec3::Y * -0.3;
-    let mut best: Option<(f32, f32)> = None;
+    let rear = pos + f * along.0 + Vec3::Y * up.0;
+    let mut best: Option<(f32, Vec3, f32)> = None;
     for e in &guidance.edges {
         if crate::guidance::steep(e.p1 - e.p0) {
             continue;
@@ -148,15 +156,15 @@ pub fn drop_edge_ahead(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
             continue;
         }
         let x = e.p0.lerp(e.p1, s0 / (s0 - s1));
-        let (along, up) = ((x - pos).dot(f), x.y - pos.y);
-        if !(-0.3..=1.1).contains(&along) || !(-0.3..=0.3).contains(&up) {
+        let (a, u) = ((x - pos).dot(f), x.y - pos.y);
+        if !(along.0..=along.1).contains(&a) || !(up.0..=up.1).contains(&u) {
             continue;
         }
         let n = super::jump_candidates::wall_of(e.n0, e.n1);
         if n == Vec3::ZERO || n.dot(f) < 0.0 {
             continue;
         }
-        let mut drop = super::jump_candidates::measure_drop(x, n, 10.0, 0.02, collision);
+        let mut drop = super::jump_candidates::measure_drop(x, if along_normal { n } else { f }, 10.0, 0.02, collision);
         // PORT: a haystack is solid to the game's drop rays (Damascus's `Hay_Bale_*` collision, the controller touches
         // it, event 122); the port's haystacks sit on the Dynamic layer the drop rays leave out, so its top ends the drop
         // here (live 2026-10-09: free-running onto a cart's rim drops into the haystack from the stay, it does not jump
@@ -167,15 +175,15 @@ pub fn drop_edge_ahead(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
                 drop = drop.min((x.y - s.max.y).max(0.0));
             }
         }
-        if drop < 0.5 {
+        if drop < min_drop {
             continue;
         }
         let d = (x - rear).length_squared();
         if best.is_none_or(|b| d < b.0) {
-            best = Some((d, drop));
+            best = Some((d, x, drop));
         }
     }
-    best.map(|b| b.1)
+    best.map(|b| (b.1, b.2))
 }
 
 /// IHuman vt148 0xB15DE0: a beam piece ahead (`sub_116E1A0` on HumanGuidance's report at `pos` + 0.35·`dir`, box
