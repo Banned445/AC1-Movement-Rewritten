@@ -1568,8 +1568,9 @@ pub fn update_narrow(
                 n.s = s;
                 if let (Some((q0, q1)), true) = (next, over >= 0.0) {
                     // `ConstrainRootMotionToBeam` 0xF7C3A0 switches to the next segment; going along it from the
-                    // junction. PORT: the heading turns at once (the game steers to a look-ahead point 0.6 m ahead
-                    // on the next segment, beam +288)
+                    // junction. The travel direction changes here; the body's heading steers toward the look-ahead
+                    // point 0.6 m along the next segment (beam +288, 0xF79B30, below), and the root motion follows the
+                    // heading
                     let junction = n.stand();
                     let fwd = n.facing();
                     n.p0 = q0;

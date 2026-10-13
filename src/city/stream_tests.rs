@@ -869,6 +869,12 @@ fn damascus_beam_chains_walk_through_without_stopping() {
                 if s.loco().current != ActorContextId::NarrowObject { break; }
                 let st = s.data().narrow.state;
                 if st == crate::player::narrow::BeamState::Start && last != Some(st) { starts += 1; }
+                // the animation follows: the beam walk plays (not the ground run) while the beam's Walk state runs
+                if st == crate::player::narrow::BeamState::Walk && last == Some(st) {
+                    if let Some(clip) = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()) {
+                        assert_eq!(clip, format!("act_{:08x}", crate::player::narrow::BEAM_WALK), "{spawn}: the walk plays {clip}");
+                    }
+                }
                 last = Some(st);
             }
             let along = (s.body().feet - start).dot(dir);
