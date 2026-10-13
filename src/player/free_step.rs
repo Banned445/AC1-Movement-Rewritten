@@ -286,6 +286,7 @@ pub fn update(
     ab: &AbilitySet,
     guidance: &GuidanceWorld,
     collision: &CollisionWorld,
+    anim: Option<&crate::anim::AnimPlayer>,
     dt: f32,
 ) {
     let Some(mut fs) = data.narrow.free_step else { return };
@@ -314,7 +315,8 @@ pub fn update(
         let yaw = a.yaw(phase);
         body.heading = (fs.e.heading + yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         let f0 = Vec3::new(-fs.e.heading.sin(), 0.0, -fs.e.heading.cos());
-        let delta = super::right_of(f0) * step[0] + f0 * step[1];
+        // ramped in with the blend into the action (RE/24 ANIM-16)
+        let delta = (super::right_of(f0) * step[0] + f0 * step[1]) * crate::anim::root_weight(anim, a.id);
         let r = collision.move_capsule(&mut body.proxy, body.feet, delta, true, dt);
         body.feet = r.position;
     }

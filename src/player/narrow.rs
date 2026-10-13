@@ -1286,11 +1286,11 @@ pub fn update_narrow(
     guidance: Res<GuidanceWorld>,
     camera: Res<crate::camera::CameraRig>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle), With<Player>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
     let ab = super::abilities::of(abilities.as_deref());
-    for (mut loco, mut body, mut data) in &mut q {
+    for (mut loco, mut body, mut data, anim) in &mut q {
         if loco.current != ActorContextId::NarrowObject {
             continue;
         }
@@ -1301,7 +1301,7 @@ pub fn update_narrow(
             }
         }
         if data.narrow.kind == NarrowKind::FreeStep {
-            super::free_step::update(&mut loco, &mut body, &mut data, &mut pad, &ab, &guidance, &collision, dt);
+            super::free_step::update(&mut loco, &mut body, &mut data, &mut pad, &ab, &guidance, &collision, anim, dt);
             continue;
         }
         let report = if data.narrow.kind == NarrowKind::Beam { beam_report(body.feet, &guidance, &collision) } else { Vec::new() };
@@ -1539,7 +1539,8 @@ pub fn update_narrow(
         // root motion projected on the beam (0xF7C3A0): the action's forward displacement
         if let Some(act) = n.action {
             let d = Vec3::from_array(act.disp((n.t / dur).min(1.0)));
-            let step = d - n.applied;
+            // ramped in with the blend into a new action (RE/24 ANIM-16); the walk's items follow each other in one action
+            let step = (d - n.applied) * crate::anim::root_weight(anim, act.id);
             n.applied = d;
             if n.kind == NarrowKind::Beam && (matches!(n.state, BeamState::Walk | BeamState::Start | BeamState::Stop)
                 || (BEAM_COMPLETION && n.state == BeamState::HopEnd)) {
@@ -1591,8 +1592,8 @@ pub fn update_narrow(
                 if BEAM_COMPLETION {
                     // Mode 1 continues incoming root motion until displacement >0.5 m, end clamp or
                     // forward contact (0xF7EBA0 / 0xF76AD0), rather than a fixed entry timer.
-                    let delta = n.action.map(|a| a.disp((n.t / dur).min(1.0))[1]
-                        - a.disp(((n.t - dt).max(0.0) / dur).min(1.0))[1]).unwrap_or(0.0);
+                    let delta = n.action.map(|a| (a.disp((n.t / dur).min(1.0))[1]
+                        - a.disp(((n.t - dt).max(0.0) / dur).min(1.0))[1]) * crate::anim::root_weight(anim, a.id)).unwrap_or(0.0);
                     let dest = body.feet + facing * delta;
                     let moved = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, dest - b.feet, true, dt) };
                     body.feet = moved.position;
@@ -1881,8 +1882,8 @@ pub fn update_narrow(
             BeamState::FreeStep => {}
             BeamState::StepOff => {
                 // Main mode 8 moves freely until the target is passed or forward contact (0xF78320).
-                let delta = n.action.map(|a| a.disp((n.t / dur).min(1.0))[1]
-                    - a.disp(((n.t - dt).max(0.0) / dur).min(1.0))[1]).unwrap_or(0.0);
+                let delta = n.action.map(|a| (a.disp((n.t / dur).min(1.0))[1]
+                    - a.disp(((n.t - dt).max(0.0) / dur).min(1.0))[1]) * crate::anim::root_weight(anim, a.id)).unwrap_or(0.0);
                 let dest = body.feet + facing * delta;
                 let moved = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, dest - b.feet, true, dt) };
                 body.feet = moved.position;

@@ -226,7 +226,9 @@ impl MoveTransition {
     /// One frame of the transition path after the speed parameter `s` was updated: new weights, then the clock.
     /// Returns (root displacement this frame, root yaw this frame, the item ended). The step is taken with this
     /// frame's weights over the phase interval, as the blended item is sampled at the new time.
-    pub fn advance(&mut self, s: f32, turn: f32, dt: f32) -> ([f32; 3], f32, bool) {
+    /// `incoming`: the transition action's own share of the displacement while the animation blends into it (B's,
+    /// `anim::root_shares`, RE/24 ANIM-16); the outgoing share is `coast` below.
+    pub fn advance(&mut self, s: f32, turn: f32, incoming: f32, dt: f32) -> ([f32; 3], f32, bool) {
         if let Some(w) = transition_weights(self.layout, s, turn, self.action.weights()) {
             // `SetItemBlendWeights` writes the slots the item has; the rest of the array is not read
             let n = match self.action.clips().len() { 0 => self.action.n, c => c }.min(40);
@@ -253,7 +255,8 @@ impl MoveTransition {
             }
             _ => 0.0,
         };
-        ([d1[0] - d0[0], d1[1] - d0[1] + coast, d1[2] - d0[2]], y1 - y0, self.phase >= 1.0)
+        let k = incoming;
+        ([(d1[0] - d0[0]) * k, (d1[1] - d0[1]) * k + coast, (d1[2] - d0[2]) * k], y1 - y0, self.phase >= 1.0)
     }
 }
 

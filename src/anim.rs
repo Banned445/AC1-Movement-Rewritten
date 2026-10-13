@@ -304,6 +304,9 @@ pub struct AnimPlayer {
     pub action_switch: bool,
     /// A still playing while the blend runs (AROLLB* types): its items, item and phase.
     a_roll: Option<(Vec<ItemPlay>, usize, f32, bool)>,
+    /// The action A belonged to when the running blend started (0 for a named clip): the root displacement shares
+    /// (`root_shares_for`) apply only across a switch between two actions.
+    blend_from: u32,
     /// A's contact tags when the blend started (ACTBlendAcuatorMode FROMA).
     prev_contacts: ContactState,
     /// The action sequence loops back to this item (the items before it are a transition action).
@@ -619,6 +622,43 @@ pub fn blend_weight(b: &ActBlend, t: f32) -> f32 {
         (false, true) => t + t * t - t * t * t,
         (false, false) => t,
     }
+}
+
+/// The shares of the root displacement while a blend runs (RE/24 ANIM-16, `sub_774350`): (A's, B's). A's displacement
+/// is gathered only while A plays on (AROLLB*, kinds 1 / 3); then ACTBlendDispSrcMode: BLENDAB lerps A's and B's by the
+/// blend weight `w`, FROMAONLY takes A's, FROMBONLY B's. So under the default ASTOPBROLL the new action's root motion
+/// ramps in with the weight. PORT: B is taken to play on in every type (the simulation's clock does not stop for the
+/// ASTOPBSTOP / AROLLBSTOP types, so their displacement is not held back).
+pub fn root_shares(b: &ActBlend, w: f32) -> (f32, f32) {
+    let a = if matches!(b.kind, 1 | 3) { 1.0 } else { 0.0 };
+    match b.disp_src {
+        1 => (a, 0.0),
+        2 => (0.0, 1.0),
+        _ => (a * (1.0 - w), w),
+    }
+}
+
+impl AnimPlayer {
+    /// `root_shares` for the simulation's `action`: while the running blend switches from another action into it;
+    /// (0, 1) otherwise (no blend, an item seam within one action, or the animation not yet on that action). One frame
+    /// late: the animation runs after the simulation.
+    pub fn root_shares_for(&self, action: u32) -> (f32, f32) {
+        let blending = self.fade < 1.0 && self.prev.is_some() && self.action_switch;
+        let on_it = self.items.get(self.item).is_some_and(|i| i.action == action && action != 0);
+        if !blending || !on_it || self.blend_from == action {
+            return (0.0, 1.0);
+        }
+        root_shares(&self.blend, blend_weight(&self.blend, self.fade))
+    }
+}
+
+/// The weight of `action`'s own displacement this frame (`root_shares_for`, A's share counted as the same motion:
+/// PORT, the simulation runs one action, so a rolling A's displacement stands for itself). 1 without an animation.
+pub fn root_weight(anim: Option<&AnimPlayer>, action: u32) -> f32 {
+    anim.map_or(1.0, |p| {
+        let (a, b) = p.root_shares_for(action);
+        a + b
+    })
 }
 
 /// Fall-grasp weights (HumanInAir__CheckAirCatch 0xE0BF2B–0xE0C2E9): with grab held the reach direction
@@ -1241,6 +1281,7 @@ fn choose_clip(
         };
         let a_state = (std::mem::take(&mut p.items), p.item, p.phase, p.looping);
         let had = p.clip.take().is_some() && !p.last_pose.is_empty();
+        p.blend_from = cur_item.as_ref().map_or(0, |i| i.action);
         start_blend(&mut p, blend, had, Some(a_state), &lib);
         p.action_switch = true;
         // locomotion cycles all start on the left foot: keep the phase between gaits
@@ -1430,6 +1471,7 @@ pub fn animate_pose(
             } else {
                 nxt.blend
             };
+            p.blend_from = cur.action;
             start_blend(&mut p, b, true, Some(a_state), &lib);
             p.action_switch = nxt_switch;
             p.phase = 0.0;

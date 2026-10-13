@@ -892,7 +892,9 @@ pub fn update_ground(
                     blend_progress,item_clock};
                 let wait_high=matches!(crouch.mode,super::crouch::CrouchMode::Wait) && !moving && pad.high_profile;
                 let mut heading=body.heading;
-                let delta=crouch.update(input,g.blend.foot,&mut heading,dt);
+                // the root displacement ramps in with the blend into a new action (RE/24 ANIM-16)
+                let k=crate::anim::root_weight(anim,crouch.action.id);
+                let delta=crouch.update(input,g.blend.foot,&mut heading,dt).map(|d|d*k);
                 body.heading=heading;
                 if wait_high && delta.is_some() {
                     // Wait -> FreeRun 0xDA9510: phase 1 starts on the impulsion wait item (0xD8B9D0).
@@ -962,7 +964,9 @@ pub fn update_ground(
                         continue;
                     }
                 }
+                let k=crate::anim::root_weight(anim,extra.action.id);
                 let (out,delta)=extra.advance(dt,pad.magnitude>0.35,request,g.blend.foot);
+                let delta=delta*k;
                 match out {
                     super::ground_extras::ExtraResult::Inactive=>{g.extra=None;},
                     super::ground_extras::ExtraResult::Jump{action,fall}=>{
@@ -1718,12 +1722,16 @@ pub fn update_ground(
             }
             let f0 = Vec3::new(-h0.sin(), 0.0, -h0.cos());
             let right = super::right_of(f0);
-            let delta = right * step[0] + f0 * step[1];
+            // while the animation blends into it, the action's displacement ramps in with the weight (BLENDAB under
+            // ASTOPBROLL: the frozen outgoing pose adds none; RE/24 ANIM-16, `sub_774350`)
+            let k = crate::anim::root_weight(anim, os.blend.id);
+            let delta = (right * step[0] + f0 * step[1]) * k;
             (delta, delta.length() / dt.max(1e-4))
         } else if let Some(mut t) = g.tr {
             // the transition action's root motion (FROMANIM), in the current heading: the code turns the body while it
             // plays unless its item word has 0x10 (then its root yaw does)
-            let (d, yaw, ended) = t.advance(g.speed_param, g.pivot_turn, dt);
+            let incoming = anim.map_or(1.0, |p| p.root_shares_for(t.action.id).1);
+            let (d, yaw, ended) = t.advance(g.speed_param, g.pivot_turn, incoming, dt);
             if yaw.abs() > 1e-6 {
                 body.heading = wrap_angle(body.heading + yaw);
             }
@@ -1745,6 +1753,8 @@ pub fn update_ground(
             (delta, delta.length() / dt.max(1e-4))
         } else {
             let speed = if g.speed_param > 0.0 { g.blend.advance(dt) } else { 0.0 };
+            // the locomotion's displacement ramps in the same way when the animation blends into it from another action
+            let speed = speed * crate::anim::root_weight(anim, super::move_blend::ACT_GROUND_LOCOMOTION);
             (forward * speed * dt, speed)
         };
         // PORT: after a ledge stop, still pushing into the same edge holds the character at it (the game re-sends
