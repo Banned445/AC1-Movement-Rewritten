@@ -761,6 +761,31 @@ pub fn update_ledge(
         // the feet follow the hang clip (braced against the wall, or dangling); only the hands are pinned
         limbs.feet = None;
 
+        // ---------------------------------------------------------------- the jump off during an Entry-state grab
+        // The Entry state (LedgeData +76 = 0: the wall run's hangs, the climb's jump up; `repose_at_entry_end` marks
+        // them) takes event 2 too (`HumanLedge__CanHandleEvent` 0xDE3A30, slot +2792 = `StateEntry` → guard
+        // `HumanLedge__Guard_EntryJumpOff` 0xDCBF00): at any time while `step1_tr_hangwall` (0x0106CFC5, the wall run's kick up
+        // into a wall hang) plays, else while the playing action's normalised time is under 0.25 (the swings into a free
+        // hang). No hang-type test (the Movement guard 0xDCCE10 refuses a free hang). The interpreter sends it as in
+        // Movement (IHumanLedge vt24 = CanHandleEvent(2), 0xDE4170; high profile and the Legs buffer, 0xEEC89F), and the
+        // state's handler `sub_DDFF30` starts the same rebound jump (`HumanLedge__StartReboundJump` 0xDD2CA0).
+        if let Some(mv) = d.mv.filter(|_| d.repose_at_entry_end && pad.high_profile && pad.jump_buffered()) {
+            let accepts = mv.action_time().is_some_and(|(id, t)| id == super::walling::STEP1_TO_HANGWALL || t < 0.25);
+            let n = mv.normal;
+            if let Some(jd) = accepts.then(|| super::targets::jump_off_wall_dir((pad.speed01 > 0.0).then_some(pad.dir_snap), n)).flatten() {
+                pad.consume_jump();
+                d.repose_at_entry_end = false;
+                d.queue.clear();
+                d.hand_l = mv.hand_l;
+                d.hand_r = mv.hand_r;
+                d.normal = n;
+                d.jump_off = Some(super::targets::jump_off_wall_entry(body.feet, jd, &guidance, &collision));
+                start_move(d, ledge_moves::rebound_move(body.feet, n, jd, mv.hand_l, mv.hand_r), "rebound");
+                d.sub_state = LedgeSubState::ReboundTransition;
+                continue;
+            }
+        }
+
         // ---------------------------------------------------------------- corner / ledge jump / hop
         if let Some(mut mv) = d.mv {
             let (p, done) = mv.advance(dt);

@@ -260,6 +260,27 @@ impl LedgeMove {
         None
     }
 
+    /// The playing action and its normalised time over the items of it in the sequence (`sub_501DF0` 0x501DF0: the
+    /// playing action's normalised time, RE/24 ANIM-12).
+    pub fn action_time(&self) -> Option<(u32, f32)> {
+        let (cur, _) = self.current()?;
+        let (mut before, mut total, mut t0) = (0.0f32, 0.0f32, 0.0f32);
+        for (i, a) in self.seq.iter().enumerate() {
+            let Some(a) = a else { continue };
+            let d = self.durations[i];
+            if a.id == cur.id {
+                total += d;
+                if t0 + d <= self.t {
+                    before += d;
+                } else if t0 < self.t {
+                    before += self.t - t0;
+                }
+            }
+            t0 += d;
+        }
+        Some((cur.id, if total > 1e-4 { (before / total).clamp(0.0, 1.0) } else { 1.0 }))
+    }
+
     /// Summed displacement of the sequence up to time `t` (animation space).
     fn disp(&self, t: f32) -> [f32; 3] {
         let mut o = [0.0f32; 3];

@@ -5842,3 +5842,32 @@ fn a_beam_tap_jumps_and_holding_legs_walks_on() {
         }
     }
 }
+
+
+/// The kick up the wall into a ledge grab: the Ledge's Entry state takes the jump off (event 2) at any time while
+/// `step1_tr_hangwall` plays (`HumanLedge__Guard_EntryJumpOff` 0xDCBF00), so a press late in the grab ejects at once with
+/// the rebound, away from the wall, instead of being lost before the hang settles.
+#[test]
+fn the_wall_run_into_a_wall_hang_can_eject_during_the_grab() {
+    let mut s = Sim::new(Vec3::new(1.56, 0.0, 5.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.body().feet.z > 7.5));
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Walling), "no wall run");
+    s.pad(Vec3::Z, 0.0, true, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge), "never grabbed: {:?}", s.loco().current);
+    let mv = s.data().ledge.mv.expect("the grab plays");
+    assert_eq!(mv.seq[0].map(|a| a.id), Some(crate::player::walling::STEP1_TO_HANGWALL));
+    // late in the grab (past the first quarter the other entries allow)
+    assert!(s.run_until(2.0, |s| s.data().ledge.mv.and_then(|m| m.action_time()).is_some_and(|(_, t)| t > 0.6)));
+    assert!(s.data().ledge.repose_at_entry_end, "still in the grab");
+    let z0 = s.body().feet.z;
+    s.pad(Vec3::NEG_Z, 1.0, true, true);
+    s.press_legs();
+    s.run(1.0 / 60.0);
+    assert_eq!(s.data().ledge.last_action, "rebound", "the press was not taken during the grab");
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "no jump off: {:?}", s.loco().current);
+    s.run(0.6);
+    assert!(s.body().feet.z < z0 - 1.0, "pushed off away from the wall: {:?} from {z0}", s.body().feet);
+}
