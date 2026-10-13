@@ -827,3 +827,180 @@ fn probe_city_climb_survey() {
     eprintln!("SUMMARY {summary:?}");
 }
 
+
+/// RE/27 S8: the city's long beams are chains of ≈ 3 m pieces in HumanGuidance's runtime report. Walking one goes on
+/// from piece to piece (`DetectBeamSegments` 0xF753A0's next segment) and stops once at the chain's end; before, it
+/// stepped off into the Ground at every piece's end, and at a short cap piece over an end it started and stopped
+/// every few frames.
+#[test]
+fn damascus_beam_chains_walk_through_without_stopping() {
+    use crate::guidance::GuidanceSubType;
+    let mut walked = 0;
+    for spawn in ["PlayerSpawner_DEBUG_Palace", "PlayerSpawner_DEBUG_Academy"] {
+        let Some(mut s) = CitySim::new(spawn) else { return };
+        let (c, g) = (s.collision(), s.guidance());
+        let mut beams: Vec<(Vec3, Vec3)> = Vec::new();
+        for e in g.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.p0.distance(e.p1) > 2.5 && e.n0.y > 0.9) {
+            for b in crate::guidance::beam_contacts::detect(g, c, (e.p0 + e.p1) * 0.5, Vec3::new(1.5, 0.6, 1.5)) {
+                if b.p0.distance(b.p1) > 2.5 && (b.p1.y - b.p0.y).abs() < 0.3 && !beams.iter().any(|x| x.0.distance(b.p0) < 0.5) { beams.push((b.p0, b.p1)); }
+            }
+        }
+        let mut spots = Vec::new();
+        for &(p0, p1) in &beams {
+            for (a, b) in [(p0, p1), (p1, p0)] {
+                let dir = (b - a).with_y(0.0).normalize();
+                let from = a - dir * 1.2;
+                let Some(floor) = c.floor_height_below(from + Vec3::Y * 0.4, 0.8) else { continue };
+                let feet = Vec3::new(from.x, floor, from.z);
+                if (floor - a.y).abs() > 0.3 || !c.capsule_fits(feet) || !c.capsule_fits(a.lerp(b, 0.5) + Vec3::Y * 0.05) { continue; }
+                spots.push((feet, dir));
+            }
+        }
+        for &(feet, dir) in spots.iter().take(6) {
+            s.place(feet, dir);
+            s.run(0.2);
+            s.pad(dir, 1.0, false, false);
+            if !s.run_until(3.0, |s| s.loco().current == ActorContextId::NarrowObject) { s.pad(dir, 0.0, false, false); s.run(1.0); continue; }
+            walked += 1;
+            let start = s.body().feet;
+            let (mut starts, mut last) = (0, None);
+            for _ in 0..300 {
+                s.run(1.0 / 60.0);
+                if s.loco().current != ActorContextId::NarrowObject { break; }
+                let st = s.data().narrow.state;
+                if st == crate::player::narrow::BeamState::Start && last != Some(st) { starts += 1; }
+                // the animation follows: the beam walk plays (not the ground run) while the beam's Walk state runs
+                if st == crate::player::narrow::BeamState::Walk && last == Some(st) {
+                    if let Some(clip) = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()) {
+                        assert_eq!(clip, format!("act_{:08x}", crate::player::narrow::BEAM_WALK), "{spawn}: the walk plays {clip}");
+                    }
+                }
+                last = Some(st);
+            }
+            let along = (s.body().feet - start).dot(dir);
+            assert!(starts <= 1, "{spawn} from {start}: the walk started {starts} times");
+            assert!(along > 2.5, "{spawn} from {start}: only {along:.2} m along before {:?} {:?}", s.loco().current, s.data().narrow.state);
+            s.pad(dir, 0.0, false, false); s.run(1.0);
+        }
+    }
+    assert!(walked >= 6, "only {walked} beams mounted");
+}
+
+/// RE/28 §1 (live 2026-10-13_210349/006): hanging beside the Bureau courtyard beam (0.25 m wide), the stick up climbs
+/// back onto it: `HumanLedge__CanPullup` 0xDE2270 asks for room on top (`Human__KneeCatchRoomOnTop`), not a floor 0.5 m
+/// in, and the stand-up's free-step stay mounts the beam (the game: hangwaist → hangknee → `freestep_entry` →
+/// NarrowObject, on the beam's line).
+#[test]
+fn damascus_pulls_up_onto_a_beam_from_a_hang() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    // the roof south of the courtyard beam (game y 4.0 = port z −4.0), walking along it onto the beam (port +z)
+    s.place(Vec3::new(51.97, 11.48, -4.0), Vec3::Z);
+    s.run(0.5);
+    s.pad(Vec3::Z, 0.6, false, false);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted the beam");
+    s.run(1.2);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0);
+    // across the beam with the empty hand: the pull-down to a hang
+    s.pad(Vec3::X, 1.0, false, false);
+    s.run(0.3);
+    s.app.world_mut().resource_mut::<crate::input::PadInput>().hand_held = true;
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
+    s.app.world_mut().resource_mut::<crate::input::PadInput>().hand_held = false;
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(2.0);
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "hanging");
+    // the stick up (toward the facing: the sim's camera follows the heading)
+    let f = Vec3::new(-s.body().heading.sin(), 0.0, -s.body().heading.cos());
+    s.pad(f, 1.0, false, false);
+    assert!(s.run_until(5.0, |s| s.loco().current == ActorContextId::NarrowObject && s.data().narrow.kind == crate::player::narrow::NarrowKind::Beam),
+        "never back on the beam: {:?} {:?} {}", s.loco().current, s.data().ledge.last_action, s.body().feet);
+    let feet = s.body().feet;
+    assert!((feet.x - 51.97).abs() < 0.15 && (feet.y - 11.17).abs() < 0.05, "on the beam's line: {feet}");
+}
+
+/// RE/28 §7 (live 2026-10-13_210349/006): hanging free from the Bureau courtyard beam, the stick back (more than 135°
+/// from the facing) turns round under the beam onto its other side (Ledge event 10, `xx_h_hangfree_turn_beam_180`), the
+/// hands on the far edge, still in a free hang.
+#[test]
+fn damascus_hanging_from_a_beam_the_stick_back_turns_under_it() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.place(Vec3::new(51.97, 11.48, -4.0), Vec3::Z);
+    s.run(0.5);
+    s.pad(Vec3::Z, 0.6, false, false);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted the beam");
+    s.run(1.2);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0);
+    s.pad(Vec3::X, 1.0, false, false);
+    s.run(0.3);
+    s.app.world_mut().resource_mut::<crate::input::PadInput>().hand_held = true;
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
+    s.app.world_mut().resource_mut::<crate::input::PadInput>().hand_held = false;
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(2.0);
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "hanging");
+    let f = Vec3::new(-s.body().heading.sin(), 0.0, -s.body().heading.cos());
+    let side = (s.body().feet.x - 51.97).signum();
+    // the stick back, away from the beam
+    s.pad(-f, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ledge.last_action == "turn under beam"), "no turn: {:?}", s.data().ledge.last_action);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    // the facing turns with the clip, no frame jumps through the half turn
+    let mut h = s.body().heading;
+    let mut worst = 0.0f32;
+    for _ in 0..180 {
+        s.step();
+        let mut dh = s.body().heading - h;
+        dh = (dh + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        worst = worst.max(dh.abs());
+        h = s.body().heading;
+    }
+    assert!(worst < 0.25, "the heading jumps {worst} rad in one frame");
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "still hanging");
+    let g = Vec3::new(-s.body().heading.sin(), 0.0, -s.body().heading.cos());
+    assert!(g.dot(f) < -0.95, "turned round: {f} → {g}");
+    assert_eq!(s.data().ledge.hang_type, crate::player::ledge::LedgeHangType::Free);
+    let feet = s.body().feet;
+    assert!((feet.x - 51.97).signum() == -side && (feet.x - 51.97).abs() > 0.1, "on the beam's other side: {feet}");
+}
+
+/// RE/28 §2 (live 2026-10-12_123944/014): standing on the Bureau courtyard beam in the Ground, the stick across it
+/// mounts the beam in the frame it moves (the interpreter asks event 72's guard with the stick, before the edge halt
+/// and the pivot); the port had stayed in the Ground, turning on the spot.
+#[test]
+fn damascus_standing_on_a_beam_the_stick_mounts_it() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.place(Vec3::new(51.97, 11.17, 1.0), Vec3::Z);
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    // the game's stick in 014: back and to the left of the facing (game md (−0.59, 0.81))
+    s.pad(Vec3::new(-0.588, 0.0, -0.81), 1.0, false, false);
+    assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted: {:?} {}", s.loco().current, s.body().feet);
+}
+
+/// RE/28 §5 (live 2026-10-13_210349/001): walking off the Bureau roof lip onto the courtyard beam 0.41 m lower, the root
+/// stays on the lip until the capsule's rim leaves it (the game: 0.29 m onto the beam, game y 2.54 = port z −2.54) and
+/// then drops in one frame, handing the drop to the stick-to-ground smoothing as the controller's residual.
+#[test]
+fn damascus_stepping_down_onto_a_beam_drops_where_the_game_does() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.place(Vec3::new(51.97, 11.48, -4.0), Vec3::Z);
+    s.run(0.5);
+    s.pad(Vec3::Z, 0.6, false, false);
+    let mut drop = None;
+    let mut last = s.body().feet;
+    for _ in 0..300 {
+        s.step();
+        let f = s.body().feet;
+        if s.loco().current == ActorContextId::NarrowObject && last.y - f.y > 0.25 {
+            drop = Some((f.z, s.body().stick_residual, last.y - f.y));
+            break;
+        }
+        last = f;
+    }
+    let (z, residual, snap) = drop.expect("never dropped onto the beam");
+    assert!((z - -2.54).abs() < 0.12, "drops at z {z}, the game at −2.54");
+    // the capsule's rounded bottom lowers the root a little over the rim first (the game: 0.08 m, then a 0.33 m snap)
+    assert!((residual - snap).abs() < 1e-4 && (0.28..0.38).contains(&snap), "the snap ({snap}) is the smoothing's residual: {residual}");
+}

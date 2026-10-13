@@ -892,7 +892,9 @@ pub fn update_ground(
                     blend_progress,item_clock};
                 let wait_high=matches!(crouch.mode,super::crouch::CrouchMode::Wait) && !moving && pad.high_profile;
                 let mut heading=body.heading;
-                let delta=crouch.update(input,g.blend.foot,&mut heading,dt);
+                // the root displacement ramps in with the blend into a new action (RE/24 ANIM-16)
+                let k=crate::anim::root_weight(anim,crouch.action.id);
+                let delta=crouch.update(input,g.blend.foot,&mut heading,dt).map(|d|d*k);
                 body.heading=heading;
                 if wait_high && delta.is_some() {
                     // Wait -> FreeRun 0xDA9510: phase 1 starts on the impulsion wait item (0xD8B9D0).
@@ -962,7 +964,9 @@ pub fn update_ground(
                         continue;
                     }
                 }
+                let k=crate::anim::root_weight(anim,extra.action.id);
                 let (out,delta)=extra.advance(dt,pad.magnitude>0.35,request,g.blend.foot);
+                let delta=delta*k;
                 match out {
                     super::ground_extras::ExtraResult::Inactive=>{g.extra=None;},
                     super::ground_extras::ExtraResult::Jump{action,fall}=>{
@@ -1088,6 +1092,37 @@ pub fn update_ground(
         }
         let busy = g.oneshot.is_some() || g.tr.is_some_and(|t| t.to_wait);
         let moving = mv_speed > 0.0 && !busy;
+
+        // ---------------------------------------------------------------- beam (NarrowObject, event 72)
+        // The sender (`GoAssassinActionInterpreter__ProcessGroundMovement`, RE/28 §2): every frame with the Jump ability
+        // and the stick past 0.35 it asks the guard (IHumanGround vt756 → CanHandleEvent(72), 0xEE79C3) along the
+        // stick's direction (+0x1250), before the edge halt zeroes the wanted speed, and posts the event (vt760,
+        // 0xEE860D) ahead of the edge jump, the ledge stop and the obstacle collision; the Ground's own update (the pivot,
+        // the start) comes after. So standing on or beside a beam, any stick toward it mounts it. Guard 0xD9F4C0
+        // (RE/24 NARROW-3).
+        if pad.speed01 > 0.0 && !busy && ab.allows(Ability::Jump) {
+            let event_dir = if pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { pad.dir };
+            if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, event_dir, &guidance, &collision) {
+                // Mode 1 plays the beam walk (`sub_F7B3B0` 0xF7B619: 0x28A3A8E4), keeping the playing locomotion item's
+                // index (the foot), jog weights [0, 1] when the Ground runs (NarrowObjectData+228 = Ground+1500), else
+                // walk [1, 0] (RE/24 NARROW-2; RE/05 §2.12's "retains the incoming locomotion" was wrong). PORT: the
+                // 1.0 s crossfade from the locomotion is the animator's
+                if super::narrow::BEAM_COMPLETION {
+                    entry.foot = g.blend.foot;
+                    let w = if g.speed_param > 0.25 { [0.0, 1.0] } else { [1.0, 0.0] };
+                    entry.action = Some(super::jump_blend::ActionBlend::new(super::narrow::BEAM_WALK, g.blend.foot, &w));
+                }
+                let phase = g.blend.phase;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(entry));
+                if super::narrow::BEAM_COMPLETION {
+                    // The incoming locomotion action carries on (0xF7AAA0 mode 1): keep its phase, not item start.
+                    let n = &mut data.narrow;
+                    n.t = phase * n.action.map(|a| a.duration()).unwrap_or(0.0);
+                }
+                continue;
+            }
+        }
+
         let prev_high = g.high_profile;
         // IHumanGround vt12 SetHighProfile: high profile only above MaxSpeed Walk (0xEE70F9, RE/24 INPUT-10)
         g.high_profile = pad.high_profile && ab.max_speed() > 1;
@@ -1505,32 +1540,6 @@ pub fn update_ground(
             }
         }
 
-        // ---------------------------------------------------------------- beam (NarrowObject, event 72)
-        // Guard 0xD9F4C0 along the event's direction (the stick, RE/24 NARROW-3). PORT trigger: walking at it (the
-        // decision layer's event 72 sender is not traced).
-        if moving && !busy {
-            let event_dir = if pad.dir != Vec3::ZERO { pad.dir } else { body.forward() };
-            if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, event_dir, &guidance, &collision) {
-                // Mode 1 plays the beam walk (`sub_F7B3B0` 0xF7B619: 0x28A3A8E4), keeping the playing locomotion item's
-                // index (the foot), jog weights [0, 1] when the Ground runs (NarrowObjectData+228 = Ground+1500), else
-                // walk [1, 0] (RE/24 NARROW-2; RE/05 §2.12's "retains the incoming locomotion" was wrong). PORT: the
-                // 1.0 s crossfade from the locomotion is the animator's
-                if super::narrow::BEAM_COMPLETION {
-                    entry.foot = g.blend.foot;
-                    let w = if g.speed_param > 0.25 { [0.0, 1.0] } else { [1.0, 0.0] };
-                    entry.action = Some(super::jump_blend::ActionBlend::new(super::narrow::BEAM_WALK, g.blend.foot, &w));
-                }
-                let phase = g.blend.phase;
-                switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(entry));
-                if super::narrow::BEAM_COMPLETION {
-                    // The incoming locomotion action carries on (0xF7AAA0 mode 1): keep its phase, not item start.
-                    let n = &mut data.narrow;
-                    n.t = phase * n.action.map(|a| a.duration()).unwrap_or(0.0);
-                }
-                continue;
-            }
-        }
-
         // ---------------------------------------------------------------- ledge stop (event 69 / sub-state 38)
         if let Some(ls) = g.ledge_stop {
             // pull-down EdgeStop (LedgeStop_HandleEvent 0xDA4D90, event 70). Sender (0xEE8977–0xEE89AF): in the ledge
@@ -1718,12 +1727,16 @@ pub fn update_ground(
             }
             let f0 = Vec3::new(-h0.sin(), 0.0, -h0.cos());
             let right = super::right_of(f0);
-            let delta = right * step[0] + f0 * step[1];
+            // while the animation blends into it, the action's displacement ramps in with the weight (BLENDAB under
+            // ASTOPBROLL: the frozen outgoing pose adds none; RE/24 ANIM-16, `sub_774350`)
+            let k = crate::anim::root_weight(anim, os.blend.id);
+            let delta = (right * step[0] + f0 * step[1]) * k;
             (delta, delta.length() / dt.max(1e-4))
         } else if let Some(mut t) = g.tr {
             // the transition action's root motion (FROMANIM), in the current heading: the code turns the body while it
             // plays unless its item word has 0x10 (then its root yaw does)
-            let (d, yaw, ended) = t.advance(g.speed_param, g.pivot_turn, dt);
+            let incoming = anim.map_or(1.0, |p| p.root_shares_for(t.action.id).1);
+            let (d, yaw, ended) = t.advance(g.speed_param, g.pivot_turn, incoming, dt);
             if yaw.abs() > 1e-6 {
                 body.heading = wrap_angle(body.heading + yaw);
             }
@@ -1745,6 +1758,8 @@ pub fn update_ground(
             (delta, delta.length() / dt.max(1e-4))
         } else {
             let speed = if g.speed_param > 0.0 { g.blend.advance(dt) } else { 0.0 };
+            // the locomotion's displacement ramps in the same way when the animation blends into it from another action
+            let speed = speed * crate::anim::root_weight(anim, super::move_blend::ACT_GROUND_LOCOMOTION);
             (forward * speed * dt, speed)
         };
         // PORT: after a ledge stop, still pushing into the same edge holds the character at it (the game re-sends

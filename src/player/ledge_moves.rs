@@ -99,6 +99,8 @@ pub const CORNER_ACTIONS: [[u32; 4]; 2] = [
 /// (0xDDAB00) `…_b` with the same weights while the root moves to the new ledge; it ends in a free hang.
 pub const SWING_BACK: u32 = 0x4CD6_8F4F;
 pub const SWING_BACK_B: u32 = 0x4CD6_8F50;
+/// `xx_h_hangfree_turn_beam_180` (`HumanLedge__StartTurnUnderBeam` 0xDD3490).
+pub const TURN_UNDER_BEAM: u32 = 0x2F3C_2551;
 
 pub const DUMPED_ACTIONS: &[u32] = &[
     RECEPTION_WALL_OTHER, REBOUND[0], REBOUND[1],
@@ -112,7 +114,7 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     0x4C460372, 0x4C460373, 0x4C460374, 0x4C460375, 0x4C460376, 0x4C460377,
     0x4C46037A, 0x4C46037B, 0x4C46037C, 0x4C46037D, 0x4C46037E, 0x4C46037F,
     0x1E67_E881, 0x1E67_E882, 0x1E67_E883, 0x1E67_E884, 0x1E67_E885, 0x1E67_E886, 0x1E67_E887, 0x1E67_E888,
-    SWING_BACK, SWING_BACK_B,
+    SWING_BACK, SWING_BACK_B, TURN_UNDER_BEAM,
     // hang-type switches (0xDE1060)
     TO_WALL[0], TO_WALL[1], TO_FREE[0], TO_FREE[1], TO_FREE[2], TO_FREE[3],
     // straight jump to a hand target (0xB21DA0) and its arrivals (0xE07D00)
@@ -197,6 +199,8 @@ pub enum MoveKind {
     PullDown { stage: u8 },
     /// The jump off a wall hang: the rebound turn before the jump (event 2 → 0xDD2CA0, SubState 5, state 10).
     Rebound,
+    /// Free hang → the edge behind across a beam, turned round (Ledge event 10, 0xDD3490).
+    TurnUnderBeam,
 }
 
 /// A running ledge move.
@@ -254,6 +258,27 @@ impl LedgeMove {
             t0 += d;
         }
         None
+    }
+
+    /// The playing action and its normalised time over the items of it in the sequence (`sub_501DF0` 0x501DF0: the
+    /// playing action's normalised time, RE/24 ANIM-12).
+    pub fn action_time(&self) -> Option<(u32, f32)> {
+        let (cur, _) = self.current()?;
+        let (mut before, mut total, mut t0) = (0.0f32, 0.0f32, 0.0f32);
+        for (i, a) in self.seq.iter().enumerate() {
+            let Some(a) = a else { continue };
+            let d = self.durations[i];
+            if a.id == cur.id {
+                total += d;
+                if t0 + d <= self.t {
+                    before += d;
+                } else if t0 < self.t {
+                    before += self.t - t0;
+                }
+            }
+            t0 += d;
+        }
+        Some((cur.id, if total > 1e-4 { (before / total).clamp(0.0, 1.0) } else { 1.0 }))
     }
 
     /// Summed displacement of the sequence up to time `t` (animation space).
@@ -334,6 +359,12 @@ impl LedgeMove {
             turn += std::f32::consts::TAU;
         }
         let clip_turn = self.yaw(total);
+        // a half turn wraps to either side: take the side the clip turns to
+        if clip_turn - turn > std::f32::consts::PI {
+            turn += std::f32::consts::TAU;
+        } else if turn - clip_turn > std::f32::consts::PI {
+            turn -= std::f32::consts::TAU;
+        }
         if turn.abs() > 0.1 && (clip_turn - turn).abs() < 0.35 {
             let h = h0 + self.yaw(self.t) + (turn - clip_turn) * s;
             return Vec3::new(-h.sin(), 0.0, -h.cos());
@@ -917,6 +948,71 @@ pub fn try_swing_back(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: Led
         });
     }
     None
+}
+
+/// Ledge event 10, the turn round under a beam (RE/28 §7). The interpreter sends it for the stick more than 135° from
+/// the facing (`GoAssassinActionInterpreter__LedgeState` 0xEECCCA, vt68 / vt72). Guard `HumanLedge__Guard_TurnUnderBeam`
+/// 0xDD30E0: the holds alive, the Movement sub-state, the playing item not locked; `Guidance__ProbeBoxHandPair` at the
+/// hands' midpoint + 0.45 m along the facing, the box facing back (half 0.3 / 0.55 / 0.25, 70°, hand references
+/// (∓0.2, −0.1) in the box's frame, mask 50); the free-hang root from that pair (`sub_B15AD0`); a box from the root to the
+/// new root, 1 m up, free (half 0.2 across, half the distance + 0.2 along, 0.8 up; `Human__BoxQueryEmpty`); the free-hang
+/// body boxes free there (`Human__FreeHangBodyBoxesFree` 0xB2DD50). Start `HumanLedge__StartTurnUnderBeam` 0xDD3490:
+/// `xx_h_hangfree_turn_beam_180` 0x2F3C2551 into the free idle, the hands on the new pair, the root interpolated over the
+/// action (`sub_711130`).
+///
+/// The game's guard reads the facing from the entity; the free hang only (a wall hang's feet are on the wall; the guard
+/// itself does not test the hang type, but the probe finds nothing behind a wall). PORT: the box query's collision
+/// filter is the port's world.
+pub fn try_turn_under_beam(hand_l: Vec3, hand_r: Vec3, n: Vec3, root: Vec3, hang: LedgeHangType, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<LedgeMove> {
+    if hang != LedgeHangType::Free {
+        return None;
+    }
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    if facing == Vec3::ZERO {
+        return None;
+    }
+    let mid = (hand_l + hand_r) * 0.5;
+    let centre = mid + facing * 0.45;
+    let back = -facing;
+    let side = back.cross(Vec3::Y);
+    let local = |x: f32| centre + side * x + back * -0.1;
+    let [a, b] = guidance.probe_facing_pair(centre, back, Vec3::new(0.3, 0.55, 0.25), [local(-0.2), local(0.2)], 1.221_730_5, crate::guidance::PROBE_STEP, MASK_CLIMB_HOLDS)?;
+    let (hl, hr) = (a.point, b.point);
+    let nn = a.wall_normal;
+    let to = hang_root_at(hl, hr, nn, LedgeHangType::Free, collision);
+    let d = Vec3::new(root.x - to.x, 0.0, root.z - to.z);
+    let len = d.length();
+    let along = d.normalize_or(facing);
+    let path_centre = (root + to) * 0.5 + Vec3::Y * 1.0;
+    if !collision.obb_free(path_centre, [right_of(along), along, Vec3::Y], Vec3::new(0.2, len * 0.5 + 0.2, 0.8)) {
+        return None;
+    }
+    let facing_to = -Vec3::new(nn.x, 0.0, nn.z).normalize_or(back);
+    if !super::climb::hang_boxes_free(collision, to, facing_to, false) {
+        return None;
+    }
+    let act = jump_blend::action_items(TURN_UNDER_BEAM).map(|_| ActionBlend::new(TURN_UNDER_BEAM, 0, &[1.0]));
+    let dur = act.map(|a| a.duration()).filter(|d| *d > 0.0).unwrap_or(JUMP_UP_TIME);
+    Some(LedgeMove {
+        kind: MoveKind::TurnUnderBeam,
+        seq: [act, None, None, None],
+        durations: [dur, 0.0, 0.0, 0.0],
+        t: 0.0,
+        from: root,
+        to,
+        facing_from: facing,
+        facing_to,
+        follow_disp: false,
+        lead: 0.0,
+        table: None,
+        root_time: None,
+        end_free: true,
+        end_wall: false,
+        end_stand: false,
+        hand_l: hl,
+        hand_r: hr,
+        normal: nn,
+    })
 }
 
 /// `HumanLedge__TryJumpUpToClimb` 0xDD5E10 (wall hang only, no pending hand step): a hold row 1.2 m above the
@@ -1695,7 +1791,8 @@ pub const ACT_KNEE_ONEHAND_TO_FREESTEP: u32 = 0x3919_3BBB;
 /// the lip) and is corrected onto the stand point 0.5 m inside the edge (Pullup_Start 0xDDBE80). A straight
 /// line from the hang to that point cuts through the wall. Returns the move and, for the free hang (5 clips),
 /// the queued second part. `one_hand`: the one-hand variants (0xDD1120: the top drops away beside the hands).
-pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, top_feet: Vec3) -> (LedgeMove, Option<LedgeMove>) {
+/// `top_feet` None (a narrow top, RE/28 §1): no correction, the clips' own end.
+pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, top_feet: Option<Vec3>) -> (LedgeMove, Option<LedgeMove>) {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mk = |seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, end_stand: bool| {
         let durations = seq_durations(&seq);
@@ -1729,15 +1826,20 @@ pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3
         (ACT_PULLUP_WALL, ACT_PULLUP_FREE, ACT_WAIST_TO_KNEE)
     };
     match hang {
-        LedgeHangType::Wall => (
-            mk([first_clip(wall, 0), first_clip(wall, 1), stand, None], from, top_feet, true),
-            None,
-        ),
+        LedgeHangType::Wall => {
+            let mut m = mk([first_clip(wall, 0), first_clip(wall, 1), stand, None], from, from, true);
+            m.to = top_feet.unwrap_or_else(|| m.natural_end());
+            (m, None)
+        }
         LedgeHangType::Free => {
-            let mut a = mk([first_clip(free, 0), first_clip(free, 1), first_clip(waist, 0), None], from, from, false);
+            // `HumanLedge__Pullup_Tick` 0xDE2EE0 plays the waist step as soon as the playing item is no longer locked: the
+            // free pull-up's `_a` is (word 0x0035), its `_b` is not (0x0FC5), so `_b` is cut at its start (live
+            // 2026-10-13_210349/006: the waist step 0.80 s after the pull-up starts, `_a`'s length)
+            let mut a = mk([first_clip(free, 0), first_clip(waist, 0), None, None], from, from, false);
             // first part: the clips' path, corrected only by the second part
             a.to = a.natural_end();
-            let b = mk([stand, None, None, None], a.to, top_feet, true);
+            let mut b = mk([stand, None, None, None], a.to, a.to, true);
+            b.to = top_feet.unwrap_or_else(|| b.natural_end());
             (a, Some(b))
         }
     }
@@ -1843,7 +1945,12 @@ pub const PULLDOWN_BEAM_DESCENT: [u32; 4] = [0x516D_5CF9, 0x516D_5D01, 0x516D_5D
 ///    PullDownSubState 4, ReleaseToInAir (`StatePullDown_Update` 0xDDFCF0 → 0xDDA100, the hang let-go 0xDD7810):
 ///    `Err` holds the orientation alone, which falls when it ends.
 /// 3. Reception: foot support (`sub_B16130`) → wall reception (angle blend `pulldown_wall_weights`) to the wall-hang
-///    root, else the free reception to the free-hang root.
+///    root, else the free reception to the free-hang root. Only the reception's `_a` plays in the pull-down: the root
+///    is interpolated over its length (`sub_501C90`(0) → `sub_711130`), and once it plays with the interpolation done
+///    (`HumanLedge__PullDownReceptionDone` 0xDCDAA0) the hang is in its Movement state; the idle it requests plays the
+///    graph's transition `_b` + `_tr` first (`_a`'s item transition to the idle, 0x082F9F3C / 0x082F820C). The free `_b`
+///    is not locked (word 0x0FC0: live 2026-10-13_210349/006, the turn under the beam starts 0.01 s into it); the wall
+///    `_b` is (0x0FF0), `ledge::reception_lock_time`.
 pub fn pulldown(p: Vec3, n: Vec3, from: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Result<[LedgeMove; 3], LedgeMove> {
     pulldown_with(p, n, from, PULLDOWN_ORIENT[wait as usize], PULLDOWN_DESCENT, guidance, collision)
 }
@@ -1952,7 +2059,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
     let reception = if wall {
         mk(
             3,
-            [item(PULLDOWN_WALL[0], 0, &w), item(PULLDOWN_WALL[1], 0, &w), item(PULLDOWN_WALL[1], 1, &w), None],
+            [item(PULLDOWN_WALL[0], 0, &w), None, None, None],
             p2,
             hang_root(hl, hr, n, LedgeHangType::Wall),
             facing_in,
@@ -1963,7 +2070,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
     } else {
         mk(
             3,
-            [single(PULLDOWN_FREE[0], 0), single(PULLDOWN_FREE[1], 0), single(PULLDOWN_FREE[1], 1), None],
+            [single(PULLDOWN_FREE[0], 0), None, None, None],
             p2,
             hang_root_at(hl, hr, n, LedgeHangType::Free, collision),
             facing_in,

@@ -272,6 +272,105 @@ fn extend_next_on<'a>(s: &mut ContactState, cur: &AnimClip, later: impl Iterator
     }
 }
 
+/// What A is while a blend runs and A plays on (the AROLLB* types): one action going on, or, when the switch came while
+/// another blend was still running, that whole blend node with its own A and B still going and its weight still moving
+/// (the game's blend tree: the new BlendNode's A is the previous node, `sub_773F90`; RE/27 S2). Before, the port froze
+/// the half-blended pose on screen there.
+#[derive(Clone, Debug)]
+enum ARoll {
+    Item { items: Vec<ItemPlay>, item: usize, phase: f32, looping: bool },
+    /// `a` = None: its A was frozen at `a_pose`.
+    Blend { a: Option<Box<ARoll>>, a_pose: Vec<(Quat, Vec3)>, b: Box<ARoll>, blend: ActBlend, fade: f32, fade_time: f32 },
+}
+
+/// Nodes kept playing inside one another; a deeper one is frozen (PORT: a bound on the work per frame).
+const AROLL_DEPTH: usize = 4;
+
+impl ARoll {
+    fn depth(&self) -> usize {
+        match self {
+            ARoll::Item { .. } => 1,
+            ARoll::Blend { a, b, .. } => 1 + a.as_ref().map_or(0, |a| a.depth()).max(b.depth()),
+        }
+    }
+
+    /// The phase a PROGRESSIVE B starts from: the newest item's.
+    fn phase(&self) -> f32 {
+        match self {
+            ARoll::Item { phase, .. } => *phase,
+            ARoll::Blend { b, .. } => b.phase(),
+        }
+    }
+
+    fn advance(&mut self, lib: &AnimLibrary, dt: f32) {
+        match self {
+            ARoll::Item { items, item, phase, looping } => {
+                let ad = items.get(*item).map(|it| lib.item_duration(it)).unwrap_or(1.0).max(1e-3);
+                let n = *phase + dt / ad;
+                *phase = if *looping { n.fract() } else { n.min(1.0) };
+                // a looping A goes on to its next item. The simulation feeds a slot only its current item (the ground
+                // locomotion's foot cycle): the action's next item follows with the same weights (they live on the slot,
+                // `sub_725B30`), instead of the item restarting on itself (footr's end is footl's start)
+                if *looping && n >= 1.0 {
+                    if items.len() > 1 {
+                        *item = (*item + 1) % items.len();
+                    } else if let Some(next) = items.first().and_then(|it| next_loop_item(lib, it)) {
+                        items[0] = next;
+                    }
+                }
+            }
+            ARoll::Blend { a, b, blend, fade, fade_time, .. } => {
+                if let Some(a) = a {
+                    a.advance(lib, dt);
+                }
+                // B frozen while its blend runs (AROLLBSTOP / ASTOPBSTOP*)
+                if !(*fade < 1.0 && matches!(blend.kind, 3 | 4 | 5)) {
+                    b.advance(lib, dt);
+                }
+                *fade = (*fade + dt / fade_time.max(0.01)).min(1.0);
+            }
+        }
+    }
+
+    fn sample(&self, lib: &AnimLibrary, skel: &PoseSkeleton, out: &mut Vec<(Quat, Vec3)>) {
+        match self {
+            ARoll::Item { items, item, phase, .. } => match items.get(*item) {
+                Some(it) => sample_layers(lib, skel, &it.layers, it.clip_phase(*phase), out),
+                None => out.clear(),
+            },
+            ARoll::Blend { a, a_pose, b, blend, fade, .. } => {
+                b.sample(lib, skel, out);
+                if *fade < 1.0 {
+                    let mut sampled = Vec::new();
+                    let ap = match a {
+                        Some(a) => {
+                            a.sample(lib, skel, &mut sampled);
+                            &sampled
+                        }
+                        None => a_pose,
+                    };
+                    if ap.len() == out.len() {
+                        let w = blend_weight(blend, *fade);
+                        for (o, x) in out.iter_mut().zip(ap) {
+                            *o = (qinterp(x.0, o.0, w), x.1.lerp(o.1, w));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The contact tags it shows: its B's, or its A's while its blend runs with ACTBlendAcuatorMode FROMA.
+    fn contacts(&self, lib: &AnimLibrary) -> Option<ContactState> {
+        match self {
+            ARoll::Item { items, item, phase, .. } => items.get(*item).and_then(|it| lib.dominant(it)).map(|c| contact_state(c, *phase * c.duration)),
+            ARoll::Blend { a, b, blend, fade, .. } => {
+                if *fade < 1.0 && blend.acuator == 0 { a.as_ref().and_then(|a| a.contacts(lib)) } else { b.contacts(lib) }
+            }
+        }
+    }
+}
+
 /// Playback state on the player. Its pose goes to the `BonePose` beside it (`animate_pose`).
 #[derive(Component, Default)]
 #[require(crate::bone_pose::BonePose)]
@@ -281,9 +380,8 @@ pub struct AnimPlayer {
     pub items: Vec<ItemPlay>,
     pub item: usize,
     pub phase: f32,
-    /// The pose on screen when the current transition started (per joint), faded out over `fade_time`.
-    /// PORT: the game's blend tree keeps the outgoing item running; the port freezes the displayed pose, which
-    /// also covers a transition that starts while another is still fading (no snap).
+    /// A's pose (per joint), faded out over `fade_time`: the pose on screen when the blend started (A frozen), or A
+    /// sampled again each frame while it plays on (`a_roll`).
     pub prev: Option<Vec<(Quat, Vec3)>>,
     /// Root-joint translation on screen when the transition started (root-motion offset of a FromAnim clip).
     prev_root: Vec3,
@@ -302,8 +400,11 @@ pub struct AnimPlayer {
     /// ActionControllerEvaluator, 0x726F40 / 0x727560, so `AnimSlotInstance__GetSelectedAction` 0x723D10 returns no
     /// action), not a seam between two items of one action.
     pub action_switch: bool,
-    /// A still playing while the blend runs (AROLLB* types): its items, item and phase.
-    a_roll: Option<(Vec<ItemPlay>, usize, f32, bool)>,
+    /// A still playing while the blend runs (AROLLB* types): one action, or the whole blend that was still running.
+    a_roll: Option<ARoll>,
+    /// The action A belonged to when the running blend started (0 for a named clip): the root displacement shares
+    /// (`root_shares_for`) apply only across a switch between two actions.
+    blend_from: u32,
     /// A's contact tags when the blend started (ACTBlendAcuatorMode FROMA).
     prev_contacts: ContactState,
     /// The action sequence loops back to this item (the items before it are a transition action).
@@ -516,6 +617,12 @@ struct Request {
     /// The blend into the requested action when the simulation knows it (a ground transition action: the authored
     /// item transition's blend A, or the code's explicit one); `None`: the graph's lookup (`sub_725950`).
     blend: Option<ActBlend>,
+    /// The two weight sets the code applies right after the request (0xDE1FE0's swing into the free idle): the playing
+    /// item's (`sub_502E30`) and then `AnimGraph__SetItemBlendWeights` 0x503040's. When the graph queues a transition
+    /// action in front, the first set goes to that action's first item, which is the one playing, and the second to the
+    /// requested action queued behind it (hypothesis: live, the swing's length matches the first set). Without a queued
+    /// action the request's own weights stand.
+    playing_w: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 const CROSSFADE: f32 = 0.2;
@@ -542,11 +649,11 @@ fn single(name: &str) -> Vec<ItemPlay> {
 }
 
 fn looped(clip: &str, fade: f32) -> Request {
-    Request { key: clip.into(), items: single(clip), sim: false, looping: true, fit: None, token: 0, fade, hold: false, blend: None }
+    Request { key: clip.into(), items: single(clip), sim: false, looping: true, fit: None, token: 0, fade, hold: false, blend: None, playing_w: None }
 }
 
 fn once(clip: String, token: u64, fit: Option<f32>, fade: f32) -> Request {
-    Request { items: single(&clip), key: clip, sim: false, looping: false, fit, token, fade, hold: false, blend: None }
+    Request { items: single(&clip), key: clip, sim: false, looping: false, fit, token, fade, hold: false, blend: None, playing_w: None }
 }
 
 /// A graph action (by the id the exe uses). Falls back to `fallback` (a clip name) if the action or its
@@ -561,7 +668,7 @@ fn action(lib: &AnimLibrary, ids: &[u32], looping: bool, token: u64, fade: Optio
     }
     let fade = fade.unwrap_or(items[0].blend.time.max(0.05));
     let key = ids.iter().map(|i| format!("act_{i:08x}")).collect::<Vec<_>>().join("+");
-    Some(Request { key, items, sim: false, looping, fit: None, token, fade, hold: false, blend: None })
+    Some(Request { key, items, sim: false, looping, fit: None, token, fade, hold: false, blend: None, playing_w: None })
 }
 
 /// PORT: a named clip (outside the graph) enters as the default transition does (A frozen, B playing, linear)
@@ -613,6 +720,43 @@ pub fn blend_weight(b: &ActBlend, t: f32) -> f32 {
         (false, true) => t + t * t - t * t * t,
         (false, false) => t,
     }
+}
+
+/// The shares of the root displacement while a blend runs (RE/24 ANIM-16, `sub_774350`): (A's, B's). A's displacement
+/// is gathered only while A plays on (AROLLB*, kinds 1 / 3); then ACTBlendDispSrcMode: BLENDAB lerps A's and B's by the
+/// blend weight `w`, FROMAONLY takes A's, FROMBONLY B's. So under the default ASTOPBROLL the new action's root motion
+/// ramps in with the weight. PORT: B is taken to play on in every type (the simulation's clock does not stop for the
+/// ASTOPBSTOP / AROLLBSTOP types, so their displacement is not held back).
+pub fn root_shares(b: &ActBlend, w: f32) -> (f32, f32) {
+    let a = if matches!(b.kind, 1 | 3) { 1.0 } else { 0.0 };
+    match b.disp_src {
+        1 => (a, 0.0),
+        2 => (0.0, 1.0),
+        _ => (a * (1.0 - w), w),
+    }
+}
+
+impl AnimPlayer {
+    /// `root_shares` for the simulation's `action`: while the running blend switches from another action into it;
+    /// (0, 1) otherwise (no blend, an item seam within one action, or the animation not yet on that action). One frame
+    /// late: the animation runs after the simulation.
+    pub fn root_shares_for(&self, action: u32) -> (f32, f32) {
+        let blending = self.fade < 1.0 && self.prev.is_some() && self.action_switch;
+        let on_it = self.items.get(self.item).is_some_and(|i| i.action == action && action != 0);
+        if !blending || !on_it || self.blend_from == action {
+            return (0.0, 1.0);
+        }
+        root_shares(&self.blend, blend_weight(&self.blend, self.fade))
+    }
+}
+
+/// The weight of `action`'s own displacement this frame (`root_shares_for`, A's share counted as the same motion:
+/// PORT, the simulation runs one action, so a rolling A's displacement stands for itself). 1 without an animation.
+pub fn root_weight(anim: Option<&AnimPlayer>, action: u32) -> f32 {
+    anim.map_or(1.0, |p| {
+        let (a, b) = p.root_shares_for(action);
+        a + b
+    })
 }
 
 /// Fall-grasp weights (HumanInAir__CheckAirCatch 0xE0BF2B–0xE0C2E9): with grab held the reach direction
@@ -712,7 +856,7 @@ fn sim_request(p: &mut AnimPlayer, lib: &AnimLibrary, b: &crate::player::jump_bl
         p.set_sim_item(it);
         return None;
     }
-    Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false, blend: None })
+    Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false, blend: None, playing_w: None })
 }
 
 /// The seam from a queued transition action's last item into the requested action's first item (`loop_from`, on the
@@ -828,7 +972,7 @@ fn choose_clip(
                 let dest = authored.map(|a| a.action_b).unwrap_or(if t.to_wait { 0 } else { ACT_GROUND_LOCOMOTION });
                 let blend_b = authored.map(|a| a.blend_b).unwrap_or_default();
                 p.pending_b = Some((dest, blend_b));
-                Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade: 0.0, hold: false, blend: Some(blend_a) })
+                Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade: 0.0, hold: false, blend: Some(blend_a), playing_w: None })
             }
             // (a landing without its action, e.g. the clips are missing: nothing extra plays; the one-shot branch above
             // shows the game's landing action)
@@ -850,7 +994,7 @@ fn choose_clip(
                     p.set_sim_item(it);
                     continue;
                 }
-                Some(Request { key, items: vec![it], sim: true, looping: true, fit: None, token: 0, fade: CROSSFADE, hold: false, blend: None })
+                Some(Request { key, items: vec![it], sim: true, looping: true, fit: None, token: 0, fade: CROSSFADE, hold: false, blend: None, playing_w: None })
             }
             // standing: the game's wait action of the leading foot (MoveBlend foot: 0 = left ahead), entered through the
             // graph's transition like every action (RE/13 §7)
@@ -1075,12 +1219,20 @@ fn choose_clip(
                             let waist = lib.action_with_clip("HumanLedge", "xx_h_hangwaist_tr_hangknee_footl");
                             [Some(ACT_PULLUP_FREE), waist, Some(ACT_HANGKNEE_TO_WAIT)].into_iter().flatten().collect()
                         };
-                        action(&lib, &ids, false, token, Some(0.1), None)
+                        // the free pull-up's unlocked `_b` is cut at its start by the waist step (`Pullup_Tick` 0xDE2EE0)
+                        action(&lib, &ids, false, token, Some(0.1), None).map(|mut r| {
+                            if !wall && r.items.len() > 2 && r.items[1].action == ACT_PULLUP_FREE {
+                                r.items.remove(1);
+                            }
+                            r
+                        })
                     }
-                    // the free idle after the swing back or a walling free hang (Entry end 0xDE1FE0, HangFreeReceptionType
-                    // 3), until the next move: its two clips `xx_h_hangfree_wait` / `xx_h_hangwallfree_wait` at
-                    // [1 − SwingStrength, SwingStrength] (`sub_502E30`, RE/24 LEDGE-24). PORT: the second set (0x503040 →
-                    // 0x726280, [1, 0]) goes to the running transition's blend node (hypothesis) and is not played.
+                    // the free idle after the swing back, a walling free hang or the climb's jump up (Entry end 0xDE1FE0,
+                    // HangFreeReceptionType 3), until the next move. The graph plays its transition action first, the swing
+                    // `ACT_HANGFREE_SWINGBACK` (min / max), and the weights go [1 − SwingStrength, SwingStrength] to its
+                    // playing first item (`sub_502E30`, the length the simulation holds, `ledge::swing_lock_time`) and
+                    // [1, 0] to the idle behind it (0x503040; RE/24 LEDGE-24). With no transition action the idle takes
+                    // the first set itself.
                     _ if !wall && l.swing_idle().is_some() => {
                         let s = l.swing_idle().unwrap_or(0.0).clamp(0.0, 1.0);
                         action(&lib, &[ACT_HANG_FREE], true, 0, Some(0.15), Some("hang_free")).map(|mut r| {
@@ -1090,6 +1242,7 @@ fn choose_clip(
                                 it.layers[0].1 = w[0];
                                 it.layers[1].1 = w[1];
                             }
+                            r.playing_w = Some((vec![1.0 - s, s], vec![1.0, 0.0]));
                             r
                         })
                     }
@@ -1185,6 +1338,23 @@ fn choose_clip(
                     let skipped = t.action_a != 0 && !queued;
                     if t.action_a != 0 && queued {
                         if let Some(mut ti) = lib.action_items(t.action_a) {
+                            if let Some((playing, queued)) = req.playing_w.as_ref() {
+                                let set = |it: &mut ItemPlay, w: &[f32]| {
+                                    if it.layers.len() == w.len() {
+                                        let mut w = w.to_vec();
+                                        crate::player::jump_blend::normalize_item_weights(&mut w);
+                                        for (l, w) in it.layers.iter_mut().zip(w) {
+                                            l.1 = w;
+                                        }
+                                    }
+                                };
+                                if let Some(it) = ti.first_mut() {
+                                    set(it, playing);
+                                }
+                                if let Some(it) = items.first_mut() {
+                                    set(it, queued);
+                                }
+                            }
                             if req.sim {
                                 for it in &mut ti {
                                     it.root_motion = false;
@@ -1215,6 +1385,7 @@ fn choose_clip(
         };
         let a_state = (std::mem::take(&mut p.items), p.item, p.phase, p.looping);
         let had = p.clip.take().is_some() && !p.last_pose.is_empty();
+        p.blend_from = cur_item.as_ref().map_or(0, |i| i.action);
         start_blend(&mut p, blend, had, Some(a_state), &lib);
         p.action_switch = true;
         // locomotion cycles all start on the left foot: keep the phase between gaits
@@ -1258,6 +1429,7 @@ impl AnimPlayer {
 fn start_blend(p: &mut AnimPlayer, b: ActBlend, had: bool, a_state: Option<(Vec<ItemPlay>, usize, f32, bool)>, lib: &AnimLibrary) {
     // a blend still running when this one starts (its own A and B are on screen together)
     let was_fading = p.fade < 1.0 && p.prev.is_some();
+    let running = was_fading.then(|| (p.blend, p.fade, p.fade_time, p.a_roll.take(), p.prev.clone()));
     p.blend = b;
     p.a_roll = None;
     if b.kind == 0 || b.time <= 0.0 || !had {
@@ -1282,18 +1454,26 @@ fn start_blend(p: &mut AnimPlayer, b: ActBlend, had: bool, a_state: Option<(Vec<
         }
     }
     p.fade_time = time.max(0.01);
-    // A keeps playing for the AROLLB* types. PORT: when the switch comes while another blend is still fading, the game's
-    // A is that whole blend node (both its children keep running); the port has one level, so it freezes the pose on
-    // screen instead of rolling only the newest item (which snapped the half-blended pose onto that item)
-    if matches!(b.kind, 1 | 3) && !was_fading {
-        p.a_roll = a_state.filter(|(items, _, _, _)| !items.is_empty());
+    // A keeps playing for the AROLLB* types: the action that was playing, or, when the switch comes while another blend
+    // is still fading, that whole blend node with both its children going on (RE/27 S2); the other types freeze A (the
+    // pose on screen, `prev` above)
+    if matches!(b.kind, 1 | 3) {
+        let item = a_state.filter(|(items, _, _, _)| !items.is_empty()).map(|(items, item, phase, looping)| ARoll::Item { items, item, phase, looping });
+        p.a_roll = match (item, running) {
+            (Some(item), Some((blend, fade, fade_time, a, a_pose))) => {
+                let node = ARoll::Blend { a: a.map(Box::new), a_pose: a_pose.unwrap_or_default(), b: Box::new(item), blend, fade, fade_time };
+                // deeper than the bound: the half-blended pose on screen stays frozen
+                (node.depth() <= AROLL_DEPTH).then_some(node)
+            }
+            (item, _) => item,
+        };
     }
 }
 
 /// B's start phase (`ACTBlendBPosMode`, 0x773F90): FROMSTART 0, PROGRESSIVE A's phase, INVPROGRESSIVE 1 − A's
 /// phase, FROMTARGETTIME the blend's target time.
 fn b_start_phase(p: &AnimPlayer, lib: &AnimLibrary, items: &[ItemPlay]) -> f32 {
-    let a_phase = p.a_roll.as_ref().map(|a| a.2).unwrap_or(p.phase);
+    let a_phase = p.a_roll.as_ref().map(|a| a.phase()).unwrap_or(p.phase);
     match p.blend.b_pos {
         1 => a_phase,
         2 => 1.0 - a_phase,
@@ -1404,6 +1584,7 @@ pub fn animate_pose(
             } else {
                 nxt.blend
             };
+            p.blend_from = cur.action;
             start_blend(&mut p, b, true, Some(a_state), &lib);
             p.action_switch = nxt_switch;
             p.phase = 0.0;
@@ -1413,20 +1594,8 @@ pub fn animate_pose(
             p.phase = next.min(1.0);
         }
         // A keeps playing for the AROLLB* types
-        if let Some((items, ai, aph, alooping)) = p.a_roll.as_mut() {
-            let ad = items.get(*ai).map(|it| lib.item_duration(it)).unwrap_or(1.0).max(1e-3);
-            let n = *aph + dt / ad;
-            *aph = if *alooping { n.fract() } else { n.min(1.0) };
-            // a looping A goes on to its next item. The simulation feeds a slot only its current item (the ground
-            // locomotion's foot cycle): the action's next item follows with the same weights (they live on the slot,
-            // `sub_725B30`), instead of the item restarting on itself (footr's end is footl's start)
-            if *alooping && n >= 1.0 {
-                if items.len() > 1 {
-                    *ai = (*ai + 1) % items.len();
-                } else if let Some(next) = items.first().and_then(|it| next_loop_item(&lib, it)) {
-                    items[0] = next;
-                }
-            }
+        if let Some(a) = p.a_roll.as_mut() {
+            a.advance(&lib, dt);
         }
         p.fade = (p.fade + dt / p.fade_time.max(0.01)).min(1.0);
         let weight = blend_weight(&p.blend, p.fade);
@@ -1459,17 +1628,14 @@ pub fn animate_pose(
 
         let fading = p.fade < 1.0 && p.prev.is_some();
         if fading && p.blend.acuator == 0 {
-            p.contacts = match p.a_roll.as_ref() {
-                Some((items, ai, aph, _)) => items.get(*ai).and_then(|it| lib.dominant(it)).map(|c| contact_state(c, *aph * c.duration)).unwrap_or(p.prev_contacts),
-                None => p.prev_contacts,
-            };
+            p.contacts = p.a_roll.as_ref().and_then(|a| a.contacts(&lib)).unwrap_or(p.prev_contacts);
         }
         // a rolling A is sampled again this frame
         if fading {
-            if let Some((items, ai, aph, _)) = p.a_roll.as_ref() {
-                if let Some(it) = items.get(*ai) {
-                    let mut a_pose = Vec::new();
-                    sample_layers(&lib, skel, &it.layers, it.clip_phase(*aph), &mut a_pose);
+            if let Some(a) = p.a_roll.as_ref() {
+                let mut a_pose = Vec::new();
+                a.sample(&lib, skel, &mut a_pose);
+                if !a_pose.is_empty() {
                     p.prev = Some(a_pose);
                 }
             }
@@ -1795,6 +1961,35 @@ mod tests {
         assert!(times(Some(0.167), 0.2).is_empty());
         // the loop wrapped: the tail of the cycle, then its start
         assert_eq!(times(Some(0.68), 0.05), vec![0.7, 0.0]);
+    }
+
+    /// RE/27 S2: a switch with a rolling-A blend while another blend still runs keeps that blend playing as A (both its
+    /// sides go on, its weight keeps moving); a frozen-A blend freezes the whole half-blended pose.
+    #[test]
+    fn a_switch_during_a_rolling_blend_keeps_that_blend_playing_as_a() {
+        let lib = AnimLibrary::default();
+        let roll = ActBlend { kind: 1, time: 0.2, ..ActBlend::DEFAULT };
+        let item = |a: u32| (vec![ItemPlay { action: a, ..Default::default() }], 0usize, 0.3f32, true);
+        let mut p = AnimPlayer { last_pose: vec![(Quat::IDENTITY, Vec3::ZERO); 3], ..Default::default() };
+        start_blend(&mut p, roll, true, Some(item(1)), &lib);
+        assert!(matches!(p.a_roll, Some(ARoll::Item { .. })), "the first blend rolls its A");
+        p.fade = 0.5;
+        start_blend(&mut p, roll, true, Some(item(2)), &lib);
+        match &p.a_roll {
+            Some(ARoll::Blend { a: Some(a), b, fade, .. }) => {
+                assert!(matches!(**a, ARoll::Item { .. }) && matches!(**b, ARoll::Item { .. }));
+                assert!((fade - 0.5).abs() < 1e-6, "the running blend keeps its weight: {fade}");
+            }
+            other => panic!("A is the running blend: {other:?}"),
+        }
+        // and its weight goes on moving while it plays as A
+        if let Some(a) = p.a_roll.as_mut() {
+            a.advance(&lib, 0.05);
+        }
+        assert!(matches!(&p.a_roll, Some(ARoll::Blend { fade, .. }) if (*fade - 0.75).abs() < 1e-4));
+        // a frozen-A blend (the default ASTOPBROLL) freezes the half-blended pose on screen
+        start_blend(&mut p, ActBlend::DEFAULT, true, Some(item(3)), &lib);
+        assert!(p.a_roll.is_none() && p.prev.is_some());
     }
 
     #[test]

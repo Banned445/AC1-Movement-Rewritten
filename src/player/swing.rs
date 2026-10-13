@@ -47,7 +47,8 @@ pub struct Swing {
     /// Facing (into the bar's far side: the swing / jump direction).
     pub fwd: Vec3,
     pub hands_mid: Vec3,
-    /// A jump was requested (PORT: kept until the release point, the end of back_down).
+    /// The jump is asked for this frame: high profile and Legs held with the stick toward the facing (the interpreter
+    /// re-sends event 7 every frame, 0xEECE5E; the guard 0xDCD000 takes it at the release point).
     pub jump_req: bool,
     pub target: Option<JumpTarget>,
     pub seq: u32,
@@ -161,15 +162,13 @@ pub fn free_jump_room(root: Vec3, fwd: Vec3, collision: &CollisionWorld) -> bool
 
 /// `HumanLedge__StateSwingReception_Update` 0xDD24F0 with its events (0xDD2890). The interpreter's ledge state
 /// (0xEECCF9–0xEED11F, RE/24 LEDGE-17 / CENSUS-3) drives it with held buttons: `held` = high profile and Legs held
-/// (+4397; its negation +4398 sends the stop, event 6), `jump_pressed` = held, Legs pressed and the stick past the dead
-/// zone within 75° of the facing (event 7). `find_target` = the jump target along the facing (the guidance search,
+/// (+4397; its negation +4398 sends the stop, event 6), `jump` = held and the stick past the dead zone within 75° of the
+/// facing (event 7: `sub_6D0F50(0)` is Legs held, not the press buffer, 0xEECE5E). `find_target` = the jump target along the facing (the guidance search,
 /// then the Leap of Faith, `targets::swing_jump_target`); without one the free jump when there is room ahead
 /// (`free_jump_room`, 0xEED0D9), else no jump.
-pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut Vec3, collision: &CollisionWorld, find_target: impl Fn(Vec3, Vec3) -> Option<JumpTarget>) -> SwingOut {
+pub fn update(s: &mut Swing, dt: f32, held: bool, jump: bool, feet: &mut Vec3, collision: &CollisionWorld, find_target: impl Fn(Vec3, Vec3) -> Option<JumpTarget>) -> SwingOut {
     s.t += dt;
-    if jump_pressed && s.on_pole {
-        s.jump_req = true;
-    }
+    s.jump_req = jump && s.on_pole;
     let dur = s.action.duration();
     let done = s.t >= dur;
     match s.phase {
@@ -220,7 +219,7 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump_pressed: bool, feet: &mut
                 }
                 return SwingOut::Hang;
             }
-            // event 7 (guard 0xDCD000): released at the end of back_down (item 3), toward the target
+            // event 7 (guard 0xDCD000): released at the end of back_down (item 3) while it is still asked for
             if i == 3 && s.jump_req {
                 if let Some(t) = s.target.or_else(|| find_target(s.root, s.fwd)) {
                     return SwingOut::Jump(Some(t));
@@ -310,10 +309,9 @@ mod stop_tests {
             let mut s = start(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y * 2.4, 0).expect("swing cycle");
             s.phase = SwingPhase::Cycle(3);
             s.action = single(SWING_CYCLE, 3, &[]).unwrap();
-            s.jump_req = true;
             let mut feet = Vec3::ZERO;
             let d = s.action.duration();
-            update(&mut s, d + 1e-3, true, false, &mut feet, c, |_, _| None)
+            update(&mut s, d + 1e-3, true, true, &mut feet, c, |_, _| None)
         };
         let mut c = CollisionWorld::default();
         assert!(matches!(release(&c), SwingOut::Jump(None)), "free jump into open space");

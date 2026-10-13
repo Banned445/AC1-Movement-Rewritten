@@ -132,13 +132,21 @@ pub fn stay_edge(point: Vec3, normal: Vec3, small_box: bool, guidance: &Guidance
 /// flattened) faces along `dir`, with a drop of 0.5 m or more beyond them (`Human__MeasureDropBeyondEdge` 0xB19620 along
 /// the normal, 10 m, step 0.02); the nearest to the zone's rear point. Returns its drop.
 pub fn drop_edge_ahead(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<f32> {
+    drop_edge_report(pos, dir, (-0.3, 1.1), (-0.3, 0.3), 0.5, true, guidance, collision).map(|r| r.1)
+}
+
+/// `Human__FindDropEdgeAhead` 0xB1C100 with the caller's zone: `along` (a5, a6) ahead of `pos` along `dir`, `up` (a7, a8),
+/// the least drop `min_drop` (a9), the drop measured along the edge's normal (`along_normal`, a11) or along `dir`.
+/// Returns the edge's crossing point and its drop.
+#[allow(clippy::too_many_arguments)]
+pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32), min_drop: f32, along_normal: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, f32)> {
     let f = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     if f == Vec3::ZERO {
         return None;
     }
     let side = super::right_of(f);
-    let rear = pos + f * -0.3 + Vec3::Y * -0.3;
-    let mut best: Option<(f32, f32)> = None;
+    let rear = pos + f * along.0 + Vec3::Y * up.0;
+    let mut best: Option<(f32, Vec3, f32)> = None;
     for e in &guidance.edges {
         if crate::guidance::steep(e.p1 - e.p0) {
             continue;
@@ -148,15 +156,15 @@ pub fn drop_edge_ahead(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
             continue;
         }
         let x = e.p0.lerp(e.p1, s0 / (s0 - s1));
-        let (along, up) = ((x - pos).dot(f), x.y - pos.y);
-        if !(-0.3..=1.1).contains(&along) || !(-0.3..=0.3).contains(&up) {
+        let (a, u) = ((x - pos).dot(f), x.y - pos.y);
+        if !(along.0..=along.1).contains(&a) || !(up.0..=up.1).contains(&u) {
             continue;
         }
         let n = super::jump_candidates::wall_of(e.n0, e.n1);
         if n == Vec3::ZERO || n.dot(f) < 0.0 {
             continue;
         }
-        let mut drop = super::jump_candidates::measure_drop(x, n, 10.0, 0.02, collision);
+        let mut drop = super::jump_candidates::measure_drop(x, if along_normal { n } else { f }, 10.0, 0.02, collision);
         // PORT: a haystack is solid to the game's drop rays (Damascus's `Hay_Bale_*` collision, the controller touches
         // it, event 122); the port's haystacks sit on the Dynamic layer the drop rays leave out, so its top ends the drop
         // here (live 2026-10-09: free-running onto a cart's rim drops into the haystack from the stay, it does not jump
@@ -167,15 +175,15 @@ pub fn drop_edge_ahead(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
                 drop = drop.min((x.y - s.max.y).max(0.0));
             }
         }
-        if drop < 0.5 {
+        if drop < min_drop {
             continue;
         }
         let d = (x - rear).length_squared();
         if best.is_none_or(|b| d < b.0) {
-            best = Some((d, drop));
+            best = Some((d, x, drop));
         }
     }
-    best.map(|b| b.1)
+    best.map(|b| (b.1, b.2))
 }
 
 /// IHuman vt148 0xB15DE0: a beam piece ahead (`sub_116E1A0` on HumanGuidance's report at `pos` + 0.35·`dir`, box
@@ -233,6 +241,34 @@ pub fn jump_kind(pos: Vec3, stick: Vec3, high: bool, moving: bool, legs: bool, p
     (kind, free)
 }
 
+/// The narrow interpreters' jump once its kind is chosen (NarrowObjectState 0xEE96C6–0xEE99F0, BeamState
+/// 0xEEAC38–0xEEAF8D): IHuman vt56 with that kind, with beams and no subtype left out, along the interpreter's stored
+/// stick (+4320, `dir`), then the scorer (mode 1; PORT: the second target of mode 2, vt20, is not kept); the Leap of
+/// Faith for kind 0; then, with no candidate, the free jump by its mode (IHuman vt68 `Human__BuildFreeJumpTarget`
+/// 0xB1E7F0: 0 → 8 m ahead, 1 → 1 m, 2 → 3 m; 3 m below, or min(drop + 0.25, 3) under the drop edge's report). Both post
+/// event 4, the free-step takeoff (jump kind 1).
+#[allow(clippy::too_many_arguments)]
+pub fn narrow_jump(feet: Vec3, forward: Vec3, dir: Vec3, kind: Option<u32>, free: Option<(u32, Option<f32>)>, ab: &AbilitySet, foot_left: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<InAirEntry> {
+    let kind = kind?;
+    let q = Query { kind, mode: 0, long: false, beams: true, exclude: 0 };
+    let target = super::targets::find_target(feet, forward, dir, &q, false, guidance, collision)
+        .or_else(|| (kind == 0 && ab.allows(Ability::LeapOfFaith)).then(|| super::targets::haystack_target(feet, dir, forward, guidance, collision)).flatten());
+    if std::env::var_os("AC_JUMP_LOG").is_some() {
+        eprintln!("narrow jump: kind {kind} free {free:?} -> {:?}", target.map(|t| (t.type_flags, t.position)));
+    }
+    if let Some(target) = target {
+        return Some(InAirEntry::FreeStepJump { from: feet, target, foot_left });
+    }
+    let (mode, drop) = free?;
+    let ahead = match mode {
+        0 => crate::tuning::FREE_JUMP_AHEAD,
+        1 => 1.0,
+        _ => 3.0,
+    };
+    let down = drop.map_or(3.0, |d| (d + 0.25).min(3.0));
+    Some(InAirEntry::FreeStepFreeJump { from: feet, dir, ahead, down, foot_left })
+}
+
 /// The Ground setup the stay builds (0xE517C8–0xE51934): `TransitionSetupDataToMovement` mode by the profile
 /// (+0xB8 bit 7), moving (`GetMoveModeFromStick` 0xC7F000) with the stick within 120° of the facing, and Legs held
 /// (+0xB9 bit 1, IHumanNarrowObject vt64 from the interpreter):
@@ -258,6 +294,7 @@ pub fn update(
     ab: &AbilitySet,
     guidance: &GuidanceWorld,
     collision: &CollisionWorld,
+    anim: Option<&crate::anim::AnimPlayer>,
     dt: f32,
 ) {
     let Some(mut fs) = data.narrow.free_step else { return };
@@ -286,7 +323,8 @@ pub fn update(
         let yaw = a.yaw(phase);
         body.heading = (fs.e.heading + yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         let f0 = Vec3::new(-fs.e.heading.sin(), 0.0, -fs.e.heading.cos());
-        let delta = super::right_of(f0) * step[0] + f0 * step[1];
+        // ramped in with the blend into the action (RE/24 ANIM-16)
+        let delta = (super::right_of(f0) * step[0] + f0 * step[1]) * crate::anim::root_weight(anim, a.id);
         let r = collision.move_capsule(&mut body.proxy, body.feet, delta, true, dt);
         body.feet = r.position;
     }
@@ -315,38 +353,19 @@ pub fn update(
 
     // ------------------------------------------------ the jump on (event 4)
     // Only while event 4 is accepted (vt16): from phase 0.5 (`StateMovement_GuardJump` 0xE4C700, +0xE0 = 0).
-    let (kind, free) = if phase >= HALF { jump_kind(body.feet, stick, high, moving, pad.legs_held, pad.jump_buffered(), guidance, collision) } else { (None, None) };
-    if ab.allows(Ability::Jump) && phase >= HALF && (kind.is_some() || free.is_some()) {
+    if moving {
+        data.narrow.jump_dir = stick;
+    }
+    let pressed = pad.jump_buffered() && data.narrow.jump_dir != Vec3::ZERO;
+    let (kind, free) = if phase >= HALF { jump_kind(body.feet, stick, high, moving, pad.legs_held, pressed, guidance, collision) } else { (None, None) };
+    if ab.allows(Ability::Jump) && phase >= HALF {
         // `SetupFreeStepJumpToTarget` 0xE4D780: kind 1 with the playing item's exit feet (live RE/25 freerun_north: the
         // reception ending right foot ahead takes off `freestep_front_front_050cm_footr_to_air`)
         let foot_left = fs.exit_foot() == 0;
-        let from = body.feet;
-        // IHuman vt56 with beams and no subtype left out, along the last strong stick (0xEE9733), the scorer (mode 1;
-        // PORT: the second target of mode 2, vt20, is not kept); the Leap of Faith for kind 0 (0xEE98B4)
-        let target = kind.and_then(|k| {
-            let q = Query { kind: k, mode: 0, long: false, beams: true, exclude: 0 };
-            super::targets::find_target(body.feet, forward, stick, &q, false, guidance, collision)
-                .or_else(|| (k == 0 && ab.allows(Ability::LeapOfFaith)).then(|| super::targets::haystack_target(body.feet, stick, forward, guidance, collision)).flatten())
-        });
-        if std::env::var_os("AC_JUMP_LOG").is_some() {
-            eprintln!("free step jump: kind {kind:?} free {free:?} -> {:?}", target.map(|t| (t.type_flags, t.position)));
-        }
-        if let Some(target) = target {
+        let dir = if data.narrow.jump_dir != Vec3::ZERO { data.narrow.jump_dir } else { stick };
+        if let Some(entry) = narrow_jump(body.feet, forward, dir, kind, free, ab, foot_left, guidance, collision) {
             pad.consume_jump();
-            switch_context(loco, data, TransitionSetup::ToInAir(InAirEntry::FreeStepJump { from, target, foot_left }));
-            return;
-        }
-        // no candidate: IHuman vt68 (`Human__BuildFreeJumpTarget` 0xB1E7F0) by the mode: 0 → 8 m ahead, 1 → 1 m, 2 → 3 m;
-        // 3 m below, or min(drop + 0.25, 3) under the drop edge's report (0xEE99A9)
-        if let Some((mode, drop)) = free {
-            pad.consume_jump();
-            let ahead = match mode {
-                0 => crate::tuning::FREE_JUMP_AHEAD,
-                1 => 1.0,
-                _ => 3.0,
-            };
-            let down = drop.map_or(3.0, |d| (d + 0.25).min(3.0));
-            switch_context(loco, data, TransitionSetup::ToInAir(InAirEntry::FreeStepFreeJump { from, dir: stick, ahead, down, foot_left }));
+            switch_context(loco, data, TransitionSetup::ToInAir(entry));
             return;
         }
     }

@@ -2167,7 +2167,8 @@ fn walking_a_bent_beam_carries_on_round_the_bend() {
     force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::Z }));
     s.run(0.2);
     s.pad(Vec3::Z, 1.0, false, false);
-    assert!(s.run_until(6.0, |s| s.data().narrow.p0 == Vec3::new(105.0, 4.0, 76.0)), "never switched segments: {:?} {:?} p0 {:?} p1 {:?} s {}", s.data().narrow.state, s.body().feet, s.data().narrow.p0, s.data().narrow.p1, s.data().narrow.s);
+    // (the segment's ends run on to the drop edges beyond them, `sub_F72FD0`, RE/28 §3: its far end is the bend's)
+    assert!(s.run_until(6.0, |s| s.data().narrow.p1 == Vec3::new(106.5, 4.0, 78.6)), "never switched segments: {:?} {:?} p0 {:?} p1 {:?} s {}", s.data().narrow.state, s.body().feet, s.data().narrow.p0, s.data().narrow.p1, s.data().narrow.s);
     s.pad((Vec3::new(1.5, 0.0, 2.6)).normalize(), 1.0, false, false);
     assert!(s.run_until(6.0, |s| s.body().feet.z > 77.5), "never walked on: {:?} {:?}", s.data().narrow.state, s.body().feet);
     let f = s.body().feet;
@@ -2783,13 +2784,12 @@ fn swing_from_bar_to_bar() {
     assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some()), "never swung: {:?} {:?}", s.loco().current, s.body().feet);
     assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_LANDING);
     // both hands on a pole (the bars are Pole edges) → the swing cycle; high profile and Legs held keep it going and
-    // jump with the stick toward the facing (RE/24 LEDGE-17)
+    // jump with the stick toward the facing, without a press (Legs held, 0xEECE5E; RE/24 LEDGE-17, RE/27 C1)
     assert!(s.data().ledge.swing.unwrap().on_pole, "the bar is a pole");
     s.pad(Vec3::Z, 1.0, true, true);
     assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle: {:?}", s.data().ledge.swing.map(|w| w.phase));
     assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_CYCLE);
     for z in [93.5f32, 97.0] {
-        s.press_legs();
         assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no swing jump toward {z}");
         assert_eq!(s.data().air.takeoff.unwrap().id, TAKEOFF_SWING);
         assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some() && s.loco().current == ActorContextId::Ledge), "never reached bar {z}: {:?} {:?}", s.loco().current, s.body().feet);
@@ -2797,8 +2797,7 @@ fn swing_from_bar_to_bar() {
         assert!((mid.z - (z - 0.1)).abs() < 0.05, "hands on bar {z}: {mid:?}");
         assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle on {z}");
     }
-    // and onto the far platform
-    s.press_legs();
+    // and onto the far platform, still only holding
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir));
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?} {:?}", s.loco().current, s.body().feet);
     // on its edge: the free-step arrival ends on the candidate (RE/24 AIR-2)
@@ -4010,8 +4009,15 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
             if lx.hypot(ly) < 0.4 || dx.hypot(dy) < 0.5 {
                 return None;
             }
-            // game angle of the camera's forward: the move direction minus the stick's angle, plus a quarter turn
-            let phi = dy.atan2(dx) - ly.atan2(lx) + std::f32::consts::FRAC_PI_2;
+            // game angle of the camera's forward: the move direction minus the stick's angle, plus a quarter turn. The
+            // recorded direction is the interpreter's +0x1250, snapped to straight ahead within 5° (`sub_55E7E0`): a
+            // stick that close to up recorded the camera's forward itself
+            let n = (lx / lx.hypot(ly), ly / lx.hypot(ly));
+            let phi = if n.1 > crate::player::interpreter::SNAP_COS {
+                dy.atan2(dx)
+            } else {
+                dy.atan2(dx) - ly.atan2(lx) + std::f32::consts::FRAC_PI_2
+            };
             Some((-phi.cos()).atan2(phi.sin()))
         })
         .collect();
@@ -5799,3 +5805,69 @@ fn the_empty_hand_drops_off_a_ladder_mid_revolve() {
 #[cfg(test)]
 #[path = "demo_run.rs"]
 mod demo_run;
+
+/// RE/27 C2: on a beam the interpreter picks a jump kind every frame (BeamState 0xEEAAA0): a tap (the press buffer with
+/// Legs let go) asks for kind 0 along the stored stick and jumps; holding Legs only searches the short hop zones (kind
+/// 4), so with nothing there the walk goes on to the beam's end without an impulsion crouch (Walk does not take event 2).
+#[test]
+fn a_beam_tap_jumps_and_holding_legs_walks_on() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    for tap in [true, false] {
+        let point = Vec3::new(85.6, 4.0, 70.0);
+        let mut s = Sim::new(point, std::f32::consts::FRAC_PI_2);
+        let (p0, p1) = (Vec3::new(84.5, 4.0, 70.0), Vec3::new(90.5, 4.0, 70.0));
+        force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: false, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::NEG_X }));
+        s.run(0.3);
+        s.pad(Vec3::NEG_X, 1.0, true, !tap);
+        s.press_legs();
+        if tap {
+            assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "the tap never jumped: {:?}", s.data().narrow.state);
+        } else {
+            // held Legs walks on (no crouch, no jump mid-beam); free running into the end's drop edge leaps off it in the
+            // last 0.4 m (`BeamRunsAlong` 0xF78F00 lets the drop-edge jump through only there; live 2026-10-13_210349/007)
+            s.run(0.5);
+            assert_eq!(s.loco().current, ActorContextId::NarrowObject, "held Legs jumped mid-beam");
+            assert!(!matches!(s.data().narrow.state, BeamState::ImpulseIn | BeamState::ImpulseWait), "a crouch while walking");
+            let mut took_off = None;
+            for _ in 0..90 {
+                let feet = s.body().feet;
+                s.run(1.0 / 60.0);
+                if s.loco().current == ActorContextId::InAir {
+                    took_off = Some(feet);
+                    break;
+                }
+            }
+            let feet = took_off.expect("never left the beam's end");
+            assert!(feet.x - 84.5 < 0.45, "left the beam {:.2} m before its end", feet.x - 84.5);
+        }
+    }
+}
+
+
+/// The kick up the wall into a ledge grab: the Ledge's Entry state takes the jump off (event 2) at any time while
+/// `step1_tr_hangwall` plays (`HumanLedge__Guard_EntryJumpOff` 0xDCBF00), so a press late in the grab ejects at once with
+/// the rebound, away from the wall, instead of being lost before the hang settles.
+#[test]
+fn the_wall_run_into_a_wall_hang_can_eject_during_the_grab() {
+    let mut s = Sim::new(Vec3::new(1.56, 0.0, 5.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.body().feet.z > 7.5));
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Walling), "no wall run");
+    s.pad(Vec3::Z, 0.0, true, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge), "never grabbed: {:?}", s.loco().current);
+    let mv = s.data().ledge.mv.expect("the grab plays");
+    assert_eq!(mv.seq[0].map(|a| a.id), Some(crate::player::walling::STEP1_TO_HANGWALL));
+    // late in the grab (past the first quarter the other entries allow)
+    assert!(s.run_until(2.0, |s| s.data().ledge.mv.and_then(|m| m.action_time()).is_some_and(|(_, t)| t > 0.6)));
+    assert!(s.data().ledge.repose_at_entry_end, "still in the grab");
+    let z0 = s.body().feet.z;
+    s.pad(Vec3::NEG_Z, 1.0, true, true);
+    s.press_legs();
+    s.run(1.0 / 60.0);
+    assert_eq!(s.data().ledge.last_action, "rebound", "the press was not taken during the grab");
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "no jump off: {:?}", s.loco().current);
+    s.run(0.6);
+    assert!(s.body().feet.z < z0 - 1.0, "pushed off away from the wall: {:?} from {z0}", s.body().feet);
+}
