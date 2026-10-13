@@ -931,8 +931,9 @@ impl Report {
     /// become the edge's pieces (`sub_671740`: [first free, first blocked) × spacing, clamped to the edge, kept when over
     /// 0.5 mm, `sub_671910`); each piece's scratch pair d is the free length past its ends for detector d (counted from
     /// the sample at its start downward and from the one after its end upward, × spacing; the whole reach when nothing
-    /// blocks; 0x66FFD0). The other pairs keep the edge's scratch. PORT: one ray per sample against the character
-    /// layer, where the game rasterises the workspace's collision (`sub_6712D0`).
+    /// blocks; 0x66FFD0). The other pairs keep the edge's scratch. The depths are the game's rasterised map
+    /// (`CollisionWorld::depth_samples`, matched sample for sample against live arrays, RE/26 §6.3) on the character
+    /// layer.
     pub fn depth_filter(&self, collision: &crate::collision::CollisionWorld, detectors: &[DepthDetector], thresholds: &[f32]) -> Report {
         let mut out = Report::default();
         for (i, e) in self.world.edges.iter().enumerate() {
@@ -946,9 +947,11 @@ impl Report {
                 .map(|(d, &thr)| {
                     let origin = start + x * d.offset.x + s * d.offset.y + z * d.offset.z;
                     let dir = s * d.angle.cos() + z * d.angle.sin();
-                    (0..count)
-                        .map(|k| collision.ray_distance(origin + t * (k as f32 * DEPTH_SPACING), dir, d.length, crate::layers::CHARACTER) >= thr)
-                        .collect()
+                    collision
+                        .depth_samples(origin, t, dir, span, d.length, DEPTH_SPACING, crate::layers::CHARACTER)
+                        .into_iter()
+                        .map(|depth| depth >= thr)
+                        .collect::<Vec<bool>>()
                 })
                 .collect();
             let all = |k: usize| free.iter().all(|f| f[k]);
@@ -970,7 +973,8 @@ impl Report {
                     let mut sc = scratch;
                     for (di, f) in free.iter().enumerate().take(2) {
                         // before the piece: from the sample at its start, downward
-                        let k0 = ((a / DEPTH_SPACING) as usize).min(count - 1);
+                        // the game divides in x87 double precision (0x66FFD0): 0.5 / 0.1f floors to 4
+                        let k0 = ((a as f64 / DEPTH_SPACING as f64) as usize).min(count - 1);
                         let mut before = a;
                         let mut n = 0;
                         for idx in (0..=k0).rev() {
@@ -981,7 +985,7 @@ impl Report {
                             n += 1;
                         }
                         // past the piece: from the sample after its end, upward
-                        let k1 = (b / DEPTH_SPACING) as usize + 1;
+                        let k1 = (b as f64 / DEPTH_SPACING as f64) as usize + 1;
                         let mut after = span - b;
                         let mut n = 0;
                         for idx in k1..count {

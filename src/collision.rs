@@ -235,6 +235,94 @@ impl CollisionWorld {
             .filter_map(|t| t.ray(origin, direction, nearest)).fold(nearest, f32::min)
     }
 
+    /// The guidance workspace's depth map of one detector along one edge (`sub_675D60`): `count` samples every `spacing`
+    /// along `along` from `origin`, each starting at `length`. The collision is cut by the detector's plane (spanned by
+    /// `along` and the ray direction `dir`) into segments, clipped to the rectangle [0, span] × [0, length] (along, depth),
+    /// and each is written as `sub_6712D0` does: its end nearer the start at sample ⌊a₀ / spacing⌋, its far end at
+    /// ⌊a₁ / spacing⌋ (each the min of the sample and that end's depth), the samples between by the line through them.
+    /// So sample k covers [k, k + 1) × spacing, and a solid on the sampling line writes depth 0 (its segments clipped at
+    /// depth 0; the game's inside intervals, `sub_6720C0`). Boxes are cut as their 12 triangles.
+    #[allow(clippy::too_many_arguments)]
+    pub fn depth_samples(&self, origin: Vec3, along: Vec3, dir: Vec3, span: f32, length: f32, spacing: f32, layer: u8) -> Vec<f32> {
+        let count = (span / spacing) as usize + 1;
+        let mut samples = vec![length; count];
+        let m = along.cross(dir).normalize_or_zero();
+        if m == Vec3::ZERO {
+            return samples;
+        }
+        let corners = [origin, origin + along * span, origin + dir * length, origin + along * span + dir * length];
+        let (lo, hi) = corners.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), c| (l.min(*c), h.max(*c)));
+        let mut write = |p: Vec3, q: Vec3| {
+            let (a0, d0) = ((p - origin).dot(along), (p - origin).dot(dir));
+            let (a1, d1) = ((q - origin).dot(along), (q - origin).dot(dir));
+            // Liang–Barsky against [0, span] × [0, length]
+            let (mut u0, mut u1) = (0.0f32, 1.0f32);
+            let (da, dd) = (a1 - a0, d1 - d0);
+            for (pp, qq) in [(-da, a0), (da, span - a0), (-dd, d0), (dd, length - d0)] {
+                if pp.abs() < 1e-9 {
+                    if qq < 0.0 {
+                        return;
+                    }
+                } else {
+                    let r = qq / pp;
+                    if pp < 0.0 { u0 = u0.max(r) } else { u1 = u1.min(r) }
+                }
+            }
+            if u0 > u1 {
+                return;
+            }
+            let (mut a, mut b) = ((a0 + da * u0, d0 + dd * u0), (a0 + da * u1, d0 + dd * u1));
+            if a.0 > b.0 {
+                std::mem::swap(&mut a, &mut b);
+            }
+            let last = count - 1;
+            // floored in x87 double precision, as the game (0x6712D0)
+            let i0 = ((a.0 as f64 / spacing as f64) as usize).min(last);
+            let i1 = ((b.0 as f64 / spacing as f64) as usize).min(last);
+            samples[i0] = samples[i0].min(a.1);
+            samples[i1] = samples[i1].min(b.1);
+            if i1 > i0 + 1 && b.0 - a.0 > 1e-9 {
+                let slope = (b.1 - a.1) / (b.0 - a.0);
+                for (k, v) in samples.iter_mut().enumerate().take(i1).skip(i0 + 1) {
+                    *v = v.min(a.1 + slope * (k as f32 * spacing - a.0));
+                }
+            }
+        };
+        let mut cut = |vs: [Vec3; 3]| {
+            let sd = vs.map(|v| (v - origin).dot(m));
+            let mut pts: Vec<Vec3> = Vec::with_capacity(2);
+            for i in 0..3 {
+                let j = (i + 1) % 3;
+                if sd[i].abs() < 1e-7 {
+                    pts.push(vs[i]);
+                } else if (sd[i] > 0.0) != (sd[j] > 0.0) && sd[j].abs() >= 1e-7 {
+                    pts.push(vs[i] + (vs[j] - vs[i]) * (sd[i] / (sd[i] - sd[j])));
+                }
+            }
+            if pts.len() >= 2 {
+                write(pts[0], pts[1]);
+            }
+        };
+        for (i, b) in self.boxes.iter().enumerate() {
+            if !self.sees(layer, i) || b.max.cmplt(lo).any() || b.min.cmpgt(hi).any() {
+                continue;
+            }
+            let c = |x: usize, y: usize, z: usize| Vec3::new([b.min.x, b.max.x][x], [b.min.y, b.max.y][y], [b.min.z, b.max.z][z]);
+            for (p0, p1, p2, p3) in [
+                (c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0)), (c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1)),
+                (c(0, 0, 0), c(1, 0, 0), c(1, 0, 1), c(0, 0, 1)), (c(0, 1, 0), c(1, 1, 0), c(1, 1, 1), c(0, 1, 1)),
+                (c(0, 0, 0), c(0, 1, 0), c(0, 1, 1), c(0, 0, 1)), (c(1, 0, 0), c(1, 1, 0), c(1, 1, 1), c(1, 0, 1)),
+            ] {
+                cut([p0, p1, p2]);
+                cut([p0, p2, p3]);
+            }
+        }
+        for t in self.triangles_in_bounds(lo, hi).filter(|t| layer == 0 || crate::layers::collides(layer, t.layer)) {
+            cut(t.vertices);
+        }
+        samples
+    }
+
     /// As `ray_distance`, with the surface normal at the hit (against the ray): the foot IK's ground ray
     /// (`FootIK__RayDown` 0x432570). None when nothing is hit within `max`.
     pub fn ray_hit(&self, origin: Vec3, direction: Vec3, max: f32, layer: u8) -> Option<(f32, Vec3)> {
