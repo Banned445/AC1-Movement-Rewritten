@@ -198,7 +198,7 @@ fn replay_lab_trace_city() {
     // let the cells around the start stream in, standing (a recording far from the spawn waited on the streaming hold
     // while its inputs ran on)
     s.app.insert_resource(crate::map_menu::neutral_pad());
-    s.settle_streaming(30.0, Some(start));
+    s.settle_streaming(120.0, Some(start));
     s.teleport(start);
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
     let player = s.player;
@@ -210,6 +210,9 @@ fn replay_lab_trace_city() {
         crate::sim_tests::apply_lab_frame(frame, &mut s.app.world_mut().resource_mut::<PadInput>());
         s.app.world_mut().resource_mut::<crate::camera::CameraRig>().yaw = frame.cam_yaw;
         s.app.update();
+        if s.app.world().resource::<super::stream::City>().0.as_ref().is_some_and(|c| c.hold.is_some()) {
+            eprintln!("REPLAY WARNING: the streaming hold froze the player at frame {i} (the replay no longer follows the recording)");
+        }
         t += frame.dt_nanos as f32 * 1e-9;
         let clip = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()).unwrap_or_default();
         out.push_str(&crate::sim_tests::lab_trace_row(i, t, s.loco().current, &clip, s.body().feet - start, s.body().velocity, s.app.world(), s.player));
@@ -258,16 +261,25 @@ impl CitySim {
     /// Steps standing until the cells around the player have streamed in: no hold and nothing loading for half a second
     /// (a teleport across the city holds the player while the near box loads, RE/17 §1.1).
     /// `hold`: kept there meanwhile (a recording starting in mid-air must not fall during the wait).
+    /// Steps until the streaming is settled around the player (or `hold`, where the player is kept), waiting up to
+    /// `max_s` seconds of **wall-clock** time: the loader threads run in real time, and headless frames take
+    /// milliseconds, so a frame count gives them almost no time when the CPU is busy.
     pub fn settle_streaming(&mut self, max_s: f32, hold: Option<Vec3>) {
         let mut quiet = 0;
-        for _ in 0..(max_s * 60.0) as usize {
+        let started = std::time::Instant::now();
+        while started.elapsed().as_secs_f32() < max_s {
             self.step();
             if let Some(p) = hold { self.teleport(p); }
+            let feet = hold.unwrap_or(self.body().feet);
             let city = self.app.world().resource::<super::stream::City>();
-            let busy = city.0.as_ref().is_some_and(|c| c.hold.is_some() || c.stats.loading > 0);
+            // every cell the planner wants around the player loaded, not only a quiet spell: under CPU load (the game
+            // running beside a lab replay) a quiet 30 frames came before the last cells and the hold caught the replay
+            let busy = city.0.as_ref().is_some_and(|c| c.hold.is_some() || c.stats.loading > 0 || !c.settled(feet));
             quiet = if busy { 0 } else { quiet + 1 };
             if quiet >= 30 { return; }
+            if busy { std::thread::sleep(std::time::Duration::from_millis(5)); }
         }
+        eprintln!("settle_streaming: not settled after {max_s} s");
     }
     pub fn run_until(&mut self, max_s: f32, pred: impl Fn(&CitySim) -> bool) -> bool {
         for _ in 0..(max_s * 60.0) as usize { self.step(); if pred(self) { return true; } }
