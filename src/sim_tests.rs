@@ -5823,9 +5823,22 @@ fn a_beam_tap_jumps_and_holding_legs_walks_on() {
         if tap {
             assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "the tap never jumped: {:?}", s.data().narrow.state);
         } else {
-            s.run(1.0);
-            assert_eq!(s.loco().current, ActorContextId::NarrowObject, "held Legs jumped with no hop target");
+            // held Legs walks on (no crouch, no jump mid-beam); free running into the end's drop edge leaps off it in the
+            // last 0.4 m (`BeamRunsAlong` 0xF78F00 lets the drop-edge jump through only there; live 2026-10-13_210349/007)
+            s.run(0.5);
+            assert_eq!(s.loco().current, ActorContextId::NarrowObject, "held Legs jumped mid-beam");
             assert!(!matches!(s.data().narrow.state, BeamState::ImpulseIn | BeamState::ImpulseWait), "a crouch while walking");
+            let mut took_off = None;
+            for _ in 0..90 {
+                let feet = s.body().feet;
+                s.run(1.0 / 60.0);
+                if s.loco().current == ActorContextId::InAir {
+                    took_off = Some(feet);
+                    break;
+                }
+            }
+            let feet = took_off.expect("never left the beam's end");
+            assert!(feet.x - 84.5 < 0.45, "left the beam {:.2} m before its end", feet.x - 84.5);
         }
     }
 }
