@@ -1164,16 +1164,38 @@ pub fn update_ledge(
                     // the hang switch, the free-hang drop, the hand step, the jump up and the wall jump up all failed (0xDE2E12;
                     // RE/24 LEDGE-2). PORT: the game sends it from the next frame's interpreter pass; the port pulls up at once.
                     d.blocked_up = true;
-                    let mid = hand_mid(d);
-                    let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
-                    let standable = collision
-                        .ground_height(top + Vec3::Y * 0.05, 0.3)
-                        .filter(|h| (h - mid.y).abs() < 0.25)
-                        .is_some();
-                    if standable && collision.capsule_fits(Vec3::new(top.x, mid.y, top.z)) {
-                        // root: onto the top, 0.5 m in (Pullup_Start 0xDDBE80), along the pull-up clips' own
-                        // displacement (up, then in over the lip) plus a correction onto that point
-                        let top_feet = Vec3::new(top.x, mid.y, top.z);
+                    // `HumanLedge__CanPullup` 0xDE2270's room test (RE/28 §1): `Human__KneeCatchRoomOnTop` 0xB2E240 at the
+                    // hands' midpoint along the facing, room for the body on top with no floor test; else a top edge
+                    // probed at the higher hand (box half 0.25 / 0.35 / 0.25, reference 0.2 up, 45°, mask 50) with room
+                    // at its point, both hands then on that point. A beam or a thin wall top passes.
+                    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+                    let mut mid = hand_mid(d);
+                    let mut room = ledge_moves::knee_room_on_top(mid, facing, &collision);
+                    if !room {
+                        let hi = if d.hand_l.y >= d.hand_r.y { d.hand_l } else { d.hand_r };
+                        let centre = Vec3::new(hi.x, mid.y, hi.z);
+                        if let Some(hit) = guidance.probe_box(centre, right_of(facing), facing, Vec3::Y, Vec3::new(0.25, 0.35, 0.25),
+                            centre + Vec3::Y * 0.2, std::f32::consts::FRAC_PI_4, 0.1, crate::guidance::MASK_CLIMB_HOLDS) {
+                            let into = -Vec3::new(hit.wall_normal.x, 0.0, hit.wall_normal.z).normalize_or(facing);
+                            if ledge_moves::knee_room_on_top(hit.point, into, &collision) {
+                                d.hand_l = hit.point;
+                                d.hand_r = hit.point;
+                                mid = hit.point;
+                                room = true;
+                            }
+                        }
+                    }
+                    if room {
+                        // root: along the pull-up clips' own displacement (up, then in over the lip; FROMANIM). PORT: with a
+                        // floor 0.5 m in (Pullup_Start 0xDDBE80's stand point) the root is also corrected onto it; on a
+                        // narrow top (a beam) the clips alone place it, and the free-step stay mounts what is there
+                        let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
+                        let standable = collision
+                            .ground_height(top + Vec3::Y * 0.05, 0.3)
+                            .filter(|h| (h - mid.y).abs() < 0.25)
+                            .is_some()
+                            && collision.capsule_fits(Vec3::new(top.x, mid.y, top.z));
+                        let top_feet = standable.then(|| Vec3::new(top.x, mid.y, top.z));
                         // HumanLedge__PullupNeedsOneHand 0xDD1120: from the hands' midpoint (higher hand) 0.15 m in, the
                         // drop beyond the top 0.35 m to either side (Human__MeasureDropBeyondEdge 0xB19620: offset 0.35,
                         // search 0.5 down); more than 0.2 m on a side → the one-hand pull-up. PORT: no solid within 0.2 m

@@ -1695,7 +1695,8 @@ pub const ACT_KNEE_ONEHAND_TO_FREESTEP: u32 = 0x3919_3BBB;
 /// the lip) and is corrected onto the stand point 0.5 m inside the edge (Pullup_Start 0xDDBE80). A straight
 /// line from the hang to that point cuts through the wall. Returns the move and, for the free hang (5 clips),
 /// the queued second part. `one_hand`: the one-hand variants (0xDD1120: the top drops away beside the hands).
-pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, top_feet: Vec3) -> (LedgeMove, Option<LedgeMove>) {
+/// `top_feet` None (a narrow top, RE/28 §1): no correction, the clips' own end.
+pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, top_feet: Option<Vec3>) -> (LedgeMove, Option<LedgeMove>) {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mk = |seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, end_stand: bool| {
         let durations = seq_durations(&seq);
@@ -1729,15 +1730,17 @@ pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3
         (ACT_PULLUP_WALL, ACT_PULLUP_FREE, ACT_WAIST_TO_KNEE)
     };
     match hang {
-        LedgeHangType::Wall => (
-            mk([first_clip(wall, 0), first_clip(wall, 1), stand, None], from, top_feet, true),
-            None,
-        ),
+        LedgeHangType::Wall => {
+            let mut m = mk([first_clip(wall, 0), first_clip(wall, 1), stand, None], from, from, true);
+            m.to = top_feet.unwrap_or_else(|| m.natural_end());
+            (m, None)
+        }
         LedgeHangType::Free => {
             let mut a = mk([first_clip(free, 0), first_clip(free, 1), first_clip(waist, 0), None], from, from, false);
             // first part: the clips' path, corrected only by the second part
             a.to = a.natural_end();
-            let b = mk([stand, None, None, None], a.to, top_feet, true);
+            let mut b = mk([stand, None, None, None], a.to, a.to, true);
+            b.to = top_feet.unwrap_or_else(|| b.natural_end());
             (a, Some(b))
         }
     }

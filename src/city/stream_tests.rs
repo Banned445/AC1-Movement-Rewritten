@@ -885,3 +885,36 @@ fn damascus_beam_chains_walk_through_without_stopping() {
     }
     assert!(walked >= 6, "only {walked} beams mounted");
 }
+
+/// RE/28 §1 (live 2026-10-13_210349/006): hanging beside the Bureau courtyard beam (0.25 m wide), the stick up climbs
+/// back onto it: `HumanLedge__CanPullup` 0xDE2270 asks for room on top (`Human__KneeCatchRoomOnTop`), not a floor 0.5 m
+/// in, and the stand-up's free-step stay mounts the beam (the game: hangwaist → hangknee → `freestep_entry` →
+/// NarrowObject, on the beam's line).
+#[test]
+fn damascus_pulls_up_onto_a_beam_from_a_hang() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    // the roof south of the courtyard beam (game y 4.0 = port z −4.0), walking along it onto the beam (port +z)
+    s.place(Vec3::new(51.97, 11.48, -4.0), Vec3::Z);
+    s.run(0.5);
+    s.pad(Vec3::Z, 0.6, false, false);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted the beam");
+    s.run(1.2);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0);
+    // across the beam with the empty hand: the pull-down to a hang
+    s.pad(Vec3::X, 1.0, false, false);
+    s.run(0.3);
+    s.app.world_mut().resource_mut::<crate::input::PadInput>().hand_held = true;
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ledge), "no pull-down: {:?}", s.loco().current);
+    s.app.world_mut().resource_mut::<crate::input::PadInput>().hand_held = false;
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(2.0);
+    assert_eq!(s.loco().current, ActorContextId::Ledge, "hanging");
+    // the stick up (toward the facing: the sim's camera follows the heading)
+    let f = Vec3::new(-s.body().heading.sin(), 0.0, -s.body().heading.cos());
+    s.pad(f, 1.0, false, false);
+    assert!(s.run_until(5.0, |s| s.loco().current == ActorContextId::NarrowObject && s.data().narrow.kind == crate::player::narrow::NarrowKind::Beam),
+        "never back on the beam: {:?} {:?} {}", s.loco().current, s.data().ledge.last_action, s.body().feet);
+    let feet = s.body().feet;
+    assert!((feet.x - 51.97).abs() < 0.15 && (feet.y - 11.17).abs() < 0.05, "on the beam's line: {feet}");
+}
