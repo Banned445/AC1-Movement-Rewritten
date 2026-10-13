@@ -548,6 +548,29 @@ pub fn step_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, out: 
 }
 
 /// How far out from its hands' line a root hangs (along the flat wall normal), for `step_root`.
+/// The end of `HumanLedge__FindVerticalRows` 0xDD8F70: the root from the hand targets with the stepping hand (`hand`) on
+/// the step row (`ComputeRootFromHandTargets` 0xDD6730); in a free hang (+104 = 1) the body boxes there
+/// (`Human__FreeHangBodyBoxesFree` 0xB2DD50) must be free, else the row is dropped (+912 = 0) and no step starts
+/// (`StartHandStep` 0xDDE0C0 needs it). The pending second hand's target, the row's or its own point, is tested the same.
+/// Live (2026-10-13, wall 23): the hold 0.155 m above the walling free hang is found, then dropped here, and the game
+/// hangs on. PORT: the wall hangs' box (`Human__WallHangBodyBoxFree` 0xB2DC80, its root moved by the hold's lean,
+/// 0xDD9591–0xDD9617) is not tested.
+fn step_fits(d: &HumanLedgeData, hand: usize, target: Vec3, n: Vec3, feet: Vec3, collision: &CollisionWorld) -> bool {
+    if d.hang_type != LedgeHangType::Free {
+        return true;
+    }
+    let (mut hl, mut hr) = (d.hand_l, d.hand_r);
+    if hand == 0 {
+        hl = target;
+    } else {
+        hr = target;
+    }
+    let out = root_out(feet, d.hand_l, d.hand_r, n);
+    let root = step_root(hl, hr, n, d.hang_type, out, collision);
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    super::climb::hang_boxes_free(collision, root, facing, false)
+}
+
 pub fn root_out(feet: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) -> f32 {
     let nf = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mid = (hand_l + hand_r) * 0.5;
@@ -1028,6 +1051,10 @@ pub fn update_ledge(
             // the step row's point nearest the hands' midpoint line, else the first hand's own point (0xDD94A6): the hands
             // end together (RE/24 LEDGE-5)
             let target = rows.step.map_or(first_p, |h| h.point);
+            if !step_fits(d, second, target, n, body.feet, &collision) {
+                d.last_action = "idle";
+                continue;
+            }
             let out = root_out(body.feet, d.hand_l, d.hand_r, n);
             if second == 0 { d.hand_l = target } else { d.hand_r = target }
             d.pending_vstep = None;
@@ -1049,6 +1076,11 @@ pub fn update_ledge(
                 let sign = if dir == LedgeDir::Up { 1.0 } else { -1.0 };
                 // sub_DD8F70: the feet, hands and hand-step rows for this direction
                 let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, dir == LedgeDir::Up, &report);
+                // the step row is dropped where the body would not fit (`step_fits`); the hand not moved last steps
+                let mut rows = rows;
+                if rows.step.is_some_and(|h| !step_fits(d, if d.last_hand == 1 { 0 } else { 1 }, h.point, n, body.feet, &collision)) {
+                    rows.step = None;
+                }
                 // TryTransitionToClimb 0xDD46A0: both rows → the climb pose of those holds (both hands on the hands row,
                 // both feet on the feet row). PORT: its body boxes (0xB2DF90) are not tested.
                 if let (Some(feet_row), Some(hands_row)) = (rows.feet, rows.hands) {
@@ -1090,7 +1122,7 @@ pub fn update_ledge(
                 // hand not moved last moves first (`PickVerticalHandAndAnim` 0xDCB3E0: +1844 == 1 → left), onto the row's
                 // point nearest the hands' midpoint line (`FindVerticalRows` x_ref 0); the other follows with its own search
                 // (ContinuePendingVerticalStep 0xDCF3C0). A vertical step clears +133 (0xDDE24D) (RE/24 LEDGE-5).
-                // PORT: the target's hang body box is not tested.
+                // A free hang's body boxes at the target were tested with the rows (`step_fits`).
                 if let Some(h) = rows.step {
                     // first hand moves now, the second one next (pending vertical step)
                     let first_left = d.last_hand == 1;
@@ -1295,6 +1327,24 @@ mod tests {
 
     /// The swing into the free idle holds the hang for its first item, min / max blended by the swing strength
     /// (`xx_h_hangfree_swingback_min_a` 0.533 s, `max_a` 0.733 s); live, wall 00's walling free hang held 0.70 s.
+    /// `FindVerticalRows` 0xDD8F70 drops a free hang's step row when the body boxes at the stepped root are not free (live
+    /// wall 23); a wall hang's are not tested (PORT).
+    #[test]
+    fn a_free_hang_steps_only_where_the_body_fits() {
+        let n = Vec3::Z; // the wall faces +Z, the hanging body is in front of it
+        let (hl, hr) = (Vec3::new(-0.2, 3.0, 0.0), Vec3::new(0.2, 3.0, 0.0));
+        let d = HumanLedgeData { hang_type: LedgeHangType::Free, hand_l: hl, hand_r: hr, normal: n, ..Default::default() };
+        let feet = Vec3::new(0.0, 0.6, 0.35);
+        let target = Vec3::new(0.2, 3.15, 0.0);
+        let mut c = CollisionWorld::default();
+        assert!(step_fits(&d, 1, target, n, feet, &c), "nothing in the way");
+        // a slab sticking out of the wall where the raised body's legs would be
+        c.boxes.push(Aabb3 { min: Vec3::new(-1.0, 1.0, 0.0), max: Vec3::new(1.0, 1.2, 0.6) });
+        assert!(!step_fits(&d, 1, target, n, feet, &c), "the body would hit the slab");
+        let wall = HumanLedgeData { hang_type: LedgeHangType::Wall, ..d };
+        assert!(step_fits(&wall, 1, target, n, feet, &c), "wall hangs untested");
+    }
+
     #[test]
     fn the_swing_into_the_free_idle_lasts_its_first_item() {
         assert!((swing_lock_time(0.0) - 0.5333).abs() < 1e-3);
