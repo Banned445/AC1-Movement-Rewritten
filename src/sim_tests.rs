@@ -5804,3 +5804,27 @@ fn the_empty_hand_drops_off_a_ladder_mid_revolve() {
 #[cfg(test)]
 #[path = "demo_run.rs"]
 mod demo_run;
+
+/// RE/27 C2: on a beam the interpreter picks a jump kind every frame (BeamState 0xEEAAA0): a tap (the press buffer with
+/// Legs let go) asks for kind 0 along the stored stick and jumps; holding Legs only searches the short hop zones (kind
+/// 4), so with nothing there the walk goes on to the beam's end without an impulsion crouch (Walk does not take event 2).
+#[test]
+fn a_beam_tap_jumps_and_holding_legs_walks_on() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    for tap in [true, false] {
+        let point = Vec3::new(85.6, 4.0, 70.0);
+        let mut s = Sim::new(point, std::f32::consts::FRAC_PI_2);
+        let (p0, p1) = (Vec3::new(84.5, 4.0, 70.0), Vec3::new(90.5, 4.0, 70.0));
+        force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: false, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::NEG_X }));
+        s.run(0.3);
+        s.pad(Vec3::NEG_X, 1.0, true, !tap);
+        s.press_legs();
+        if tap {
+            assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "the tap never jumped: {:?}", s.data().narrow.state);
+        } else {
+            s.run(1.0);
+            assert_eq!(s.loco().current, ActorContextId::NarrowObject, "held Legs jumped with no hop target");
+            assert!(!matches!(s.data().narrow.state, BeamState::ImpulseIn | BeamState::ImpulseWait), "a crouch while walking");
+        }
+    }
+}

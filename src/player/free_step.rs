@@ -233,6 +233,34 @@ pub fn jump_kind(pos: Vec3, stick: Vec3, high: bool, moving: bool, legs: bool, p
     (kind, free)
 }
 
+/// The narrow interpreters' jump once its kind is chosen (NarrowObjectState 0xEE96C6–0xEE99F0, BeamState
+/// 0xEEAC38–0xEEAF8D): IHuman vt56 with that kind, with beams and no subtype left out, along the interpreter's stored
+/// stick (+4320, `dir`), then the scorer (mode 1; PORT: the second target of mode 2, vt20, is not kept); the Leap of
+/// Faith for kind 0; then, with no candidate, the free jump by its mode (IHuman vt68 `Human__BuildFreeJumpTarget`
+/// 0xB1E7F0: 0 → 8 m ahead, 1 → 1 m, 2 → 3 m; 3 m below, or min(drop + 0.25, 3) under the drop edge's report). Both post
+/// event 4, the free-step takeoff (jump kind 1).
+#[allow(clippy::too_many_arguments)]
+pub fn narrow_jump(feet: Vec3, forward: Vec3, dir: Vec3, kind: Option<u32>, free: Option<(u32, Option<f32>)>, ab: &AbilitySet, foot_left: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<InAirEntry> {
+    let kind = kind?;
+    let q = Query { kind, mode: 0, long: false, beams: true, exclude: 0 };
+    let target = super::targets::find_target(feet, forward, dir, &q, false, guidance, collision)
+        .or_else(|| (kind == 0 && ab.allows(Ability::LeapOfFaith)).then(|| super::targets::haystack_target(feet, dir, forward, guidance, collision)).flatten());
+    if std::env::var_os("AC_JUMP_LOG").is_some() {
+        eprintln!("narrow jump: kind {kind} free {free:?} -> {:?}", target.map(|t| (t.type_flags, t.position)));
+    }
+    if let Some(target) = target {
+        return Some(InAirEntry::FreeStepJump { from: feet, target, foot_left });
+    }
+    let (mode, drop) = free?;
+    let ahead = match mode {
+        0 => crate::tuning::FREE_JUMP_AHEAD,
+        1 => 1.0,
+        _ => 3.0,
+    };
+    let down = drop.map_or(3.0, |d| (d + 0.25).min(3.0));
+    Some(InAirEntry::FreeStepFreeJump { from: feet, dir, ahead, down, foot_left })
+}
+
 /// The Ground setup the stay builds (0xE517C8–0xE51934): `TransitionSetupDataToMovement` mode by the profile
 /// (+0xB8 bit 7), moving (`GetMoveModeFromStick` 0xC7F000) with the stick within 120° of the facing, and Legs held
 /// (+0xB9 bit 1, IHumanNarrowObject vt64 from the interpreter):
@@ -315,38 +343,19 @@ pub fn update(
 
     // ------------------------------------------------ the jump on (event 4)
     // Only while event 4 is accepted (vt16): from phase 0.5 (`StateMovement_GuardJump` 0xE4C700, +0xE0 = 0).
-    let (kind, free) = if phase >= HALF { jump_kind(body.feet, stick, high, moving, pad.legs_held, pad.jump_buffered(), guidance, collision) } else { (None, None) };
-    if ab.allows(Ability::Jump) && phase >= HALF && (kind.is_some() || free.is_some()) {
+    if moving {
+        data.narrow.jump_dir = stick;
+    }
+    let pressed = pad.jump_buffered() && data.narrow.jump_dir != Vec3::ZERO;
+    let (kind, free) = if phase >= HALF { jump_kind(body.feet, stick, high, moving, pad.legs_held, pressed, guidance, collision) } else { (None, None) };
+    if ab.allows(Ability::Jump) && phase >= HALF {
         // `SetupFreeStepJumpToTarget` 0xE4D780: kind 1 with the playing item's exit feet (live RE/25 freerun_north: the
         // reception ending right foot ahead takes off `freestep_front_front_050cm_footr_to_air`)
         let foot_left = fs.exit_foot() == 0;
-        let from = body.feet;
-        // IHuman vt56 with beams and no subtype left out, along the last strong stick (0xEE9733), the scorer (mode 1;
-        // PORT: the second target of mode 2, vt20, is not kept); the Leap of Faith for kind 0 (0xEE98B4)
-        let target = kind.and_then(|k| {
-            let q = Query { kind: k, mode: 0, long: false, beams: true, exclude: 0 };
-            super::targets::find_target(body.feet, forward, stick, &q, false, guidance, collision)
-                .or_else(|| (k == 0 && ab.allows(Ability::LeapOfFaith)).then(|| super::targets::haystack_target(body.feet, stick, forward, guidance, collision)).flatten())
-        });
-        if std::env::var_os("AC_JUMP_LOG").is_some() {
-            eprintln!("free step jump: kind {kind:?} free {free:?} -> {:?}", target.map(|t| (t.type_flags, t.position)));
-        }
-        if let Some(target) = target {
+        let dir = if data.narrow.jump_dir != Vec3::ZERO { data.narrow.jump_dir } else { stick };
+        if let Some(entry) = narrow_jump(body.feet, forward, dir, kind, free, ab, foot_left, guidance, collision) {
             pad.consume_jump();
-            switch_context(loco, data, TransitionSetup::ToInAir(InAirEntry::FreeStepJump { from, target, foot_left }));
-            return;
-        }
-        // no candidate: IHuman vt68 (`Human__BuildFreeJumpTarget` 0xB1E7F0) by the mode: 0 → 8 m ahead, 1 → 1 m, 2 → 3 m;
-        // 3 m below, or min(drop + 0.25, 3) under the drop edge's report (0xEE99A9)
-        if let Some((mode, drop)) = free {
-            pad.consume_jump();
-            let ahead = match mode {
-                0 => crate::tuning::FREE_JUMP_AHEAD,
-                1 => 1.0,
-                _ => 3.0,
-            };
-            let down = drop.map_or(3.0, |d| (d + 0.25).min(3.0));
-            switch_context(loco, data, TransitionSetup::ToInAir(InAirEntry::FreeStepFreeJump { from, dir: stick, ahead, down, foot_left }));
+            switch_context(loco, data, TransitionSetup::ToInAir(entry));
             return;
         }
     }

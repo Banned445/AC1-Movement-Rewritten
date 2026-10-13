@@ -24,7 +24,7 @@ use bevy::prelude::*;
 
 use super::air::InAirEntry;
 use super::jump_blend::{self, ActionBlend};
-use super::targets::{self, JumpTarget};
+use super::targets::JumpTarget;
 use super::{switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, TransitionSetup};
 use crate::collision::CollisionWorld;
 use crate::guidance::{GuidanceSubType, GuidanceWorld};
@@ -370,6 +370,10 @@ pub struct HumanNarrowObjectData {
     clamped: bool,
     /// The free-step stay (`NarrowKind::FreeStep`).
     pub free_step: Option<super::free_step::FreeStep>,
+    /// The interpreter's stored stick (+4320): the last stick past 0.35 in the narrow states, the direction their jump
+    /// searches go along (0xEE9F34 / 0xEE9026); cleared by the impulsion (event 2, 0xEEB15C / 0xEE9AE0). Kept across
+    /// entries, as the interpreter keeps it.
+    pub jump_dir: Vec3,
 }
 
 /// The beam's speed bands (beam +164, `sub_F7D3E0` 0xF7D600–0xF7D61B): [walk, walk, jog, jog, jog], each the walk
@@ -1162,10 +1166,58 @@ fn next_segment(root: Vec3, forward: Vec3, current: (Vec3, Vec3), guidance: &Gui
     None
 }
 
-/// A free-step jump target from the beam / pilotis in the stick direction (event 4: `Human__SetupJumpToTarget`
-/// with jump kind 1, 0xE4D950).
-fn jump_target(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
-    targets::find_jump_target(feet, dir, guidance, collision)
+/// BeamState's jump kind (0xEEAAA0–0xEEAC0A, RE/27 C2): (the candidate kind, `None` = 6, no search; the free-jump mode
+/// with the drop edge's drop, `None` = v99 6). `moving`: the stick past 0.35; `legs`: Legs held (`sub_6D0F50(0)`);
+/// `pressed`: the press buffer +4390 with the stored stick past 0.35; `drop`: the drop edge ahead along the stick
+/// (IHuman vt144, after NARROW-11's gate); `next`: a next beam segment along the stick (vt180); `forward`: the stick within
+/// 45° of the facing; `state10`: vt164, the beam entered from a pilotis (state 10).
+/// - a drop edge under 2 m with no next segment, high profile or the stick forward: kind and free mode 1 (low) / 2 (high);
+/// - high profile with the stick: with that drop edge and Legs held kind 0, free mode 2 within 1 m of drop, 0 with the
+///   stick forward, else 2 only in state 10; otherwise (no kind yet) Legs held → 4, released → 3, no free jump;
+/// - high profile, a tap (Legs let go) → kind 0, free mode 0.
+#[allow(clippy::too_many_arguments)]
+pub fn beam_jump_kind(high: bool, moving: bool, legs: bool, pressed: bool, drop: Option<f32>, next: bool, forward: bool, state10: bool) -> (Option<u32>, Option<(u32, Option<f32>)>) {
+    let edge = drop.filter(|_| moving && !next);
+    let (mut kind, mut free) = (None, None);
+    if let Some(d) = edge.filter(|d| *d < 2.0 && (high || forward)) {
+        let k = if high { 2 } else { 1 };
+        kind = Some(k);
+        free = Some((k, Some(d)));
+    }
+    if high {
+        if moving {
+            match edge {
+                Some(d) if legs => {
+                    kind = Some(0);
+                    free = if d <= 1.0 { Some((2, Some(d))) } else if forward { Some((0, Some(d))) } else if state10 { Some((2, Some(d))) } else { None };
+                }
+                _ if kind.is_none() => kind = Some(if legs { 4 } else { 3 }),
+                _ => {}
+            }
+        }
+        if pressed && !legs {
+            kind = Some(0);
+            free = Some((0, edge));
+        }
+    }
+    (kind, free)
+}
+
+/// INarrow vt172 (`sub_F78F00`): the beam's next segment, or else its current one, runs within `angle` of both the move
+/// direction and the facing, and the root lies within 0.4 m of it. PORT (hypothesis): the segments are taken in the
+/// direction of travel and the distance is the root's from the segment's line.
+fn beam_along(n: &HumanNarrowObjectData, root: Vec3, dir: Vec3, facing: Vec3, angle: f32, guidance: &GuidanceWorld) -> bool {
+    let (p0, p1) = next_segment(root, dir, (n.p0, n.p1), guidance).unwrap_or((n.p0, n.p1));
+    let mut d = Vec3::new(p1.x - p0.x, 0.0, p1.z - p0.z).normalize_or_zero();
+    if d.dot(facing) < 0.0 {
+        d = -d;
+    }
+    let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
+    if d == Vec3::ZERO || flat(dir).angle_between(d) >= angle || flat(facing).angle_between(d) >= angle {
+        return false;
+    }
+    let q = crate::guidance::closest_on_segment(p0, p1, root);
+    Vec3::new(q.x - root.x, 0.0, q.z - root.z).length() < 0.4
 }
 
 /// Beam event 16 (0xF70A60 / 0xF70CD0 → 0xB2E860): foot and hand probes 1.2 m apart,
@@ -1367,15 +1419,51 @@ pub fn update_narrow(
         }
         let n = &mut data.narrow;
 
-        // ------------------------------------------------ jumps (high profile + Legs, 0xEE9AF0 / 0xEE8EC0)
-        let jump = pad.high_profile && pad.jump_buffered();
+        // ------------------------------------------------ jumps (event 4; BeamState 0xEEA5A9–0xEEAF8D, NarrowObjectState
+        // 0xEE9504–0xEE99F0)
+        // The interpreter picks a jump kind every frame from the stick, the profile, Legs **held** and a drop edge ahead;
+        // any kind runs the candidate search, no press needed (RE/27 C2): holding Legs with the stick toward a target
+        // jumps to it. Only a tap (the press buffer +4390 with Legs let go) asks for kind 0 by itself.
         let impulsion = matches!(n.state, BeamState::ImpulseIn | BeamState::ImpulseWait);
         let impulse_ready = n.impulse_elapsed >= 0.2;
+        // 0xF7A740 gates events 4 / 5 / 6 on the timer, independently of the entry clip. The jog stop accepts no
+        // event at all (`Main_CanHandleEvent` 0xF7FB60 returns 1 for sub-state +97, `PlayJogStop` 0xF6EE90).
         let can_jump = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::ImpulseWait | BeamState::PilotisWait)
             || (BEAM_COMPLETION && n.state == BeamState::ImpulseIn && impulse_ready)
             || (!BEAM_COMPLETION && n.state == BeamState::Stop);
-        // 0xF7A740 gates events 4 / 5 / 6 on the timer, independently of the entry clip. The jog stop accepts no
-        // event at all (`Main_CanHandleEvent` 0xF7FB60 returns 1 for sub-state +97, `PlayJogStop` 0xF6EE90).
+        if stick {
+            n.jump_dir = pad.dir;
+        }
+        // the press buffer with the stored stick past 0.35 and Legs let go (0xEEABFB / 0xEE95AF)
+        let pressed = pad.jump_buffered() && n.jump_dir != Vec3::ZERO;
+        if can_jump && ab.allows(super::abilities::Ability::Jump) {
+            let feet = n.stand();
+            // the pilotis wait runs NarrowObjectState (vt240 = 2); the pilotis impulsion is a beam in state 10 (PilotisToBeam
+            // mode 8, `HumanNarrowObjectBeam__EnterByMode` 0xF7AB45) and runs BeamState
+            let (kind, free) = if n.kind == NarrowKind::Pilotis && !impulsion {
+                super::free_step::jump_kind(feet, if stick { pad.dir } else { facing }, pad.high_profile, stick, pad.legs_held, pressed, &guidance, &collision)
+            } else {
+                let forward_sector = stick && a < std::f32::consts::FRAC_PI_4;
+                let next = stick && next_segment(feet, pad.dir, (n.p0, n.p1), &guidance).is_some();
+                let mut drop = if stick { super::free_step::drop_edge_ahead(feet, pad.dir, &guidance, &collision) } else { None };
+                // NARROW-11's gate (0xEEA930–0xEEA999): with the stick within 45° of the facing and no beam running along
+                // it (vt172(60°) 0xF78F00), the drop edge is dropped while the facing lies within 45° of the current
+                // segment (vt176)
+                if forward_sector && n.kind == NarrowKind::Beam && !beam_along(n, feet, pad.dir, facing, 60f32.to_radians(), &guidance)
+                    && facing.dot(n.facing()) > std::f32::consts::FRAC_1_SQRT_2 {
+                    drop = None;
+                }
+                beam_jump_kind(pad.high_profile, stick, pad.legs_held, pressed, drop, next, forward_sector, n.kind == NarrowKind::Pilotis && impulsion)
+            };
+            let dir = if n.jump_dir != Vec3::ZERO { n.jump_dir } else { facing };
+            if let Some(entry) = super::free_step::narrow_jump(feet, facing, dir, kind, free, &ab, n.foot == 0, &guidance, &collision) {
+                pad.consume_jump();
+                body.feet = feet;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+                continue;
+            }
+        }
+        let n = &mut data.narrow;
         // Events 5 / 6, the jump on the spot, fire when Legs is **not held** (BeamState 0xEEAFEF–0xEEB0E1: `Pad__IsPressed`
         // (0) false): press or hold Legs to crouch, let go after 0.2 s to jump; event 5 carries the standing request's
         // hand target (IHuman vt64 + `Human__PickStaticReport` 0xE97720), event 6 none (RE/24 NARROW-10)
@@ -1384,28 +1472,18 @@ pub fn update_narrow(
             n.hand_target = super::ground::static_hand_target(feet, facing, &guidance, &collision, true);
             let id = if n.hand_target.is_some() { BEAM_IMPULSE_TO_JUMP } else { BEAM_IMPULSE_TO_CLEAR };
             n.play(BeamState::JumpOnPlace, item(id, 0, &[]));
-        } else if jump && can_jump && (!BEAM_COMPLETION || !impulsion || impulse_ready) {
-            let feet = n.stand();
-            // event 4: a target in the stick direction → free-step jump (kind 1)
-            if stick {
-                if let Some(target) = jump_target(feet, pad.dir, &guidance, &collision) {
-                    pad.consume_jump();
-                    let foot_left = n.foot == 0;
-                    body.feet = feet;
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::FreeStepJump { from: feet, target, foot_left }));
-                    continue;
-                }
-            }
-            if impulsion {
-                // a press in the impulsion: only event 4 above (the jump on the spot is the release)
-            } else if !stick {
-                // event 2 (pilotis, 0xE53850 → PilotisToBeam mode 8) / Main: the impulsion crouch (+145, 0xF738A0)
-                pad.consume_jump();
-                let id = if n.kind == NarrowKind::Pilotis { item(PILOTIS_TO_IMPULSE, 0, &[]) }
-                    else if BEAM_COMPLETION && n.across.is_some() { item(BEAM_90_TO_IMPULSE, 0, &[]) }
-                    else { item(BEAM_TO_IMPULSE[n.foot], 0, &[]) };
-                n.play(BeamState::ImpulseIn, id);
-            }
+        } else if pad.high_profile && pad.jump_buffered() && !impulsion
+            && (matches!(n.state, BeamState::Wait | BeamState::Wait90) || (n.state == BeamState::PilotisWait && !stick))
+        {
+            // event 2, the impulsion crouch (+145, 0xF738A0): high profile and the press buffer, where it is accepted (Idle
+            // 0xF7A4F0, the 90° wait 0xF7A650; the pilotis wait without the stick, 0xE53850 → PilotisToBeam mode 8); it
+            // clears the stored stick (0xEEB15C)
+            pad.consume_jump();
+            n.jump_dir = Vec3::ZERO;
+            let id = if n.kind == NarrowKind::Pilotis { item(PILOTIS_TO_IMPULSE, 0, &[]) }
+                else if BEAM_COMPLETION && n.across.is_some() { item(BEAM_90_TO_IMPULSE, 0, &[]) }
+                else { item(BEAM_TO_IMPULSE[n.foot], 0, &[]) };
+            n.play(BeamState::ImpulseIn, id);
         }
         let n = &mut data.narrow;
 
@@ -1835,6 +1913,29 @@ pub fn update_narrow(
 mod air_catch_tests {
     use super::*;
     use crate::collision::Aabb3;
+
+    /// RE/27 C2: BeamState's kinds (0xEEAAA0–0xEEAC0A).
+    #[test]
+    fn beam_jump_kinds_follow_the_interpreter() {
+        // nothing ahead: low profile asks for nothing; high profile with the stick searches the hop zones, 4 with Legs held
+        assert_eq!(beam_jump_kind(false, true, false, false, None, false, true, false), (None, None));
+        assert_eq!(beam_jump_kind(true, true, true, false, None, false, true, false), (Some(4), None));
+        assert_eq!(beam_jump_kind(true, true, false, false, None, false, true, false), (Some(3), None));
+        // a drop edge under 2 m: kind and free mode 1 (low, stick forward only) / 2 (high)
+        assert_eq!(beam_jump_kind(false, true, false, false, Some(1.5), false, true, false), (Some(1), Some((1, Some(1.5)))));
+        assert_eq!(beam_jump_kind(false, true, false, false, Some(1.5), false, false, false), (None, None));
+        assert_eq!(beam_jump_kind(true, true, false, false, Some(1.5), false, false, false), (Some(2), Some((2, Some(1.5)))));
+        // high profile, Legs held, a drop edge: kind 0; free 2 within 1 m, 0 forward, else only from the pilotis state
+        assert_eq!(beam_jump_kind(true, true, true, false, Some(0.8), false, false, false), (Some(0), Some((2, Some(0.8)))));
+        assert_eq!(beam_jump_kind(true, true, true, false, Some(3.0), false, true, false), (Some(0), Some((0, Some(3.0)))));
+        assert_eq!(beam_jump_kind(true, true, true, false, Some(3.0), false, false, false), (Some(0), None));
+        assert_eq!(beam_jump_kind(true, true, true, false, Some(3.0), false, false, true), (Some(0), Some((2, Some(3.0)))));
+        // a next segment along the stick hides the drop edge
+        assert_eq!(beam_jump_kind(true, true, true, false, Some(0.8), true, true, false), (Some(4), None));
+        // a tap with Legs let go: kind 0, free mode 0, even without the stick
+        assert_eq!(beam_jump_kind(true, false, false, true, None, false, false, false), (Some(0), Some((0, None))));
+        assert_eq!(beam_jump_kind(false, false, false, true, None, false, false, false), (None, None));
+    }
     #[test]
     fn beam_side_drop_threshold_and_cross_ray() {
         let mut world=CollisionWorld::default();let point=Vec3::Y*4.0;
