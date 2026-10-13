@@ -932,3 +932,29 @@ fn damascus_standing_on_a_beam_the_stick_mounts_it() {
     s.pad(Vec3::new(-0.588, 0.0, -0.81), 1.0, false, false);
     assert!(s.run_until(0.2, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted: {:?} {}", s.loco().current, s.body().feet);
 }
+
+/// RE/28 §5 (live 2026-10-13_210349/001): walking off the Bureau roof lip onto the courtyard beam 0.41 m lower, the root
+/// stays on the lip until the capsule's rim leaves it (the game: 0.29 m onto the beam, game y 2.54 = port z −2.54) and
+/// then drops in one frame, handing the drop to the stick-to-ground smoothing as the controller's residual.
+#[test]
+fn damascus_stepping_down_onto_a_beam_drops_where_the_game_does() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.place(Vec3::new(51.97, 11.48, -4.0), Vec3::Z);
+    s.run(0.5);
+    s.pad(Vec3::Z, 0.6, false, false);
+    let mut drop = None;
+    let mut last = s.body().feet;
+    for _ in 0..300 {
+        s.step();
+        let f = s.body().feet;
+        if s.loco().current == ActorContextId::NarrowObject && last.y - f.y > 0.25 {
+            drop = Some((f.z, s.body().stick_residual, last.y - f.y));
+            break;
+        }
+        last = f;
+    }
+    let (z, residual, snap) = drop.expect("never dropped onto the beam");
+    assert!((z - -2.54).abs() < 0.12, "drops at z {z}, the game at −2.54");
+    // the capsule's rounded bottom lowers the root a little over the rim first (the game: 0.08 m, then a 0.33 m snap)
+    assert!((residual - snap).abs() < 1e-4 && (0.28..0.38).contains(&snap), "the snap ({snap}) is the smoothing's residual: {residual}");
+}

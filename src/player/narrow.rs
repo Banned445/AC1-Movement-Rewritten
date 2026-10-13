@@ -1341,11 +1341,11 @@ pub fn update_narrow(
     guidance: Res<GuidanceWorld>,
     camera: Res<crate::camera::CameraRig>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
-    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>), With<Player>>,
+    mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>, Option<&mut crate::ik::GroundIkSwitch>), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
     let ab = super::abilities::of(abilities.as_deref());
-    for (mut loco, mut body, mut data, anim) in &mut q {
+    for (mut loco, mut body, mut data, anim, mut ik_switch) in &mut q {
         if loco.current != ActorContextId::NarrowObject {
             continue;
         }
@@ -1993,7 +1993,25 @@ pub fn update_narrow(
             body.heading = super::heading_of(data.narrow.facing());
         }
         let n = &data.narrow;
-        body.feet = beam_root(n, &collision);
+        let root = beam_root(n, &collision);
+        if n.kind == NarrowKind::Beam {
+            // the beam's entry switches the stick-to-ground smoothing on (`HumanNarrowObjectBeam__EnterByMode` 0xF7AB32:
+            // `Human__GroundIK_SetSmoothing`(…, 1)); the root's snaps onto a new support (a 0.41 m step on or off a lip)
+            // are the controller's residual it eases out (RE/28 §5: live, the root drops in one frame, the body over
+            // ≈ 0.35 s), and the root's motion is the controller's velocity
+            if let Some(sw) = ik_switch.as_deref_mut() {
+                sw.smooth = true;
+            }
+            let step = body.feet.y - root.y;
+            if !loco.just_switched && step.abs() > 0.0005 && step.abs() < 0.6 {
+                body.stick_residual = step;
+                body.stick_normal_y = Some(1.0);
+            }
+            if dt > 0.0 && (root - body.feet).length() < 1.0 {
+                body.velocity = (root - body.feet) / dt;
+            }
+        }
+        body.feet = root;
         if BEAM_COMPLETION && matches!(n.state, BeamState::Walk | BeamState::Start | BeamState::Stop | BeamState::HopEnd) {
             // Heading toward a point 0.6 m along the next segment, lerp fraction min(4*dt,1)
             // (0xF79B30). Translation continues to use the beam constraint.
