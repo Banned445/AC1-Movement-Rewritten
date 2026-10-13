@@ -1219,7 +1219,13 @@ fn choose_clip(
                             let waist = lib.action_with_clip("HumanLedge", "xx_h_hangwaist_tr_hangknee_footl");
                             [Some(ACT_PULLUP_FREE), waist, Some(ACT_HANGKNEE_TO_WAIT)].into_iter().flatten().collect()
                         };
-                        action(&lib, &ids, false, token, Some(0.1), None)
+                        // the free pull-up's unlocked `_b` is cut at its start by the waist step (`Pullup_Tick` 0xDE2EE0)
+                        action(&lib, &ids, false, token, Some(0.1), None).map(|mut r| {
+                            if !wall && r.items.len() > 2 && r.items[1].action == ACT_PULLUP_FREE {
+                                r.items.remove(1);
+                            }
+                            r
+                        })
                     }
                     // the free idle after the swing back, a walling free hang or the climb's jump up (Entry end 0xDE1FE0,
                     // HangFreeReceptionType 3), until the next move. The graph plays its transition action first, the swing

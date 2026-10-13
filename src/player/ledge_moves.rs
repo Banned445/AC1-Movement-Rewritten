@@ -1811,7 +1811,10 @@ pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3
             (m, None)
         }
         LedgeHangType::Free => {
-            let mut a = mk([first_clip(free, 0), first_clip(free, 1), first_clip(waist, 0), None], from, from, false);
+            // `HumanLedge__Pullup_Tick` 0xDE2EE0 plays the waist step as soon as the playing item is no longer locked: the
+            // free pull-up's `_a` is (word 0x0035), its `_b` is not (0x0FC5), so `_b` is cut at its start (live
+            // 2026-10-13_210349/006: the waist step 0.80 s after the pull-up starts, `_a`'s length)
+            let mut a = mk([first_clip(free, 0), first_clip(waist, 0), None, None], from, from, false);
             // first part: the clips' path, corrected only by the second part
             a.to = a.natural_end();
             let mut b = mk([stand, None, None, None], a.to, a.to, true);
