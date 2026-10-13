@@ -4010,8 +4010,15 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
             if lx.hypot(ly) < 0.4 || dx.hypot(dy) < 0.5 {
                 return None;
             }
-            // game angle of the camera's forward: the move direction minus the stick's angle, plus a quarter turn
-            let phi = dy.atan2(dx) - ly.atan2(lx) + std::f32::consts::FRAC_PI_2;
+            // game angle of the camera's forward: the move direction minus the stick's angle, plus a quarter turn. The
+            // recorded direction is the interpreter's +0x1250, snapped to straight ahead within 5° (`sub_55E7E0`): a
+            // stick that close to up recorded the camera's forward itself
+            let n = (lx / lx.hypot(ly), ly / lx.hypot(ly));
+            let phi = if n.1 > crate::player::interpreter::SNAP_COS {
+                dy.atan2(dx)
+            } else {
+                dy.atan2(dx) - ly.atan2(lx) + std::f32::consts::FRAC_PI_2
+            };
             Some((-phi.cos()).atan2(phi.sin()))
         })
         .collect();

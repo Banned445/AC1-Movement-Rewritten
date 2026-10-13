@@ -31,7 +31,7 @@ const HAND_BLOCK: f32 = 0.2;
 const BANDS: [f32; 3] = [0.35, 0.9, 1.0];
 /// The tracker's forward snap: a stick whose y (normalised) is above cos 5° reads straight ahead (tracker +0xA8,
 /// `sub_55EDF0` 0x55EF09: 0x3F7F069E).
-const SNAP_COS: f32 = 0.996_194_7;
+pub const SNAP_COS: f32 = 0.996_194_7;
 /// The left stick's ResponseCurve (tracker +0x600, keys added at 0x55EF26–0x55EFD0; x = |angle|/π, y = radians,
 /// evaluated piecewise linearly by `ResponseCurve__Evaluate` 0x5631D0): flt_168BA40/44, 38/3C, 30/34, 28/2C, 20/24.
 const CURVE: [(f32, f32); 7] = [
