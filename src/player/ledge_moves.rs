@@ -620,18 +620,15 @@ pub fn try_side_jump(
         let Some(found) = guidance.step_search(hs, hs - Vec3::Y * 1.2, side, facing, 1.6, 0.35, Vec2::new(0.3, 0.3), true, true) else { continue };
         let hit = found.hands;
         let nn = hit.wall_normal;
-        let r = right_of(-nn);
-        // both hands on the new edge: the first hand lands on the nearest point, the other one HAND_SPACING further
-        // along the move (PORT: the game puts both hand records on that one hold and derives the pose from it)
-        let c = hit.point + side * HAND_SPACING * 0.5;
-        let (hl, hr) = (c - r * HAND_SPACING * 0.5, c + r * HAND_SPACING * 0.5);
+        // both hand slots (+928 / +1008) on the hand hit, both foot slots on the foot hit (`TrySideJumpToLedge`
+        // 0xDDDBC9–0xDDDD42); the pose from them (0xB157B0 / 0xB1CC20 / 0xB15AD0)
+        let (hl, hr) = (hit.point, hit.point);
         let dist = Vec2::new(hit.point.x - hs.x, hit.point.z - hs.z).length();
         let long = (dist / 1.6).clamp(0.0, 1.0) >= 0.5;
         // feet on climb holds → type 0 (the climb pose from the holds, `Human__ComputeClimbPoseFromHolds` 0xB1CC20), on
         // a wall surface → 1, none → 2 (RE/18 §7.2)
         if let Some(f) = found.feet {
-            let fc = f.point + side * HAND_SPACING * 0.5;
-            let (fl, fr) = (fc - r * HAND_SPACING * 0.5, fc + r * HAND_SPACING * 0.5);
+            let (fl, fr) = (f.point, f.point);
             let target = super::climb::climb_root_at(hl, hr, fl, fr, nn);
             if !side_jump_clear(root, target, n, 0, collision) {
                 continue;
@@ -840,8 +837,8 @@ pub const SECOND_HAND_LOOPS: [u32; 6] = [0x4912_2886, 0x4912_288E, 0x4912_28E2, 
 
 /// SecondHandGrab (0xDCD5E0 / 0xDDADE0 / 0xDD7310 / 0xDD14E0). When the jump's loop item X is playing and the root
 /// interpolation has finished, the game plays X+1 (`_3_c`, the one-hand catch) in place, then `SecondHandGrab_Reach`:
-/// the trailing hand (the right one after a left jump, +44) probes for the edge at root + 2.4 up ± 0.25·right (r 0.25,
-/// 0.15 / 0.15, filter dword_193417C; on a miss it keeps its target), plays X+2 (`_3_d`) while the root is
+/// the trailing hand (the right one after a left jump, +44) probes for the edge at root + 2.4 up ± 0.25·right
+/// (`second_hand_probe`, the catch reach's probe; on a miss it keeps its target), plays X+2 (`_3_d`) while the root is
 /// interpolated to the two-hand free-hang pose (sub_B15AD0, sub_711130), then (0xDCF460) the free-hang wait 0x012719F1
 /// with X+3 (`_3_e`) as its entry transition.
 ///
@@ -852,11 +849,10 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
     let Some(k) = SECOND_HAND_LOOPS.iter().position(|x| *x == lp) else { return (mv, None) };
     let right_reaches = k % 2 == 0;
     let n = mv.normal;
-    let r = right_of(-Vec3::new(n.x, 0.0, n.z).normalize_or_zero());
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let first = if right_reaches { mv.hand_l } else { mv.hand_r };
     let one_root = hang_root_at(first, first, n, LedgeHangType::Free, collision);
-    let probe = first + r * if right_reaches { 0.25 } else { -0.25 };
-    let second = guidance.on_edge(probe, n, 0.25).map(|h| h.point).unwrap_or(first);
+    let second = second_hand_probe(one_root, facing, right_reaches, first, guidance);
     let (hl, hr) = if right_reaches { (first, second) } else { (second, first) };
     let to = hang_root_at(hl, hr, n, LedgeHangType::Free, collision);
     mv.to = one_root;
@@ -900,13 +896,7 @@ pub const CATCH_REACH: [(u32, u32); 3] = [(0x1F0C_2EB9, 0x1F0C_2EBA), (0x2013_72
 pub fn catch_reach(catch: u32, right: bool, hold: Vec3, n: Vec3, root: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<LedgeMove> {
     let reach = CATCH_REACH.iter().find(|(c, _)| *c == catch)?.1;
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let s = if right { 1.0 } else { -1.0 };
-    let x = right_of(facing) * s;
-    let centre = root + Vec3::Y * 2.4 + x * 0.25;
-    let reference = centre + right_of(facing) * 0.3 - facing * 0.2;
-    let second = guidance
-        .probe_box(centre, x, facing, Vec3::Y, Vec3::new(0.25, 0.15, 0.15), reference, std::f32::consts::FRAC_PI_4, 0.1, MASK_CLIMB_HOLDS)
-        .map_or(hold, |h| h.point);
+    let second = second_hand_probe(root, facing, right, hold, guidance);
     let (hl, hr) = if right { (hold, second) } else { (second, hold) };
     let to = hang_root_at(hl, hr, n, LedgeHangType::Free, collision);
     let seq = [single(reach, 0), single(reach, 1), None, None];
@@ -931,6 +921,19 @@ pub fn catch_reach(catch: u32, right: bool, hold: Vec3, n: Vec3, root: Vec3, gui
         hand_r: hr,
         normal: n,
     })
+}
+
+/// `HumanLedge__SecondHandGrab_Reach` 0xDD7310's probe, shared by the long free-hang catch and the long jumps into a free
+/// hang: a `Guidance__ProbeBox` at the one-hand root + 2.4 m up ± 0.25 m along the character's right (the reaching hand's
+/// side), the box along the facing (half 0.25 / 0.15 / 0.15, the half width signed by the side), 45°, reference
+/// (0.3, −0.2, 0) in the character's frame, step 0.1, mask 50; on a miss the hand keeps `hold`.
+pub fn second_hand_probe(root: Vec3, facing: Vec3, right: bool, hold: Vec3, guidance: &GuidanceWorld) -> Vec3 {
+    let x = right_of(facing) * if right { 1.0 } else { -1.0 };
+    let centre = root + Vec3::Y * 2.4 + x * 0.25;
+    let reference = centre + right_of(facing) * 0.3 - facing * 0.2;
+    guidance
+        .probe_box(centre, x, facing, Vec3::Y, Vec3::new(0.25, 0.15, 0.15), reference, std::f32::consts::FRAC_PI_4, 0.1, MASK_CLIMB_HOLDS)
+        .map_or(hold, |h| h.point)
 }
 
 /// The blended swing back's weights over `swingback_up_{min,max}_{200,300}` (`StartLedgeJump` 0xDDCE40, blended):
@@ -1173,7 +1176,8 @@ pub fn try_jump_up_to_climb(
 /// while the root is interpolated to the pose over its length (0xDDA120 → sub_711130); then Climb (0xDE0870 →
 /// 0xDDFBF0, when the second action is the climb one) or the wall hang (0xDDA3D0).
 ///
-/// PORT: hands both on the upper hit (the climb) or spread by HAND_SPACING (the hang); clearance = capsule test at
+/// Both hand records on the upper hit, the climb and the hang alike (`TryFreeHangDropToClimb` 0xDDF711 / 0xDDF847);
+/// PORT: clearance = capsule test at
 /// the target.
 pub fn try_free_hang_drop(
     hand_l: Vec3,
@@ -1218,8 +1222,7 @@ pub fn try_free_hang_drop(
         if !super::ledge::feet_supports(upper.point, nn, collision) {
             return None;
         }
-        let r = right_of(new_facing);
-        let (hl, hr) = (upper.point - r * HAND_SPACING * 0.5, upper.point + r * HAND_SPACING * 0.5);
+        let (hl, hr) = (upper.point, upper.point);
         let to = hang_root_at(hl, hr, nn, LedgeHangType::Wall, collision);
         // the wall-hang feet (sub_B16130) sit about 1.1 m below the hands (the wall-hang root offset)
         (FREE_DROP_TO_HANG, to, hl, hr, to.y, None)
@@ -1484,8 +1487,8 @@ pub fn knee_catch_moves(action: u32, from: Vec3, edge: Vec3, n: Vec3) -> (LedgeM
     let seq = [single(action, 0), None, None, None];
     let durations = seq_durations(&seq);
     let durations = if durations.iter().sum::<f32>() > 0.0 { durations } else { [0.2, 0.0, 0.0, 0.0] };
-    let r = right_of(facing);
-    let (hand_l, hand_r) = (edge - r * HAND_SPACING * 0.5, edge + r * HAND_SPACING * 0.5);
+    // the Pullup state runs no hand IK for the knee catch (`sub_DCD910`); both records on the edge
+    let (hand_l, hand_r) = (edge, edge);
     let knee = edge + facing * 0.1;
     let base = LedgeMove {
         kind: MoveKind::Pullup,

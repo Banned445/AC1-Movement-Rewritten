@@ -683,11 +683,12 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
     let r = fwd.cross(Vec3::Y);
     let hold = guidance
         .probe_facing_pair(p, fwd, Vec3::new(0.4, 0.5, 0.5), [p - r * 0.3, p + r * 0.3], 0.785_398_2, crate::guidance::PROBE_STEP, crate::guidance::MASK_CLIMB_HOLDS)
-        .map(|[a, b]| ((a.point + b.point) * 0.5, a.wall_normal));
-    if let Some((mid, wn)) = hold {
+        .map(|[a, b]| ((a.point + b.point) * 0.5, a.wall_normal, a.point, b.point));
+    if let Some((mid, wn, hl, hr)) = hold {
         let hang = hang_type_at(mid, wn, collision);
         let wall = hang == LedgeHangType::Wall;
-        let e = LedgeEntry::at(mid, wn, root, LedgeSubState::TransitionInFromClimb);
+        // the two hands found (`HumanLadder__FillLedge_SideHang` 0xE20120: LimbIK contacts 0 / 1 = the setup's records)
+        let e = LedgeEntry { hand_l: hl, hand_r: hr, ..LedgeEntry::at(mid, wn, root, LedgeSubState::TransitionInFromClimb) };
         let to = hang_root_at(e.hand_l, e.hand_r, wn, hang, collision);
         let hf = -Vec3::new(wn.x, 0.0, wn.z).normalize_or(fwd);
         if super::climb::hang_boxes_free(collision, to, hf, wall) {

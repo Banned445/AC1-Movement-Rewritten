@@ -64,9 +64,9 @@ pub struct GuidanceHit {
 }
 
 impl GuidanceWorld {
-    /// A hang centred at `p` on the edge carrying it, moved along that edge so both hands (`HAND_SPACING` apart, plus
-    /// a hand's width) stay on it. The closest point of an edge is clamped to its ends, so a grab near an end used to
-    /// put one hand past the end, outside the climbable markup. An edge shorter than the hands keeps its middle.
+    /// A grab at `p` on the edge carrying it, moved along that edge so the hand (a hand's width, `HAND_MARGIN`) stays on
+    /// it. PORT: the closest point of an edge is clamped to its ends, and this keeps the grab a hand's width in from
+    /// them (the game's probes shorten the pieces by their step instead). An edge shorter than a hand keeps its middle.
     pub fn fit_hands(&self, p: Vec3, n: Vec3) -> Vec3 {
         let Some(hit) = self.on_edge(p, n, 0.15) else { return p };
         let e = &self.edges[hit.edge];
@@ -75,7 +75,7 @@ impl GuidanceWorld {
         if len < 1e-4 {
             return p;
         }
-        let half = crate::tuning::HAND_SPACING * 0.5 + HAND_MARGIN;
+        let half = HAND_MARGIN;
         let t = (hit.point - e.p0).dot(d) / len;
         let t = if len <= 2.0 * half { len * 0.5 } else { t.clamp(half, len - half) };
         e.p0 + d * (t / len)
