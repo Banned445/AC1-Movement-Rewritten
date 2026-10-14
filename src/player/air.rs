@@ -224,6 +224,9 @@ pub struct HumanInAirData {
     pub long_catch: bool,
     /// InAirData +0x190: the hold let go of (a ledge or climb release); catches must be 0.5 m below it (0xE0A990).
     pub release_hold: Option<Vec3>,
+    /// The right-hand hold of the last pair `FindLedgeCatch` found in this air stay (`CheckAirCatch`'s v140, which the
+    /// long free-hang catch reads without filling: `air_catches::ledge_search`).
+    pub catch_pair_right: Option<Vec3>,
     /// The edge landing (InAir +225 bit 2) has played in this air stay.
     pub edge_landed: bool,
     pub mode: AirMode,
@@ -310,6 +313,7 @@ impl HumanInAirData {
         self.anti_stuck.reset(self.seq.wrapping_mul(2_654_435_761));
         self.entry_velocity = None;
         self.release_hold = None;
+        self.catch_pair_right = None;
         self.edge_landed = false;
         match entry {
             InAirEntry::JumpToTarget { from, target, speed_param, foot_left } => {
@@ -710,11 +714,12 @@ fn classify_landing(apex_y: f32, apex_reached: bool, start_y: f32, land_y: f32) 
 /// The narrow-object part of `CheckAirCatch` 0xE0BB70 (fall height < 9 m, not while a target is still ahead):
 /// first a pilotis: the drop report at the feet (IHuman vt104 `Human__ReportDropAtFeet` 0xB248B0, minimum 0.5 m,
 /// 0xE0C583) must hold an edge (+56 clear), whose point `Human__FindPilotisTop` 0xB2B600 searches round from the air
-/// (→ PilotisReception); then a beam in the 0xE0B890 box (→ landing, BeamReception mode 7).
+/// along −(the report's normal) (`sub_42FA60` on the report's +32, 0xE0C5AD; live 2026-10-14: (0, 1, 0) from a south
+/// edge) (→ PilotisReception); then a beam in the 0xE0B890 box (→ landing, BeamReception mode 7).
 fn narrow_catch(feet: Vec3, facing: Vec3, foot: usize, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<TransitionSetup> {
     use super::narrow::*;
-    if let Some(r) = super::ground::drop_report(feet, 0.5, guidance, collision).filter(|r| r.normal.is_some()) {
-        if let Some(top) = find_pilotis(feet, r.point, facing, true, guidance, collision) {
+    if let Some((r, n)) = super::ground::drop_report(feet, 0.5, guidance, collision).and_then(|r| r.normal.map(|n| (r, n))) {
+        if let Some(top) = find_pilotis(feet, r.point, -n, true, guidance, collision) {
             return Some(TransitionSetup::ToPilotis(PilotisEntry { top, from: feet, facing, kind: PilotisEntryType::FromInAir, foot }));
         }
     }
@@ -1170,7 +1175,7 @@ pub fn update_air(
                 } else if let Some(found) = super::air_catches::ledge_search(body.feet, reach, body.forward(), fall_height, manual,
                     // the Hips bone of last frame's pose at the root where it stands (`bone_pose`)
                     skeleton.as_deref().zip(pose).and_then(|(s, p)| p.world_pos(s, crate::bone_pose::HIPS, &body)),
-                    air.release_hold, &guidance, &collision) {
+                    air.release_hold, &mut air.catch_pair_right, &guidance, &collision) {
                     // CheckAirCatch 0xE0BB70: the ledge, climb and free-hang catches (RE/19 §2)
                     air.long_catch = fall_height >= 3.0;
                     match found {

@@ -1896,13 +1896,15 @@ fn pilotis_impulsion_and_jump_on_the_spot() {
         }
     }
     assert!((top_y - 4.0).abs() < 0.05, "rose 1.0 m (beam_jumpstraight_clear): {top_y}");
+    // caught back on the post by the beam catch, not the pilotis one: the air catch's pilotis search starts at the drop
+    // report's point, on the post's own edge, along −its normal, and its back search skips that edge (zero direction);
+    // the runtime beam pairing of the top's opposite edges then takes it (live 2026-10-14: a fall onto the colonnade
+    // column `Wall_Colonne_P_01a_170` plays BeamReception 0x010DD707 then `beam_crouchwait`, RE/05 §5.7)
     assert_eq!(s.loco().current, ActorContextId::NarrowObject, "caught back on the post");
-    assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::PilotisWait));
-    // the catch's top (`Human__FindPilotisTop` 0xB2B600) is the mean of the four edge points searched from the drop
-    // report's nearest edge point (vt104 0xB248B0), not from the centre: on this 0.5 m post it lies 0.125 m toward
-    // that edge (RE/05 §5.6; live #70)
+    assert_eq!(s.data().narrow.kind, crate::player::narrow::NarrowKind::Beam, "the beam catch");
+    assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::Wait));
     let off = Vec2::new(s.body().feet.x - top.x, s.body().feet.z - top.z).length();
-    assert!((s.body().feet.y - top.y).abs() < 0.05 && off < 0.15, "on the post's top: {:?}", s.body().feet);
+    assert!((s.body().feet.y - top.y).abs() < 0.05 && off < 0.3, "on the post's top: {:?}", s.body().feet);
 }
 
 #[test]

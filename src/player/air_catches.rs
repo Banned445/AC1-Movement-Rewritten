@@ -92,6 +92,7 @@ pub fn ledge_search(
     manual: bool,
     hips: Option<Vec3>,
     release_hold: Option<Vec3>,
+    pair_right: &mut Option<Vec3>,
     guidance: &crate::guidance::GuidanceWorld,
     collision: &CollisionWorld,
 ) -> Option<CatchFound> {
@@ -113,7 +114,11 @@ pub fn ledge_search(
     let catch_pair = |base: Vec3| pair_along(&hands_report, base, dir, half_z);
     // 1. the ledge catch: a hand pair at the feet + 1.4 m
     let ledge_base = if manual { feet + Vec3::Y * 1.4 } else { auto(1.4) };
-    if let Some([a, b]) = catch_pair(ledge_base).filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y)) {
+    let ledge_pair = catch_pair(ledge_base);
+    if let Some([_, b]) = ledge_pair {
+        *pair_right = Some(b.point);
+    }
+    if let Some([a, b]) = ledge_pair.filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y)) {
         let n = a.wall_normal;
         let (hl, hr) = (a.point, b.point);
         let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
@@ -160,7 +165,11 @@ pub fn ledge_search(
             .probe_box(centre, super::right_of(dir), dir, Vec3::Y, half, reference, angle, 0.1, crate::guidance::MASK_CATCH)
             .filter(|h| below_release(h.point.y));
         if let Some((hands, mid, n)) = hit.and_then(|h| free(h, h)) {
-            // the side by the angle between the facing and the hold (0xE0D322)
+            // the side by the angle from the facing to v110 = ½(v137 + v140) (0xE0D23E–0xE0D347): the long catch fills
+            // only v137 (the hold), so v140 is the right hand of the last pair `FindLedgeCatch` found, left in the
+            // same stack slot by the frames before (live 2026-10-14, `catch69_ahead`: a hold straight ahead plays
+            // `hangfree_max_left`, RE/05 §5.7); with none, the hold itself (hypothesis)
+            let mid = pair_right.map_or(mid, |r| Vec3::new((mid.x + r.x) * 0.5, mid.y.max(r.y), (mid.z + r.z) * 0.5));
             let to = Vec3::new(mid.x - feet.x, 0.0, mid.z - feet.z).normalize_or(dir);
             let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(dir);
             // the game's signed angle about up (counter-clockwise, toward the left, positive). The hand that reaches
@@ -357,7 +366,7 @@ mod tests {
         let mut guidance = crate::guidance::GuidanceWorld::default();
         crate::level::add_roof_edges(&mut guidance, min, max);
         let feet = Vec3::new(0.0, 1.1, -0.1);
-        let catch = |hips| ledge_search(feet, Vec3::NEG_Z, Vec3::NEG_Z, 1.0, false, hips, None, &guidance, &collision);
+        let catch = |hips| ledge_search(feet, Vec3::NEG_Z, Vec3::NEG_Z, 1.0, false, hips, None, &mut None, &guidance, &collision);
         let found = catch(Some(feet + Vec3::Y * 0.65));
         assert!(matches!(found, Some(CatchFound::Hang { wall: true, .. })), "caught from the Hips: {found:?}");
         if let Some(CatchFound::Hang { hands, .. }) = found {

@@ -896,7 +896,10 @@ pub fn find_pilotis(pos: Vec3, support: Vec3, dir: Vec3, from_air: bool, guidanc
             && (!collision.native_query_culling || (e.p0.min(e.p1).cmple(centre + extent).all() && e.p0.max(e.p1).cmpge(centre - extent).all()))
             && in_box(e.closest_point(support)))
         .collect();
-    // sub_B1C550: the nearest edge whose outward normal is within 45° of `d`, within `max` of `from`
+    // sub_B1C550: the nearest edge whose outward normal is within 45° of `d`, within `max` of `from`. The direction to
+    // the edge's point must lie within 30° of `d`; an edge through `from` itself gives a zero direction (normalised to
+    // zero, 90° from `d`) and is skipped (live 2026-10-14: the air catch's search from the drop report's point on the
+    // post's own edge never finds that edge, RE/05 §5.7)
     let find = |from: Vec3, d: Vec3, max: f32| -> Option<Vec3> {
         edges
             .iter()
@@ -905,7 +908,7 @@ pub fn find_pilotis(pos: Vec3, support: Vec3, dir: Vec3, from_air: bool, guidanc
             .filter(|q| {
                 let flat=Vec3::new(q.x-from.x,0.0,q.z-from.z);
                 flat.length() < max && (q.y-from.y).abs() <= 0.5
-                    && flat.normalize_or(d).dot(d)>=30f32.to_radians().cos()
+                    && flat.normalize_or_zero().dot(d)>=30f32.to_radians().cos()
             })
             .min_by(|a, b| Vec2::new(a.x-from.x,a.z-from.z).length_squared().total_cmp(&Vec2::new(b.x-from.x,b.z-from.z).length_squared()))
     };
@@ -2079,6 +2082,25 @@ pub fn update_narrow(
 mod air_catch_tests {
     use super::*;
     use crate::collision::Aabb3;
+
+    /// `sub_B1C550` (from `Human__FindPilotisTop` 0xB2B600): a search point on an edge gives a zero direction to that
+    /// edge, 90° from any search direction, so the edge is skipped. From the drop report's point on a post's south edge,
+    /// looking in along −its normal, the back search finds nothing (live 2026-10-14, the colonnade column); from the
+    /// top's middle the post is found.
+    #[test]
+    fn a_search_point_on_the_posts_own_edge_finds_no_pilotis() {
+        let (min, max) = (Vec3::new(-0.25, 0.0, -0.25), Vec3::new(0.25, 3.0, 0.25));
+        let mut collision = CollisionWorld::default();
+        collision.boxes.push(Aabb3 { min, max });
+        let mut guidance = GuidanceWorld::default();
+        crate::level::add_roof_edges(&mut guidance, min, max);
+        let feet = Vec3::new(0.0, 3.2, 0.0);
+        // the south edge is z +0.25 here (its wall normal +Z): the report point and −normal
+        let on_edge = Vec3::new(0.0, 3.0, 0.25);
+        assert!(find_pilotis(feet, on_edge, Vec3::NEG_Z, true, &guidance, &collision).is_none());
+        let top = find_pilotis(feet, Vec3::new(0.0, 3.0, 0.0), Vec3::NEG_Z, false, &guidance, &collision);
+        assert!(top.is_some_and(|t| t.distance(Vec3::new(0.0, 3.0, 0.0)) < 0.05), "{top:?}");
+    }
 
     /// RE/27 C2: BeamState's kinds (0xEEAAA0–0xEEAC0A).
     #[test]
