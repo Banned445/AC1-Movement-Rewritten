@@ -140,7 +140,7 @@ Set these environment variables before `cargo run --release`:
 cargo test --release
 ```
 
-About 650 tests run. Tests that need game data skip themselves when the game isn't found.
+About 575 tests run by default. About 75 more are `#[ignore]`d: long simulations and bug-report replays, which the next section runs. Tests that need game data skip themselves when the game isn't found.
 
 To replay the saved bug reports through the headless simulation and report the first frame that differs:
 
