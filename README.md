@@ -8,18 +8,21 @@ A clean-room recreation of Altaïr's movement from Assassin's Creed (2008), writ
 ## What it covers
 
 - Ground locomotion: walk, jog, run, sprint, stops and pivots
-- Jumps, falls and landings
-- Ledges: hang, shimmy, pull-up and drops
+- Jumps, falls and landings, including leaps into haystacks and jumps through kiosks
+- Ledges: hang, shimmy, pull-up, drops, pass-overs and swing bars
 - Climbing walls and climb jumps
-- Wall runs, beams, ladders and swing bars
+- Wall runs, beams, pilotis and ladders
+- Damascus, the whole city, streamed from your install
+- The character: Rank 9 body parts, limb IK, cloth, skirt hinges and wind
 
 No game files are included. The program reads Altaïr's models, animations and map data from **your own copy**
 of the Steam PC version. Educational and personal use only.
 
 ## Requirements
 
-- Rust (<https://rustup.rs>)
+- Rust, edition 2024 (1.85 or newer) (<https://rustup.rs>)
 - Assassin's Creed (2008), PC (Steam)
+- Optional: ffmpeg, for recording replay videos (see Debugging and replays)
 
 ## Run
 
@@ -39,19 +42,29 @@ environment variable. Without the game, the level still runs with a capsule in p
 
 ## Controls
 
+The keys below are the game's built-in keyboard profile. If your install has its own `DefaultBindings.map`, the
+game reads its bindings from there instead, as the original does.
+
 | Input | Action |
 |---|---|
 | WASD | Move |
+| Arrow keys | Camera (the right stick). The mouse also moves the camera |
 | Left mouse | Capture mouse (Esc releases) |
 | Right mouse (hold) | High profile |
 | Space | Legs. Into a wall: climb or grab. With right mouse held: sprint / free-run |
-| E | Empty hand (drop off a ladder) |
+| Left Shift | Empty hand. On a ladder: drop off. Held in a fall: falling grab |
+| Left Alt (hold) | Walk slow (keyboard stick × 0.6) |
 | G | Show climbable edges |
 | F1 | Toggle help |
 | F2 | Debug map menu |
 | F3 | City streaming counters (Damascus) |
-| F5 | **Ghost mode**, the game's unused development flight (the Debug context, "Ghost mode" animation). WASD on the ground plane, Space / Ctrl up / down, 5 m/s, Shift × 3, Alt × 10, Q held = strafe, F6 = debug camera (holds still). F5 again drops out into a fall; hold E with it to keep the flight's speed. Gamepad: L3 + R3 (B with it to keep the speed), left stick, right stick Y up / down (LB holds the height), RT × 3, RB × 10, X strafe, R3 camera |
-| F9 | Save a bug report |
+| F5 | **Ghost mode**, the game's unused development flight (the Debug context, "Ghost mode" animation). WASD on the ground plane, Space / Ctrl up / down, 5 m/s, Shift × 3, Alt × 10, Q held = strafe, F6 = debug camera (holds still). F5 again drops out into a fall; hold Shift (the empty hand) with it to keep the flight's speed. Gamepad: L3 + R3 (B with it to keep the speed), left stick, right stick Y up / down (LB holds the height), RT × 3, RB × 10, X strafe, R3 camera |
+| F9 | Save a bug report to `bugs/` in the project folder (see Debugging and replays) |
+
+Not used by movement yet: E (the Head button), and the left mouse's weapon-hand slot. They are bound, but nothing reads them.
+
+A gamepad (Xbox layout) fills the same pad: left stick moves, A is Legs, B is the empty hand, LB is the left
+shoulder, and RT is high profile.
 
 ## Maps
 
@@ -88,15 +101,38 @@ cargo run --release
 | Area | State |
 |---|---|
 | Ground | Working. Some transitions into and out of the run are simplified |
+| Crouch | The state machine and its clearance checks run in the simulation. Nothing in the game starts a crouch yet: the request comes from world scripts, which are not imported |
 | Jumps and falls | Mostly working. Some fall and damage cases missing |
 | Ledges | Mostly working. Hand spacing after a shimmy is a placeholder |
 | Climbing and wall runs | Working |
-| Beams | Mostly working. Some bends and hop landings still approximate |
-| Ladders | Mostly working. Ladder turn and side jump missing |
+| Beams | Mostly working. Beam ends, junctions and mounts follow the game's rules. Some bends and hop landings still approximate |
+| Ladders | Mostly working. Turns and the side jump are in. Ladder attacks are not ported (there is no combat) |
+| Haystacks and kiosks | Landing in a haystack and jumping through kiosks work. Hiding in them is not reachable yet |
 | Swing bars | Working |
 | Animation and IK | Partial. Transitions into the ground run are skipped for now |
-| Character | All Rank 9 parts load. Robe folds, weapon offsets and facial expressions unfinished |
-| Not started | Crouch, crowds, swimming, hay and kiosk hiding, slope slides, combat |
+| Character | All Rank 9 parts load. Cloth, skirt hinges and wind run from the game's data. Robe folds, weapon offsets and facial expressions unfinished |
+| Not started | Swimming, combat, pole and rope contexts. NPC crowds: the avoidance rules are written, but the level has no NPCs |
+
+## Debugging and replays
+
+**F9** writes `bugs/bug-<unix time>/` in the project folder. It holds `input.txt` (every frame since launch, which
+can be replayed), `state.txt` (the last ~10 seconds of state), `screenshot.png`, and `note.txt` for a line about
+what looked wrong.
+
+Set these environment variables before `cargo run --release`:
+
+| Variable | What it does |
+|---|---|
+| `AC_REPLAY=<bug folder>` | Replays a bug report in the full game, with the same timesteps, controls and camera. Writes `replay_state.txt` next to it, then exits |
+| `AC_VIDEO=<out.mp4>` | With `AC_REPLAY`: pipes every replayed frame to ffmpeg. `AC_FFMPEG` sets the ffmpeg path, `AC_VIDEO_CRF` the quality |
+| `AC_WINDOW=<w>x<h>` | Window size. The default is 1600 x 900 |
+| `AC_NO_HUD=1` | Hides the debug HUD |
+| `AC_DEMO_COURSE=1` | Adds a parkour course on the greybox's empty north side. Its scripted run is written as a recording by `cargo test --release demo_course_run -- --ignored --nocapture` (output in `target/demo-course/`) |
+| `AC_AUTOPILOT=roofs`, `climb` or `ledge` | Scripted input for that scenario |
+| `AC_SCREENSHOT=<file.png>` | Saves a screenshot and exits. `AC_SCREENSHOT_AT=<seconds>` sets when (default 3) |
+| `AC_GHOST=1` | Turns Ghost mode on after one second |
+| `AC_CITY_TOUR=<m/s>` | Flies across Damascus at that speed, to stress the streaming |
+| `AC_NO_MODEL=1` | Runs without Altaïr's model, with the capsule |
 
 ## Tests
 
@@ -104,4 +140,12 @@ cargo run --release
 cargo test --release
 ```
 
-Tests that need game data skip themselves when the game isn't found.
+About 575 tests run by default. About 75 more are `#[ignore]`d: long simulations and bug-report replays, which the next section runs. Tests that need game data skip themselves when the game isn't found.
+
+To replay the saved bug reports through the headless simulation and report the first frame that differs:
+
+```
+cargo test --release replay_bug_recordings -- --ignored --nocapture
+```
+
+Set `AC_BUG=<folder name>` to replay one report.
