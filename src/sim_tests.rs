@@ -5912,3 +5912,101 @@ fn the_wall_run_into_a_wall_hang_can_eject_during_the_grab() {
     s.run(0.6);
     assert!(s.body().feet.z < z0 - 1.0, "pushed off away from the wall: {:?} from {z0}", s.body().feet);
 }
+
+
+/// NARROW-11's gate (0xEEA930–0xEEA999) compares the actor's forward with the current segment: facing across a beam (the
+/// 90° wait) the drop edge ahead stays, so high profile + Legs held with the stick across turns to the 90° wait and
+/// jumps off the side (the free jump over the 4 m drop) down to the floor. Along the beam the gate holds the jump back.
+#[test]
+fn high_profile_legs_across_a_beam_jumps_off_its_side_to_the_floor() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::InAir), "never jumped off: {:?}", s.data().narrow.state);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
+    let f = s.body().feet;
+    assert!(f.y < 0.1 && f.z > 70.5, "on the floor beside the beam: {f:?}");
+    // along the beam, mid-way, the same input walks on
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::X, 1.0, true, true);
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::NarrowObject, "jumped mid-beam");
+    assert!(matches!(s.data().narrow.state, BeamState::Start | BeamState::Walk), "{:?}", s.data().narrow.state);
+}
+
+/// Timing probe (the village slice): the runtime beam report and whole frames on a beam at the densest ledge spot.
+/// `AC_BEAM_DUMP=<file>` writes the reports around many points, to check a speed change leaves them identical.
+#[test]
+#[ignore]
+fn probe_beam_frame_cost() {
+    use crate::guidance::GuidanceSubType;
+    let Some((collision, guidance, _)) = crate::native_map::village_simulation_fixture() else { eprintln!("no village"); return; };
+    let ledges: Vec<Vec3> = guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab).map(|e| (e.p0 + e.p1) * 0.5).collect();
+    eprintln!("COST edges {} ledgegrab {}", guidance.edges.len(), ledges.len());
+    // the densest spot: most LedgeGrab midpoints within ±8 m
+    let mut best = (0, Vec3::ZERO);
+    for (i, p) in ledges.iter().enumerate().step_by(7) {
+        let n = ledges.iter().filter(|q| (**q - *p).abs().cmple(Vec3::new(8.0, 12.0, 8.0)).all()).count();
+        if n > best.0 { best = (n, *p); }
+        let _ = i;
+    }
+    let root = best.1;
+    eprintln!("COST densest {root:?}: {} edges", best.0);
+    if let Ok(path) = std::env::var("AC_BEAM_DUMP") {
+        let mut out = String::new();
+        for p in ledges.iter().step_by(23) {
+            for b in crate::guidance::beam_contacts::detect(&guidance, &collision, *p, Vec3::new(7.0, 7.25, 7.0)) {
+                out += &format!("{:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4}
+", b.p0.x, b.p0.y, b.p0.z, b.p1.x, b.p1.y, b.p1.z, b.widths[0], b.widths[1]);
+            }
+            out += "--
+";
+        }
+        std::fs::write(path, out).unwrap();
+    }
+    let t = std::time::Instant::now();
+    let mut beams = 0;
+    for _ in 0..10 { beams = crate::guidance::beam_contacts::detect(&guidance, &collision, root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0)).len(); }
+    eprintln!("COST beam_contacts::detect {:.2} ms ({beams} beams)", t.elapsed().as_secs_f64() * 100.0);
+    let (centre, half) = (root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0));
+    let t = std::time::Instant::now();
+    let mut edges = vec![];
+    for _ in 0..10 { edges = guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab
+        && e.p0.min(e.p1).cmple(centre + half + Vec3::ONE).all() && e.p0.max(e.p1).cmpge(centre - half - Vec3::ONE).all()).cloned().collect::<Vec<_>>(); }
+    eprintln!("COST filter {:.3} ms ({} edges)", t.elapsed().as_secs_f64() * 100.0, edges.len());
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let mut e = edges.clone(); e.sort_by(|a, b| a.p0.distance_squared(a.p1).total_cmp(&b.p0.distance_squared(b.p1))); }
+    eprintln!("COST one sort {:.3} ms", t.elapsed().as_secs_f64() * 100.0);
+    let empty = crate::collision::CollisionWorld::default();
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let _ = crate::guidance::beam_contacts::pair_report(edges.clone(), &empty); }
+    eprintln!("COST pair_report without trims {:.3} ms", t.elapsed().as_secs_f64() * 100.0);
+    let ab = crate::player::abilities::AbilitySet::default();
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let _ = crate::player::free_step::narrow_jump(root, Vec3::X, Vec3::X, Some(4), None, &ab, true, &guidance, &collision); }
+    eprintln!("COST narrow_jump kind 4 {:.2} ms", t.elapsed().as_secs_f64() * 100.0);
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let _ = crate::player::free_step::drop_edge_ahead(root, Vec3::X, &guidance, &collision); }
+    eprintln!("COST drop_edge_ahead {:.2} ms", t.elapsed().as_secs_f64() * 100.0);
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let _ = crate::player::narrow::try_mount_beam(root, Vec3::X, &guidance, &collision); }
+    eprintln!("COST try_mount_beam {:.2} ms", t.elapsed().as_secs_f64() * 100.0);
+    // a whole frame standing on the beam nearest the densest spot
+    use crate::player::narrow::{BeamEntry, BeamEntryMode};
+    let report = crate::guidance::beam_contacts::detect(&guidance, &collision, root, Vec3::new(10.0, 10.0, 10.0));
+    let Some(b) = report.iter().filter(|b| b.p0.distance(b.p1) > 1.5).min_by(|a, b| a.p0.lerp(a.p1, 0.5).distance(root).total_cmp(&b.p0.lerp(b.p1, 0.5).distance(root))) else { eprintln!("COST no beam"); return; };
+    let (p0, p1) = (b.p0, b.p1);
+    let point = p0.lerp(p1, 0.5);
+    let facing = (p1 - p0).with_y(0.0).normalize();
+    let mut s = Sim::new_raw(point, crate::player::heading_of(facing));
+    s.app.insert_resource(collision).insert_resource(guidance);
+    s.app.update();
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing }));
+    s.run(0.3);
+    for (label, dir, high) in [("idle", Vec3::ZERO, false), ("stick low", facing, false), ("stick high", facing, true), ("stick across high", crate::player::right_of(facing), true)] {
+        s.pad(dir, if dir == Vec3::ZERO { 0.0 } else { 1.0 }, high, false);
+        let t = std::time::Instant::now();
+        for _ in 0..30 { s.app.update(); }
+        eprintln!("COST frame {label}: {:.2} ms/frame, now {:?}", t.elapsed().as_secs_f64() * 1000.0 / 30.0, s.loco().current);
+    }
+}

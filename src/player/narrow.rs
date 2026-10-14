@@ -1216,6 +1216,11 @@ fn beam_report(root: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld)
     crate::guidance::beam_contacts::detect(guidance, collision, root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0)).into_iter().map(|b| (b.p0, b.p1)).collect()
 }
 
+/// How far the root may move before the frame's beam report is built again (`update_narrow`).
+const REPORT_REUSE: f32 = 0.5;
+/// … and how old it may get (s).
+const REPORT_MAX_AGE: f32 = 0.5;
+
 /// `sub_F72FD0` (DetectBeamSegments' segment ends, RE/28 §3): from each end of the chosen segment, along it, the drop
 /// edge ahead (IHuman vt144 `Human__FindDropEdgeAhead` 0xB1C100: −0.1 … 1.25 m on, ±0.5 m up, a drop of 0.3 m or more
 /// along the segment, step 0.02) becomes the end: the walkable run of a beam reaches over what it rests against (live,
@@ -1379,8 +1384,13 @@ pub fn update_narrow(
     abilities: Option<Res<super::abilities::AbilitySet>>,
     skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>, Option<&mut crate::ik::GroundIkSwitch>, Option<&crate::bone_pose::BonePose>), With<Player>>,
+    mut report_cache: Local<Option<(Vec3, (usize, usize, usize), f32, Vec<(Vec3, Vec3)>)>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
+    // the worlds as the cached report saw them (the city's streaming takes them mutably every frame, so the change
+    // ticks say nothing); the report is also rebuilt every `REPORT_MAX_AGE`
+    let worlds = (guidance.edges.len(), collision.triangles.len(), collision.boxes.len());
+    let now = time.elapsed_secs();
     let ab = super::abilities::of(abilities.as_deref());
     for (mut loco, mut body, mut data, anim, mut ik_switch, pose) in &mut q {
         // `Human__GetLeadingFoot` 0xB18850 on last frame's pose (`bone_pose`): the wait's foot when the item has none
@@ -1398,7 +1408,21 @@ pub fn update_narrow(
             super::free_step::update(&mut loco, &mut body, &mut data, &mut pad, &ab, &guidance, &collision, anim, dt);
             continue;
         }
-        let report = if data.narrow.kind == NarrowKind::Beam { beam_report(body.feet, &guidance, &collision) } else { Vec::new() };
+        // the runtime beam report, kept while the root stays within `REPORT_REUSE` of where it was built (the game keeps
+        // HumanGuidance's workspace between frames; its ±7 m box reaches far past every query of the frame). PORT
+        // (speed): rebuilding it each frame cost up to 7 ms among many beams (Damascus)
+        let report = if data.narrow.kind == NarrowKind::Beam {
+            match report_cache.as_ref() {
+                Some((at, w, built, r)) if at.distance(body.feet) <= REPORT_REUSE && *w == worlds && now - built < REPORT_MAX_AGE => r.clone(),
+                _ => {
+                    let r = beam_report(body.feet, &guidance, &collision);
+                    *report_cache = Some((body.feet, worlds, now, r.clone()));
+                    r
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let n = &mut data.narrow;
         n.t += dt;
         if matches!(n.state, BeamState::ImpulseIn | BeamState::ImpulseWait) { n.impulse_elapsed += dt; }
@@ -1593,10 +1617,12 @@ pub fn update_narrow(
                 let next = stick && next_segment(feet, pad.dir, (n.p0, n.p1), &guidance, &report).is_some();
                 let mut drop = if stick { super::free_step::drop_edge_ahead(feet, pad.dir, &guidance, &collision) } else { None };
                 // NARROW-11's gate (0xEEA930–0xEEA999): with the stick within 45° of the facing and no beam running along
-                // it (vt172(60°) 0xF78F00), the drop edge is dropped while the facing lies within 45° of the current
-                // segment (vt176)
+                // it (vt172(60°) 0xF78F00), the drop edge is dropped while the actor's forward (the transform's +16) lies
+                // within 45° of the current segment (vt176, its flat p1 − p0; a plain dot > 0.7071). Facing across the
+                // beam (the 90° wait) the drop edge stays: HP + Legs with the stick ahead jumps off the side
+                let along = if n.toward_p1 { n.dir() } else { -n.dir() };
                 if forward_sector && n.kind == NarrowKind::Beam && !beam_along(n, feet, pad.dir, facing, 60f32.to_radians(), &guidance, &collision, &report)
-                    && facing.dot(n.facing()) > std::f32::consts::FRAC_1_SQRT_2 {
+                    && body.forward().dot(along) > std::f32::consts::FRAC_1_SQRT_2 {
                     drop = None;
                 }
                 beam_jump_kind(pad.high_profile, stick, pad.legs_held, pressed, drop, next, forward_sector, n.kind == NarrowKind::Pilotis && impulsion)
