@@ -1898,7 +1898,11 @@ fn pilotis_impulsion_and_jump_on_the_spot() {
     assert!((top_y - 4.0).abs() < 0.05, "rose 1.0 m (beam_jumpstraight_clear): {top_y}");
     assert_eq!(s.loco().current, ActorContextId::NarrowObject, "caught back on the post");
     assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::PilotisWait));
-    assert!((s.body().feet - top).length() < 0.05);
+    // the catch's top (`Human__FindPilotisTop` 0xB2B600) is the mean of the four edge points searched from the drop
+    // report's nearest edge point (vt104 0xB248B0), not from the centre: on this 0.5 m post it lies 0.125 m toward
+    // that edge (RE/05 §5.6; live #70)
+    let off = Vec2::new(s.body().feet.x - top.x, s.body().feet.z - top.z).length();
+    assert!((s.body().feet.y - top.y).abs() < 0.05 && off < 0.15, "on the post's top: {:?}", s.body().feet);
 }
 
 #[test]
@@ -5404,8 +5408,19 @@ fn a_long_fall_beside_a_free_hang_edge_catches_one_handed_to_the_side() {
     s.run(0.05);
     let l = &s.data().ledge;
     assert!(l.catch_action.is_some_and(|a| FREE_CATCH_SIDE.contains(&a)), "a side catch: {:?}", l.catch_action.map(|a| format!("{a:#x}")));
-    assert!(l.catch_one_hand.is_some());
+    assert!(l.catch_reach.is_some(), "a type-4 catch ends in the second hand's reach");
     assert_eq!(l.hang_type, crate::player::ledge::LedgeHangType::Free);
+    // both hand records on the one hold (0xE0D3D9), then SecondHandGrab (0xDCDCF0 → 0xDD7310): the other hand reaches
+    // 0.25 m along the edge with 0x201372FA / FB, and the hang ends with the hands apart
+    assert!((l.hand_l - l.hand_r).length() < 1e-4, "both hands on the hold: {:?} {:?}", l.hand_l, l.hand_r);
+    let reach = l.catch_action.and_then(|c| crate::player::ledge_moves::CATCH_REACH.iter().find(|(a, _)| *a == c)).map(|r| r.1).unwrap();
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_some_and(|m| m.seq[0].is_some_and(|a| a.id == reach))), "no reach: {:?}", s.data().ledge.last_action);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "the reach never ended");
+    let l = &s.data().ledge;
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    assert_eq!(l.hang_type, crate::player::ledge::LedgeHangType::Free);
+    let apart = (l.hand_l - l.hand_r).length();
+    assert!(apart > 0.15 && apart < 0.8, "the second hand found the edge: {apart}");
 }
 
 #[test]
@@ -5425,13 +5440,14 @@ fn landing_on_a_roofs_lip_steps_off_the_edge() {
     assert_eq!(s.data().air.start_y, from.y);
     assert!(s.data().air.release_hold.is_none());
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "never reached the street: {:?}", s.body().feet);
-    // facing into the roof (+Z): `step_off_front` steps 0.48 m backward off the lip; falling in front of the face with
-    // its top at the feet, the knee catch (type 0) takes the edge again and stands up
+    // facing into the roof (+Z), the feet 0.1 m over it: the knee catch (type 0) comes before the edge landing in
+    // `CheckAirCatch` and has no test of the feet's side of the edge (0xE04630; the 45° cone is seen from 0.2 m behind
+    // the feet), so it takes the edge as the feet reach it and stands up on the roof (RE/05 §5.6)
     let mut s = Sim::new(from, FACE_PZ);
     force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
     s.pad(Vec3::ZERO, 0.0, false, false);
-    assert!(s.run_until(1.5, |s| s.data().air.edge_landed), "no edge landing facing the roof");
-    assert_eq!(s.data().air.flight.map(|a| a.id), Some(STEP_OFF[0]), "step_off_front");
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ledge), "no knee catch facing the roof: {:?}", s.loco().current);
+    assert!(!s.data().air.edge_landed, "the knee catch comes first");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood again");
     assert!((s.body().feet.y - 3.0).abs() < 0.05, "back on the roof: {:?}", s.body().feet);
     // a 0.2 m drop onto the lip: the edge landing waits behind the catches' gate (a fall over 0.3 m or 0.4 s in the air,

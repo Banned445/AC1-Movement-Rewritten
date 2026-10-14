@@ -669,7 +669,7 @@ pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
     }
     let r = super::right_of(f);
     // 0xD9F4C0's query (sub_116E1A0 over HumanGuidance's report, the same query as 0xE0B890)
-    let segments: Vec<(Vec3, Vec3)> = if NATIVE_BEAM_MOUNT && crate::tuning::AIR_CATCHES && !collision.triangles.is_empty() {
+    let segments: Vec<(Vec3, Vec3)> = if NATIVE_BEAM_MOUNT && !collision.triangles.is_empty() {
         let centre = feet + f * 0.5;
         crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs() * 0.75 + f.abs() * 0.5 + Vec3::Y * 0.53)
             .into_iter().map(|b| (b.p0, b.p1)).collect()
@@ -756,51 +756,25 @@ pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
 /// the root goes to the closest point of the beam (sub_946AC0) when a capsule fits there (sub_116D960).
 /// Returns (p0, p1, point).
 pub fn beam_at(feet: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3, Vec3)> {
-    if crate::tuning::AIR_CATCHES {
-        let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
-        let r = super::right_of(f);
-        let centre = feet + Vec3::Y * 0.15;
-        let half = Vec3::new(0.55, 0.4, 0.35);
-        let local = |p: Vec3| { let d=p-centre; Vec3::new(d.dot(r),d.dot(f),d.y) };
-        let world = |p: Vec3| centre+r*p.x+f*p.y+Vec3::Y*p.z;
-        return crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs()*0.55+f.abs()*0.4+Vec3::Y*0.35)
-            .into_iter().filter_map(|beam| {
-                let (a,b)=crate::guidance::clip_segment(local(beam.p0),local(beam.p1),half)?;
-                let (a,b)=(world(a),world(b));
-                let flat=Vec3::new(b.x-a.x,0.0,b.z-a.z);
-                if flat.length()<=0.0005 {return None;}
-                let point=crate::guidance::closest_on_segment(a,b,feet);
-                let width=beam.width(point);
-                let axis=flat.normalize();
-                if !beam_catch_clear(point,axis,width,collision) {return None;}
-                let (p0,p1)=if axis.dot(f)>=0.0 {(beam.p0,beam.p1)} else {(beam.p1,beam.p0)};
-                Some((Vec2::new(point.x-feet.x,point.z-feet.z).length_squared(),(p0,p1,point)))
-            }).min_by(|a,b|a.0.total_cmp(&b.0)).map(|b|b.1);
-    }
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
     let r = super::right_of(f);
-    let c = feet + Vec3::Y * 0.15;
-    let mut best: Option<(f32, (Vec3, Vec3, Vec3))> = None;
-    for e in &guidance.edges {
-        if e.subtype != GuidanceSubType::Beam {
-            continue;
-        }
-        // the beam point closest to the box centre must lie in the box
-        let q = e.closest_point(c);
-        let d = q - c;
-        if d.dot(r).abs() > 0.55 || d.dot(f).abs() > 0.4 || d.y.abs() > 0.35 {
-            continue;
-        }
-        let point = e.closest_point(feet);
-        if !clear_above(point, collision) {
-            continue;
-        }
-        let dist = (point - feet).length();
-        if best.as_ref().is_none_or(|b| dist < b.0) {
-            best = Some((dist, (e.p0, e.p1, point)));
-        }
-    }
-    best.map(|b| b.1)
+    let centre = feet + Vec3::Y * 0.15;
+    let half = Vec3::new(0.55, 0.4, 0.35);
+    let local = |p: Vec3| { let d=p-centre; Vec3::new(d.dot(r),d.dot(f),d.y) };
+    let world = |p: Vec3| centre+r*p.x+f*p.y+Vec3::Y*p.z;
+    crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs()*0.55+f.abs()*0.4+Vec3::Y*0.35)
+        .into_iter().filter_map(|beam| {
+            let (a,b)=crate::guidance::clip_segment(local(beam.p0),local(beam.p1),half)?;
+            let (a,b)=(world(a),world(b));
+            let flat=Vec3::new(b.x-a.x,0.0,b.z-a.z);
+            if flat.length()<=0.0005 {return None;}
+            let point=crate::guidance::closest_on_segment(a,b,feet);
+            let width=beam.width(point);
+            let axis=flat.normalize();
+            if !beam_catch_clear(point,axis,width,collision) {return None;}
+            let (p0,p1)=if axis.dot(f)>=0.0 {(beam.p0,beam.p1)} else {(beam.p1,beam.p0)};
+            Some((Vec2::new(point.x-feet.x,point.z-feet.z).length_squared(),(p0,p1,point)))
+        }).min_by(|a,b|a.0.total_cmp(&b.0)).map(|b|b.1)
 }
 
 /// 0x116D960: two side drop rays and the query's horizontal cross-ray.
@@ -931,7 +905,7 @@ pub fn find_pilotis(pos: Vec3, support: Vec3, dir: Vec3, from_air: bool, guidanc
             .filter(|q| {
                 let flat=Vec3::new(q.x-from.x,0.0,q.z-from.z);
                 flat.length() < max && (q.y-from.y).abs() <= 0.5
-                    && (!crate::tuning::AIR_CATCHES || flat.normalize_or(d).dot(d)>=30f32.to_radians().cos())
+                    && flat.normalize_or(d).dot(d)>=30f32.to_radians().cos()
             })
             .min_by(|a, b| Vec2::new(a.x-from.x,a.z-from.z).length_squared().total_cmp(&Vec2::new(b.x-from.x,b.z-from.z).length_squared()))
     };
@@ -1104,7 +1078,9 @@ fn clip_segment(a: Vec3, b: Vec3, c: Vec3, axes: [Vec3; 3], half: [f32; 3]) -> O
     Some((t0, t1))
 }
 
-/// Current-segment passes of 0xF753A0: 60° cone, rotated 90°, then the ±1 m box without a cone.
+/// Current-segment passes of 0xF753A0: 60° cone, rotated 90°, then the ±1 m box without a cone (over authored Beam
+/// lines, for the segment tests).
+#[cfg(test)]
 fn detect_beam(root: Vec3, forward: Vec3, current: Option<(Vec3, Vec3)>, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3)> {
     detect_beam_segments(root, forward, current, guidance.edges.iter().filter(|e|e.subtype==GuidanceSubType::Beam).map(|e|(e.p0,e.p1)))
 }
@@ -1234,9 +1210,6 @@ fn next_segment(root: Vec3, forward: Vec3, current: (Vec3, Vec3), guidance: &Gui
 /// each query point gave different pieces from different points, and the walk at a chain's end started and stopped
 /// every few frames).
 fn beam_report(root: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<(Vec3, Vec3)> {
-    if !crate::tuning::AIR_CATCHES {
-        return Vec::new();
-    }
     crate::guidance::beam_contacts::detect(guidance, collision, root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0)).into_iter().map(|b| (b.p0, b.p1)).collect()
 }
 
@@ -1432,9 +1405,7 @@ pub fn update_narrow(
             && !matches!(n.state, BeamState::Entry | BeamState::Reception | BeamState::HopStart | BeamState::Hop | BeamState::HopEnd | BeamState::StepOff)
         {
             // HumanGuidance's runtime report is also the support source after reception (0xC7EB30 / 0xF753A0).
-            let support = if crate::tuning::AIR_CATCHES {
-                detect_beam_segments(body.feet,body.forward(),Some((n.p0,n.p1)),report.iter().copied())
-            } else { detect_beam(body.feet,body.forward(),Some((n.p0,n.p1)),&guidance) };
+            let support = detect_beam_segments(body.feet,body.forward(),Some((n.p0,n.p1)),report.iter().copied());
             if let Some((p0, p1)) = support {
                 if same_piece((n.p0, n.p1), (p0, p1)) {
                     // The current support remains valid.
@@ -1765,12 +1736,9 @@ pub fn update_narrow(
             BeamState::Reception | BeamState::PilotisIn => {
                 // the entry action plays while the root is interpolated onto the beam / top (sub_711130 /
                 // sub_7113F0); modes 3 / 7 turn onto the beam meanwhile
-                let k = if crate::tuning::AIR_CATCHES { n.advance_catch_root(&mut body, dt) } else {
-                    n.warp_elapsed = n.t-dt;
-                    n.advance_catch_root(&mut body, dt)
-                };
+                let k = n.advance_catch_root(&mut body, dt);
                 if k >= 1.0 && done {
-                    if crate::tuning::AIR_CATCHES && n.state == BeamState::PilotisIn {
+                    if n.state == BeamState::PilotisIn {
                         if let Some(next) = n.action.and_then(|a| item(a.id, a.item + 1, &[])) {
                             // 0xE52170 waits for the full entry action. Keep completed RootInterp independent.
                             let excess = (n.t - dur).max(0.0);

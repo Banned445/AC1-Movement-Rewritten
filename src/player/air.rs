@@ -19,7 +19,7 @@ use super::ledge_moves::{self, LedgeArrival};
 use super::targets::JumpTarget;
 use super::{switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, TransitionSetup};
 use crate::collision::CollisionWorld;
-use crate::guidance::{GuidanceHit, GuidanceWorld};
+use crate::guidance::GuidanceWorld;
 use crate::input::PadInput;
 use crate::tuning::*;
 
@@ -707,27 +707,14 @@ fn classify_landing(apex_y: f32, apex_reached: bool, start_y: f32, land_y: f32) 
     Landing { kind, damage, fall_height, total_drop, roll: total_drop > ROLL_DROP && kind != LandingType::Fatal, action: None, skip: 0.0 }
 }
 
-/// CheckAirCatch 0xE0BB70 / FindLedgeCatch 0xE0A990: look for an edge in the hand box at the reach
-/// height, facing the character within 70°.
-/// PORT: approximate feet-height probes; native hand-bone pairs and origin/release clearance are not represented.
-fn find_air_catch(feet: Vec3, facing: Vec3, guidance: &GuidanceWorld) -> Option<GuidanceHit> {
-    for reach in [CATCH_REACH_WALL, CATCH_REACH_LEDGE] {
-        let p = feet + Vec3::Y * reach + facing * 0.3;
-        if let Some(h) = guidance.probe(p, CATCH_BOX_R, CATCH_BOX_V, Some(facing), CATCH_MAX_ANGLE) {
-            return Some(h);
-        }
-    }
-    None
-}
-
 /// The narrow-object part of `CheckAirCatch` 0xE0BB70 (fall height < 9 m, not while a target is still ahead):
-/// first a pilotis under the feet (a support within 0.5 m, then 0xB2B600 from the air → soft landing,
-/// PilotisReception), then a beam in the 0xE0B890 box (→ landing, BeamReception mode 7).
+/// first a pilotis: the drop report at the feet (IHuman vt104 `Human__ReportDropAtFeet` 0xB248B0, minimum 0.5 m,
+/// 0xE0C583) must hold an edge (+56 clear), whose point `Human__FindPilotisTop` 0xB2B600 searches round from the air
+/// (→ PilotisReception); then a beam in the 0xE0B890 box (→ landing, BeamReception mode 7).
 fn narrow_catch(feet: Vec3, facing: Vec3, foot: usize, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<TransitionSetup> {
     use super::narrow::*;
-    if let Some(h) = collision.ground_height(feet + Vec3::Y * 0.01, 0.5) {
-        let support = Vec3::new(feet.x, h, feet.z);
-        if let Some(top) = find_pilotis(feet, support, facing, true, guidance, collision) {
+    if let Some(r) = super::ground::drop_report(feet, 0.5, guidance, collision).filter(|r| r.normal.is_some()) {
+        if let Some(top) = find_pilotis(feet, r.point, facing, true, guidance, collision) {
             return Some(TransitionSetup::ToPilotis(PilotisEntry { top, from: feet, facing, kind: PilotisEntryType::FromInAir, foot }));
         }
     }
@@ -935,10 +922,6 @@ pub fn update_air(
                             hay_on = Some(super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
                         }
                     }
-                    // a jump without a real target (on the spot / free jump) can come down on a beam or a pilotis
-                    if !AIR_CATCHES && air.target.is_none() && hang_on.is_none() {
-                        narrow_on = narrow_catch(body.feet, fwd, foot, &guidance, &collision);
-                    }
                     match then_fall_to {
                         _ if hang_on.is_some() || hay_on.is_some() || narrow_on.is_some() || pass_on.is_some() || ladder_on.is_some() || kiosk_on.is_some() => {}
                         // 0xE07D00 returns 0: the jump ends with no reception and the fall's air catch takes over
@@ -1084,10 +1067,6 @@ pub fn update_air(
                     }
                 }
                 air.fall_t += dt;
-                // narrow objects are caught before the ground contact (0xE0BB70 runs before 0xE05200)
-                if !AIR_CATCHES && body.velocity.y <= 0.0 && air.apex_y - body.feet.y < 9.0 && air.time_in_air > 0.1 {
-                    narrow_on = narrow_catch(body.feet + body.velocity * dt, body.forward(), foot, &guidance, &collision);
-                }
                 let before = body.feet;
                 air.anti_stuck.tick(dt);
                 let r = if air.hollywood {
@@ -1147,10 +1126,10 @@ pub fn update_air(
                 // searched last, after the catches (below, RE/24 AIR-16)
                 let fall_h = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
                 // not during the faith dive (`!vt72()` 0xE0D684, RE/24 AIR-32)
-                edge_contact = AIR_CATCHES && narrow_on.is_none() && hay_on.is_none() && r.landed && body.velocity.y <= 0.0 && !air.edge_landed && !air.faith_dive()
-                    // PORT: the proxy's contact list is empty on the landing frame; a landing that is not a steep
-                    // contact is the flat contact (GetGroundContactType = 1)
-                    && fall_h < 9.0 && contact != super::ground_extras::GroundContact::Steep;
+                edge_contact = narrow_on.is_none() && hay_on.is_none() && r.landed && body.velocity.y <= 0.0 && !air.edge_landed && !air.faith_dive()
+                    // a flat contact (`HumanInAir__GetGroundContactType` 0xE038A0 = 1: a manifold contact within 45° of up;
+                    // the proxy adds the landing cast's hit to the manifold before it moves)
+                    && fall_h < 9.0 && contact == super::ground_extras::GroundContact::Flat;
                 if narrow_on.is_some() || hay_on.is_some() {
                 } else if r.landed && body.velocity.y <= 0.0 && !gated {
                     landed_at = Some(body.feet.y);
@@ -1164,15 +1143,6 @@ pub fn update_air(
                     air.anti_stuck.update(dt, moved, false, has_contacts, body.feet, body.forward(), |p| collision.capsule_fits(p))
                 }) {
                     body.velocity = v;
-                } else if !AIR_CATCHES && grasp && if GAME_FALLS { pad.hand_held && air.apex_reached && air.apex_y - body.feet.y > 0.3 } else { pad.legs_held && body.velocity.y <= 0.5 && air.time_in_air > 0.3 } {
-                    // grab requested (SetGrabRequested 0xE102D0) → a ladder first (FindLadderCatch 0xE04100), then a ledge
-                    // in reach
-                    if let Some(e) = super::ladder::find_ladder_catch(body.feet, body.forward(), true, &guidance, &collision) {
-                        ladder_on = Some(e);
-                    } else if let Some(h) = find_air_catch(body.feet, body.forward(), &guidance) {
-                        air.long_catch = air.apex_y - body.feet.y >= 3.0;
-                        hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(guidance.fit_hands(h.point, h.wall_normal), h.wall_normal, body.feet, LedgeSubState::HangWallReception) });
-                    }
                 }
             }
             AirMode::Idle => {
@@ -1181,7 +1151,7 @@ pub fn update_air(
         }
 
         // no catch at the free-step arrival: it switches context with the root interpolation running (0xE07D00)
-        if AIR_CATCHES && !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
+        if !on_target && ladder_on.is_none() && hang_on.is_none() && pass_on.is_none() {
             let fall_height = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
             // the empty-hand catch needs `!vt72()`: none during the faith dive (0xE0BF71, RE/24 AIR-32)
             let manual = grasp && !air.faith_dive() && super::air_catches::manual(pad.hand_held, fall_height, air.drop.map(|d| d.0));
@@ -1189,7 +1159,7 @@ pub fn update_air(
             let jumping = matches!(air.mode, AirMode::Jump { .. });
             // the jump's type is InAirData +0x290 (`target_flags`): a target's type, or 1 for the free jumps
             let jump_type = Some(air.target_flags).filter(|&f| f != 0);
-            let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, jump_type, body.forward(), body.proxy.manifold.iter().map(|c| c.normal));
+            let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, jump_type, body.forward(), body.proxy.manifold.iter());
             // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
             let reach = if manual && pad.speed01 > 0.0 && pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { body.forward() };
             if manual || automatic {
@@ -1205,10 +1175,12 @@ pub fn update_air(
                     air.long_catch = fall_height >= 3.0;
                     match found {
                         super::air_catches::CatchFound::Climb(e) => climb_on = Some(e),
-                        super::air_catches::CatchFound::Hang { mid, normal, wall, action, one_hand } => {
+                        super::air_catches::CatchFound::Hang { hands, normal, wall, action, reach } => {
                             let sub = if wall { LedgeSubState::HangWallReception } else { LedgeSubState::HangFreeReception };
-                            hang_on = Some(LedgeEntry { catch: Some(air.long_catch), ..LedgeEntry::at(mid, normal, body.feet, sub) });
-                            catch_hang = Some((action, wall, one_hand));
+                            // the hand targets are the holds found (`sub_E55CB0`(0 / 1, …) 0xE0DB02)
+                            let at = LedgeEntry::at((hands[0] + hands[1]) * 0.5, normal, body.feet, sub);
+                            hang_on = Some(LedgeEntry { catch: Some(air.long_catch), hand_l: hands[0], hand_r: hands[1], ..at });
+                            catch_hang = Some((action, wall, reach));
                         }
                     }
                 }
@@ -1277,16 +1249,16 @@ pub fn update_air(
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
-            if AIR_CATCHES { data.ladder.advance_catch_root(&mut body, dt); }
+            data.ladder.advance_catch_root(&mut body, dt);
         } else if let Some(entry) = hang_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             let flight = air.flight;
             switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));
-            if let Some((action, wall, one_hand)) = catch_hang {
+            if let Some((action, wall, reach)) = catch_hang {
                 data.ledge.catch_action = Some(action);
                 data.ledge.catch_free = !wall;
-                data.ledge.catch_one_hand = one_hand;
+                data.ledge.catch_reach = reach;
             }
             if swing_on {
                 let n = entry.normal;
@@ -1309,7 +1281,7 @@ pub fn update_air(
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, setup);
-            if AIR_CATCHES { data.narrow.advance_catch_root(&mut body, dt); }
+            data.narrow.advance_catch_root(&mut body, dt);
         } else if let Some(e) = kiosk_on {
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;

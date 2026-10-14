@@ -875,10 +875,38 @@ pub(crate) fn measure_drop(p: Vec3, n: Vec3, max: f32, step: f32, collision: &Co
 /// - Stairs: with a drop d, the edge reports at the floor (IHuman vt132 with radius 0.2 · clamp(d / 3, 0, 1) when that
 ///   exceeds 0.01, minimum drop 0.45, no floor report) add the deepest one's drop (`sub_B14CA0`), so a ledge below the
 ///   edge adds the drop beyond it (RE/25 #2: the 1.61 m roof edge over a 0.6 m shelf halts the walk).
-/// PORT: the two checks before the sweep are left out (the edge's lip from 0.05 m inside, 50 deg down, and the line
-/// from 1 m above the feet to the point past the edge; a hit on either is the drop); the rays use one layer.
+/// The two checks before the sweep need the caller's feet (`measure_drop_from`); these callers pass none. PORT: the rays
+/// use one layer (the game's 12, or 22 for the player, then 35).
 pub(crate) fn measure_drop_stepped(p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld, guidance: Option<&GuidanceWorld>) -> f32 {
+    measure_drop_from(None, p, n, max, step, collision, guidance)
+}
+
+/// `Human__MeasureDropBeyondEdge` 0xB19620 with the caller's feet (its a2: the knee catch's root, `HumanInAir__FindKneeCatchEdge`
+/// 0xE04630; `Human__ReportDropAtFeet` 0xB248B0's feet). Before the sweep (`measure_drop_stepped`), with an edge normal:
+/// 1. the lip: a ray 50° down from the edge's normal, from 0.05 m inside the edge's plane to the point `step` past the
+///    edge (0xB19741–0xB198C0);
+/// 2. the line from 1 m above the feet to that point (0xB1996A–0xB19A13).
+///
+/// A hit on either is the floor: the drop is the edge's height minus the hit's (it can be negative).
+pub(crate) fn measure_drop_from(feet: Option<Vec3>, p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld, guidance: Option<&GuidanceWorld>) -> f32 {
     let n = flat(n);
+    if let Some(feet) = feet.filter(|_| n != Vec3::ZERO) {
+        let q = p + n * step;
+        let (s, c) = 50f32.to_radians().sin_cos();
+        let down = n * c - Vec3::Y * s;
+        let len = (step + 0.05) / c;
+        if let Some((d, _)) = collision.ray_hit(q - down * len, down, len, RAY_LAYER) {
+            return p.y - (q - down * len + down * d).y;
+        }
+        let top = feet + Vec3::Y;
+        let to = q - top;
+        let len = to.length();
+        if len > 1e-4 {
+            if let Some((d, _)) = collision.ray_hit(top, to / len, len, RAY_LAYER) {
+                return p.y - (top + to / len * d).y;
+            }
+        }
+    }
     if n == Vec3::ZERO {
         let o = p + Vec3::Y * 0.05;
         return collision.ray_distance(o, -Vec3::Y, max + 0.05, RAY_LAYER) - 0.05;

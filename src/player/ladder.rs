@@ -422,7 +422,7 @@ impl HumanLadderData {
                 Some(a) => {
                     let p = self.root_at(self.height);
                     self.play(LadderPhase::Entry, Some(a), e.from, p, false);
-                    if crate::tuning::AIR_CATCHES && matches!(a.id, CATCH_AIR | ARRIVE_TARGET) {
+                    if matches!(a.id, CATCH_AIR | ARRIVE_TARGET) {
                         let out = e.catch_out.unwrap_or(self.n);
                         let to = self.base + self.axis() * self.height + out * ATTACH_OUT;
                         // 0x724DB0: the shipped catch item's blend kind is NONE, so only this item's
@@ -499,7 +499,7 @@ pub fn buried_depth(base: Vec3, top: Vec3, collision: &CollisionWorld) -> f32 {
 /// must be at least 0.45 m and below the ladder's height − 1.95 m.
 pub fn catch_height(h: f32, len: f32) -> Option<f32> {
     // the probe has already snapped the hit to a rung (GUIDE-1); the game truncates that value with no epsilon
-    let h = if crate::tuning::AIR_CATCHES { (h * 2.0).trunc() * 0.5 } else { (h * 2.0 + 1e-3).floor() * 0.5 };
+    let h = (h * 2.0).trunc() * 0.5;
     (h >= 0.45 && h < len - 1.95).then_some(h)
 }
 
@@ -899,15 +899,13 @@ pub fn update_ladder(
                 if done {
                     // the entry action's next item (a → b) at the reached root, then the wait
                     let excess = (l.t-dur).max(0.0);
-                    let next = l.action.filter(|_| l.chain && phase == LadderPhase::Entry).and_then(|a| blend(a.id, a.item + 1, if crate::tuning::AIR_CATCHES && a.id==ARRIVE_TARGET { a.weights() } else { &[] }));
+                    let next = l.action.filter(|_| l.chain && phase == LadderPhase::Entry).and_then(|a| blend(a.id, a.item + 1, if a.id==ARRIVE_TARGET { a.weights() } else { &[] }));
                     match next {
                         Some(a) => {
                             let p = l.root_at(l.height);
                             l.play(LadderPhase::Entry, Some(a), p, p, false);
-                            if crate::tuning::AIR_CATCHES {
-                                l.t = excess;
-                                if matches!(a.id,CATCH_AIR|ARRIVE_TARGET) { l.blend_time=0.0; } // DataPC item blend NONE.
-                            }
+                            l.t = excess;
+                            if matches!(a.id,CATCH_AIR|ARRIVE_TARGET) { l.blend_time=0.0; } // DataPC item blend NONE.
                         }
                         None => {
                             if phase == LadderPhase::EnterGround {

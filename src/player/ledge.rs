@@ -293,10 +293,11 @@ pub struct HumanLedgeData {
     /// The entry was an air catch (long or not): the grab lasts the catch action, set once the hang type is known.
     pub catch: Option<bool>,
     /// The catch action chosen by the air search (`air_catches::ledge_search`, RE/19 §2), and whether it is a free
-    /// hang (the hang type follows it) and, for the one-handed side catch, the hand that holds (true = right).
+    /// hang (the hang type follows it) and, for the long free-hang catches (type 4), the hand that reaches for the edge
+    /// once the catch ends (true = right; `ledge_moves::catch_reach`).
     pub catch_action: Option<u32>,
     pub catch_free: bool,
-    pub catch_one_hand: Option<bool>,
+    pub catch_reach: Option<bool>,
 }
 
 impl HumanLedgeData {
@@ -328,7 +329,7 @@ impl HumanLedgeData {
         self.catch = e.catch.filter(|_| e.entry_move.is_none());
         self.catch_action = None;
         self.catch_free = false;
-        self.catch_one_hand = None;
+        self.catch_reach = None;
         self.after = Some(After::Hang);
         self.last_action = "grab";
         self.step_seq += 1;
@@ -389,6 +390,13 @@ pub fn hands_from_bones(bones: [Vec3; 2], root: Vec3, facing: Vec3, guidance: &G
         })
         .collect();
     bones.map(|b| edges.iter().map(|e| e.closest_point(b)).min_by(|p, q| p.distance_squared(b).total_cmp(&q.distance_squared(b))))
+}
+
+/// The released-hold record of every Ledge → InAir fill (`HumanLedge__FillInAirData_LetGo` 0xDD7810: the let-go, the
+/// lost ledge, the pull-down's release …): InAirData+400 = the root + 1.1 m up from a wall hang (+500 = 2), + 2.4 m from
+/// a free hang (+500 = 3). The air catches ignore holds less than 0.5 m below it (`HumanInAir__FindLedgeCatch` 0xE0A990).
+pub fn release_record(root: Vec3, hang: LedgeHangType) -> Vec3 {
+    root + Vec3::Y * if hang == LedgeHangType::Wall { 1.1 } else { 2.4 }
 }
 
 fn hand_mid(d: &HumanLedgeData) -> Vec3 {
@@ -850,7 +858,7 @@ pub fn update_ledge(
                 d.mv = None;
                 limbs.hands = None;
                 limbs.feet = None;
-                let hold = body.feet + Vec3::Y * 1.1;
+                let hold = release_record(body.feet, LedgeHangType::Wall);
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::HangWall, speed_param: 0.0 }));
                 data.air.release_hold = Some(hold);
                 continue;
@@ -948,7 +956,7 @@ pub fn update_ledge(
         let lost = |p: Vec3| guidance.probe_facing(p, facing, Vec3::splat(0.1), 0.0, std::f32::consts::FRAC_PI_2, crate::guidance::MASK_CLIMB_HOLDS).is_none();
         if lost(d.hand_l) || lost(d.hand_r) {
             let origin = if d.hang_type == LedgeHangType::Wall { FallOrigin::HangWall } else { FallOrigin::HangFree };
-            let hold = hand_mid(d);
+            let hold = release_record(body.feet, d.hang_type);
             limbs.hands = None;
             limbs.feet = None;
             d.moves.clear();
@@ -998,6 +1006,15 @@ pub fn update_ledge(
                 _ => {}
             }
             d.sub_state = LedgeSubState::Movement;
+            // a long free-hang catch (type 4) ends in SecondHandGrab, not in the wait (`HumanLedge__StateGrasp_Update`
+            // 0xDDFDB0 → `HumanLedge__Grasp_SetupSecondHand` 0xDCDCF0): the other hand reaches for the edge
+            if let (Some(right), Some(catch)) = (d.catch_reach.take(), d.catch_action) {
+                let hold = if right { d.hand_l } else { d.hand_r };
+                if let Some(mv) = ledge_moves::catch_reach(catch, right, hold, n, body.feet, &guidance, &collision) {
+                    start_move(d, mv, "catch: second hand");
+                    continue;
+                }
+            }
         }
 
         // ---------------------------------------------------------------- checks (Movement state)
@@ -1015,7 +1032,7 @@ pub fn update_ledge(
             limbs.hands = None;
             limbs.feet = None;
             let origin = if d.hang_type == LedgeHangType::Wall { FallOrigin::HangWall } else { FallOrigin::HangFree };
-            let hold = hand_mid(d);
+            let hold = release_record(body.feet, d.hang_type);
             // with the Leap of Faith ability, a haystack below (IHuman vt84, `hay::LET_GO`, along the facing away from
             // the wall) turns the let-go into the dive (0xEEC580–0xEEC63B, RE/24 CENSUS-2)
             let away = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
