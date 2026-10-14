@@ -1896,9 +1896,15 @@ fn pilotis_impulsion_and_jump_on_the_spot() {
         }
     }
     assert!((top_y - 4.0).abs() < 0.05, "rose 1.0 m (beam_jumpstraight_clear): {top_y}");
+    // caught back on the post by the beam catch, not the pilotis one: the air catch's pilotis search starts at the drop
+    // report's point, on the post's own edge, along −its normal, and its back search skips that edge (zero direction);
+    // the runtime beam pairing of the top's opposite edges then takes it (live 2026-10-14: a fall onto the colonnade
+    // column `Wall_Colonne_P_01a_170` plays BeamReception 0x010DD707 then `beam_crouchwait`, RE/05 §5.7)
     assert_eq!(s.loco().current, ActorContextId::NarrowObject, "caught back on the post");
-    assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::PilotisWait));
-    assert!((s.body().feet - top).length() < 0.05);
+    assert_eq!(s.data().narrow.kind, crate::player::narrow::NarrowKind::Beam, "the beam catch");
+    assert!(s.run_until(1.5, |s| s.data().narrow.state == BeamState::Wait));
+    let off = Vec2::new(s.body().feet.x - top.x, s.body().feet.z - top.z).length();
+    assert!((s.body().feet.y - top.y).abs() < 0.05 && off < 0.3, "on the post's top: {:?}", s.body().feet);
 }
 
 #[test]
@@ -5389,6 +5395,29 @@ fn falling_past_climb_holds_with_the_hand_held_catches_into_the_climb() {
     assert!((m.reach - reach.min(m.duration)).abs() < 1e-4 && m.reach < m.duration, "reach {} of {}", m.reach, m.duration);
 }
 
+/// The air catch's debug draw (F7): while the empty hand is held in a fall the trace holds the searched boxes, and the
+/// catch's frame (its free-hang box found, the hold, the room box, the outcome) stays for 2 s.
+#[test]
+fn the_catch_debug_trace_shows_the_search_and_the_catch() {
+    use crate::player::air_catches::{CatchDebug, TraceKind};
+    let from = Vec3::new(1.0, 5.2, 34.9);
+    let mut s = Sim::new(from, -std::f32::consts::FRAC_PI_2);
+    s.app.world_mut().insert_resource(CatchDebug { show: true, ..Default::default() });
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::Z, 0.6, false, false);
+    s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
+    s.run(0.1);
+    let early = s.app.world().resource::<CatchDebug>().trace.clone().expect("a trace while the hand is held");
+    assert!(early.hand_held && !early.manual && early.boxes.is_empty(), "not armed before 0.3 m of fall: {early:?}");
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ledge), "no catch");
+    let t = s.app.world().resource::<CatchDebug>().trace.clone().expect("the catch's trace");
+    assert!(t.manual, "armed by the empty hand");
+    assert!(t.result.as_deref().is_some_and(|r| r.contains("type 4")), "{:?}", t.result);
+    assert!(t.boxes.iter().any(|b| b.kind == TraceKind::FreeHang && b.hit), "the free-hang box found the hold");
+    assert!(t.boxes.iter().any(|b| b.kind == TraceKind::Room && b.hit), "and its room is empty");
+    assert!(!t.holds.is_empty());
+}
+
 #[test]
 fn a_long_fall_beside_a_free_hang_edge_catches_one_handed_to_the_side() {
     use crate::player::air_catches::FREE_CATCH_SIDE;
@@ -5404,8 +5433,19 @@ fn a_long_fall_beside_a_free_hang_edge_catches_one_handed_to_the_side() {
     s.run(0.05);
     let l = &s.data().ledge;
     assert!(l.catch_action.is_some_and(|a| FREE_CATCH_SIDE.contains(&a)), "a side catch: {:?}", l.catch_action.map(|a| format!("{a:#x}")));
-    assert!(l.catch_one_hand.is_some());
+    assert!(l.catch_reach.is_some(), "a type-4 catch ends in the second hand's reach");
     assert_eq!(l.hang_type, crate::player::ledge::LedgeHangType::Free);
+    // both hand records on the one hold (0xE0D3D9), then SecondHandGrab (0xDCDCF0 → 0xDD7310): the other hand reaches
+    // 0.25 m along the edge with 0x201372FA / FB, and the hang ends with the hands apart
+    assert!((l.hand_l - l.hand_r).length() < 1e-4, "both hands on the hold: {:?} {:?}", l.hand_l, l.hand_r);
+    let reach = l.catch_action.and_then(|c| crate::player::ledge_moves::CATCH_REACH.iter().find(|(a, _)| *a == c)).map(|r| r.1).unwrap();
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_some_and(|m| m.seq[0].is_some_and(|a| a.id == reach))), "no reach: {:?}", s.data().ledge.last_action);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()), "the reach never ended");
+    let l = &s.data().ledge;
+    assert_eq!(s.loco().current, ActorContextId::Ledge);
+    assert_eq!(l.hang_type, crate::player::ledge::LedgeHangType::Free);
+    let apart = (l.hand_l - l.hand_r).length();
+    assert!(apart > 0.15 && apart < 0.8, "the second hand found the edge: {apart}");
 }
 
 #[test]
@@ -5425,13 +5465,14 @@ fn landing_on_a_roofs_lip_steps_off_the_edge() {
     assert_eq!(s.data().air.start_y, from.y);
     assert!(s.data().air.release_hold.is_none());
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "never reached the street: {:?}", s.body().feet);
-    // facing into the roof (+Z): `step_off_front` steps 0.48 m backward off the lip; falling in front of the face with
-    // its top at the feet, the knee catch (type 0) takes the edge again and stands up
+    // facing into the roof (+Z), the feet 0.1 m over it: the knee catch (type 0) comes before the edge landing in
+    // `CheckAirCatch` and has no test of the feet's side of the edge (0xE04630; the 45° cone is seen from 0.2 m behind
+    // the feet), so it takes the edge as the feet reach it and stands up on the roof (RE/05 §5.6)
     let mut s = Sim::new(from, FACE_PZ);
     force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
     s.pad(Vec3::ZERO, 0.0, false, false);
-    assert!(s.run_until(1.5, |s| s.data().air.edge_landed), "no edge landing facing the roof");
-    assert_eq!(s.data().air.flight.map(|a| a.id), Some(STEP_OFF[0]), "step_off_front");
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ledge), "no knee catch facing the roof: {:?}", s.loco().current);
+    assert!(!s.data().air.edge_landed, "the knee catch comes first");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood again");
     assert!((s.body().feet.y - 3.0).abs() < 0.05, "back on the roof: {:?}", s.body().feet);
     // a 0.2 m drop onto the lip: the edge landing waits behind the catches' gate (a fall over 0.3 m or 0.4 s in the air,
@@ -5870,4 +5911,130 @@ fn the_wall_run_into_a_wall_hang_can_eject_during_the_grab() {
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "no jump off: {:?}", s.loco().current);
     s.run(0.6);
     assert!(s.body().feet.z < z0 - 1.0, "pushed off away from the wall: {:?} from {z0}", s.body().feet);
+}
+
+
+/// NARROW-11's gate (0xEEA930–0xEEA999) compares the actor's forward with the current segment: facing across a beam (the
+/// 90° wait) the drop edge ahead stays, so high profile + Legs held with the stick across turns to the 90° wait and
+/// jumps off the side (the free jump over the 4 m drop) down to the floor. Along the beam the gate holds the jump back.
+#[test]
+fn high_profile_legs_across_a_beam_jumps_off_its_side_to_the_floor() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::InAir), "never jumped off: {:?}", s.data().narrow.state);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
+    let f = s.body().feet;
+    assert!(f.y < 0.1 && f.z > 70.5, "on the floor beside the beam: {f:?}");
+    // along the beam, mid-way, the same input walks on
+    let mut s = on_free_beam(87.0);
+    s.pad(Vec3::X, 1.0, true, true);
+    s.run(0.5);
+    assert_eq!(s.loco().current, ActorContextId::NarrowObject, "jumped mid-beam");
+    assert!(matches!(s.data().narrow.state, BeamState::Start | BeamState::Walk), "{:?}", s.data().narrow.state);
+}
+
+/// Timing probe (the village slice): the runtime beam report and whole frames on a beam at the densest ledge spot.
+/// `AC_BEAM_DUMP=<file>` writes the reports around many points, to check a speed change leaves them identical.
+#[test]
+#[ignore]
+fn probe_beam_frame_cost() {
+    use crate::guidance::GuidanceSubType;
+    let Some((collision, guidance, _)) = crate::native_map::village_simulation_fixture() else { eprintln!("no village"); return; };
+    let ledges: Vec<Vec3> = guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab).map(|e| (e.p0 + e.p1) * 0.5).collect();
+    eprintln!("COST edges {} ledgegrab {}", guidance.edges.len(), ledges.len());
+    // the densest spot: most LedgeGrab midpoints within ±8 m
+    let mut best = (0, Vec3::ZERO);
+    for (i, p) in ledges.iter().enumerate().step_by(7) {
+        let n = ledges.iter().filter(|q| (**q - *p).abs().cmple(Vec3::new(8.0, 12.0, 8.0)).all()).count();
+        if n > best.0 { best = (n, *p); }
+        let _ = i;
+    }
+    let root = best.1;
+    eprintln!("COST densest {root:?}: {} edges", best.0);
+    if let Ok(path) = std::env::var("AC_BEAM_DUMP") {
+        let mut out = String::new();
+        for p in ledges.iter().step_by(23) {
+            for b in crate::guidance::beam_contacts::detect(&guidance, &collision, *p, Vec3::new(7.0, 7.25, 7.0)) {
+                out += &format!("{:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4}
+", b.p0.x, b.p0.y, b.p0.z, b.p1.x, b.p1.y, b.p1.z, b.widths[0], b.widths[1]);
+            }
+            out += "--
+";
+        }
+        std::fs::write(path, out).unwrap();
+    }
+    let t = std::time::Instant::now();
+    let mut beams = 0;
+    for _ in 0..10 { beams = crate::guidance::beam_contacts::detect(&guidance, &collision, root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0)).len(); }
+    eprintln!("COST beam_contacts::detect {:.2} ms ({beams} beams)", t.elapsed().as_secs_f64() * 100.0);
+    let (centre, half) = (root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0));
+    let t = std::time::Instant::now();
+    let mut edges = vec![];
+    for _ in 0..10 { edges = guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab
+        && e.p0.min(e.p1).cmple(centre + half + Vec3::ONE).all() && e.p0.max(e.p1).cmpge(centre - half - Vec3::ONE).all()).cloned().collect::<Vec<_>>(); }
+    eprintln!("COST filter {:.3} ms ({} edges)", t.elapsed().as_secs_f64() * 100.0, edges.len());
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let mut e = edges.clone(); e.sort_by(|a, b| a.p0.distance_squared(a.p1).total_cmp(&b.p0.distance_squared(b.p1))); }
+    eprintln!("COST one sort {:.3} ms", t.elapsed().as_secs_f64() * 100.0);
+    let empty = crate::collision::CollisionWorld::default();
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let _ = crate::guidance::beam_contacts::pair_report(edges.clone(), &empty); }
+    eprintln!("COST pair_report without trims {:.3} ms", t.elapsed().as_secs_f64() * 100.0);
+    let ab = crate::player::abilities::AbilitySet::default();
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let _ = crate::player::free_step::narrow_jump(root, Vec3::X, Vec3::X, Some(4), None, &ab, true, &guidance, &collision); }
+    eprintln!("COST narrow_jump kind 4 {:.2} ms", t.elapsed().as_secs_f64() * 100.0);
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let _ = crate::player::free_step::drop_edge_ahead(root, Vec3::X, &guidance, &collision); }
+    eprintln!("COST drop_edge_ahead {:.2} ms", t.elapsed().as_secs_f64() * 100.0);
+    let t = std::time::Instant::now();
+    for _ in 0..10 { let _ = crate::player::narrow::try_mount_beam(root, Vec3::X, &guidance, &collision); }
+    eprintln!("COST try_mount_beam {:.2} ms", t.elapsed().as_secs_f64() * 100.0);
+    // a whole frame standing on the beam nearest the densest spot
+    use crate::player::narrow::{BeamEntry, BeamEntryMode};
+    let report = crate::guidance::beam_contacts::detect(&guidance, &collision, root, Vec3::new(10.0, 10.0, 10.0));
+    let Some(b) = report.iter().filter(|b| b.p0.distance(b.p1) > 1.5).min_by(|a, b| a.p0.lerp(a.p1, 0.5).distance(root).total_cmp(&b.p0.lerp(b.p1, 0.5).distance(root))) else { eprintln!("COST no beam"); return; };
+    let (p0, p1) = (b.p0, b.p1);
+    let point = p0.lerp(p1, 0.5);
+    let facing = (p1 - p0).with_y(0.0).normalize();
+    let mut s = Sim::new_raw(point, crate::player::heading_of(facing));
+    s.app.insert_resource(collision).insert_resource(guidance);
+    s.app.update();
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0, p1, point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing }));
+    s.run(0.3);
+    for (label, dir, high) in [("idle", Vec3::ZERO, false), ("stick low", facing, false), ("stick high", facing, true), ("stick across high", crate::player::right_of(facing), true)] {
+        s.pad(dir, if dir == Vec3::ZERO { 0.0 } else { 1.0 }, high, false);
+        let t = std::time::Instant::now();
+        for _ in 0..30 { s.app.update(); }
+        eprintln!("COST frame {label}: {:.2} ms/frame, now {:?}", t.elapsed().as_secs_f64() * 1000.0 / 30.0, s.loco().current);
+    }
+}
+
+/// `HumanInAir__CheckAirCatch` 0xE0BF2B–0xE0C31F: the grasp blend plays on the upper body whenever the empty-hand catch
+/// is armed, over any fall clip: here while the hang's let-go item still runs on the full body (InAir sub-state 3, the
+/// fall entry) from the 7 m wall, where the port used to wait for that item's end. Letting go of the button stops the
+/// upper-body slot (0xE0C301).
+#[test]
+fn the_grasp_blend_plays_over_the_let_go_fall_while_the_hand_is_held() {
+    let mut s = hang_at(Vec3::new(-120.0, 7.0, -135.0), Vec3::NEG_X);
+    if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    let grasp = |s: &Sim| {
+        let p = s.app.world().get::<crate::anim::AnimPlayer>(s.player).unwrap();
+        p.overlay.as_ref().filter(|o| !o.ending && (o.action == 0x1F0C_22C2 || o.action == 0xCD6F_5E10)).map(|_| p.overlay_reach())
+    };
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.press_hand();
+    s.hold_hand(true);
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "never let go");
+    assert!(s.run_until(1.0, |s| s.data().air.grasp_armed), "the catch never armed");
+    s.run(2.0 / 60.0);
+    assert!(grasp(&s).is_some_and(|w| w > 0.0), "no grasp on the upper body over the let-go fall: {:?}", grasp(&s));
+    assert_eq!(s.loco().current, ActorContextId::InAir);
+    s.hold_hand(false);
+    s.run(2.0 / 60.0);
+    assert!(grasp(&s).is_none_or(|w| w == 0.0), "the grasp outlived the button: {:?}", grasp(&s));
 }

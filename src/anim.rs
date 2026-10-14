@@ -436,6 +436,8 @@ pub struct AnimPlayer {
     fall_entry: bool,
     /// Smoothed grasp direction while falling with grab held (HumanInAir+48, 7/s).
     grasp_dir: Vec3,
+    /// The upper-body slot plays the grasp blend because the catch is armed (`CheckAirCatch` 0xE0C2B9 / 0xE0C2CC).
+    grasp_on: bool,
     /// Ledge grab whose reception has been played.
     caught: Option<u64>,
     /// Phase set by the simulation (the ground step cycle, `MoveBlend`): the player shows it instead of
@@ -470,7 +472,7 @@ pub struct Overlay {
     pub weight: f32,
     /// Its blend in and out (s).
     fade: f32,
-    ending: bool,
+    pub(crate) ending: bool,
     looping: bool,
     /// Action +32: the item a looping action starts again at (RE/24 ANIM-5).
     loop_item: usize,
@@ -532,6 +534,11 @@ impl AnimPlayer {
                 }
             }
         }
+    }
+
+    /// The current overlay item's weight off its first layer (the falling blend: the grasp clips' share).
+    pub fn overlay_reach(&self) -> f32 {
+        self.overlay.as_ref().filter(|o| !o.ending).and_then(|o| o.items.get(o.item)).and_then(|it| it.layers.first()).map_or(0.0, |l| 1.0 - l.1)
     }
 
     /// Stop the partial-body action (it fades out).
@@ -815,6 +822,9 @@ const ACT_CATCH_WALL: [u32; 2] = crate::player::ledge::ACT_CATCH_WALL;
 const ACT_CATCH_FREE: [u32; 2] = crate::player::ledge::ACT_CATCH_FREE;
 /// Falling (6-way grasp blend).
 const ACT_FALL: u32 = 0x1F0C_22C2;
+/// The same six clips as a second action, played instead while the reach lies at a signed angle ≥ 0 from the facing,
+/// when the character has it (`sub_B0EB20`, 0xE0C29E).
+const ACT_FALL_B: u32 = 0xCD6F_5E10;
 
 /// The ground waits (HumanGround), [low, high profile] × [left, right foot ahead]: `xx_{l,h}_wait_hipm_foot{l,r}`.
 const ACT_WAIT: [[u32; 2]; 2] = crate::player::ground_tree::WAITS;
@@ -874,7 +884,6 @@ fn ground_items(lib: &AnimLibrary) -> Option<Vec<ItemPlay>> {
 fn choose_clip(
     time: Res<Time>,
     lib: Res<AnimLibrary>,
-    pad: Res<crate::input::PadInput>,
     collision: Res<crate::collision::CollisionWorld>,
     mut q: Query<(&Locomotion, &HumanDataBundle, &crate::player::Body, &mut AnimPlayer)>,
     fly: Option<Res<crate::debug_fly::DebugFly>>,
@@ -887,8 +896,33 @@ fn choose_clip(
         let g = &data.ground;
         p.sim_phase = None;
         // the falling blend belongs to InAir: leaving it (a landing, a catch) fades the partial slot out
-        if loco.current != ActorContextId::InAir && p.overlay.as_ref().is_some_and(|o| o.action == ACT_FALL) {
+        if loco.current != ActorContextId::InAir && p.overlay.as_ref().is_some_and(|o| o.action == ACT_FALL || o.action == ACT_FALL_B) {
             p.stop_overlay();
+        }
+        // the grasp (`HumanInAir__CheckAirCatch` 0xE0BF2B–0xE0C31F): every frame the empty-hand catch is armed, the
+        // reach (+32) is smoothed at 7/s into +48 and the falling blend plays on the upper body with its weights, over
+        // whatever the fall plays on the full body (a jump's flight or fall clip, a let-go, the drop entry); not armed,
+        // the upper-body slot stops and +48 is cleared (0xE0C301)
+        if loco.current == ActorContextId::InAir && data.air.grasp_armed {
+            let facing = body.forward();
+            let k = (dt * 7.0).min(1.0);
+            let gd = p.grasp_dir;
+            p.grasp_dir = gd + (data.air.grasp_reach - gd) * k;
+            let flat = p.grasp_dir.with_y(0.0);
+            let right = crate::player::right_of(facing);
+            let angle = if flat.length() > 5e-4 { flat.dot(right).atan2(flat.dot(facing)) } else { 0.0 };
+            let id = if angle >= 0.0 && lib.action_items(ACT_FALL_B).is_some() { ACT_FALL_B } else { ACT_FALL };
+            let w = fall_grasp_weights(p.grasp_dir, facing);
+            if p.play_overlay(&lib, id) {
+                p.set_overlay_weights(&w);
+                p.grasp_on = true;
+            }
+        } else if p.grasp_on {
+            p.grasp_on = false;
+            p.grasp_dir = Vec3::ZERO;
+            if p.overlay.as_ref().is_some_and(|o| o.action == ACT_FALL || o.action == ACT_FALL_B) {
+                p.stop_overlay();
+            }
         }
         // the walking fidget on the upper-body slot (RE/24 GROUND-18): a new request picks a cycle breaker from the
         // player's group (variant 0); a run, a locked upper body or leaving the ground ends it
@@ -1077,30 +1111,22 @@ fn choose_clip(
                             continue;
                         }
                         None
-                    } else if p.fall_entry && p.overlay.is_none() && !(p.phase >= 1.0 && p.item + 1 >= p.items.len()) {
+                    } else if p.fall_entry && p.overlay.as_ref().is_none_or(|o| o.ending) && !(p.phase >= 1.0 && p.item + 1 >= p.items.len()) {
+                        // the entry item runs to its end (a grasp let go of fades out meanwhile)
+                        continue;
+                    } else if p.fall_entry && p.grasp_on {
+                        // the grasp rule above plays the blend on the upper body
                         continue;
                     } else if p.fall_entry && p.play_overlay(&lib, ACT_FALL) {
                         // the falling blend is an upper-body action (channel 1, BodyPartTemplate_Human): it plays on
-                        // the partial slot while the full-body slot holds the entry's last frame; grasp weights only
-                        // while the grab input (empty hand, pad button 3) is held.
-                        // PORT: native timer/ability gates and overlay exit scheduling (0xE0C301)
-                        // remain simplified; zero weights reset grasp immediately on release.
-                        let facing = body.forward();
-                        let want = if (if crate::tuning::GAME_FALLS { pad.hand_held } else { pad.legs_held }) && data.air.apex_reached && data.air.apex_y - body.feet.y > 0.3 { if pad.magnitude > 0.35 { pad.dir } else { facing } } else { Vec3::ZERO };
-                        let k = (dt * 7.0).min(1.0);
-                        let gd = p.grasp_dir;
-                        p.grasp_dir = if crate::tuning::GAME_FALLS && want == Vec3::ZERO { Vec3::ZERO } else { gd + (want - gd) * k };
-                        let w = fall_grasp_weights(p.grasp_dir, facing);
-                        p.set_overlay_weights(&w);
+                        // the partial slot while the full-body slot holds the entry's last frame; with the catch not
+                        // armed, falling01 alone (the grasp rule above takes the slot while it is armed)
+                        p.set_overlay_weights(&fall_grasp_weights(Vec3::ZERO, body.forward()));
                         continue;
                     } else {
-                        // no body-part data (or no entry clip): the falling blend on the full body
-                        let facing = body.forward();
-                        let want = if (if crate::tuning::GAME_FALLS { pad.hand_held } else { pad.legs_held }) && data.air.apex_reached && data.air.apex_y - body.feet.y > 0.3 { if pad.magnitude > 0.35 { pad.dir } else { facing } } else { Vec3::ZERO };
-                        let k = (dt * 7.0).min(1.0);
-                        let gd = p.grasp_dir;
-                        p.grasp_dir = if crate::tuning::GAME_FALLS && want == Vec3::ZERO { Vec3::ZERO } else { gd + (want - gd) * k };
-                        let w = fall_grasp_weights(p.grasp_dir, facing);
+                        // no body-part data (or no entry clip): the falling blend on the full body, its weights the
+                        // grasp's while the catch is armed (the rule above smooths +48)
+                        let w = fall_grasp_weights(if p.grasp_on { p.grasp_dir } else { Vec3::ZERO }, body.forward());
                         // the free-step abort's fall blends in over 0.3 s (`sub_E009F0`, RE/24 AIR-10)
                         let fade = if data.air.free_step_abort { 0.3 } else if after_flight { 0.5 } else { 0.15 };
                         let r = action(&lib, &[ACT_FALL], true, 0, Some(fade), Some("fall"));
@@ -2030,3 +2056,4 @@ mod tests {
 #[cfg(test)]
 #[path = "anim_pose_tests.rs"]
 mod pose_tests;
+

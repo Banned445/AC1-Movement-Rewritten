@@ -100,8 +100,14 @@ fn trim(beam:BeamContact, world:&CollisionWorld) -> Vec<BeamContact> {
             }
         }
     };
-    // PORT: static collision meshes/boxes adapt GuidanceWorkspace's live component triangle lists.
-    let min=beam.p0.min(beam.p1)-Vec3::splat(2.0); let max=beam.p0.max(beam.p1)+Vec3::splat(2.0);
+    // PORT: static collision meshes/boxes adapt GuidanceWorkspace's live component triangle lists. Only geometry that
+    // overlaps the three rectangles' bounds can cut one (a hit lies on the triangle and inside the rectangle), so the
+    // gather box is those bounds, not the beam's ±2 m (PORT, speed: the same intervals, a tenth of the triangles)
+    let (mut min,mut max)=(Vec3::splat(f32::INFINITY),Vec3::splat(f32::NEG_INFINITY));
+    for &(origin,_,across,width) in &planes {
+        for p in [origin,origin+axis*length,origin+across*width,origin+axis*length+across*width] {min=min.min(p);max=max.max(p);}
+    }
+    let (min,max)=(min-Vec3::splat(0.01),max+Vec3::splat(0.01));
     for t in world.triangles_overlapping(min,max) {visit(t.vertices,t.normal);}
     for b in &world.boxes {
         if !b.min.cmple(max).all() || !b.max.cmpge(min).all() {continue;}
@@ -142,7 +148,12 @@ pub fn pair_report(mut edges:Vec<GuidanceEdge>, world:&CollisionWorld) -> Vec<Be
     edges.sort_by(|a,b|a.p0.distance_squared(a.p1).total_cmp(&b.p0.distance_squared(b.p1)));
     let mut report=Vec::new();
     while let Some(seed)=edges.pop() {
-        let candidate=edges.iter().enumerate().filter_map(|(i,e)|pair(&seed,e).map(|(b,overlap)|(i,b,overlap)))
+        // PORT (speed): edges whose bounding boxes are more than 1 m apart are skipped before `pair`; every point pair
+        // is then over 1 m apart, so both half widths would exceed MAX_HALF_WIDTH and `pair` rejects them anyway
+        let (lo,hi)=(seed.p0.min(seed.p1)-Vec3::splat(2.0*MAX_HALF_WIDTH+0.01),seed.p0.max(seed.p1)+Vec3::splat(2.0*MAX_HALF_WIDTH+0.01));
+        let candidate=edges.iter().enumerate()
+            .filter(|(_,e)|e.p0.min(e.p1).cmple(hi).all() && e.p0.max(e.p1).cmpge(lo).all())
+            .filter_map(|(i,e)|pair(&seed,e).map(|(b,overlap)|(i,b,overlap)))
             .max_by(|a,b|a.2.total_cmp(&b.2));
         if let Some((i,beam,_))=candidate {
             let other=edges.remove(i);

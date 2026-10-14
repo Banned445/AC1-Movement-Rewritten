@@ -115,6 +115,8 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     0x4C46037A, 0x4C46037B, 0x4C46037C, 0x4C46037D, 0x4C46037E, 0x4C46037F,
     0x1E67_E881, 0x1E67_E882, 0x1E67_E883, 0x1E67_E884, 0x1E67_E885, 0x1E67_E886, 0x1E67_E887, 0x1E67_E888,
     SWING_BACK, SWING_BACK_B, TURN_UNDER_BEAM,
+    // the long free-hang catches' reach (0xDCDCF0)
+    CATCH_REACH[0].1, CATCH_REACH[1].1, CATCH_REACH[2].1,
     // hang-type switches (0xDE1060)
     TO_WALL[0], TO_WALL[1], TO_FREE[0], TO_FREE[1], TO_FREE[2], TO_FREE[3],
     // straight jump to a hand target (0xB21DA0) and its arrivals (0xE07D00)
@@ -201,6 +203,9 @@ pub enum MoveKind {
     Rebound,
     /// Free hang → the edge behind across a beam, turned round (Ledge event 10, 0xDD3490).
     TurnUnderBeam,
+    /// After a long free-hang air catch (type 4): the second hand reaches for the edge (SecondHandGrab, 0xDCDCF0 →
+    /// 0xDD7310).
+    CatchReach,
 }
 
 /// A running ledge move.
@@ -876,6 +881,56 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, collision: 
     mv.hand_l = first;
     mv.hand_r = first;
     (mv, Some(tail))
+}
+
+/// The long free-hang catches (type 4) and the reach each one ends with (`HumanLedge__Grasp_SetupSecondHand` 0xDCDCF0):
+/// `hangfree_max` → 0x1F0C2EBA, `hangfree_max_left` → 0x201372FA, `hangfree_max_right` → 0x201372FB.
+pub const CATCH_REACH: [(u32, u32); 3] = [(0x1F0C_2EB9, 0x1F0C_2EBA), (0x2013_72F8, 0x2013_72FA), (0x2013_72F9, 0x2013_72FB)];
+
+/// SecondHandGrab after a long free-hang catch (Ledge state 16 → 17 once the catch's root and action are done,
+/// `HumanLedge__StateGrasp_Update` 0xDDFDB0). The catch put both hand records on the one hold; with +32 = −1 the state
+/// goes straight to `HumanLedge__SecondHandGrab_Reach` 0xDD7310: the reaching hand (`right`, +44) probes
+/// (`Guidance__ProbeBox`) at the root + 2.4 m up ± 0.25 m along the character's right, the box along the facing (half
+/// 0.25 / 0.15 / 0.15 across / along / up, the half width signed by the side), 45°, reference (0.3, −0.2, 0) in the
+/// character's frame (0.3 m to its right whichever hand reaches), step 0.1, mask 50; on a miss the hand keeps its hold. The reach action (`CATCH_REACH`) plays while the root is
+/// interpolated to the two-hand free-hang pose (`Human__FreeHangPoseFromHolds` 0xB15AD0, `sub_711130`) over its first
+/// item (`sub_502590`(0)); when it ends (0xDD14E0) the plain free-hang wait plays (`PlayFreeHangWait_WithEntry`
+/// 0xDCF460 with +40 = −1). Live 2026-10-14 (RE/05 §5.8): the right hand lands 0.4 m from the hold (the root moves
+/// 0.2 m), the left one 0.1 m (the root 0.05 m): the reference does not follow the side.
+pub fn catch_reach(catch: u32, right: bool, hold: Vec3, n: Vec3, root: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<LedgeMove> {
+    let reach = CATCH_REACH.iter().find(|(c, _)| *c == catch)?.1;
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let s = if right { 1.0 } else { -1.0 };
+    let x = right_of(facing) * s;
+    let centre = root + Vec3::Y * 2.4 + x * 0.25;
+    let reference = centre + right_of(facing) * 0.3 - facing * 0.2;
+    let second = guidance
+        .probe_box(centre, x, facing, Vec3::Y, Vec3::new(0.25, 0.15, 0.15), reference, std::f32::consts::FRAC_PI_4, 0.1, MASK_CLIMB_HOLDS)
+        .map_or(hold, |h| h.point);
+    let (hl, hr) = if right { (hold, second) } else { (second, hold) };
+    let to = hang_root_at(hl, hr, n, LedgeHangType::Free, collision);
+    let seq = [single(reach, 0), single(reach, 1), None, None];
+    let durations = seq_durations(&seq);
+    Some(LedgeMove {
+        kind: MoveKind::CatchReach,
+        seq,
+        durations: if durations[0] > 0.0 { durations } else { [0.4, 0.0, 0.0, 0.0] },
+        t: 0.0,
+        from: root,
+        to,
+        facing_from: facing,
+        facing_to: facing,
+        follow_disp: false,
+        lead: 0.0,
+        table: None,
+        root_time: Some(durations[0].max(1e-3)),
+        end_free: true,
+        end_wall: false,
+        end_stand: false,
+        hand_l: hl,
+        hand_r: hr,
+        normal: n,
+    })
 }
 
 /// The blended swing back's weights over `swingback_up_{min,max}_{200,300}` (`StartLedgeJump` 0xDDCE40, blended):
@@ -2179,5 +2234,30 @@ mod tests {
         // the crate is below the hands and 0.75 m out reaches it: the old sphere at hand height found it free
         let origin = mover - Vec3::X * SHIMMY_SWEEP_R + n * SHIMMY_SWEEP_OUT + Vec3::Y * SHIMMY_SWEEP_UP;
         assert!(c.sphere_free_distance(origin, Vec3::X, SHIMMY_SWEEP_R, SHIMMY_SWEEP_LEN) >= SHIMMY_SWEEP_LEN - 1e-3);
+    }
+
+    /// The long free catch's reach (`HumanLedge__SecondHandGrab_Reach` 0xDD7310), live 2026-10-14 (RE/05 §5.8): the
+    /// probe's reference sits 0.3 m to the character's right whichever hand reaches, so on a long edge the right hand
+    /// lands 0.4 m from the hold (the box's far end less the 0.1 m trim) and the left hand 0.1 m (its near end).
+    #[test]
+    fn the_catch_reach_lands_04_m_right_and_01_m_left() {
+        use crate::collision::Aabb3;
+        // a beam's side edge along x at y 5, its wall facing +z: the character hangs facing -z, its right is -x
+        let (min, max) = (Vec3::new(-3.0, 4.75, -0.25), Vec3::new(3.0, 5.0, 0.0));
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min, max });
+        let mut g = GuidanceWorld::default();
+        crate::level::add_roof_edges(&mut g, min, max);
+        let hold = Vec3::new(0.0, 5.0, 0.0);
+        let n = Vec3::Z;
+        let root = hold - Vec3::Y * 2.4;
+        let right = right_of(-n);
+        for (reaches_right, want) in [(true, 0.4f32), (false, 0.1)] {
+            let mv = catch_reach(0x1F0C_2EB9, reaches_right, hold, n, root, &g, &c).expect("a reach move");
+            let other = if reaches_right { mv.hand_r } else { mv.hand_l };
+            let side = (other - hold).dot(right);
+            let expect = if reaches_right { want } else { -want };
+            assert!((side - expect).abs() < 0.02, "reaches right {reaches_right}: the hand at {side:.3} m along the right");
+        }
     }
 }

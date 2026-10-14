@@ -64,40 +64,6 @@ pub struct GuidanceHit {
 }
 
 impl GuidanceWorld {
-    /// PORT (legacy): the closest LedgeGrab point to `p` within `radius` horizontally and `vtol` vertically, on an edge
-    /// whose slope is ≤ 40° (RE/06 post-filter) and whose wall faces `facing` within `max_angle`. Only the pre-A2 air
-    /// catch uses it (`tuning::AIR_CATCHES = false`); every Human search now runs the game's own queries
-    /// (`probe_facing`, `probe_facing_pair`, `step_search`, `vertical_search`, `handhold_pair`, `chains`).
-    pub fn probe(&self, p: Vec3, radius: f32, vtol: f32, facing: Option<Vec3>, max_angle: f32) -> Option<GuidanceHit> {
-        let mut best: Option<(f32, GuidanceHit)> = None;
-        for (i, e) in self.edges.iter().enumerate() {
-            if e.subtype != GuidanceSubType::LedgeGrab {
-                continue;
-            }
-            let d = (e.p1 - e.p0).normalize_or_zero();
-            if steep(e.p1 - e.p0) {
-                continue; // > 40° from horizontal
-            }
-            if let Some(f) = facing {
-                let f = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
-                if (-e.n1).dot(f) < max_angle.cos() {
-                    continue;
-                }
-            }
-            let q = e.closest_point(p);
-            let dv = (q.y - p.y).abs();
-            let dh = Vec2::new(q.x - p.x, q.z - p.z).length();
-            if dv > vtol || dh > radius {
-                continue;
-            }
-            let score = dh + dv;
-            if best.as_ref().is_none_or(|b| score < b.0) {
-                best = Some((score, GuidanceHit { point: q, edge: i, wall_normal: e.n1, dir: d }));
-            }
-        }
-        best.map(|b| b.1)
-    }
-
     /// A hang centred at `p` on the edge carrying it, moved along that edge so both hands (`HAND_SPACING` apart, plus
     /// a hand's width) stay on it. The closest point of an edge is clamped to its ends, so a grab near an end used to
     /// put one hand past the end, outside the climbable markup. An edge shorter than the hands keeps its middle.

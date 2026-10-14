@@ -669,7 +669,7 @@ pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
     }
     let r = super::right_of(f);
     // 0xD9F4C0's query (sub_116E1A0 over HumanGuidance's report, the same query as 0xE0B890)
-    let segments: Vec<(Vec3, Vec3)> = if NATIVE_BEAM_MOUNT && crate::tuning::AIR_CATCHES && !collision.triangles.is_empty() {
+    let segments: Vec<(Vec3, Vec3)> = if NATIVE_BEAM_MOUNT && !collision.triangles.is_empty() {
         let centre = feet + f * 0.5;
         crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs() * 0.75 + f.abs() * 0.5 + Vec3::Y * 0.53)
             .into_iter().map(|b| (b.p0, b.p1)).collect()
@@ -756,51 +756,25 @@ pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
 /// the root goes to the closest point of the beam (sub_946AC0) when a capsule fits there (sub_116D960).
 /// Returns (p0, p1, point).
 pub fn beam_at(feet: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3, Vec3)> {
-    if crate::tuning::AIR_CATCHES {
-        let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
-        let r = super::right_of(f);
-        let centre = feet + Vec3::Y * 0.15;
-        let half = Vec3::new(0.55, 0.4, 0.35);
-        let local = |p: Vec3| { let d=p-centre; Vec3::new(d.dot(r),d.dot(f),d.y) };
-        let world = |p: Vec3| centre+r*p.x+f*p.y+Vec3::Y*p.z;
-        return crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs()*0.55+f.abs()*0.4+Vec3::Y*0.35)
-            .into_iter().filter_map(|beam| {
-                let (a,b)=crate::guidance::clip_segment(local(beam.p0),local(beam.p1),half)?;
-                let (a,b)=(world(a),world(b));
-                let flat=Vec3::new(b.x-a.x,0.0,b.z-a.z);
-                if flat.length()<=0.0005 {return None;}
-                let point=crate::guidance::closest_on_segment(a,b,feet);
-                let width=beam.width(point);
-                let axis=flat.normalize();
-                if !beam_catch_clear(point,axis,width,collision) {return None;}
-                let (p0,p1)=if axis.dot(f)>=0.0 {(beam.p0,beam.p1)} else {(beam.p1,beam.p0)};
-                Some((Vec2::new(point.x-feet.x,point.z-feet.z).length_squared(),(p0,p1,point)))
-            }).min_by(|a,b|a.0.total_cmp(&b.0)).map(|b|b.1);
-    }
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or(Vec3::NEG_Z);
     let r = super::right_of(f);
-    let c = feet + Vec3::Y * 0.15;
-    let mut best: Option<(f32, (Vec3, Vec3, Vec3))> = None;
-    for e in &guidance.edges {
-        if e.subtype != GuidanceSubType::Beam {
-            continue;
-        }
-        // the beam point closest to the box centre must lie in the box
-        let q = e.closest_point(c);
-        let d = q - c;
-        if d.dot(r).abs() > 0.55 || d.dot(f).abs() > 0.4 || d.y.abs() > 0.35 {
-            continue;
-        }
-        let point = e.closest_point(feet);
-        if !clear_above(point, collision) {
-            continue;
-        }
-        let dist = (point - feet).length();
-        if best.as_ref().is_none_or(|b| dist < b.0) {
-            best = Some((dist, (e.p0, e.p1, point)));
-        }
-    }
-    best.map(|b| b.1)
+    let centre = feet + Vec3::Y * 0.15;
+    let half = Vec3::new(0.55, 0.4, 0.35);
+    let local = |p: Vec3| { let d=p-centre; Vec3::new(d.dot(r),d.dot(f),d.y) };
+    let world = |p: Vec3| centre+r*p.x+f*p.y+Vec3::Y*p.z;
+    crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs()*0.55+f.abs()*0.4+Vec3::Y*0.35)
+        .into_iter().filter_map(|beam| {
+            let (a,b)=crate::guidance::clip_segment(local(beam.p0),local(beam.p1),half)?;
+            let (a,b)=(world(a),world(b));
+            let flat=Vec3::new(b.x-a.x,0.0,b.z-a.z);
+            if flat.length()<=0.0005 {return None;}
+            let point=crate::guidance::closest_on_segment(a,b,feet);
+            let width=beam.width(point);
+            let axis=flat.normalize();
+            if !beam_catch_clear(point,axis,width,collision) {return None;}
+            let (p0,p1)=if axis.dot(f)>=0.0 {(beam.p0,beam.p1)} else {(beam.p1,beam.p0)};
+            Some((Vec2::new(point.x-feet.x,point.z-feet.z).length_squared(),(p0,p1,point)))
+        }).min_by(|a,b|a.0.total_cmp(&b.0)).map(|b|b.1)
 }
 
 /// 0x116D960: two side drop rays and the query's horizontal cross-ray.
@@ -922,7 +896,10 @@ pub fn find_pilotis(pos: Vec3, support: Vec3, dir: Vec3, from_air: bool, guidanc
             && (!collision.native_query_culling || (e.p0.min(e.p1).cmple(centre + extent).all() && e.p0.max(e.p1).cmpge(centre - extent).all()))
             && in_box(e.closest_point(support)))
         .collect();
-    // sub_B1C550: the nearest edge whose outward normal is within 45° of `d`, within `max` of `from`
+    // sub_B1C550: the nearest edge whose outward normal is within 45° of `d`, within `max` of `from`. The direction to
+    // the edge's point must lie within 30° of `d`; an edge through `from` itself gives a zero direction (normalised to
+    // zero, 90° from `d`) and is skipped (live 2026-10-14: the air catch's search from the drop report's point on the
+    // post's own edge never finds that edge, RE/05 §5.7)
     let find = |from: Vec3, d: Vec3, max: f32| -> Option<Vec3> {
         edges
             .iter()
@@ -931,7 +908,7 @@ pub fn find_pilotis(pos: Vec3, support: Vec3, dir: Vec3, from_air: bool, guidanc
             .filter(|q| {
                 let flat=Vec3::new(q.x-from.x,0.0,q.z-from.z);
                 flat.length() < max && (q.y-from.y).abs() <= 0.5
-                    && (!crate::tuning::AIR_CATCHES || flat.normalize_or(d).dot(d)>=30f32.to_radians().cos())
+                    && flat.normalize_or_zero().dot(d)>=30f32.to_radians().cos()
             })
             .min_by(|a, b| Vec2::new(a.x-from.x,a.z-from.z).length_squared().total_cmp(&Vec2::new(b.x-from.x,b.z-from.z).length_squared()))
     };
@@ -1104,7 +1081,9 @@ fn clip_segment(a: Vec3, b: Vec3, c: Vec3, axes: [Vec3; 3], half: [f32; 3]) -> O
     Some((t0, t1))
 }
 
-/// Current-segment passes of 0xF753A0: 60° cone, rotated 90°, then the ±1 m box without a cone.
+/// Current-segment passes of 0xF753A0: 60° cone, rotated 90°, then the ±1 m box without a cone (over authored Beam
+/// lines, for the segment tests).
+#[cfg(test)]
 fn detect_beam(root: Vec3, forward: Vec3, current: Option<(Vec3, Vec3)>, guidance: &GuidanceWorld) -> Option<(Vec3, Vec3)> {
     detect_beam_segments(root, forward, current, guidance.edges.iter().filter(|e|e.subtype==GuidanceSubType::Beam).map(|e|(e.p0,e.p1)))
 }
@@ -1234,11 +1213,13 @@ fn next_segment(root: Vec3, forward: Vec3, current: (Vec3, Vec3), guidance: &Gui
 /// each query point gave different pieces from different points, and the walk at a chain's end started and stopped
 /// every few frames).
 fn beam_report(root: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<(Vec3, Vec3)> {
-    if !crate::tuning::AIR_CATCHES {
-        return Vec::new();
-    }
     crate::guidance::beam_contacts::detect(guidance, collision, root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0)).into_iter().map(|b| (b.p0, b.p1)).collect()
 }
+
+/// How far the root may move before the frame's beam report is built again (`update_narrow`).
+const REPORT_REUSE: f32 = 0.5;
+/// … and how old it may get (s).
+const REPORT_MAX_AGE: f32 = 0.5;
 
 /// `sub_F72FD0` (DetectBeamSegments' segment ends, RE/28 §3): from each end of the chosen segment, along it, the drop
 /// edge ahead (IHuman vt144 `Human__FindDropEdgeAhead` 0xB1C100: −0.1 … 1.25 m on, ±0.5 m up, a drop of 0.3 m or more
@@ -1403,8 +1384,13 @@ pub fn update_narrow(
     abilities: Option<Res<super::abilities::AbilitySet>>,
     skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::anim::AnimPlayer>, Option<&mut crate::ik::GroundIkSwitch>, Option<&crate::bone_pose::BonePose>), With<Player>>,
+    mut report_cache: Local<Option<(Vec3, (usize, usize, usize), f32, Vec<(Vec3, Vec3)>)>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
+    // the worlds as the cached report saw them (the city's streaming takes them mutably every frame, so the change
+    // ticks say nothing); the report is also rebuilt every `REPORT_MAX_AGE`
+    let worlds = (guidance.edges.len(), collision.triangles.len(), collision.boxes.len());
+    let now = time.elapsed_secs();
     let ab = super::abilities::of(abilities.as_deref());
     for (mut loco, mut body, mut data, anim, mut ik_switch, pose) in &mut q {
         // `Human__GetLeadingFoot` 0xB18850 on last frame's pose (`bone_pose`): the wait's foot when the item has none
@@ -1422,7 +1408,21 @@ pub fn update_narrow(
             super::free_step::update(&mut loco, &mut body, &mut data, &mut pad, &ab, &guidance, &collision, anim, dt);
             continue;
         }
-        let report = if data.narrow.kind == NarrowKind::Beam { beam_report(body.feet, &guidance, &collision) } else { Vec::new() };
+        // the runtime beam report, kept while the root stays within `REPORT_REUSE` of where it was built (the game keeps
+        // HumanGuidance's workspace between frames; its ±7 m box reaches far past every query of the frame). PORT
+        // (speed): rebuilding it each frame cost up to 7 ms among many beams (Damascus)
+        let report = if data.narrow.kind == NarrowKind::Beam {
+            match report_cache.as_ref() {
+                Some((at, w, built, r)) if at.distance(body.feet) <= REPORT_REUSE && *w == worlds && now - built < REPORT_MAX_AGE => r.clone(),
+                _ => {
+                    let r = beam_report(body.feet, &guidance, &collision);
+                    *report_cache = Some((body.feet, worlds, now, r.clone()));
+                    r
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let n = &mut data.narrow;
         n.t += dt;
         if matches!(n.state, BeamState::ImpulseIn | BeamState::ImpulseWait) { n.impulse_elapsed += dt; }
@@ -1432,9 +1432,7 @@ pub fn update_narrow(
             && !matches!(n.state, BeamState::Entry | BeamState::Reception | BeamState::HopStart | BeamState::Hop | BeamState::HopEnd | BeamState::StepOff)
         {
             // HumanGuidance's runtime report is also the support source after reception (0xC7EB30 / 0xF753A0).
-            let support = if crate::tuning::AIR_CATCHES {
-                detect_beam_segments(body.feet,body.forward(),Some((n.p0,n.p1)),report.iter().copied())
-            } else { detect_beam(body.feet,body.forward(),Some((n.p0,n.p1)),&guidance) };
+            let support = detect_beam_segments(body.feet,body.forward(),Some((n.p0,n.p1)),report.iter().copied());
             if let Some((p0, p1)) = support {
                 if same_piece((n.p0, n.p1), (p0, p1)) {
                     // The current support remains valid.
@@ -1619,10 +1617,12 @@ pub fn update_narrow(
                 let next = stick && next_segment(feet, pad.dir, (n.p0, n.p1), &guidance, &report).is_some();
                 let mut drop = if stick { super::free_step::drop_edge_ahead(feet, pad.dir, &guidance, &collision) } else { None };
                 // NARROW-11's gate (0xEEA930–0xEEA999): with the stick within 45° of the facing and no beam running along
-                // it (vt172(60°) 0xF78F00), the drop edge is dropped while the facing lies within 45° of the current
-                // segment (vt176)
+                // it (vt172(60°) 0xF78F00), the drop edge is dropped while the actor's forward (the transform's +16) lies
+                // within 45° of the current segment (vt176, its flat p1 − p0; a plain dot > 0.7071). Facing across the
+                // beam (the 90° wait) the drop edge stays: HP + Legs with the stick ahead jumps off the side
+                let along = if n.toward_p1 { n.dir() } else { -n.dir() };
                 if forward_sector && n.kind == NarrowKind::Beam && !beam_along(n, feet, pad.dir, facing, 60f32.to_radians(), &guidance, &collision, &report)
-                    && facing.dot(n.facing()) > std::f32::consts::FRAC_1_SQRT_2 {
+                    && body.forward().dot(along) > std::f32::consts::FRAC_1_SQRT_2 {
                     drop = None;
                 }
                 beam_jump_kind(pad.high_profile, stick, pad.legs_held, pressed, drop, next, forward_sector, n.kind == NarrowKind::Pilotis && impulsion)
@@ -1765,12 +1765,9 @@ pub fn update_narrow(
             BeamState::Reception | BeamState::PilotisIn => {
                 // the entry action plays while the root is interpolated onto the beam / top (sub_711130 /
                 // sub_7113F0); modes 3 / 7 turn onto the beam meanwhile
-                let k = if crate::tuning::AIR_CATCHES { n.advance_catch_root(&mut body, dt) } else {
-                    n.warp_elapsed = n.t-dt;
-                    n.advance_catch_root(&mut body, dt)
-                };
+                let k = n.advance_catch_root(&mut body, dt);
                 if k >= 1.0 && done {
-                    if crate::tuning::AIR_CATCHES && n.state == BeamState::PilotisIn {
+                    if n.state == BeamState::PilotisIn {
                         if let Some(next) = n.action.and_then(|a| item(a.id, a.item + 1, &[])) {
                             // 0xE52170 waits for the full entry action. Keep completed RootInterp independent.
                             let excess = (n.t - dur).max(0.0);
@@ -2111,6 +2108,25 @@ pub fn update_narrow(
 mod air_catch_tests {
     use super::*;
     use crate::collision::Aabb3;
+
+    /// `sub_B1C550` (from `Human__FindPilotisTop` 0xB2B600): a search point on an edge gives a zero direction to that
+    /// edge, 90° from any search direction, so the edge is skipped. From the drop report's point on a post's south edge,
+    /// looking in along −its normal, the back search finds nothing (live 2026-10-14, the colonnade column); from the
+    /// top's middle the post is found.
+    #[test]
+    fn a_search_point_on_the_posts_own_edge_finds_no_pilotis() {
+        let (min, max) = (Vec3::new(-0.25, 0.0, -0.25), Vec3::new(0.25, 3.0, 0.25));
+        let mut collision = CollisionWorld::default();
+        collision.boxes.push(Aabb3 { min, max });
+        let mut guidance = GuidanceWorld::default();
+        crate::level::add_roof_edges(&mut guidance, min, max);
+        let feet = Vec3::new(0.0, 3.2, 0.0);
+        // the south edge is z +0.25 here (its wall normal +Z): the report point and −normal
+        let on_edge = Vec3::new(0.0, 3.0, 0.25);
+        assert!(find_pilotis(feet, on_edge, Vec3::NEG_Z, true, &guidance, &collision).is_none());
+        let top = find_pilotis(feet, Vec3::new(0.0, 3.0, 0.0), Vec3::NEG_Z, false, &guidance, &collision);
+        assert!(top.is_some_and(|t| t.distance(Vec3::new(0.0, 3.0, 0.0)) < 0.05), "{top:?}");
+    }
 
     /// RE/27 C2: BeamState's kinds (0xEEAAA0–0xEEAC0A).
     #[test]

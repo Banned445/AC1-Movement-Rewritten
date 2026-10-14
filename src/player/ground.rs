@@ -1895,43 +1895,53 @@ pub fn wall_slide(body: &Body, dir: Vec3, speed01: f32) -> (Vec3, f32) {
     }
 }
 
-/// The drop report of `IHuman` vt104 (`Human__ReportDropAtFeet` 0xB248B0, called with a 0.5 m minimum): the nearest
-/// LedgeGrab edge in a 0.75 m sphere zone around the feet (|dz| < 0.3) whose drop beyond it is at least the minimum,
-/// or, with no such edge, the drop straight under the feet. Returns (signed horizontal distance from the feet to the
-/// edge, negative once past it; the edge's outward normal, `None` when there was no edge).
-pub fn drop_report(feet: Vec3, min_drop: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(f32, Option<Vec3>, f32)> {
-    use crate::guidance::GuidanceSubType;
-    let mut best: Option<(f32, f32, Vec3, f32)> = None; // (distance to the zone centre, signed distance, normal, drop)
-    for e in guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab) {
+/// The drop report of `IHuman` vt104 (`Human__ReportDropAtFeet` 0xB248B0): the edges of a 0.75 m sphere zone at the
+/// feet (every type, mask −1), none steep (`Guidance__IsNotSteep`), each at its point nearest the feet with |dz| < 0.3
+/// and a wall normal; of those whose drop (`Human__MeasureDropBeyondEdge`(feet, point, normal, 7, 0.02) with its lip and
+/// line checks) is at least `min_drop`, the one nearest the feet: its point (+16), normal (+32), drop (+48) and signed
+/// distance (+52: the SQUARED distance, `sub_42EC70`, negative once the feet are past the edge; +56 = 0). With no such
+/// edge, unless an edge was refused for its drop, the drop straight under the feet (+52 = 0, +56 = 1, `normal` None).
+/// Callers: `HumanGround__CheckGroundLoss` 0xD87720 (minimum 0.5) and the pilotis air catch (0xE0C583, minimum 0.5).
+#[derive(Clone, Copy, Debug)]
+pub struct DropReport {
+    pub point: Vec3,
+    pub normal: Option<Vec3>,
+    pub drop: f32,
+    pub signed: f32,
+}
+
+pub fn drop_report(feet: Vec3, min_drop: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<DropReport> {
+    let mut best: Option<(f32, DropReport)> = None;
+    let mut refused = false;
+    for e in guidance.edges.iter().filter(|e| !crate::guidance::steep(e.p1 - e.p0)) {
         let q = e.closest_point(feet);
-        if (q.y - feet.y).abs() >= 0.3 {
-            continue;
-        }
-        let flat = Vec3::new(q.x - feet.x, 0.0, q.z - feet.z);
-        let d = flat.length();
-        if d > 0.75 {
+        if q.distance(feet) > 0.75 || (q.y - feet.y).abs() >= 0.3 {
             continue;
         }
         let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
         if n == Vec3::ZERO {
             continue;
         }
-        // drop measure 0xB19620: from just past the edge down to the first floor (≤ 7 m)
-        let drop = collision.floor_height_below(q + n * 0.05 + Vec3::Y * 0.01, 7.0).map_or(7.0, |h| q.y - h);
+        let drop = super::jump_candidates::measure_drop_from(Some(feet), q, n, 7.0, 0.02, collision, Some(guidance));
         if drop < min_drop {
+            refused = true;
             continue;
         }
-        let signed = if n.dot(feet - q) > 0.0 { -d } else { d };
-        if best.is_none_or(|b| d < b.0) {
-            best = Some((d, signed, n, drop));
+        let d2 = q.distance_squared(feet);
+        if best.is_none_or(|b| d2 < b.0) {
+            let signed = if n.dot(feet - q) > 0.0 { -d2 } else { d2 };
+            best = Some((d2, DropReport { point: q, normal: Some(n), drop, signed }));
         }
     }
-    if let Some((_, s, n, drop)) = best {
-        return Some((s, Some(n), drop));
+    if let Some((_, r)) = best {
+        return Some(r);
+    }
+    if refused {
+        return None;
     }
     // no edge: the drop straight under the feet (flag +56)
-    let drop = collision.floor_height_below(feet + Vec3::Y * 0.01, 7.0).map_or(7.0, |h| feet.y - h);
-    (drop >= min_drop).then_some((0.0, None, drop))
+    let drop = super::jump_candidates::measure_drop_from(Some(feet), feet, Vec3::ZERO, 7.0, 0.02, collision, Some(guidance));
+    (drop >= min_drop).then_some(DropReport { point: feet, normal: None, drop, signed: 0.0 })
 }
 
 /// `HumanGround__CheckGroundLoss` 0xD87720: with the drop report (vt104, minimum 0.5 m), the ground is lost once the
@@ -1942,7 +1952,7 @@ pub fn drop_report(feet: Vec3, min_drop: f32, guidance: &GuidanceWorld, collisio
 /// normal movement never uses it; the fight is not ported. (The cached report of Human+2801 is not modelled.)
 #[allow(dead_code)]
 pub fn ground_loss(feet: Vec3, velocity: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> bool {
-    let Some((dist, n, _)) = drop_report(feet, 0.5, guidance, collision) else { return false };
+    let Some(DropReport { normal: n, signed: dist, .. }) = drop_report(feet, 0.5, guidance, collision) else { return false };
     if dist >= 0.01 {
         return false;
     }

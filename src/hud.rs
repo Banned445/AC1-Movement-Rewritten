@@ -36,6 +36,8 @@ fn update_hud(
     fly: Option<Res<crate::debug_fly::DebugFly>>,
     areas: Option<Res<crate::test_areas::TestAreas>>,
     bindings: Option<Res<crate::bindings::Bindings>>,
+    catch_debug: Option<Res<crate::player::air_catches::CatchDebug>>,
+    time: Res<Time>,
     q: Query<(&Locomotion, &Body, &HumanDataBundle), With<Player>>,
     mut hud: Query<(&mut Text, &mut Visibility), With<HudText>>,
 ) {
@@ -73,6 +75,15 @@ fn update_hud(
         .last_landing
         .map(|l| format!("{:?}  fall {:.2} m  drop {:.2} m{}", l.kind, l.fall_height, l.total_drop, if l.roll { "  (roll)" } else { "" }))
         .unwrap_or_else(|| "-".into());
+    // the air catch's state (F7 draws its boxes, `air_catches::CatchDebug`)
+    let grab_line = match catch_debug.as_deref() {
+        Some(d) if d.show => d
+            .current(time.elapsed_secs())
+            .map(|t| t.summary())
+            .unwrap_or_else(|| "grab: - (hold the empty hand while falling; F7 hides the boxes)".into()),
+        Some(_) => "grab: debug draw off (F7)".into(),
+        None => String::new(),
+    };
     use crate::bindings::Slot;
     let default_bindings = crate::bindings::Bindings::default();
     let b = bindings.as_deref().unwrap_or(&default_bindings);
@@ -81,7 +92,7 @@ fn update_hud(
         "bindings: {} | {}{}{}{} move | {hp} high profile | {legs} legs (hold with {hp} = sprint/free-run; into a wall = wall run; {hand} at a wall = climb;\n\
          while hanging or climbing: {hand} = let go, {hp}+{legs} = jump off (stick steers); up at a top edge = pull up) | {head} head | Alt slow (port)\n\
          {hand} empty hand (at a roof edge: pull down to a hang; on a ladder: drop; {hp}+{legs} = jump off; on a wall run: {legs} = push off)\n\
-         LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, {hp} x3, Alt x10, {} strafe, F6 camera, {hand}+F5 keep speed) | F4 test areas | F9 save a bug report | F1 hide | F2 maps",
+         LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, {hp} x3, Alt x10, {} strafe, F6 camera, {hand}+F5 keep speed) | F4 test areas | F7 air-catch boxes | F9 save a bug report | F1 hide | F2 maps",
         b.profile, b.label(Slot::LeftStickUp), b.label(Slot::LeftStickLeft), b.label(Slot::LeftStickDown), b.label(Slot::LeftStickRight), b.label(Slot::LeftShoulder)
     );
     text.0 = format!(
@@ -91,6 +102,7 @@ fn update_hud(
          ground sub-state: {:?}   speed param {:.2} -> {:?}   turn atten {:.2}\n\
          profile: {}   legs: {}   stick {:.2} (speed01 {:.2})\n\
          air: {}   height {:.2} m\n\
+         {}\n\
          last landing: {}\n\n\
          {}",
         map.active.label(),
@@ -111,6 +123,7 @@ fn update_hud(
         pad.speed01,
         air_mode,
         body.feet.y,
+        grab_line,
         landing,
         help
     );

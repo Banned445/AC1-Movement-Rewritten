@@ -1338,7 +1338,9 @@ pub fn update_climb(
             limbs.hands = None;
             limbs.feet = None;
             d.last_action = "lost grip";
-            let hold = (d.hand_l + d.hand_r) * 0.5;
+            // `HumanClimb__Update` 0xDFE7F0: a hold gone (`LimbIK__AllHoldsAlive`) → InAir through the lost-grip fill
+            // (`HumanClimb__FillInAirData_LostGrip` 0xDF3300): the released hold is the root + 1.2 m up (InAirData+400)
+            let hold = body.feet + Vec3::Y * 1.2;
             let entry = InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Climb, speed_param: 0.0 };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             data.air.fall_action = super::ledge_moves::single_item(LOST_GRIP, 0);

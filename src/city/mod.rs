@@ -440,10 +440,49 @@ mod tests {
                 for e in o.edges.iter().filter(|e| near((e.p0 + e.p1) * 0.5)) {
                     use crate::guidance::GuidanceSubType as T;
                     let len = e.p0.distance(e.p1);
-                    let keep = match e.subtype { T::Ladder | T::Beam | T::Pole | T::Kiosk | T::Rope => true, T::LedgeGrab => len > 4.0, _ => false };
+                    let keep = match e.subtype { T::Ladder | T::Beam | T::Pole | T::Kiosk | T::Rope => true, T::LedgeGrab => len > std::env::var("LAB_MINLEN").ok().and_then(|v| v.parse().ok()).unwrap_or(4.0), _ => false };
                     if keep {
                         println!("{:?} {} {:.2?} -> {:.2?} len {len:.1} wall {:.2?}", e.subtype, o.name, game(e.p0), game(e.p1), game(e.n1));
                     }
+                }
+            }
+        }
+    }
+
+    /// Live-analysis sites for the pilotis catch: tops made of LedgeGrab edges no longer than 0.7 m whose ends join
+    /// into a closed loop (a post's top, `Human__FindPilotisTop` 0xB2B600 wants front–back and left–right ≤ 0.7 m),
+    /// within `LAB_RADIUS` (default 60) m of `LAB_CENTER` (default the Bureau spawner); game coordinates, Z up.
+    #[test]
+    #[ignore]
+    fn probe_lab_pilotis() {
+        let Some(w) = damascus() else { return };
+        let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+        let center = std::env::var("LAB_CENTER").ok().and_then(|s| {
+            let v: Vec<f32> = s.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            (v.len() == 2).then(|| Vec2::new(v[0], v[1]))
+        }).unwrap_or_else(|| { let p = game(spawner(&w.globals, "PlayerSpawner_DEBUG_Bureau").unwrap().0); Vec2::new(p.x, p.y) });
+        let radius: f32 = std::env::var("LAB_RADIUS").ok().and_then(|s| s.parse().ok()).unwrap_or(60.0);
+        let mut found = 0;
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in &d.objects {
+                use crate::guidance::GuidanceSubType as T;
+                let short: Vec<_> = o.edges.iter().filter(|e| e.subtype == T::LedgeGrab && e.p0.distance(e.p1) <= 0.75 && (e.p0.y - e.p1.y).abs() < 0.05).collect();
+                for a in &short {
+                    // a loop of four: each end meets another short edge's end at the same height
+                    let joins = |p: Vec3| short.iter().filter(|b| b.p0.distance(p) < 0.05 || b.p1.distance(p) < 0.05).count() >= 2;
+                    if !(joins(a.p0) && joins(a.p1)) { continue; }
+                    let ring: Vec<_> = short.iter().filter(|b| (b.p0.y - a.p0.y).abs() < 0.05 && b.p0.distance(a.p0) < 1.1).collect();
+                    if ring.len() != 4 { continue; }
+                    let centre = ring.iter().map(|b| (b.p0 + b.p1) * 0.5).sum::<Vec3>() * 0.25;
+                    // print each top once, from its first edge
+                    if !std::ptr::eq(*ring[0], *a) { continue; }
+                    let g = game(centre);
+                    if Vec2::new(g.x, g.y).distance(center) > radius { continue; }
+                    let size: Vec<f32> = ring.iter().map(|b| b.p0.distance(b.p1)).collect();
+                    println!("pilotis {} top {:.2?} sides {size:.2?}", o.name, g);
+                    found += 1;
+                    if found >= 40 { return; }
                 }
             }
         }

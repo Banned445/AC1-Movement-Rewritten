@@ -772,6 +772,8 @@ fn autopilot(
             pad.dir = if grab { Vec3::NEG_Z } else { OFF_EDGE };
             pad.high_profile = true;
             pad.legs_held = grab;
+            // the air grab is the empty hand (`air_catches::manual`); F7's boxes show its search
+            pad.hand_held = grab;
             pad.magnitude = if t > 1.0 { 0.5 } else { 0.0 };
             pad.speed01 = ((pad.magnitude - 0.35) / 0.65).max(0.0);
         }

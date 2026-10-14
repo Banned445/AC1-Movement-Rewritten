@@ -10,8 +10,6 @@
 pub const GAME_SMOOTHING: bool = true;
 /// PORT comparison switch for the verified fall scalar/input corrections.
 pub const GAME_FALLS: bool = true;
-/// PORT comparison switch for the verified air-catch rules and beam contact detector.
-pub const AIR_CATCHES: bool = true;
 /// PORT comparison switch for the verified Ground extras state/contact rules (RE/02 §9).
 pub const GAME_GROUND_EXTRAS: bool = true;
 /// PORT comparison switch for the ground state tree's re-entry into the locomotion: Movement states 18 / 21 / 22 /
@@ -179,12 +177,6 @@ pub const CLIMB_MOVE_TIME: f32 = 0.533;
 pub const CLIMB_ROOT_OUT: f32 = 0.5;
 
 // ---------------------------------------------------------------- air catch (RE/04)
-/// Ledge catch: hand box 0.4 x 0.3, edges within 70°, reach +1.4 (ledge) / +1.95 (wall). 0xE0A990 / 0xE0AC70
-pub const CATCH_BOX_R: f32 = 0.4;
-pub const CATCH_BOX_V: f32 = 0.3;
-pub const CATCH_MAX_ANGLE: f32 = 70.0 * std::f32::consts::PI / 180.0;
-pub const CATCH_REACH_LEDGE: f32 = 1.4;
-pub const CATCH_REACH_WALL: f32 = 1.95;
 /// Highest hand target of the standing straight jump: its top band blends the 250 / 300 cm clips over
 /// 2.5–3.0 m (0xB21DA0). (hypothesis) the target finder's own limit is not traced.
 pub const STRAIGHT_JUMP_MAX: f32 = 3.0;

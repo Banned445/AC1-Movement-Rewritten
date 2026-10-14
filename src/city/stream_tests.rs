@@ -1004,3 +1004,75 @@ fn damascus_stepping_down_onto_a_beam_drops_where_the_game_does() {
     // the capsule's rounded bottom lowers the root a little over the rim first (the game: 0.08 m, then a 0.33 m snap)
     assert!((residual - snap).abs() < 1e-4 && (0.28..0.38).contains(&snap), "the snap ({snap}) is the smoothing's residual: {residual}");
 }
+
+/// Timing probe: the runtime beam report on the Bureau beam and at the slowest beam spot streamed in around it, then
+/// whole frames standing on that beam.
+#[test]
+#[ignore]
+fn probe_damascus_beam_frame_cost() {
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.place(Vec3::new(51.97, 11.48, -4.0), Vec3::Z);
+    s.run(0.5);
+    s.pad(Vec3::Z, 0.6, false, false);
+    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted the beam");
+    s.run(1.0);
+    let worst_beam;
+    {
+        let g = s.app.world().resource::<crate::guidance::GuidanceWorld>();
+        let c = s.app.world().resource::<crate::collision::CollisionWorld>();
+        let root = s.body().feet;
+        let near = g.edges.iter().filter(|e| (e.p0 - root).abs().cmple(Vec3::new(8.0, 13.0, 8.0)).all()).count();
+        let t = std::time::Instant::now();
+        let mut n = 0;
+        for _ in 0..10 { n = crate::guidance::beam_contacts::detect(g, c, root - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0)).len(); }
+        eprintln!("DCOST edges {} near {near} tris {} index {} detect {:.2} ms ({n} beams)", g.edges.len(), c.triangles.len(), c.index.is_some(), t.elapsed().as_secs_f64() * 100.0);
+        // the worst spot among beam midpoints: the slowest detect
+        let mut spots: Vec<Vec3> = Vec::new();
+        for e in g.edges.iter().filter(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab).step_by(5) {
+            for b in crate::guidance::beam_contacts::detect(g, c, (e.p0 + e.p1) * 0.5, Vec3::new(1.0, 0.5, 1.0)) {
+                let m = (b.p0 + b.p1) * 0.5;
+                if spots.iter().all(|q| q.distance(m) > 4.0) { spots.push(m); }
+            }
+        }
+        let mut worst = (0.0f64, Vec3::ZERO, 0usize);
+        for m in &spots {
+            let t = std::time::Instant::now();
+            let n = crate::guidance::beam_contacts::detect(g, c, *m - Vec3::Y * 4.75, Vec3::new(7.0, 7.25, 7.0)).len();
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            if ms > worst.0 { worst = (ms, *m, n); }
+        }
+        {
+            let m = worst.1;
+            let (lo, hi) = (m - Vec3::new(9.0, 14.0, 9.0), m + Vec3::new(9.0, 4.5, 9.0));
+            let t = std::time::Instant::now();
+            let tris = c.triangles_overlapping(lo, hi).count();
+            eprintln!("DCOST worst box: {tris} triangles ({:.2} ms), {} boxes in world", t.elapsed().as_secs_f64() * 1000.0, c.boxes.len());
+            let edges: Vec<_> = g.edges.iter().filter(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab
+                && e.p0.min(e.p1).cmple(hi).all() && e.p0.max(e.p1).cmpge(lo).all()).cloned().collect();
+            let empty = crate::collision::CollisionWorld::default();
+            let t = std::time::Instant::now();
+            let n = crate::guidance::beam_contacts::pair_report(edges.clone(), &empty).len();
+            eprintln!("DCOST worst: {} edges, pairing alone {:.2} ms ({n} untrimmed)", edges.len(), t.elapsed().as_secs_f64() * 1000.0);
+        }
+        worst_beam = crate::guidance::beam_contacts::detect(g, c, worst.1, Vec3::new(1.0, 0.5, 1.0)).into_iter().next();
+        eprintln!("DCOST {} beam spots; worst detect {:.2} ms at {:?} ({} beams)", spots.len(), worst.0, worst.1, worst.2);
+    }
+    if let Some(b) = worst_beam {
+        let point = b.p0.lerp(b.p1, 0.5);
+        let facing = (b.p1 - b.p0).with_y(0.0).normalize();
+        s.place(point, facing);
+        let w = s.app.world_mut();
+        let mut q = w.query::<(&mut crate::player::Locomotion, &mut crate::player::HumanDataBundle)>();
+        let (mut loco, mut data) = q.get_mut(w, s.player).unwrap();
+        crate::player::switch_context(&mut loco, &mut data, crate::player::TransitionSetup::ToBeam(crate::player::narrow::BeamEntry { p0: b.p0, p1: b.p1, point, from: point,
+            toward_p1: true, mode: crate::player::narrow::BeamEntryMode::Straight, foot: 0, action: None, facing }));
+        s.run(0.5);
+        eprintln!("DCOST on the worst beam: {:?}", s.loco().current);
+    }
+    for (label, dir, stick, high) in [("idle", Vec3::Z, 0.0, false), ("idle again", Vec3::Z, 0.0, false), ("stick high", Vec3::Z, 1.0, true)] {
+        s.pad(dir, stick, high, false);
+        let t = std::time::Instant::now();
+        for _ in 0..30 { s.app.update(); }
+        eprintln!("DCOST frame {label}: {:.2} ms/frame, {:?} {:?} feet {:?}", t.elapsed().as_secs_f64() * 1000.0 / 30.0, s.loco().current, s.data().narrow.state, s.body().feet);
+    }
+}
