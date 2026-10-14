@@ -229,6 +229,11 @@ pub struct HumanInAirData {
     pub catch_pair_right: Option<Vec3>,
     /// The edge landing (InAir +225 bit 2) has played in this air stay.
     pub edge_landed: bool,
+    /// This frame's empty-hand catch is armed (`CheckAirCatch` 0xE0BF71: the grab held, the fall past the threshold,
+    /// not the faith dive): the grasp blend plays on the upper body over whatever the fall plays (`anim`).
+    pub grasp_armed: bool,
+    /// The catch's raw reach direction this frame (+32: the stick, else the facing).
+    pub grasp_reach: Vec3,
     pub mode: AirMode,
     /// JumpApexPosition (+0xD0): where descent started — the fall-height reference.
     pub apex_y: f32,
@@ -746,6 +751,7 @@ pub fn update_air(
         if loco.current != ActorContextId::InAir {
             continue;
         }
+        data.air.grasp_armed = false;
         if loco.just_switched {
             if let Some(v) = data.air.entry_velocity.take() { body.velocity = v; }
             loco.just_switched = false;
@@ -1168,6 +1174,8 @@ pub fn update_air(
             let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, jump_type, body.forward(), body.proxy.manifold.iter());
             // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
             let reach = if manual && pad.speed01 > 0.0 && pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { body.forward() };
+            air.grasp_armed = manual;
+            air.grasp_reach = reach;
             // the debug draw (F7, `air_catches::CatchDebug`): this frame's search while the grab is held or armed
             let mut trace = catch_debug.as_ref().filter(|d| d.show && (pad.hand_held || manual || automatic)).map(|_| super::air_catches::CatchTrace {
                 feet: body.feet,

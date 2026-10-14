@@ -6010,3 +6010,31 @@ fn probe_beam_frame_cost() {
         eprintln!("COST frame {label}: {:.2} ms/frame, now {:?}", t.elapsed().as_secs_f64() * 1000.0 / 30.0, s.loco().current);
     }
 }
+
+/// `HumanInAir__CheckAirCatch` 0xE0BF2B–0xE0C31F: the grasp blend plays on the upper body whenever the empty-hand catch
+/// is armed, over any fall clip: here while the hang's let-go item still runs on the full body (InAir sub-state 3, the
+/// fall entry) from the 7 m wall, where the port used to wait for that item's end. Letting go of the button stops the
+/// upper-body slot (0xE0C301).
+#[test]
+fn the_grasp_blend_plays_over_the_let_go_fall_while_the_hand_is_held() {
+    let mut s = hang_at(Vec3::new(-120.0, 7.0, -135.0), Vec3::NEG_X);
+    if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_none() {
+        eprintln!("skipped: game install not found");
+        return;
+    }
+    let grasp = |s: &Sim| {
+        let p = s.app.world().get::<crate::anim::AnimPlayer>(s.player).unwrap();
+        p.overlay.as_ref().filter(|o| !o.ending && (o.action == 0x1F0C_22C2 || o.action == 0xCD6F_5E10)).map(|_| p.overlay_reach())
+    };
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.press_hand();
+    s.hold_hand(true);
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "never let go");
+    assert!(s.run_until(1.0, |s| s.data().air.grasp_armed), "the catch never armed");
+    s.run(2.0 / 60.0);
+    assert!(grasp(&s).is_some_and(|w| w > 0.0), "no grasp on the upper body over the let-go fall: {:?}", grasp(&s));
+    assert_eq!(s.loco().current, ActorContextId::InAir);
+    s.hold_hand(false);
+    s.run(2.0 / 60.0);
+    assert!(grasp(&s).is_none_or(|w| w == 0.0), "the grasp outlived the button: {:?}", grasp(&s));
+}
