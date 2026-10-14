@@ -98,6 +98,6 @@ fn main() {
             city::CityPlugin,
         ))
         // a tuple takes at most 15 plugins
-        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin, sound::SoundPlugin, particles::ParticlesPlugin))
+        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin, sound::SoundPlugin, particles::ParticlesPlugin, player::air_catches::CatchDebugPlugin))
         .run();
 }

@@ -737,6 +737,7 @@ pub fn update_air(
     abilities: Option<Res<super::abilities::AbilitySet>>,
     skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, Option<&crate::bone_pose::BonePose>), With<Player>>,
+    mut catch_debug: Option<ResMut<super::air_catches::CatchDebug>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
     // the InAir empty-hand catch needs Grasp (0xEDBC26)
@@ -1167,15 +1168,45 @@ pub fn update_air(
             let automatic = super::air_catches::automatic(air.time_in_air, air.drop.is_some(), jumping, jump_type, body.forward(), body.proxy.manifold.iter());
             // 0xE0BB70: raw reach direction (+32), seeded from facing when the stick is zero.
             let reach = if manual && pad.speed01 > 0.0 && pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { body.forward() };
+            // the debug draw (F7, `air_catches::CatchDebug`): this frame's search while the grab is held or armed
+            let mut trace = catch_debug.as_ref().filter(|d| d.show && (pad.hand_held || manual || automatic)).map(|_| super::air_catches::CatchTrace {
+                feet: body.feet,
+                reach,
+                fall_height,
+                hand_held: pad.hand_held,
+                manual,
+                automatic,
+                ..Default::default()
+            });
             if manual || automatic {
-                if let Some(mut e) = super::ladder::find_ladder_catch(body.feet, reach, manual, &guidance, &collision) {
+                let ladder = super::ladder::find_ladder_catch(body.feet, reach, manual, &guidance, &collision);
+                if let Some(t) = trace.as_mut() {
+                    // the ladder box as `find_ladder_catch` builds it: `dir`·0.5 ahead with the grab held, 0.25 without
+                    let depth = if manual { 0.5 } else { 0.25 };
+                    let dir = Vec3::new(reach.x, 0.0, reach.z).normalize_or_zero();
+                    t.push_box(body.feet + dir * depth, dir, Vec3::new(0.4, depth, 0.3), super::air_catches::TraceKind::Ladder, ladder.is_some());
+                    if ladder.is_some() {
+                        t.result = Some("ladder catch".into());
+                    }
+                }
+                if let Some(mut e) = ladder {
                     e.facing = body.forward();
                     e.catch_speed = body.velocity.length();
                     ladder_on = Some(e);
                 } else if let Some(found) = super::air_catches::ledge_search(body.feet, reach, body.forward(), fall_height, manual,
                     // the Hips bone of last frame's pose at the root where it stands (`bone_pose`)
                     skeleton.as_deref().zip(pose).and_then(|(s, p)| p.world_pos(s, crate::bone_pose::HIPS, &body)),
-                    air.release_hold, &mut air.catch_pair_right, &guidance, &collision) {
+                    air.release_hold, &mut air.catch_pair_right, trace.as_mut(), &guidance, &collision) {
+                    if let Some(t) = trace.as_mut() {
+                        t.result = Some(match &found {
+                            super::air_catches::CatchFound::Climb(_) => "CAUGHT: climb catch (type 1)".to_string(),
+                            super::air_catches::CatchFound::Hang { wall: true, .. } => "CAUGHT: wall hang (type 3)".to_string(),
+                            super::air_catches::CatchFound::Hang { reach: Some(right), .. } => {
+                                format!("CAUGHT: free hang (type 4), then the {} hand reaches", if *right { "right" } else { "left" })
+                            }
+                            super::air_catches::CatchFound::Hang { .. } => "CAUGHT: free hang (type 5)".to_string(),
+                        });
+                    }
                     // CheckAirCatch 0xE0BB70: the ledge, climb and free-hang catches (RE/19 §2)
                     air.long_catch = fall_height >= 3.0;
                     match found {
@@ -1206,8 +1237,19 @@ pub fn update_air(
                         e.entry_move = Some(knee);
                         e.entry_rest = [Some(stand), None];
                         hang_on = Some(e);
+                        if let Some(t) = trace.as_mut() {
+                            t.result = Some("CAUGHT: knee catch (type 0)".into());
+                            t.holds.push(edge);
+                        }
                     }
                 }
+                if let (Some(t), Some(_)) = (trace.as_mut(), narrow_on.as_ref()) {
+                    t.result = Some("CAUGHT: beam / pilotis".into());
+                }
+            }
+            if let (Some(t), Some(d)) = (trace, catch_debug.as_mut()) {
+                let caught = t.result.is_some();
+                d.write(t, time.elapsed_secs(), caught);
             }
             // the edge landing last (`CheckAirCatch` LABEL_140), behind the same 0.3 m / 0.4 s gate (LABEL_56) as the
             // narrow catches (RE/24 AIR-16)

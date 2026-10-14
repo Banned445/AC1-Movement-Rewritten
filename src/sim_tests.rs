@@ -5395,6 +5395,29 @@ fn falling_past_climb_holds_with_the_hand_held_catches_into_the_climb() {
     assert!((m.reach - reach.min(m.duration)).abs() < 1e-4 && m.reach < m.duration, "reach {} of {}", m.reach, m.duration);
 }
 
+/// The air catch's debug draw (F7): while the empty hand is held in a fall the trace holds the searched boxes, and the
+/// catch's frame (its free-hang box found, the hold, the room box, the outcome) stays for 2 s.
+#[test]
+fn the_catch_debug_trace_shows_the_search_and_the_catch() {
+    use crate::player::air_catches::{CatchDebug, TraceKind};
+    let from = Vec3::new(1.0, 5.2, 34.9);
+    let mut s = Sim::new(from, -std::f32::consts::FRAC_PI_2);
+    s.app.world_mut().insert_resource(CatchDebug { show: true, ..Default::default() });
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::Ground, speed_param: 0.0 }));
+    s.pad(Vec3::Z, 0.6, false, false);
+    s.app.world_mut().resource_mut::<PadInput>().hand_held = true;
+    s.run(0.1);
+    let early = s.app.world().resource::<CatchDebug>().trace.clone().expect("a trace while the hand is held");
+    assert!(early.hand_held && !early.manual && early.boxes.is_empty(), "not armed before 0.3 m of fall: {early:?}");
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Ledge), "no catch");
+    let t = s.app.world().resource::<CatchDebug>().trace.clone().expect("the catch's trace");
+    assert!(t.manual, "armed by the empty hand");
+    assert!(t.result.as_deref().is_some_and(|r| r.contains("type 4")), "{:?}", t.result);
+    assert!(t.boxes.iter().any(|b| b.kind == TraceKind::FreeHang && b.hit), "the free-hang box found the hold");
+    assert!(t.boxes.iter().any(|b| b.kind == TraceKind::Room && b.hit), "and its room is empty");
+    assert!(!t.holds.is_empty());
+}
+
 #[test]
 fn a_long_fall_beside_a_free_hang_edge_catches_one_handed_to_the_side() {
     use crate::player::air_catches::FREE_CATCH_SIDE;

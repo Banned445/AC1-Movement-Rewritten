@@ -93,6 +93,7 @@ pub fn ledge_search(
     hips: Option<Vec3>,
     release_hold: Option<Vec3>,
     pair_right: &mut Option<Vec3>,
+    mut trace: Option<&mut CatchTrace>,
     guidance: &crate::guidance::GuidanceWorld,
     collision: &CollisionWorld,
 ) -> Option<CatchFound> {
@@ -115,6 +116,10 @@ pub fn ledge_search(
     // 1. the ledge catch: a hand pair at the feet + 1.4 m
     let ledge_base = if manual { feet + Vec3::Y * 1.4 } else { auto(1.4) };
     let ledge_pair = catch_pair(ledge_base);
+    if let Some(t) = trace.as_deref_mut() {
+        t.push_box(ledge_base + dir * along, dir, Vec3::new(0.4, along, half_z), TraceKind::LedgeHands, ledge_pair.is_some());
+        t.holds.extend(ledge_pair.iter().flatten().map(|h| h.point));
+    }
     if let Some([_, b]) = ledge_pair {
         *pair_right = Some(b.point);
     }
@@ -125,7 +130,13 @@ pub fn ledge_search(
         // the feet holds (FindCatchFeetHolds 0xE0A810): the same search from the feet's position at the higher hand's
         // height − 1.2 m, along −(the two hands' wall normals) (into the wall)
         let feet_dir = -Vec3::new(a.wall_normal.x + b.wall_normal.x, 0.0, a.wall_normal.z + b.wall_normal.z).normalize_or(-into);
-        if let Some([fl, fr]) = pair_along(&feet_report, Vec3::new(feet.x, hl.y.max(hr.y) - 1.2, feet.z), feet_dir, 0.3) {
+        let feet_base = Vec3::new(feet.x, hl.y.max(hr.y) - 1.2, feet.z);
+        let feet_pair = pair_along(&feet_report, feet_base, feet_dir, 0.3);
+        if let Some(t) = trace.as_deref_mut() {
+            t.push_box(feet_base + feet_dir * along, feet_dir, Vec3::new(0.4, along, 0.3), TraceKind::Feet, feet_pair.is_some());
+            t.holds.extend(feet_pair.iter().flatten().map(|h| h.point));
+        }
+        if let Some([fl, fr]) = feet_pair {
             let entry = super::climb::ClimbEntry {
                 // the catch's Ledge fill (SubState 13) enters with type 1 and ClimbData+40 = the hands 0.3 m or more
                 // apart (0xE0CCC7; RE/24 AIR-15 / CLIMB-24). PORT: the Ledge step is skipped
@@ -164,6 +175,13 @@ pub fn ledge_search(
             .world
             .probe_box(centre, super::right_of(dir), dir, Vec3::Y, half, reference, angle, 0.1, crate::guidance::MASK_CATCH)
             .filter(|h| below_release(h.point.y));
+        if let Some(t) = trace.as_deref_mut() {
+            t.push_box(centre, dir, half, TraceKind::FreeHang, hit.is_some());
+            if let Some(h) = hit {
+                t.holds.push(h.point);
+                t.push_room(h.point, h.wall_normal, collision);
+            }
+        }
         if let Some((hands, mid, n)) = hit.and_then(|h| free(h, h)) {
             // the side by the angle from the facing to v110 = ½(v137 + v140) (0xE0D23E–0xE0D347): the long catch fills
             // only v137 (the hold), so v140 is the right hand of the last pair `FindLedgeCatch` found, left in the
@@ -185,10 +203,20 @@ pub fn ledge_search(
             };
             return Some(CatchFound::Hang { hands, normal: n, wall: false, action, reach: Some(reach) });
         }
-    } else if let Some((hands, _, n)) = catch_pair(if manual { feet + Vec3::Y * 1.95 } else { auto(1.75) })
-        .filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y))
-        .and_then(|[a, b]| free(a, b))
-    {
+    } else if let Some((hands, _, n)) = {
+        let base = if manual { feet + Vec3::Y * 1.95 } else { auto(1.75) };
+        let pair = catch_pair(base);
+        if let Some(t) = trace.as_deref_mut() {
+            t.push_box(base + dir * along, dir, Vec3::new(0.4, along, half_z), TraceKind::ClimbCatch, pair.is_some());
+            if let Some([a, b]) = pair {
+                t.holds.extend([a.point, b.point]);
+                let sum = Vec3::new(a.wall_normal.x + b.wall_normal.x, 0.0, a.wall_normal.z + b.wall_normal.z);
+                let mid = Vec3::new((a.point.x + b.point.x) * 0.5, a.point.y.max(b.point.y), (a.point.z + b.point.z) * 0.5);
+                t.push_room(mid, sum.normalize_or(a.wall_normal), collision);
+            }
+        }
+        pair.filter(|[a, b]| below_release(a.point.y) && below_release(b.point.y)).and_then(|[a, b]| free(a, b))
+    } {
         // FindClimbCatch 0xE0AC70
         return Some(CatchFound::Hang { hands, normal: n, wall: false, action: super::ledge::ACT_CATCH_FREE[0], reach: None });
     }
@@ -354,6 +382,163 @@ pub fn edge_landing(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidan
     })
 }
 
+// ---------------------------------------------------------------- debug draw of the catch search (F7)
+
+/// One box the air catch searched this frame (centre, axes right / along / up, half extents across / along / up).
+#[derive(Clone, Copy, Debug)]
+pub struct TraceBox {
+    pub centre: Vec3,
+    pub axes: [Vec3; 3],
+    pub half: Vec3,
+    pub kind: TraceKind,
+    /// The search found something (a hold pair, a hold, a ladder rung); for the room box: the box is empty.
+    pub hit: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraceKind {
+    /// `HumanInAir__FindLadderCatch` 0xE04100.
+    Ladder,
+    /// `HumanInAir__FindLedgeCatch` 0xE0A990: the hand pair at the feet + 1.4 m (the Hips + 0.2 m on the automatic catch).
+    LedgeHands,
+    /// `HumanInAir__FindCatchFeetHolds` 0xE0A810: the feet holds under that pair (the climb catch).
+    Feet,
+    /// `HumanInAir__FindFreeHangCatch` 0xDFFE30 (falls of 3 m or more).
+    FreeHang,
+    /// `HumanInAir__FindClimbCatch` 0xE0AC70 (shorter falls): the free hang on a pair.
+    ClimbCatch,
+    /// `Human__CatchFreeHangBoxEmpty` 0xB2DEB0: the free hangs' room.
+    Room,
+}
+
+/// What the air catch did this frame, for the debug draw: whether the grab is armed and why (`manual` = the empty hand
+/// held past 0.3 m of fall; `automatic` = a target jump touching a wall), the boxes, the holds found and the outcome.
+#[derive(Clone, Debug, Default)]
+pub struct CatchTrace {
+    pub boxes: Vec<TraceBox>,
+    pub holds: Vec<Vec3>,
+    pub feet: Vec3,
+    pub reach: Vec3,
+    pub fall_height: f32,
+    pub hand_held: bool,
+    pub manual: bool,
+    pub automatic: bool,
+    pub result: Option<String>,
+}
+
+impl CatchTrace {
+    pub fn push_box(&mut self, centre: Vec3, along: Vec3, half: Vec3, kind: TraceKind, hit: bool) {
+        let f = Vec3::new(along.x, 0.0, along.z).normalize_or(Vec3::NEG_Z);
+        self.boxes.push(TraceBox { centre, axes: [super::right_of(f), f, Vec3::Y], half, kind, hit });
+    }
+
+    /// The free hangs' room box for a hold (`free_catch_room`), and whether it is empty.
+    pub fn push_room(&mut self, mid: Vec3, n: Vec3, collision: &CollisionWorld) {
+        let fwd = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+        let root = mid - Vec3::Y * 2.4;
+        let free = free_catch_room(mid, n, collision);
+        let centre = root - fwd * 0.05 + Vec3::Y * 0.95;
+        self.boxes.push(TraceBox { centre, axes: [super::right_of(fwd), fwd, Vec3::Y], half: Vec3::new(0.375, 0.25, 0.95), kind: TraceKind::Room, hit: free });
+    }
+
+    /// One HUD line: armed or not and why, the fall height, the outcome.
+    pub fn summary(&self) -> String {
+        let why = match (self.manual, self.automatic) {
+            (true, _) => "ARMED (empty hand)".to_string(),
+            (false, true) => "ARMED (automatic: target jump, wall contact)".to_string(),
+            (false, false) if self.hand_held && self.fall_height <= 0.3 => format!("held, not armed yet (fall {:.2} m, needs > 0.30 m)", self.fall_height),
+            (false, false) if self.hand_held => "held, not armed".to_string(),
+            _ => "-".to_string(),
+        };
+        let band = if self.fall_height >= 3.0 { "long" } else { "short" };
+        format!("grab: {why}   fall {:.2} m ({band})   {}", self.fall_height, self.result.as_deref().unwrap_or("searching"))
+    }
+}
+
+/// The air catch's debug draw. F7 toggles it (on by default; `AC_CATCH_DEBUG=0` starts it off). While InAir with the
+/// empty hand held or the automatic catch armed, it draws every box the catch searched: yellow the hand pair at the
+/// feet + 1.4 m, orange the feet holds, cyan the free hang (falls of 3 m or more), blue the free hang under 3 m, purple
+/// the ladder, white / red the free hang's room (empty / blocked); bright when the search found something, dim when
+/// not. The holds found are green spheres; the feet and the reach direction (the stick, else the facing) are a sphere and
+/// an arrow (green when armed, grey when not). After a catch its frame stays drawn for 2 s. The HUD shows the state.
+#[derive(Resource)]
+pub struct CatchDebug {
+    pub show: bool,
+    pub trace: Option<CatchTrace>,
+    /// Elapsed time when the trace was written, and how long it stays drawn.
+    pub at: f32,
+    pub hold: f32,
+}
+
+impl Default for CatchDebug {
+    fn default() -> Self {
+        Self { show: std::env::var("AC_CATCH_DEBUG").map_or(true, |v| v != "0"), trace: None, at: 0.0, hold: 0.0 }
+    }
+}
+
+impl CatchDebug {
+    /// A frame's trace; `caught` keeps it drawn for 2 s (later frames do not replace it meanwhile).
+    pub fn write(&mut self, trace: CatchTrace, now: f32, caught: bool) {
+        if !caught && now < self.at + self.hold {
+            return;
+        }
+        self.trace = Some(trace);
+        self.at = now;
+        self.hold = if caught { 2.0 } else { 0.0 };
+    }
+
+    /// The trace to draw now: this frame's, or a catch's within its 2 s.
+    pub fn current(&self, now: f32) -> Option<&CatchTrace> {
+        self.trace.as_ref().filter(|_| now <= self.at + self.hold.max(0.1))
+    }
+}
+
+pub struct CatchDebugPlugin;
+
+impl Plugin for CatchDebugPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<CatchDebug>().add_systems(Update, (toggle_catch_debug, draw_catch_debug));
+    }
+}
+
+fn toggle_catch_debug(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<CatchDebug>) {
+    if keys.just_pressed(KeyCode::F7) {
+        debug.show = !debug.show;
+    }
+}
+
+fn draw_catch_debug(time: Res<Time>, debug: Res<CatchDebug>, mut gizmos: Gizmos) {
+    if !debug.show {
+        return;
+    }
+    let Some(t) = debug.current(time.elapsed_secs()) else { return };
+    for b in &t.boxes {
+        let (bright, dim) = match b.kind {
+            TraceKind::LedgeHands => (Color::srgb(1.0, 0.85, 0.1), Color::srgba(1.0, 0.85, 0.1, 0.35)),
+            TraceKind::Feet => (Color::srgb(1.0, 0.5, 0.1), Color::srgba(1.0, 0.5, 0.1, 0.35)),
+            TraceKind::FreeHang => (Color::srgb(0.1, 0.95, 1.0), Color::srgba(0.1, 0.95, 1.0, 0.35)),
+            TraceKind::ClimbCatch => (Color::srgb(0.3, 0.5, 1.0), Color::srgba(0.3, 0.5, 1.0, 0.35)),
+            TraceKind::Ladder => (Color::srgb(0.8, 0.3, 1.0), Color::srgba(0.8, 0.3, 1.0, 0.35)),
+            TraceKind::Room => (Color::srgb(1.0, 1.0, 1.0), Color::srgb(1.0, 0.15, 0.15)),
+        };
+        let color = if b.hit { bright } else { dim };
+        // the cube gizmo is a unit cube: local x = right, y = up, z = right × up (± along)
+        let z = b.axes[0].cross(b.axes[2]);
+        let rotation = Quat::from_mat3(&Mat3::from_cols(b.axes[0], b.axes[2], z));
+        let transform = Transform { translation: b.centre, rotation, scale: Vec3::new(b.half.x, b.half.z, b.half.y) * 2.0 };
+        gizmos.cube(transform, color);
+    }
+    for h in &t.holds {
+        gizmos.sphere(Isometry3d::from_translation(*h), 0.06, Color::srgb(0.2, 1.0, 0.3));
+    }
+    let armed = t.manual || t.automatic;
+    let feet_color = if armed { Color::srgb(0.2, 1.0, 0.3) } else { Color::srgb(0.6, 0.6, 0.6) };
+    gizmos.sphere(Isometry3d::from_translation(t.feet), 0.08, feet_color);
+    let reach = Vec3::new(t.reach.x, 0.0, t.reach.z).normalize_or_zero();
+    gizmos.arrow(t.feet + Vec3::Y * 0.05, t.feet + Vec3::Y * 0.05 + reach * 0.8, feet_color);
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,7 +551,7 @@ mod tests {
         let mut guidance = crate::guidance::GuidanceWorld::default();
         crate::level::add_roof_edges(&mut guidance, min, max);
         let feet = Vec3::new(0.0, 1.1, -0.1);
-        let catch = |hips| ledge_search(feet, Vec3::NEG_Z, Vec3::NEG_Z, 1.0, false, hips, None, &mut None, &guidance, &collision);
+        let catch = |hips| ledge_search(feet, Vec3::NEG_Z, Vec3::NEG_Z, 1.0, false, hips, None, &mut None, None, &guidance, &collision);
         let found = catch(Some(feet + Vec3::Y * 0.65));
         assert!(matches!(found, Some(CatchFound::Hang { wall: true, .. })), "caught from the Hips: {found:?}");
         if let Some(CatchFound::Hang { hands, .. }) = found {
