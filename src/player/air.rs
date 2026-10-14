@@ -858,7 +858,13 @@ pub fn update_air(
                             None => LedgeArrival::Surface { free: t.type_flags == super::targets::TARGET_LEDGE_FREE },
                         };
                         let mut e = LedgeEntry::at(mid, normal, body.feet, LedgeSubState::HangWallReception);
+                        let hands = super::ledge::arrival_hands(mid, normal, matches!(arrival, LedgeArrival::Straight(_)), &guidance);
+                        if let Some((l, r)) = hands {
+                            (e.hand_l, e.hand_r) = (l, r);
+                        }
                         match arrival {
+                            // no hand pair at the target: the arrival returns 0 (0xE093CC / 0xE08B39)
+                            _ if hands.is_none() => no_arrival = true,
                             // the generic branch (0xE093CC): foot holds on the wall (`sub_B15C30`) → the wall
                             // reception (SubState 6) whatever the jump type; no holds → the swing (SubState 8) for a
                             // free-hang jump (0x80), else no arrival (the air catch takes over)

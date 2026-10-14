@@ -127,9 +127,6 @@ pub const SHIMMY_MIN_FREE: f32 = 0.7;
 pub const SHIMMY_WALL_MARGIN: f32 = 0.4;
 pub const SHIMMY_MAX_SPACING: f32 = 1.0;
 pub const SHIMMY_MIN_STEP: f32 = 0.15;
-/// PLACEHOLDER: the hand spacing of a new hang (entries, jumps, corners): the game puts both hand records on one hold
-/// and derives the pose from it (sub_B15AD0 / sub_B157B0). The shimmy's own spacing comes from ProbeLateral 0xDD9640.
-pub const HAND_SPACING: f32 = 0.4;
 /// Pull-up: root ends 0.5 m inside the ledge (Pullup_Start 0xDDBE80).
 pub const PULLUP_IN: f32 = 0.5;
 /// The fallback length of a ledge move when its clip is missing (`xx_h_hangwall_strafe_*_050cm_open`). The hand steps

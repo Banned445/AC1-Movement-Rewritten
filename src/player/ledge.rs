@@ -100,12 +100,16 @@ pub struct LedgeEntry {
 }
 
 impl LedgeEntry {
-    /// Hands centred on `mid`, `HAND_SPACING` apart along the edge, facing into the wall.
+    /// Both hand records on the hold `mid`, facing into the wall. The game's fills set the hand records each their own
+    /// way (`LimbIK` contacts 0 / 1): the climb's ledge grab (`HumanClimb__TryLedgeGrab` 0xDF0980), the side jumps
+    /// (`HumanLedge__TrySideJumpToLedge` 0xDDD490) and the free-hang drop (`TryFreeHangDropToClimb` 0xDDF6E0) put both on
+    /// the one hold; the jump arrivals (`arrival_hands`), the air catches, the pull-downs, the ladder's side hang and the
+    /// wall run's hangs set two (their callers overwrite these). EnterCommon 0xDE26D0 re-poses SubStates 1 / 2 / 3 / 5 /
+    /// 7 / 10 / 12 from the hand bones, the Entry state at its end (0xDE1970, RE/24 LEDGE-22).
     pub fn at(mid: Vec3, normal: Vec3, from_feet: Vec3, sub_state: LedgeSubState) -> Self {
-        let r = right_of(-normal);
         Self {
-            hand_l: mid - r * HAND_SPACING * 0.5,
-            hand_r: mid + r * HAND_SPACING * 0.5,
+            hand_l: mid,
+            hand_r: mid,
             normal,
             from_feet,
             sub_state,
@@ -487,6 +491,21 @@ pub fn feet_supports(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let c = hand - Vec3::Y + facing * 0.125;
     wall_support(c, n, -0.2, 0.1, SUPPORT_FEET, collision) || wall_support(c, n, 0.0, -0.1, SUPPORT_FEET, collision)
+}
+
+/// The jump arrival's hand records (`HumanInAir__CheckJumpTargetArrival` 0xE07D00): `Guidance__ProbeBoxHandPair`
+/// 0x1171050 at the target point, the box facing into the wall, mask 306, step 0.1, hand references (∓0.3, −0.15, 0) in
+/// the box frame (right, forward, up): 0.3 m to either side, 0.15 m out from the wall. The generic receptions (the wall
+/// reception and the swing, `sub_E00C50`) use half extents 0.4 / 0.3 / 0.3 and 70°; the straight jump's (`sub_E00B10`)
+/// 0.4 / 0.15 / 0.07 and 45°. No pair: the arrival returns 0 (the jump ends without a reception, the air catch takes
+/// over). Hands 0 / 1 are the left / right (`sub_E55CB0`(0 / 1, …), 0xE08BFB / 0xE09520 / 0xE096F2); the wall and free
+/// receptions keep them (EnterCommon 0xDE26D0 re-poses neither SubState 6 nor 8).
+pub fn arrival_hands(target: Vec3, n: Vec3, straight: bool, guidance: &crate::guidance::GuidanceWorld) -> Option<(Vec3, Vec3)> {
+    let forward = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let right = right_of(forward);
+    let (half, angle) = if straight { (Vec3::new(0.4, 0.15, 0.07), std::f32::consts::FRAC_PI_4) } else { (Vec3::new(0.4, 0.3, 0.3), 70f32.to_radians()) };
+    let refs = [target - right * 0.3 - forward * 0.15, target + right * 0.3 - forward * 0.15];
+    guidance.probe_facing_pair(target, forward, half, refs, angle, 0.1, crate::guidance::MASK_CATCH).map(|[l, r]| (l.point, r.point))
 }
 
 /// `Human__FindReceptionFeetHolds` 0xB15C30: the jump arrival's foot holds under a hold point `hand`

@@ -4404,9 +4404,11 @@ fn a_long_side_jump_into_a_free_hang_catches_one_handed_then_reaches_with_the_ot
     assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_none() && s.data().ledge.queue.is_empty()));
     let l = &s.data().ledge;
     assert_eq!(l.hang_type, ledge::LedgeHangType::Free);
-    let gap = (l.hand_l - l.hand_r).length();
-    assert!((gap - 0.25).abs() < 0.03, "second hand 0.25 m from the first: {gap}");
+    // the jump to the left (+X, facing +Z) catches with the left hand; the right one reaches back toward the gap
+    // (`HumanLedge__SecondHandGrab_Reach` 0xDD7310's box at the one-hand root + 2.4 m, 0.25 m to the right): on slab I's
+    // near end that box holds only the end itself
     assert!(l.hand_l.x > 28.55 && l.hand_r.x > 28.55, "both hands on slab I: {:?} {:?}", l.hand_l, l.hand_r);
+    assert!(l.hand_r.x < l.hand_l.x && l.hand_l.x - l.hand_r.x <= 0.5, "the right hand reached back: {:?} {:?}", l.hand_l, l.hand_r);
 }
 
 #[test]
@@ -6037,4 +6039,22 @@ fn the_grasp_blend_plays_over_the_let_go_fall_while_the_hand_is_held() {
     s.hold_hand(false);
     s.run(2.0 / 60.0);
     assert!(grasp(&s).is_none_or(|w| w == 0.0), "the grasp outlived the button: {:?}", grasp(&s));
+}
+
+/// `HumanInAir__CheckJumpTargetArrival` 0xE07D00's hand records (`ledge::arrival_hands`): `Guidance__ProbeBoxHandPair`
+/// at the target with the references 0.3 m to either side and 0.15 m out, so on a long edge the hands land 0.6 m apart
+/// either side of the target (live: the wall reception's hand bones 0.60–0.62 m apart); with no edge, no pair.
+#[test]
+fn a_jump_arrival_takes_its_hands_from_the_hand_pair_probe() {
+    let s = Sim::new(Vec3::ZERO, 0.0);
+    let g = s.app.world().resource::<crate::guidance::GuidanceWorld>();
+    let target = Vec3::new(-20.5, 9.6, 27.0);
+    for straight in [false, true] {
+        let (l, r) = crate::player::ledge::arrival_hands(target, Vec3::NEG_Z, straight, g).expect("a hand pair on the tower's edge");
+        assert!(((l - r).length() - 0.6).abs() < 0.02, "0.6 m apart: {l:?} {r:?}");
+        assert!(((l + r) * 0.5 - target).length() < 0.02, "centred on the target: {l:?} {r:?}");
+        // facing +Z (into the wall), the character's left is +X
+        assert!(l.x > r.x, "hand 0 on the character's left: {l:?} {r:?}");
+    }
+    assert!(crate::player::ledge::arrival_hands(Vec3::new(-30.0, 9.6, -30.0), Vec3::NEG_Z, false, g).is_none());
 }
