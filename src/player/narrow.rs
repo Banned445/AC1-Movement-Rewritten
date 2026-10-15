@@ -1523,7 +1523,9 @@ pub fn update_narrow(
         if BEAM_COMPLETION && n.kind == NarrowKind::Beam && matches!(n.state, BeamState::Start | BeamState::Walk)
             && stick && !collision.obb_free(n.stand() + pad.dir * 0.45 + Vec3::Y * 0.8,
                 [super::right_of(pad.dir), Vec3::Y, pad.dir], Vec3::new(0.2, 0.3, 0.1)) {
-            if let Some(target) = super::ground::beam_obstacle_target(n.stand(), pad.dir, &guidance, &collision) {
+            let found = super::ground::beam_obstacle_target(n.stand(), pad.dir, &guidance, &collision);
+            super::target_debug::record(|| "beam obstacle (hand target)".into(), n.stand(), pad.dir, &[], found.as_ref());
+            if let Some(target) = found {
                 let entry = InAirEntry::JumpToTarget { from: n.stand(), target, speed_param: 0.0, foot_left: n.foot == 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 continue;

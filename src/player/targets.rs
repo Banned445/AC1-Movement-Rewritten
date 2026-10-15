@@ -80,16 +80,18 @@ pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collis
     if cands.is_empty() {
         return haystack_target(feet, fwd, fwd, guidance, collision);
     }
-    let (i, ty) = jump_candidates::select(&cands, feet, fwd, fwd, 1, false)?;
-    to_target(&cands[i], ty, feet, guidance, collision)
+    let t = jump_candidates::select(&cands, feet, fwd, fwd, 1, false).and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));
+    super::target_debug::record(|| "swing jump".into(), feet, fwd, &cands, t.as_ref());
+    t
 }
 
 /// Query + scorer + the port's target for the chosen candidate. `facing` = the actor's forward (the scorer's frame),
 /// `want` = the wanted direction.
 pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
     let cands = jump_candidates::query(feet, want, q, guidance, collision);
-    let (i, ty) = jump_candidates::select(&cands, feet, facing, want, 1, behind_far)?;
-    to_target(&cands[i], ty, feet, guidance, collision)
+    let t = jump_candidates::select(&cands, feet, facing, want, 1, behind_far).and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));
+    super::target_debug::record(|| format!("jump (query kind {})", q.kind), feet, want, &cands, t.as_ref());
+    t
 }
 
 /// The port's jump target for a candidate and the scorer's jump type.
@@ -158,7 +160,9 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
 /// 0x800. A Leap of Faith when it lies 3 m or more below (bands −30 m / 7.5 m), else the haystack bands (0xB1EC40).
 pub fn haystack_target(feet: Vec3, want_dir: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
     let s = super::hay::search(feet, want_dir, facing, &super::hay::LEAP_OF_FAITH, &guidance.haystacks, collision)?;
-    Some(JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None })
+    let t = JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
+    super::target_debug::record(|| "leap of faith".into(), feet, want_dir, &[], Some(&t));
+    Some(t)
 }
 
 /// True when there is no floor a short way ahead (approaching a roof edge).
