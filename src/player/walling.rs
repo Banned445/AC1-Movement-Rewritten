@@ -406,7 +406,7 @@ fn exit_with_hands(seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, c: &Ledg
     let facing = -Vec3::new(c.normal.x, 0.0, c.normal.z).normalize_or_zero();
     let durations = seq.map(|a| a.map(|a| a.duration()).unwrap_or(0.0));
     let mv = LedgeMove {
-        kind: MoveKind::Arrival,
+        kind: MoveKind::Arrival { wallfree_wait: false },
         seq,
         durations,
         t: 0.0,

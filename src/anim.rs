@@ -884,7 +884,6 @@ fn ground_items(lib: &AnimLibrary) -> Option<Vec<ItemPlay>> {
 fn choose_clip(
     time: Res<Time>,
     lib: Res<AnimLibrary>,
-    collision: Res<crate::collision::CollisionWorld>,
     mut q: Query<(&Locomotion, &HumanDataBundle, &crate::player::Body, &mut AnimPlayer)>,
     fly: Option<Res<crate::debug_fly::DebugFly>>,
 ) {
@@ -1272,10 +1271,10 @@ fn choose_clip(
                             r
                         })
                     }
-                    // free hang with a wall under it = LedgeHangType WallFree: `xx_h_hangwallfree_wait` (0x0106F2E9,
-                    // played after the straight jump's wall-free reception, 0xE07D00 → 0xE09055; the wait update
-                    // 0xDE1FE0 plays it for type 2), legs held clear of the wall
-                    _ if !wall && crate::player::ledge::wall_below_hands((l.hand_l + l.hand_r) * 0.5, l.normal, &collision) => {
+                    // `xx_h_hangwallfree_wait` (0x0106F2E9), legs held clear of the wall: behind the straight jump's wall-free
+                    // reception until the next move (0xE07D00 → 0xE09055, a free hang), or for the WallFree type (the entry's
+                    // end 0xDE20C3; never held in v1.02). Any other free hang plays the free idle, whatever wall is below
+                    _ if !wall && l.wallfree_idle() => {
                         action(&lib, &[ACT_HANG_WALLFREE], true, 0, Some(0.15), Some("hang_free"))
                     }
                     // `PlayIdleOrBlocked` 0xDD3A10 (wall hang, no pending step): the stick held with no move possible plays

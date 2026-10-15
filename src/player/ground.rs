@@ -1385,6 +1385,7 @@ pub fn update_ground(
             if (legs || g.lean_push_t > LEAN_CLIMB_TIME[pad.high_profile as usize]) && ab.allows(Ability::Jump) && !super::anim_gate::locked(&c.current().0) {
                 let target = static_hand_target(body.feet, body.forward(), &guidance, &collision, false)
                     .filter(|t| (pad.high_profile && legs) || t.type_flags & 0xD != 0);
+                super::target_debug::record(|| "lean climb (static hand target)".into(), body.feet, body.forward(), &[], target.as_ref());
                 if let Some(target) = target {
                     pad.consume_jump();
                     g.collide = None;

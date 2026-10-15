@@ -10,11 +10,22 @@ use crate::player::{ActorContextId, Body, HumanDataBundle, Locomotion, Player};
 #[derive(Component)]
 struct HudText;
 
+/// The frame-rate readout in the top-right corner.
+#[derive(Component)]
+struct FpsText;
+
+/// Frames and real time since the readout last changed (it updates four times a second).
+#[derive(Default)]
+struct FpsWindow {
+    frames: u32,
+    elapsed: f32,
+}
+
 pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_hud).add_systems(Update, update_hud);
+        app.add_systems(Startup, spawn_hud).add_systems(Update, (update_hud, update_fps));
     }
 }
 
@@ -26,6 +37,33 @@ fn spawn_hud(mut commands: Commands) {
         TextColor(Color::srgb(0.05, 0.05, 0.08)),
         Node { position_type: PositionType::Absolute, top: Val::Px(10.0), left: Val::Px(12.0), ..default() },
     ));
+    commands.spawn((
+        FpsText,
+        Text::new(""),
+        TextFont { font_size: FontSize::Px(18.0), ..default() },
+        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+        // a dark backing drawn over the HUD, which can run under it in a narrow window
+        BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.92)),
+        GlobalZIndex(10),
+        Node { position_type: PositionType::Absolute, top: Val::Px(8.0), right: Val::Px(8.0), padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)), ..default() },
+    ));
+}
+
+/// The frame rate over the last quarter second of real time (not the simulation clock, which screenshot runs fix),
+/// with the frame time; hidden with the HUD under `AC_NO_HUD`.
+fn update_fps(time: Res<Time<bevy::time::Real>>, mut window: Local<FpsWindow>, mut q: Query<(&mut Text, &mut Visibility), With<FpsText>>) {
+    let Ok((mut text, mut vis)) = q.single_mut() else { return };
+    if std::env::var_os("AC_NO_HUD").is_some() {
+        *vis = Visibility::Hidden;
+        return;
+    }
+    window.frames += 1;
+    window.elapsed += time.delta_secs();
+    if window.elapsed >= 0.25 {
+        let fps = window.frames as f32 / window.elapsed;
+        text.0 = format!("{fps:.0} FPS  ({:.1} ms)", 1000.0 / fps.max(1e-3));
+        *window = FpsWindow::default();
+    }
 }
 
 fn update_hud(
@@ -37,6 +75,7 @@ fn update_hud(
     areas: Option<Res<crate::test_areas::TestAreas>>,
     bindings: Option<Res<crate::bindings::Bindings>>,
     catch_debug: Option<Res<crate::player::air_catches::CatchDebug>>,
+    target_debug: Option<Res<crate::player::target_debug::TargetDebug>>,
     time: Res<Time>,
     q: Query<(&Locomotion, &Body, &HumanDataBundle), With<Player>>,
     mut hud: Query<(&mut Text, &mut Visibility), With<HudText>>,
@@ -84,6 +123,12 @@ fn update_hud(
         Some(_) => "grab: debug draw off (F7)".into(),
         None => String::new(),
     };
+    // the jump targeting (F8 draws it, `target_debug::TargetDebug`)
+    let target_line = match target_debug.as_deref() {
+        Some(d) if d.show => d.summary(crate::player::target_debug::flying_target(loco, body, data)),
+        Some(_) => "target: debug draw off (F8)".into(),
+        None => String::new(),
+    };
     use crate::bindings::Slot;
     let default_bindings = crate::bindings::Bindings::default();
     let b = bindings.as_deref().unwrap_or(&default_bindings);
@@ -92,7 +137,7 @@ fn update_hud(
         "bindings: {} | {}{}{}{} move | {hp} high profile | {legs} legs (hold with {hp} = sprint/free-run; into a wall = wall run; {hand} at a wall = climb;\n\
          while hanging or climbing: {hand} = let go, {hp}+{legs} = jump off (stick steers); up at a top edge = pull up) | {head} head | Alt slow (port)\n\
          {hand} empty hand (at a roof edge: pull down to a hang; on a ladder: drop; {hp}+{legs} = jump off; on a wall run: {legs} = push off)\n\
-         LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, {hp} x3, Alt x10, {} strafe, F6 camera, {hand}+F5 keep speed) | F4 test areas | F7 air-catch boxes | F9 save a bug report | F1 hide | F2 maps",
+         LMB capture mouse | Esc release | G guidance edges | F5 Ghost mode (noclip; Space/Ctrl up/down, {hp} x3, Alt x10, {} strafe, F6 camera, {hand}+F5 keep speed) | F4 test areas | F7 air-catch boxes | F8 jump targets | F9 save a bug report | F1 hide | F2 maps",
         b.profile, b.label(Slot::LeftStickUp), b.label(Slot::LeftStickLeft), b.label(Slot::LeftStickDown), b.label(Slot::LeftStickRight), b.label(Slot::LeftShoulder)
     );
     text.0 = format!(
@@ -102,6 +147,7 @@ fn update_hud(
          ground sub-state: {:?}   speed param {:.2} -> {:?}   turn atten {:.2}\n\
          profile: {}   legs: {}   stick {:.2} (speed01 {:.2})\n\
          air: {}   height {:.2} m\n\
+         {}\n\
          {}\n\
          last landing: {}\n\n\
          {}",
@@ -124,6 +170,7 @@ fn update_hud(
         air_mode,
         body.feet.y,
         grab_line,
+        target_line,
         landing,
         help
     );

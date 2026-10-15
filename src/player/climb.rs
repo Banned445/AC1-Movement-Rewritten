@@ -817,7 +817,7 @@ fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWor
     let e = LedgeEntry::at(g.fit_hands(h.point, n), n, root, LedgeSubState::TransitionInFromClimb);
     let wall = side_grab_feet(h.point, n, collision);
     let hang = if wall { super::ledge::LedgeHangType::Wall } else { super::ledge::LedgeHangType::Free };
-    let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, n, hang, collision);
+    let to = super::ledge::hang_root(e.hand_l, e.hand_r, n, hang);
     if !hang_boxes_free(collision, to, hf, wall) || !lateral_path_free(collision, root, facing, to, hf) {
         return None;
     }

@@ -1323,7 +1323,7 @@ pub fn update_air(
             }
             if swing_on {
                 let n = entry.normal;
-                let root = super::ledge::hang_root_at(entry.hand_l, entry.hand_r, n, super::ledge::LedgeHangType::Free, &collision);
+                let root = super::ledge::hang_root(entry.hand_l, entry.hand_r, n, super::ledge::LedgeHangType::Free);
                 let fwd = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
                 let seq = data.ledge.swing.map(|s| s.seq).unwrap_or(0);
                 data.ledge.swing = super::swing::enter(body.feet, root, fwd, (entry.hand_l + entry.hand_r) * 0.5, flight, seq);

@@ -114,9 +114,6 @@ pub const WALL_HANG_OUT: f32 = 0.5;
 pub const FREE_HANG_DROP: f32 = 2.4;
 /// Free-hang root offset from the edge, from xx_h_hangfree_wait (wrists 0.04 m behind the root; RE/11 §5.1).
 pub const FREE_HANG_OUT: f32 = 0.01;
-/// WallFree hang (free hang with a wall under it): root 0.5 m out, from xx_h_hangwallfree_wait (hands 0.46 m
-/// in front of the root) and the 0xB21DA0 band offset (+0.5·n).
-pub const WALLFREE_HANG_OUT: f32 = 0.5;
 /// Shimmy free-space sweep: sphere r 0.15, length 1.55, origin 0.75 out + 0.2 up. ProbeLateral 0xDD9640
 pub const SHIMMY_SWEEP_R: f32 = 0.15;
 pub const SHIMMY_SWEEP_LEN: f32 = 1.55;

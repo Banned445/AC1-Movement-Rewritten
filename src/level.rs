@@ -40,7 +40,7 @@ const BUILDINGS: &[(f32, f32, f32, f32, f32)] = &[
     (6.0, 0.0, 1.5, 1.5, 0.3),
     (9.0, 0.0, 1.5, 1.5, 0.6),
     (0.0, -8.0, 14.0, 0.6, 2.4),
-    (40.0, 4.0, 4.0, 0.3, 1.0),  // a 1 m railing, 0.3 m thick: run and jump at it to vault it (pass-over, RE/04 §4.1.13)
+    (40.0, 4.0, 4.0, 0.3, 1.0),  // a 1 m railing, 0.3 m thick: jumped onto (free step); the pass-over vault is the empty hand's from a narrow top (RE/18 §1.8)
     (30.0, -4.0, 4.0, 0.4, 1.1), // a 1.1 m wall: run into it to lean on it (ObstacleCollision, RE/02 §4.2)
     // --- stage 2: climbing ---
     (-20.0, 30.0, 6.0, 6.0, 9.6),  // climb tower: hold bands on its -Z face (CLIMB_FACE)

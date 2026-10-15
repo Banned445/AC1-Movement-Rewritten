@@ -1523,7 +1523,9 @@ pub fn update_narrow(
         if BEAM_COMPLETION && n.kind == NarrowKind::Beam && matches!(n.state, BeamState::Start | BeamState::Walk)
             && stick && !collision.obb_free(n.stand() + pad.dir * 0.45 + Vec3::Y * 0.8,
                 [super::right_of(pad.dir), Vec3::Y, pad.dir], Vec3::new(0.2, 0.3, 0.1)) {
-            if let Some(target) = super::ground::beam_obstacle_target(n.stand(), pad.dir, &guidance, &collision) {
+            let found = super::ground::beam_obstacle_target(n.stand(), pad.dir, &guidance, &collision);
+            super::target_debug::record(|| "beam obstacle (hand target)".into(), n.stand(), pad.dir, &[], found.as_ref());
+            if let Some(target) = found {
                 let entry = InAirEntry::JumpToTarget { from: n.stand(), target, speed_param: 0.0, foot_left: n.foot == 0 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 continue;
@@ -1629,7 +1631,7 @@ pub fn update_narrow(
             };
             let dir = if n.jump_dir != Vec3::ZERO { n.jump_dir } else { facing };
             let foot_left = if n.kind == NarrowKind::Beam { n.item_foot() == 0 } else { n.foot == 0 };
-            if let Some(entry) = super::free_step::narrow_jump(feet, facing, dir, kind, free, &ab, foot_left, &guidance, &collision) {
+            if let Some(entry) = super::free_step::narrow_jump(feet, facing, dir, kind, free, pad.hand_held, &ab, foot_left, &guidance, &collision) {
                 pad.consume_jump();
                 body.feet = feet;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));

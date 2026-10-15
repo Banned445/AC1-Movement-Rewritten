@@ -110,9 +110,12 @@ impl LimbState {
                 self.travel = false;
                 self.released = true;
             }
-            Tag::Travel { until, .. } if self.released => {
+            Tag::Travel { until, .. } if self.released || !self.has_goal => {
                 // 0xE56FC0: a released limb stays released until its next contact is under 0.2 s away, then
-                // takes the new hold directly (the old contact becomes the new one; no travel from the old hold)
+                // takes the new hold directly (the old contact becomes the new one; no travel from the old hold).
+                // A limb with no contact at all is the same: the travel flag (rec+2) is only set when an attached
+                // limb's tag drops, so the feet of a free hang wait for the climb clip's foot contacts instead of
+                // fading in onto the climb holds from its first frame (bug 1792055331)
                 if until < IK_GRAB_PREDICT {
                     self.weight = (self.weight + dt * IK_WEIGHT_IN_RATE).min(1.0);
                     *self = LimbState { weight: self.weight, goal: p, from: p, to: p, anim_from: anim, has_goal: true, predicted: true, ..Default::default() };
@@ -149,10 +152,9 @@ impl LimbState {
             }
             Tag::Travel { s, .. } => {
                 if !self.travel {
-                    // contact released with a re-contact ahead: travel from here to the new hold (a limb
-                    // that never had a contact starts at the hold)
+                    // contact released with a re-contact ahead: travel from here to the new hold
                     self.travel = true;
-                    self.from = if self.has_goal { self.goal } else { p };
+                    self.from = self.goal;
                     self.anim_from = anim;
                 }
                 self.to = p;
@@ -1361,6 +1363,23 @@ mod tests {
         assert!(g.distance(new) < 1e-6, "{g}");
         l.update_tagged(Some(new), new, Tag::On, dt);
         assert!(l.goal.distance(new) < 1e-6 && !l.released && !l.predicted);
+    }
+
+    #[test]
+    fn a_limb_with_no_contact_waits_for_its_clips_next_contact() {
+        // bug 1792055331: from a free hang (feet without holds) the pull-up's feet faded in onto the climb holds 1.8 m
+        // up from the clip's first frame, folding the legs up through the overhang; the game attaches a limb with no
+        // contact only once its next contact tag is under 0.2 s away (0xE56FC0)
+        let dt = 1.0 / 60.0;
+        let hold = Vec3::new(0.0, 1.8, 0.0);
+        let mut l = LimbState::default();
+        l.update_tagged(None, Vec3::ZERO, Tag::Off, dt); // the hang: no foot target
+        for i in 0..12 {
+            let until = 0.4 - i as f32 * dt; // down to 0.22 s
+            assert_eq!(l.update_tagged(Some(hold), Vec3::ZERO, Tag::Travel { s: 0.0, until }, dt), None, "frame {i}");
+        }
+        let g = l.update_tagged(Some(hold), Vec3::Y, Tag::Travel { s: 0.6, until: 0.15 }, dt).unwrap();
+        assert!(g.distance(hold) < 1e-6 && l.weight > 0.0, "{g}");
     }
 
     #[test]

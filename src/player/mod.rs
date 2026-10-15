@@ -14,6 +14,7 @@
 pub mod abilities;
 pub mod air;
 pub mod air_catches;
+pub mod target_debug;
 pub mod anim_gate;
 pub mod climb;
 pub mod collide;

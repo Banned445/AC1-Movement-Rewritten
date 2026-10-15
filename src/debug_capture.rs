@@ -67,7 +67,7 @@ enum Scenario {
     RunOff,
     /// Run, then pull the stick back: the run stop (skid), then the pivot.
     Skid,
-    /// Run at the 1 m railing and jump: pass-over vault.
+    /// Run at the 1 m railing and jump: the free step onto its top (a ground jump is never a pass-over, RE/18 §1.8).
     PassOver,
     /// Jump at the first swing bar and swing from bar to bar onto the far platform.
     Swing,

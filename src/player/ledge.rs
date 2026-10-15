@@ -75,12 +75,19 @@ const IK_ENTRY: [u32; 3] = [0x1EB2_1811, 0x4CD6_8F50, 0x0106_CFC5];
 /// `sub_DCD910`'s actions that never run the IK.
 const IK_NEVER: [u32; 10] = [0x0106_F36F, 0x0121_A15E, 0x035F_27A1, 0x035F_27A2, 0x035F_27AD, 0x035F_27AF, 0x0292_6C68, 0x0292_6C69, 0x0292_40CA, 0x0292_40CB];
 
-/// `HumanLedgeData::LedgeHangType` (desc 0x1994E68). WallFree is treated as Free by the game.
+/// `HumanLedgeData::LedgeHangType` (+104, desc 0x1994E68).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LedgeHangType {
     #[default]
     Wall = 0,
     Free = 1,
+    /// WallFree (2). Its only writer in v1.02 is walling's post-run grab (`HumanWalling__TryGrabLedgeAfterWallRun`
+    /// 0xE399D5), which is unreachable (RE/05 §1.9): every other entry writes 0 or 1, so the game never holds it. Its
+    /// readers are ported: the table lookups take it as Free (`!= Wall`), `ComputeRootFromHandTargets` 0xDD6899 sends
+    /// it down the wall branch (`hang_root`), the entry's end plays the wall-free wait 0x0106F2E9 (0xDE20C3), and
+    /// `Pullup_Start` 0xDDC2E3 plays `hangwallfree_tr_hangwall` into the wall hang (+104 := 0). The straight jump's
+    /// wall-free reception is a Free hang (0xE08EE9) that plays the wall-free wait (`HumanLedgeData::wallfree_wait`).
+    WallFree = 2,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -302,12 +309,21 @@ pub struct HumanLedgeData {
     pub catch_action: Option<u32>,
     pub catch_free: bool,
     pub catch_reach: Option<bool>,
+    /// The straight jump's wall-free reception (`0x0121B072`, after `jumpstraight_to_hangwallfree`) plays the wall-free
+    /// wait 0x0106F2E9 behind it (0xE09055) on a free hang (+104 = 1, 0xE08EE9 / 0xE08C2D); it lasts until the next move.
+    /// The `step_seq` it was set at.
+    pub wallfree_wait: Option<u32>,
 }
 
 impl HumanLedgeData {
     /// The swing strength for the free idle, while no move has started since it was stored.
     pub fn swing_idle(&self) -> Option<f32> {
         self.swing_strength.filter(|(_, seq)| *seq == self.step_seq).map(|(s, _)| s)
+    }
+
+    /// The wall-free wait plays: the straight jump's wall-free reception with no move since, or the WallFree type.
+    pub fn wallfree_idle(&self) -> bool {
+        self.hang_type == LedgeHangType::WallFree || self.wallfree_wait == Some(self.step_seq)
     }
 
     pub fn enter(&mut self, e: LedgeEntry) {
@@ -326,6 +342,7 @@ impl HumanLedgeData {
         self.pending_vstep = None;
         self.jump_off = None;
         self.swing_strength = None;
+        self.wallfree_wait = None;
         self.swing_lock = 0.0;
         self.moves.clear();
         self.mv = None;
@@ -529,11 +546,6 @@ pub fn feet_on_wall(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> (bool, bo
     (hit(start - r * 0.1), hit(start + r * 0.1))
 }
 
-/// A wall under the hands within leg length (the free hang becomes WallFree: legs held off the wall).
-pub fn wall_below_hands(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
-    [0.6f32, 1.2, 1.8].iter().any(|&d| collision.point_inside(mid - n * 0.15 - Vec3::Y * d))
-}
-
 /// Hang type a hang at `mid` gets: wall if a foot finds support (the free → wall rule of 0xDE1060).
 pub fn hang_type_at(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> LedgeHangType {
     let (a, b) = feet_on_wall(mid, n, collision);
@@ -555,11 +567,14 @@ fn needs_switch(cur: LedgeHangType, mid: Vec3, n: Vec3, collision: &CollisionWor
     }
 }
 
-/// Root (feet) for a hang (ComputeRootFromHandTargets 0xDD6730).
+/// Root (feet) for a hang (ComputeRootFromHandTargets 0xDD6730): only type 1 is the free pose (0xDD6899), the holds'
+/// midpoint 2.4 m below the higher one (`Human__FreeHangPoseFromHolds` 0xB15AD0); types 0 and 2 take the wall branch.
+/// The entries and every step hang here, at the distance from the wall of their type; only the straight jump's hang
+/// receptions keep their band's root (+out·n − down, 0xB21DA0) until the next move.
 pub fn hang_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType) -> Vec3 {
     let mid = (hand_l + hand_r) * 0.5;
     match hang {
-        LedgeHangType::Wall => {
+        LedgeHangType::Wall | LedgeHangType::WallFree => {
             Vec3::new(mid.x, hand_l.y.min(hand_r.y) - WALL_HANG_DROP, mid.z) + n * WALL_HANG_OUT
         }
         LedgeHangType::Free => {
@@ -568,23 +583,6 @@ pub fn hang_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType) -> Ve
     }
 }
 
-/// Root for a hang, with the WallFree case (LedgeHangType 2): a free hang with a wall under the hands plays
-/// `xx_h_hangwallfree_wait`, whose hands are 0.46 m in front of the root (fingertips 0.52 m, 2.41 m up), so its
-/// root sits 0.5 m out from the wall and 2.4 m below the hands, as the game's band offsets for the jump into it
-/// (+0.5·n, −2.4 m, 0xB21DA0). `hangfree_wait` has the hands right above the root (FREE_HANG_OUT).
-/// The root for a hand step's new hand targets: its height from the hang (`hang_root_at`), its distance from the wall kept
-/// from the root as it hangs now (`out`, measured from the old hands). The game changes how far out a hang sits only
-/// through a hang-type switch (`TrySwitchHangType` 0xDE1060, its own actions), which the step paths try first; the
-/// wall-under-the-hands test of `hang_root_at` would otherwise move a free hang 0.5 m out once a hand reaches a bar with
-/// wall below it, and both hands fell short of their holds (bug-1791714696).
-pub fn step_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, out: f32, collision: &CollisionWorld) -> Vec3 {
-    let nf = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let mid = (hand_l + hand_r) * 0.5;
-    let y = hang_root_at(hand_l, hand_r, n, hang, collision).y;
-    Vec3::new(mid.x + nf.x * out, y, mid.z + nf.z * out)
-}
-
-/// How far out from its hands' line a root hangs (along the flat wall normal), for `step_root`.
 /// The end of `HumanLedge__FindVerticalRows` 0xDD8F70: the root from the hand targets with the stepping hand (`hand`) on
 /// the step row (`ComputeRootFromHandTargets` 0xDD6730); in a free hang (+104 = 1) the body boxes there
 /// (`Human__FreeHangBodyBoxesFree` 0xB2DD50) must be free, else the row is dropped (+912 = 0) and no step starts
@@ -592,7 +590,7 @@ pub fn step_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, out: 
 /// Live (2026-10-13, wall 23): the hold 0.155 m above the walling free hang is found, then dropped here, and the game
 /// hangs on. PORT: the wall hangs' box (`Human__WallHangBodyBoxFree` 0xB2DC80, its root moved by the hold's lean,
 /// 0xDD9591–0xDD9617) is not tested.
-fn step_fits(d: &HumanLedgeData, hand: usize, target: Vec3, n: Vec3, feet: Vec3, collision: &CollisionWorld) -> bool {
+fn step_fits(d: &HumanLedgeData, hand: usize, target: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     if d.hang_type != LedgeHangType::Free {
         return true;
     }
@@ -602,25 +600,9 @@ fn step_fits(d: &HumanLedgeData, hand: usize, target: Vec3, n: Vec3, feet: Vec3,
     } else {
         hr = target;
     }
-    let out = root_out(feet, d.hand_l, d.hand_r, n);
-    let root = step_root(hl, hr, n, d.hang_type, out, collision);
+    let root = hang_root(hl, hr, n, d.hang_type);
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     super::climb::hang_boxes_free(collision, root, facing, false)
-}
-
-pub fn root_out(feet: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3) -> f32 {
-    let nf = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let mid = (hand_l + hand_r) * 0.5;
-    Vec3::new(feet.x - mid.x, 0.0, feet.z - mid.z).dot(nf)
-}
-
-pub fn hang_root_at(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, collision: &CollisionWorld) -> Vec3 {
-    let mid = (hand_l + hand_r) * 0.5;
-    if hang == LedgeHangType::Free && wall_below_hands(mid, n, collision) {
-        Vec3::new(mid.x, hand_l.y.max(hand_r.y) - FREE_HANG_DROP, mid.z) + n * WALLFREE_HANG_OUT
-    } else {
-        hang_root(hand_l, hand_r, n, hang)
-    }
 }
 
 /// Ledge stick quantization (QuantizeStickDirection 0xDD1920): |a| â‰¤ 45Â° up, beyond 135Â° down,
@@ -940,6 +922,11 @@ pub fn update_ledge(
                 if mv.kind == ledge_moves::MoveKind::SwingBack {
                     d.swing_strength = Some((mv.seq[1].map(|b| b.w[2] + b.w[3]).unwrap_or(0.0), d.step_seq));
                 }
+                // the straight jump's wall-free reception plays the wall-free wait behind it (0xE09055) on a free hang
+                // (+104 = 1, 0xE08EE9) until the next move
+                if mv.kind == (ledge_moves::MoveKind::Arrival { wallfree_wait: true }) {
+                    d.wallfree_wait = Some(d.step_seq);
+                }
                 // the wall pull-down's locked `_b` (the free one is not)
                 if mv.kind == (ledge_moves::MoveKind::PullDown { stage: 3 }) && d.hang_type == LedgeHangType::Wall {
                     d.swing_lock = reception_lock_time(mv.seq[0].map(|a| a.w).as_ref().map(|w| &w[..3]).unwrap_or(&[1.0, 0.0, 0.0]));
@@ -989,7 +976,7 @@ pub fn update_ledge(
         if let Some(m) = d.moves.first_mut() {
             if m.to.is_nan() {
                 // deferred target (entry): the hang root for the current hands
-                m.to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
+                m.to = hang_root(d.hand_l, d.hand_r, n, d.hang_type);
             }
             let (p, _) = m.advance(dt);
             body.feet = p;
@@ -1125,16 +1112,15 @@ pub fn update_ledge(
             // the step row's point nearest the hands' midpoint line, else the first hand's own point (0xDD94A6): the hands
             // end together (RE/24 LEDGE-5)
             let target = rows.step.map_or(first_p, |h| h.point);
-            if !step_fits(d, second, target, n, body.feet, &collision) {
+            if !step_fits(d, second, target, n, &collision) {
                 d.last_action = "idle";
                 continue;
             }
-            let out = root_out(body.feet, d.hand_l, d.hand_r, n);
             if second == 0 { d.hand_l = target } else { d.hand_r = target }
             d.pending_vstep = None;
             d.last_hand = second;
             d.alt_flag = false;
-            let to = step_root(d.hand_l, d.hand_r, n, d.hang_type, out, &collision);
+            let to = hang_root(d.hand_l, d.hand_r, n, d.hang_type);
             d.vstep = Some((second == 1, true));
             // the step lasts its action (`StartHandStep` 0xDDE0C0 interpolates over `sub_501CB0`(0), RE/24 LEDGE-21)
             let wi = (d.hang_type != LedgeHangType::Wall) as usize;
@@ -1161,7 +1147,7 @@ pub fn update_ledge(
                 let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, dir == LedgeDir::Up, &report);
                 // the step row is dropped where the body would not fit (`step_fits`); the hand not moved last steps
                 let mut rows = rows;
-                if rows.step.is_some_and(|h| !step_fits(d, if d.last_hand == 1 { 0 } else { 1 }, h.point, n, body.feet, &collision)) {
+                if rows.step.is_some_and(|h| !step_fits(d, if d.last_hand == 1 { 0 } else { 1 }, h.point, n, &collision)) {
                     rows.step = None;
                 }
                 // TryTransitionToClimb 0xDD46A0: both rows → the climb pose of those holds (both hands on the hands row,
@@ -1211,14 +1197,14 @@ pub fn update_ledge(
                     let first_left = d.last_hand == 1;
                     d.alt_flag = false;
                     d.last_hand = (!first_left) as usize;
-                    let out = root_out(body.feet, d.hand_l, d.hand_r, n);
                     if first_left { d.hand_l = h.point } else { d.hand_r = h.point }
                     // the root from the two hand targets as they stand after the first hand (`ComputeRootFromHandTargets`
                     // 0xDD6730): a free hang hangs from the higher hand (max − 2.4), so a step up lifts the body the
                     // whole step and the reaching hand gets to its hold; a wall hang's vertical step reads the lower hand
                     // (min − 1.1) and waits for the second. The halfway root left the reaching arm 0.4 m short of its hold
-                    // (bug-1791711547). The distance from the wall stays (`step_root`, bug-1791714696)
-                    let mid_root = step_root(d.hand_l, d.hand_r, n, d.hang_type, out, &collision);
+                    // (bug-1791711547). Its distance from the wall is the type's: a step from the straight jump's wall-free
+                    // reception (root 0.5 m out) brings it under the hands
+                    let mid_root = hang_root(d.hand_l, d.hand_r, n, d.hang_type);
                     d.vstep = Some((first_left, false));
                     let wi = (d.hang_type != LedgeHangType::Wall) as usize;
                     let first_time = action_time(ACT_VSTEP[wi][vstep_index(sign < 0.0, false, first_left)]);
@@ -1248,6 +1234,18 @@ pub fn update_ledge(
                     // the hang switch, the free-hang drop, the hand step, the jump up and the wall jump up all failed (0xDE2E12;
                     // RE/24 LEDGE-2). PORT: the game sends it from the next frame's interpreter pass; the port pulls up at once.
                     d.blocked_up = true;
+                    // a free hang (+104 = 1) with no pending step whose two foot rays find the wall and whose wall-hang body
+                    // box is free (`HumanLedge__FreeHangFeetFindWall` 0xDE0E30) is accepted before the room test, flag 0x20
+                    // (0xDE22FD); `Pullup_Start` 0xDDC32C then switches it to the wall hang instead of pulling up
+                    // (`HumanLedge__PullupSwitchFreeToWall` 0xDD4160), and the next push up is the wall pull-up
+                    if d.hang_type == LedgeHangType::Free && d.pending_vstep.is_none() {
+                        let (a, b) = feet_on_wall(hand_mid(d), n, &collision);
+                        let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+                        if a && b && super::climb::hang_boxes_free(&collision, hang_root(d.hand_l, d.hand_r, n, LedgeHangType::Wall), facing, true) {
+                            start_move(d, ledge_moves::pullup_switch_to_wall_move(body.feet, d.hand_l, d.hand_r, n), "switch to wall hang (pull-up)");
+                            continue;
+                        }
+                    }
                     // `HumanLedge__CanPullup` 0xDE2270's room test (RE/28 §1): `Human__KneeCatchRoomOnTop` 0xB2E240 at the
                     // hands' midpoint along the facing, room for the body on top with no floor test; else a top edge
                     // probed at the higher hand (box half 0.25 / 0.35 / 0.25, reference 0.2 up, 45°, mask 50) with room
@@ -1290,9 +1288,9 @@ pub fn update_ledge(
                             ![0.05f32, 0.1, 0.15, 0.2].iter().any(|dy| collision.point_inside(q - Vec3::Y * *dy))
                         };
                         let one_hand = drops(right) || drops(-right);
-                        // the wall-free hang (Free with a wall below, LedgeHangType 2) does not pull up: Pullup_Start
-                        // 0xDDBE80 switches it to the wall hang first (`hangwallfree_tr_hangwall`)
-                        if d.hang_type == LedgeHangType::Free && wall_below_hands(mid, n, &collision) {
+                        // the WallFree type (+104 = 2; never held in v1.02, see `LedgeHangType::WallFree`) does not pull up:
+                        // `Pullup_Start` 0xDDC2E3 plays `hangwallfree_tr_hangwall` into the wall hang (+104 := 0)
+                        if d.hang_type == LedgeHangType::WallFree {
                             start_move(d, ledge_moves::wallfree_to_wall_move(body.feet, d.hand_l, d.hand_r, n), "wall-free to wall hang");
                             continue;
                         }
@@ -1350,7 +1348,7 @@ pub fn update_ledge(
                     if move_right_hand { d.hand_r = t } else { d.hand_l = t }
                     d.last_hand = move_right_hand as usize;
                     d.alt_flag = !d.alt_flag;
-                    let to = hang_root_at(d.hand_l, d.hand_r, n, d.hang_type, &collision);
+                    let to = hang_root(d.hand_l, d.hand_r, n, d.hang_type);
                     // after the toggle: alt_flag set = this was the lead hand's reach (open), clear = closing step; the step
                     // lasts its action (RE/24 LEDGE-21: the free hang's closing step is 0.533 s, not the wall's 0.6 s)
                     let wi = (d.hang_type != LedgeHangType::Wall) as usize;
@@ -1439,15 +1437,14 @@ mod tests {
         let n = Vec3::Z; // the wall faces +Z, the hanging body is in front of it
         let (hl, hr) = (Vec3::new(-0.2, 3.0, 0.0), Vec3::new(0.2, 3.0, 0.0));
         let d = HumanLedgeData { hang_type: LedgeHangType::Free, hand_l: hl, hand_r: hr, normal: n, ..Default::default() };
-        let feet = Vec3::new(0.0, 0.6, 0.35);
         let target = Vec3::new(0.2, 3.15, 0.0);
         let mut c = CollisionWorld::default();
-        assert!(step_fits(&d, 1, target, n, feet, &c), "nothing in the way");
+        assert!(step_fits(&d, 1, target, n, &c), "nothing in the way");
         // a slab sticking out of the wall where the raised body's legs would be
         c.boxes.push(Aabb3 { min: Vec3::new(-1.0, 1.0, 0.0), max: Vec3::new(1.0, 1.2, 0.6) });
-        assert!(!step_fits(&d, 1, target, n, feet, &c), "the body would hit the slab");
+        assert!(!step_fits(&d, 1, target, n, &c), "the body would hit the slab");
         let wall = HumanLedgeData { hang_type: LedgeHangType::Wall, ..d };
-        assert!(step_fits(&wall, 1, target, n, feet, &c), "wall hangs untested");
+        assert!(step_fits(&wall, 1, target, n, &c), "wall hangs untested");
     }
 
     #[test]
@@ -1455,6 +1452,31 @@ mod tests {
         assert!((swing_lock_time(0.0) - 0.5333).abs() < 1e-3);
         assert!((swing_lock_time(1.0) - 0.7333).abs() < 1e-3);
         assert!((swing_lock_time(0.835) - 0.70).abs() < 0.01);
+    }
+
+    /// Bug 1792058748: a wall hang on a bay whose face ends 0.9 m below the holds switched to a free hang 0.5 m out from
+    /// the wall (the wall-free pose, picked by the wall still under the hands), and every later step kept that distance.
+    /// `TrySwitchHangType` 0xDE1060 sets the plain free hang (+104 = 1, 0xDE1822) on `Human__FreeHangPoseFromHolds`
+    /// 0xB15AD0: the holds' midpoint, 2.4 m below.
+    #[test]
+    fn a_switch_to_the_free_hang_hangs_under_the_holds() {
+        let mut c = CollisionWorld::default();
+        // face z 0 (normal -Z) from 3.3 m to 7 m, nothing below
+        c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 3.3, 0.0), max: Vec3::new(2.0, 7.0, 0.9) });
+        let (n, hold) = (Vec3::NEG_Z, Vec3::new(0.0, 4.2, -0.08));
+        let mv = ledge_moves::switch_move(2, false, Vec3::new(0.0, 3.1, -0.58), hold, hold, n, &c);
+        assert!(mv.end_free);
+        assert!(mv.to.distance(Vec3::new(0.0, 1.8, hold.z)) < 0.02, "root {} should be under the holds", mv.to);
+    }
+
+    /// `ComputeRootFromHandTargets` 0xDD6899: only +104 == 1 is the free pose; the WallFree type (2) takes the wall
+    /// branch (1.1 m below the lower hand, 0.5 m out).
+    #[test]
+    fn the_wall_free_type_hangs_from_the_wall_branch() {
+        let (hl, hr, n) = (Vec3::new(-0.2, 3.0, 0.0), Vec3::new(0.2, 3.2, 0.0), Vec3::NEG_Z);
+        assert_eq!(hang_root(hl, hr, n, LedgeHangType::WallFree), hang_root(hl, hr, n, LedgeHangType::Wall));
+        let free = hang_root(hl, hr, n, LedgeHangType::Free);
+        assert!((free - Vec3::new(0.0, 0.8, -crate::tuning::FREE_HANG_OUT)).length() < 1e-5, "{free}");
     }
 
     /// RE/24 LEDGE-10: past a corner the turn fails when the new face needs the other hang type; `TrySwitchHangType`

@@ -243,15 +243,22 @@ pub fn jump_kind(pos: Vec3, stick: Vec3, high: bool, moving: bool, legs: bool, p
 
 /// The narrow interpreters' jump once its kind is chosen (NarrowObjectState 0xEE96C6–0xEE99F0, BeamState
 /// 0xEEAC38–0xEEAF8D): IHuman vt56 with that kind, with beams and no subtype left out, along the interpreter's stored
-/// stick (+4320, `dir`), then the scorer (mode 1; PORT: the second target of mode 2, vt20, is not kept); the Leap of
-/// Faith for kind 0; then, with no candidate, the free jump by its mode (IHuman vt68 `Human__BuildFreeJumpTarget`
-/// 0xB1E7F0: 0 → 8 m ahead, 1 → 1 m, 2 → 3 m; 3 m below, or min(drop + 0.25, 3) under the drop edge's report). Both post
-/// event 4, the free-step takeoff (jump kind 1).
+/// stick (+4320, `dir`), then the scorer `Human__SelectJumpCandidate` 0xE96BF0 with a7 = (kind == 2) (0xEE9766 /
+/// 0xEEACDF). Its mode is the empty hand (`sub_6D0F50(3)`, the button held, 0xEE9776 / 0xEEACEF): held, mode 2 alone,
+/// so the nearest ledge-like candidate in front is jumped as a pass-over (type 2, the hand-plant vault on arrival);
+/// let go, mode 1 (the scorer's own type) and a second mode-2 target for vt20, which rides along as the flight's
+/// chained target (InAirData +768, 0xB20A1C) but only takes over with InAir +225 bit 0x80 (0xE0E0CF), which nothing
+/// sets in v1.02, so it is not kept. Then the Leap of Faith for kind 0; then, with no candidate, the free jump by its
+/// mode (IHuman vt68 `Human__BuildFreeJumpTarget` 0xB1E7F0: 0 → 8 m ahead, 1 → 1 m, 2 → 3 m; 3 m below, or
+/// min(drop + 0.25, 3) under the drop edge's report). Both post event 4, the free-step takeoff (jump kind 1).
 #[allow(clippy::too_many_arguments)]
-pub fn narrow_jump(feet: Vec3, forward: Vec3, dir: Vec3, kind: Option<u32>, free: Option<(u32, Option<f32>)>, ab: &AbilitySet, foot_left: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<InAirEntry> {
+pub fn narrow_jump(feet: Vec3, forward: Vec3, dir: Vec3, kind: Option<u32>, free: Option<(u32, Option<f32>)>, hand_held: bool, ab: &AbilitySet, foot_left: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<InAirEntry> {
     let kind = kind?;
     let q = Query { kind, mode: 0, long: false, beams: true, exclude: 0 };
-    let target = super::targets::find_target(feet, forward, dir, &q, false, guidance, collision)
+    let cands = super::jump_candidates::query(feet, dir, &q, guidance, collision);
+    let mode = if hand_held { 2 } else { 1 };
+    let target = super::jump_candidates::select(&cands, feet, forward, dir, mode, kind == 2)
+        .and_then(|(i, ty)| super::targets::to_target(&cands[i], ty, feet, guidance, collision))
         .or_else(|| (kind == 0 && ab.allows(Ability::LeapOfFaith)).then(|| super::targets::haystack_target(feet, dir, forward, guidance, collision)).flatten());
     if std::env::var_os("AC_JUMP_LOG").is_some() {
         eprintln!("narrow jump: kind {kind} free {free:?} -> {:?}", target.map(|t| (t.type_flags, t.position)));
@@ -363,7 +370,7 @@ pub fn update(
         // reception ending right foot ahead takes off `freestep_front_front_050cm_footr_to_air`)
         let foot_left = fs.exit_foot() == 0;
         let dir = if data.narrow.jump_dir != Vec3::ZERO { data.narrow.jump_dir } else { stick };
-        if let Some(entry) = narrow_jump(body.feet, forward, dir, kind, free, ab, foot_left, guidance, collision) {
+        if let Some(entry) = narrow_jump(body.feet, forward, dir, kind, free, pad.hand_held, ab, foot_left, guidance, collision) {
             pad.consume_jump();
             switch_context(loco, data, TransitionSetup::ToInAir(entry));
             return;
