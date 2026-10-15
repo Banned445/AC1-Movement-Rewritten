@@ -27,7 +27,7 @@
 //! the right stick's Y (arrows) = up / down, high profile (RMB, RT) = × 3, Left Alt = × 10 (PORT: RB has no key), LB
 //! (Q) held = strafe (PORT: the game's X is the weapon hand, LMB, which captures the mouse in the port), F6 = debug
 //! camera.
-//! Gamepad: L3 + R3 = enter / leave (B with it: keep the speed), left stick = move, right stick Y = up / down, LB =
+//! Gamepad: L3 + R3 or Start (the menu button) = enter / leave (B with it: keep the speed), left stick = move, right stick Y = up / down, LB =
 //! hold the height, RT = × 3, RB = × 10, X held = strafe, R3 = debug camera.
 
 use bevy::input::gamepad::{Gamepad, GamepadButton};
@@ -98,7 +98,8 @@ fn toggle_fly(
     mut pad: ResMut<PadInput>,
     mut q: Query<(&mut Locomotion, &mut HumanDataBundle, &mut Body, &mut LimbTargets, Option<&mut crate::ik::LimbIk>), With<Player>>,
 ) {
-    let pad_chord = gamepads.iter().any(|gp| chord(gp, GamepadButton::LeftThumb, GamepadButton::RightThumb));
+    // the game's chord (L3 + R3), or Start (the menu button; PORT: a second binding, the game's Start pauses)
+    let pad_chord = gamepads.iter().any(|gp| chord(gp, GamepadButton::LeftThumb, GamepadButton::RightThumb) || gp.just_pressed(GamepadButton::Start));
     if !keys.just_pressed(KeyCode::F5) && !pad_chord {
         // R3 / F6 alone while flying: the debug camera
         let cam = keys.just_pressed(KeyCode::F6) || gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::RightThumb) && !gp.pressed(GamepadButton::LeftThumb));
