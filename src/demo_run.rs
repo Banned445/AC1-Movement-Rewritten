@@ -178,11 +178,11 @@ fn demo_course_run() {
     let x = Vec3::X;
     r.hold(1.0, In::idle());
 
-    // ---- walk, run, vault the railing (face x -112.15)
+    // ---- walk, run, hop over the railing (face x -112.15)
     r.hold(2.0, In::go(x, 1.0, false, false));
     r.until("run up to the railing", 6.0, |_| In::go(x, 1.0, true, false), |r| r.feet().x >= -115.4);
     r.frame(In { press_legs: true, ..In::go(x, 1.0, true, false) });
-    r.until("vault the railing", 4.0, |_| In::go(x, 1.0, true, false), |r| r.ctx() == C::Ground && r.feet().x > -111.0);
+    r.until("hop over the railing", 4.0, |_| In::go(x, 1.0, true, false), |r| r.ctx() == C::Ground && r.feet().x > -111.0);
 
     // ---- wall run onto the 1.8 m block (face x -95), then the free run up the two roofs
     r.until("run at the wall", 6.0, |r| In::go(r.toward(Vec3::new(-95.0, 0.0, 130.0)), 1.0, true, false), |r| r.feet().x >= -96.25);

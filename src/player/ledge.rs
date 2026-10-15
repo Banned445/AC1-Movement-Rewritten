@@ -1457,6 +1457,22 @@ mod tests {
         assert!((swing_lock_time(0.835) - 0.70).abs() < 0.01);
     }
 
+    /// Bug 1792058748: a wall hang on a bay whose face ends 0.9 m below the holds switched to a free hang 0.5 m out from
+    /// the wall (the wall-free pose, picked by the wall still under the hands), and every later step kept that distance.
+    /// `TrySwitchHangType` 0xDE1060 sets the plain free hang (+104 = 1, 0xDE1822) on `Human__FreeHangPoseFromHolds`
+    /// 0xB15AD0: the holds' midpoint, 2.4 m below.
+    #[test]
+    fn a_switch_to_the_free_hang_hangs_under_the_holds() {
+        let mut c = CollisionWorld::default();
+        // face z 0 (normal -Z) from 3.3 m to 7 m, nothing below
+        c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 3.3, 0.0), max: Vec3::new(2.0, 7.0, 0.9) });
+        let (n, hold) = (Vec3::NEG_Z, Vec3::new(0.0, 4.2, -0.08));
+        assert!(wall_below_hands(hold, n, &c), "the bay's face is under the hands");
+        let mv = ledge_moves::switch_move(2, false, Vec3::new(0.0, 3.1, -0.58), hold, hold, n, &c);
+        assert!(mv.end_free);
+        assert!(mv.to.distance(Vec3::new(0.0, 1.8, hold.z)) < 0.02, "root {} should be under the holds", mv.to);
+    }
+
     /// RE/24 LEDGE-10: past a corner the turn fails when the new face needs the other hang type; `TrySwitchHangType`
     /// with the corner variant switches onto that face instead. A wall hang (face z 0) whose corner face (x 0, normal +X)
     /// is an overhang slab with nothing below switches to a free hang turned onto it.

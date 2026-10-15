@@ -2616,26 +2616,38 @@ fn passover_weights_follow_the_game() {
     assert!((f[1] - 0.4).abs() < 1e-6 && (f[2] - 0.4).abs() < 1e-6 && (f[4] - 0.2).abs() < 1e-6);
 }
 
+/// The tap jump scores in mode 1 too (0xEE821D): at the 1 m railing it lands on the top (free step), no vault.
 #[test]
-fn running_jump_at_a_railing_vaults_it() {
-    use crate::player::passover::{PassOverPhase, FLIGHT_PASSOVER, VAULT};
-    // the 1 m railing at z 4 (x 38..42, z 3.85..4.15): run along -Z, jump
-    let mut s = Sim::new(Vec3::new(40.0, 0.0, 8.5), 0.0);
+fn a_tap_jump_at_a_railing_lands_on_its_top() {
+    // the 1 m railing at z 4 (x 38..42, z 3.85..4.15): walk along -Z in low profile, then tap
+    let mut s = Sim::new(Vec3::new(40.0, 0.0, 6.5), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    s.run(0.3);
     s.pad(Vec3::NEG_Z, 1.0, true, false);
-    s.run(0.4);
     s.press_legs();
-    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "no jump");
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.body().feet);
     let t = s.data().air.target.expect("a target");
-    assert_eq!(t.type_flags, 2, "pass-over target");
-    assert!(FLIGHT_PASSOVER.contains(&s.data().air.flight.unwrap().id));
-    assert!(s.run_until(2.0, |s| s.data().ledge.pass_over.is_some_and(|p| p.phase == PassOverPhase::Vault)), "no vault: {:?} {:?}", s.loco().current, s.body().feet);
-    let p = s.data().ledge.pass_over.unwrap();
-    assert!(VAULT.contains(&p.action.id));
-    assert!((p.w - 0.3).abs() < 0.02, "0.3 m thick → w 0.3: {}", p.w);
-    assert!((s.body().feet.y - 1.0).abs() < 0.01, "on the top: {:?}", s.body().feet);
-    // over and down on the far side
-    assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.01), "never landed beyond: {:?} {:?}", s.loco().current, s.body().feet);
-    assert!(s.body().feet.z < 3.85, "on the far side: {:?}", s.body().feet);
+    assert_eq!(t.type_flags, crate::player::targets::TARGET_GROUND, "a free-step target");
+    assert!(t.pass.is_none());
+    assert!(!s.run_until(2.0, |s| s.data().ledge.pass_over.is_some()), "no hand-plant vault");
+}
+
+/// The pass-over is the scorer's mode 2 only (`Human__SelectJumpCandidate` 0xE96BF0: type 2 at 0xE97596 when a5 == 2;
+/// with a5 == 1 a wall top's flags 1 | 2 make it ledge-like, type 1). Every ground jump scores in mode 1 (free-run hop
+/// 0xEE806B, tap 0xEE821D, edge jump 0xEE879A, 0xEE7439 / 0xEE7596 read the constant 1 at 0x19C3E60 / 0x19C3E58), so
+/// running in high profile at the 1 m railing hops onto its top (free step) and never plants a hand.
+#[test]
+fn running_at_a_railing_in_high_profile_hops_onto_it_without_a_vault() {
+    for legs in [false, true] {
+        let mut s = Sim::new(Vec3::new(40.0, 0.0, 8.5), 0.0);
+        s.pad(Vec3::NEG_Z, 1.0, true, legs);
+        assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no hop (legs {legs}): {:?}", s.body().feet);
+        let t = s.data().air.target.expect("a target");
+        assert_eq!(t.type_flags, crate::player::targets::TARGET_GROUND, "a free-step target (legs {legs})");
+        assert!(t.pass.is_none());
+        let vaulted = s.run_until(2.0, |s| s.data().ledge.pass_over.is_some());
+        assert!(!vaulted, "no hand-plant vault (legs {legs}): {:?}", s.loco().current);
+    }
 }
 
 /// bug-1791664621: standing with the back against the 3 m wall (z 9) and the stick pushed toward it, the wall slide
@@ -5587,17 +5599,41 @@ fn a_pull_down_with_no_hands_on_the_edge_releases_into_a_fall() {
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.y < 0.1), "fell to the street");
 }
 
+/// The free-step stay on the A2 roof (top 4 m), 1 m before its 1 m parapet (near face z -118.0), facing it, with the
+/// stick toward it in high profile (kind 3) and the empty hand `hand` held.
+fn stay_on_the_a2_roof(hand: bool) -> Sim {
+    use crate::player::free_step::FreeStepEntry;
+    use crate::player::ledge_moves::ACT_KNEE_TO_FREESTEP;
+    let feet = Vec3::new(-120.0, 4.0, -117.0);
+    let mut s = Sim::new(feet, 0.0);
+    let action = crate::player::ledge_moves::single_item(ACT_KNEE_TO_FREESTEP[0], 0).expect("the install's action");
+    let e = FreeStepEntry { action, t: 0.0, from: feet, to: feet, root_time: 0.0, follow_clip: false, point: feet, normal: Vec3::Z, small_box: false, heading: 0.0 };
+    force(&mut s, crate::player::TransitionSetup::ToFreeStep(e));
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.hold_hand(hand);
+    s
+}
+
+/// Without the empty hand the stay scores in mode 1 (0xEE97D6): the parapet's top is a free step, no vault.
+#[test]
+fn the_stay_without_the_empty_hand_steps_onto_a_parapet() {
+    let mut s = stay_on_the_a2_roof(false);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?} {:?}", s.loco().current, s.body().feet);
+    let t = s.data().air.target.expect("a target");
+    assert_eq!(t.type_flags, crate::player::targets::TARGET_GROUND, "a free-step target");
+    assert!(!s.run_until(2.0, |s| s.data().ledge.pass_over.is_some()), "no hand-plant vault");
+}
+
 #[test]
 fn vaulting_a_roofs_parapet_pulls_down_to_hang_on_the_far_side() {
     use crate::player::ledge_moves::MoveKind;
     use crate::player::passover::{PassOverPhase, PULLDOWN_ORIENT};
     // A2 yard: a 4 m roof with a 1 m parapet (z -118.3..-118.0, top 5 m) over a 5 m drop. The vault finds the far
-    // edge, room at it and 3 m or more beyond (0xDD2BD0) → pull-down type 4 (0xDE0220), hanging on the far side
-    let mut s = Sim::new(Vec3::new(-120.0, 4.0, -113.4), 0.0);
-    s.pad(Vec3::NEG_Z, 1.0, true, false);
-    s.run(0.4);
-    s.press_legs();
-    assert!(s.run_until(0.6, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.body().feet);
+    // edge, room at it and 3 m or more beyond (0xDD2BD0) → pull-down type 4 (0xDE0220), hanging on the far side.
+    // The vault is the free-step stay's jump with the empty hand held (scorer mode 2, 0xEE9776)
+    let mut s = stay_on_the_a2_roof(true);
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?} {:?}", s.loco().current, s.body().feet);
+    s.hold_hand(false);
     assert_eq!(s.data().air.target.map(|t| t.type_flags), Some(2), "pass-over target");
     assert!(s.run_until(2.0, |s| s.data().ledge.pass_over.is_some_and(|p| p.phase == PassOverPhase::Vault)), "no vault: {:?} {:?}", s.loco().current, s.body().feet);
     assert!(s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::PullDown { stage: 1 })), "no pull-down: {:?} {:?}", s.loco().current, s.body().feet);
@@ -5985,7 +6021,7 @@ fn probe_beam_frame_cost() {
     eprintln!("COST pair_report without trims {:.3} ms", t.elapsed().as_secs_f64() * 100.0);
     let ab = crate::player::abilities::AbilitySet::default();
     let t = std::time::Instant::now();
-    for _ in 0..10 { let _ = crate::player::free_step::narrow_jump(root, Vec3::X, Vec3::X, Some(4), None, &ab, true, &guidance, &collision); }
+    for _ in 0..10 { let _ = crate::player::free_step::narrow_jump(root, Vec3::X, Vec3::X, Some(4), None, false, &ab, true, &guidance, &collision); }
     eprintln!("COST narrow_jump kind 4 {:.2} ms", t.elapsed().as_secs_f64() * 100.0);
     let t = std::time::Instant::now();
     for _ in 0..10 { let _ = crate::player::free_step::drop_edge_ahead(root, Vec3::X, &guidance, &collision); }

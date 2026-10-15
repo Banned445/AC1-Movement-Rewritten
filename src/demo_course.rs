@@ -2,7 +2,7 @@
 //! a copy of a tested greybox setup, for showcase recordings. Not part of the reverse-engineered game: the layout is
 //! the port's own. Off by default, so the greybox, the tests and the replay fixtures are unchanged.
 //!
-//! The run: walk / run / vault a railing → wall run onto a block → free run up two roofs → the beam → a rooftop gap →
+//! The run: walk / run / hop over a railing → wall run onto a block → free run up two roofs → the beam → a rooftop gap →
 //! pull down into a wall hang, shimmy, let go → jump up to a ledge, shimmy, side jump, pull up → ladder → pilotis →
 //! a free-run drop and roll → swing bars → climb the tower → Leap of Faith into a haystack, hop out.
 
@@ -21,7 +21,7 @@ pub const START_HEADING: f32 = -std::f32::consts::FRAC_PI_2;
 
 /// Blocks (min x, max x, min z, max z, height), roof edges on every block of 0.5 m or more.
 pub const BLOCKS: &[(f32, f32, f32, f32, f32)] = &[
-    // a 1 m railing, 0.3 m thick: the pass-over vault
+    // a 1 m railing, 0.3 m thick: hopped onto (free step) and jumped off
     (-112.15, -111.85, 128.0, 132.0, 1.0),
     // the wall-run block (face x -95): the entry's pull-up onto its 1.8 m top
     (-95.0, -91.0, 128.0, 132.0, 1.8),

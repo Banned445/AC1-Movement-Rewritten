@@ -1912,7 +1912,7 @@ pub const TO_WALL: [u32; 2] = [0x01C3_2562, 0x01C3_2563];
 pub const TO_FREE: [u32; 4] = [0x01C3_14BD, 0x01C3_14BE, 0x01C3_217A, 0x01C3_217C];
 
 /// Ledge stick direction as the exe numbers it (QuantizeStickDirection 0xDD1920): 0 up, 1 down, 2 left, 3 right.
-pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, collision: &CollisionWorld) -> LedgeMove {
+pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, _collision: &CollisionWorld) -> LedgeMove {
     let id = if to_wall { TO_WALL[(dir != 2) as usize] } else { TO_FREE[match dir { 2 => 0, 3 => 1, 0 => 2, _ => 3 }] };
     let a = single(id, 0);
     let d = a.map(|a| a.duration()).unwrap_or(0.0);
@@ -1924,7 +1924,10 @@ pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec
         durations: [if d > 0.0 { d } else { SHIMMY_OPEN_TIME }, 0.0, 0.0, 0.0],
         t: 0.0,
         from,
-        to: hang_root_at(hand_l, hand_r, n, hang, collision),
+        // wall → free sets +104 = 1, the plain free hang (0xDE1822), its root from `Human__FreeHangPoseFromHolds`
+        // 0xB15AD0 (the holds' midpoint, 2.4 m below the higher one, no step out); never the wall-free pose 0.5 m out,
+        // which every later step then kept (bug 1792058748)
+        to: hang_root(hand_l, hand_r, n, hang),
         facing_from: facing,
         facing_to: facing,
         // the root interpolator over the action (0xDE1060 → sub_711130)

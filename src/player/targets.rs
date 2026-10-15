@@ -36,8 +36,6 @@ pub const TARGET_GROUND: u32 = super::jump_blend::TARGET_FREESTEP;
 /// The arrival (0xE07D00) picks the reception by the foot holds, not the type: holds → the wall reception, none → the
 /// swing for 0x80 (RE/24 AIR-37).
 pub const TARGET_LEDGE: u32 = 0x40;
-/// PORT: thickest wall top offered as a pass-over target (type 2).
-pub const PASSOVER_MAX_THICKNESS: f32 = 1.0;
 pub const TARGET_LEDGE_FREE: u32 = 0x80;
 /// Ladder targets (flight `…_to_surface`, arrival `HumanInAir__CheckJumpTargetArrival` 0xE07D00 case 0x1000).
 pub const TARGET_LADDER: u32 = 0x1000;
@@ -112,24 +110,9 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             for &inset in insets {
                 let probe = c.pos - c.wall * inset;
                 if let Some(h) = collision.ground_height(probe + Vec3::Y * 0.05, 0.2) {
-                    let on = c.pos;
-                    let target = JumpTarget { position: Vec3::new(on.x, h, on.z), ..base };
-                    // PORT: a thin wall top is a pass-over (type 2). The query gives a railing type 1 | 2 like a
-                    // roof; which of the two the game jumps at there is not established (LIVE, RE/20 #7 / #8; RE/18 §9 item 2)
-                    // PORT (live 2026-10-09, RE/18 §9): a haystack cart's rim is landed on, not vaulted, so no pass-over
-                    // when a haystack lies just beyond the edge
-                    // (0.8 m beyond the edge, the stack's box widened 0.3 m: no game source, RE/24 AIR-36)
-                    let hay_beyond = guidance.haystacks.iter().any(|s| {
-                        let p = c.pos - c.wall * 0.8;
-                        p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3
-                    });
-                    if c.flags & 2 != 0 && c.sub == 4 && !hay_beyond {
-                        if let Some((_, t)) = super::passover::far_edge(c.pos, -c.wall, guidance).filter(|(_, t)| *t <= PASSOVER_MAX_THICKNESS) {
-                            let _ = t;
-                            return Some(JumpTarget { position: c.pos, type_flags: 2, pass: Some((c.pos, c.wall)), ..base });
-                        }
-                    }
-                    return Some(target);
+                    // a wall top however thin is a free step here: the pass-over (type 2) is the scorer's mode 2 only
+                    // (`Human__SelectJumpCandidate` 0xE96BF0 at 0xE97584), which no ground jump asks for (RE/18 §1.8)
+                    return Some(JumpTarget { position: Vec3::new(c.pos.x, h, c.pos.z), ..base });
                 }
             }
             None

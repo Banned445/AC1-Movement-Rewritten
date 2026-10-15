@@ -1629,7 +1629,7 @@ pub fn update_narrow(
             };
             let dir = if n.jump_dir != Vec3::ZERO { n.jump_dir } else { facing };
             let foot_left = if n.kind == NarrowKind::Beam { n.item_foot() == 0 } else { n.foot == 0 };
-            if let Some(entry) = super::free_step::narrow_jump(feet, facing, dir, kind, free, &ab, foot_left, &guidance, &collision) {
+            if let Some(entry) = super::free_step::narrow_jump(feet, facing, dir, kind, free, pad.hand_held, &ab, foot_left, &guidance, &collision) {
                 pad.consume_jump();
                 body.feet = feet;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
