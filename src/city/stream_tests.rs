@@ -1141,3 +1141,51 @@ fn damascus_runs_over_the_seams_between_buildings() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Frame cost hanging among many holds (owner report 2026-10-16: the FPS dropped ~80 % holding a grab next to many
+/// grabs): the street wall with the most guidance edges within 3.5 m of its hold, grabbed, then held still.
+#[test]
+#[ignore = "profile; requires the local game install"]
+fn profile_damascus_hang_among_many_holds() {
+    use crate::guidance::GuidanceSubType;
+    let Some(mut s) = CitySim::new(SPAWNS[0]) else { return };
+    let c = s.collision();
+    let g = s.guidance();
+    let mut spots = Vec::new();
+    for e in g.edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.n0.y > 0.9 && e.n1.y.abs() < 0.3 && e.p0.distance(e.p1) > 1.0) {
+        let q = (e.p0 + e.p1) * 0.5;
+        let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
+        let stand = q + n * 0.75;
+        let Some(floor) = c.floor_height_below(Vec3::new(stand.x, q.y - 1.0, stand.z), 3.0) else { continue };
+        if !(1.9..=2.5).contains(&(q.y - floor)) { continue; }
+        let feet = Vec3::new(stand.x, floor, stand.z);
+        if !c.capsule_fits(feet) { continue; }
+        let near = g.edges.iter().filter(|o| (o.p0 + o.p1).distance(q * 2.0) < 7.0).count();
+        spots.push((near, feet, n));
+    }
+    spots.sort_by(|a, b| b.0.cmp(&a.0));
+    for &(near, feet, n) in spots.iter().take(8) {
+        s.place(feet, -n);
+        s.run(0.2);
+        s.pad(-n, 1.0, true, true);
+        s.press_legs();
+        if !s.run_until(3.0, |s| s.loco().current == ActorContextId::Ledge) { s.pad(n, 0.0, false, false); s.run(1.0); continue; }
+        s.pad(-n, 0.0, true, false);
+        s.run(1.5);
+        if s.loco().current != ActorContextId::Ledge { continue; }
+        let mut times = Vec::new();
+        for _ in 0..120 {
+            let t = std::time::Instant::now();
+            s.step();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        let hands = (s.data().ledge.hand_l + s.data().ledge.hand_r) * 0.5;
+        let t = std::time::Instant::now();
+        let r = s.guidance().ledge_report_depth(hands, 3.5, true, crate::guidance::LEDGE_DEPTH, s.collision());
+        let report_ms = t.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("PROFILE hang with {near} edges near: frame median {:.2} ms p95 {:.2} ms; one ledge report {report_ms:.2} ms ({} edges); {} boxes, {} triangles in the world", times[60], times[114], r.edges.len(), s.collision().boxes.len(), s.collision().triangles.len());
+        s.pad(n, 0.0, false, false);
+        s.run(1.5);
+    }
+}

@@ -51,7 +51,21 @@ pub struct GuidanceWorld {
     pub haystacks: Vec<crate::collision::Aabb3>,
     /// PORT: derived once after loading an immutable native map; never populated for editable greybox worlds.
     pub jump_pilotis: Option<Vec<Vec3>>,
+    /// PORT (speed): `ledge_report_depth`'s depth-filtered pieces per edge (`DepthCache`).
+    pub(crate) depth_cache: std::sync::Mutex<DepthCache>,
 }
+
+/// PORT (speed): the depth filter's result for one edge depends only on the edge, the detector and the collision, so
+/// `ledge_report_depth` keeps it per edge while the collision is unchanged. Hanging among many holds rebuilt the same
+/// pieces every frame (6.5 ms among 63 Damascus edges); a cached report returns the same edges in the same order.
+#[derive(Default)]
+pub(crate) struct DepthCache {
+    collision: Option<crate::collision::CollisionSignature>,
+    pieces: std::collections::HashMap<([u32; 13], [u32; 2]), Vec<GuidanceEdge>>,
+}
+
+/// Entries kept before the cache starts over (a streamed city's edges come and go).
+const DEPTH_CACHE_MAX: usize = 20_000;
 
 /// A hit from a guidance query: closest point on an edge plus that edge's data.
 #[derive(Clone, Copy, Debug)]
@@ -535,10 +549,27 @@ impl GuidanceWorld {
     pub fn ledge_report_depth(&self, centre: Vec3, radius: f32, steep: bool, (angle, length): (f32, f32), collision: &crate::collision::CollisionWorld) -> GuidanceWorld {
         let base = self.ledge_report(centre, radius, steep);
         let (ladders, others): (Vec<GuidanceEdge>, Vec<GuidanceEdge>) = base.edges.into_iter().partition(|e| e.subtype == GuidanceSubType::Ladder);
-        let world = GuidanceWorld { edges: others, ..Default::default() };
-        let filtered = Report::of(&world).depth_filter(collision, &[DepthDetector::new(DEPTH_OFFSET_EDGE, angle, length)], &[length]);
         let mut out = GuidanceWorld { haystacks: base.haystacks, ..Default::default() };
-        out.edges = filtered.world.edges;
+        // each edge filtered on its own, as `depth_filter` does (its scratch starts at zero for every edge)
+        let signature = collision.signature();
+        let mut cache = self.depth_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.collision != Some(signature) || cache.pieces.len() > DEPTH_CACHE_MAX {
+            cache.pieces.clear();
+            cache.collision = Some(signature);
+        }
+        for e in others {
+            let bits = |v: Vec3| v.to_array().map(f32::to_bits);
+            let (p0, p1, n0, n1) = (bits(e.p0), bits(e.p1), bits(e.n0), bits(e.n1));
+            let key = ([p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], n0[0], n0[1], n0[2], n1[0], n1[1], n1[2], e.subtype as u32], [angle.to_bits(), length.to_bits()]);
+            if let Some(pieces) = cache.pieces.get(&key) {
+                out.edges.extend(pieces.iter().cloned());
+                continue;
+            }
+            let one = GuidanceWorld { edges: vec![e], ..Default::default() };
+            let pieces = Report::of(&one).depth_filter(collision, &[DepthDetector::new(DEPTH_OFFSET_EDGE, angle, length)], &[length]).world.edges;
+            out.edges.extend(pieces.iter().cloned());
+            cache.pieces.insert(key, pieces);
+        }
         out.edges.extend(ladders);
         out
     }
@@ -1093,6 +1124,30 @@ mod tests {
 
     fn ledge(a: Vec3, b: Vec3) -> GuidanceEdge {
         GuidanceEdge { p0: a, p1: b, n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab }
+    }
+
+    /// The depth-filtered ledge report is cached per edge (PORT, speed): a repeated report returns what a fresh one
+    /// does, and another collision world or a streamed change filters again.
+    #[test]
+    fn the_cached_ledge_report_matches_a_fresh_one_and_follows_the_collision() {
+        use crate::collision::{Aabb3, CollisionWorld};
+        let edges = || vec![ledge(Vec3::new(-2.0, 2.0, 0.0), Vec3::new(2.0, 2.0, 0.0)), ledge(Vec3::new(-2.0, 2.0, -3.0), Vec3::new(2.0, 2.0, -3.0))];
+        let g = GuidanceWorld { edges: edges(), ..Default::default() };
+        let report = |g: &GuidanceWorld, c: &CollisionWorld| g.ledge_report_depth(Vec3::new(0.0, 2.0, 0.0), 3.5, true, LEDGE_DEPTH, c).edges.iter().map(|e| (e.p0, e.p1)).collect::<Vec<_>>();
+        let open = CollisionWorld::default();
+        assert_eq!(report(&g, &open).len(), 2, "nothing in front: both edges whole");
+        // a post in front of the middle of the first edge splits it
+        let post = CollisionWorld { boxes: vec![Aabb3 { min: Vec3::new(-0.5, 1.0, -0.6), max: Vec3::new(0.5, 3.0, -0.4) }], ..Default::default() };
+        let split = report(&g, &post);
+        assert_eq!(split.len(), 3, "another world filters again: {split:?}");
+        assert_eq!(report(&g, &post), split, "the cached report");
+        assert_eq!(report(&GuidanceWorld { edges: edges(), ..Default::default() }, &post), split, "a fresh world's report");
+        // a streamed wall in front of the second edge removes it
+        let mut streamed = CollisionWorld { boxes: post.boxes.clone(), ..Default::default() };
+        assert_eq!(report(&g, &streamed), split);
+        let (a, b, c, d) = (Vec3::new(-3.0, 0.0, -3.5), Vec3::new(3.0, 0.0, -3.5), Vec3::new(3.0, 4.0, -3.5), Vec3::new(-3.0, 4.0, -3.5));
+        streamed.add_triangles([[a, b, c], [a, c, d]].into_iter().filter_map(|t| crate::triangles::Triangle::new(t, crate::layers::STATIC)).collect());
+        assert_eq!(report(&g, &streamed).len(), 2, "the streamed wall: {:?}", report(&g, &streamed));
     }
 
     #[test]
