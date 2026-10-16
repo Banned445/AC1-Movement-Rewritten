@@ -1189,3 +1189,28 @@ fn profile_damascus_hang_among_many_holds() {
         s.run(1.5);
     }
 }
+
+/// Owner report (2026-10-16): a jump onto a crossbeam in the Souk with the stick let go slipped off. The free-step stay
+/// looks for the beam with its small box at the arrival point + 0.5 m (NarrowObjectData +0xF0, 0xE09A13), and the
+/// arrival point is the pulled-back target (InAirData+560); from the unpulled target the box missed the beam. Live
+/// (lab 2026-10-16 souk chain, 7.23 s): `freestep_entry_tr_beam_air_90` onto the beam at (205.65, 63.78).
+#[test]
+fn damascus_a_jump_onto_a_crossbeam_with_the_stick_released_stays_on_it() {
+    let Some(mut s) = CitySim::new(SPAWNS[0]) else { return };
+    let bevy = |x: f32, y: f32, z: f32| Vec3::new(x, z, -y);
+    let dir = Vec3::new(-0.7071, 0.0, 0.7071);
+    let from = bevy(207.70, 65.83, 6.84);
+    s.teleport(from + Vec3::Y * 0.05);
+    s.settle_streaming(60.0, Some(from + Vec3::Y * 0.05));
+    s.place(from, dir);
+    s.run(0.3);
+    s.pad(dir, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::InAir), "no jump: {:?}", s.loco().current);
+    s.pad(dir, 0.0, true, false);
+    s.run(2.0);
+    let f = s.body().feet;
+    assert!(s.loco().current == ActorContextId::NarrowObject && s.data().narrow.kind == crate::player::narrow::NarrowKind::Beam,
+        "not on the crossbeam: {:?} {:?} at {f}", s.loco().current, s.data().narrow.kind);
+    assert!(Vec2::new(f.x - 205.65, f.z + 63.78).length() < 0.3 && (f.y - 6.84).abs() < 0.1, "where the game stops: {f}");
+}
