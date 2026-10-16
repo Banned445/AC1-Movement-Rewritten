@@ -100,6 +100,9 @@ pub struct HumanGroundData {
     /// The wall run waiting for its Ground lead-in (`walling::GROUND_LEAD_IN`) to end: the wall's contact and normal
     /// (the payload 0xD857C0 keeps at HG+1344).
     pub wall_start: Option<(Vec3, Vec3, Vec3)>,
+    /// The impulsion jump (state +245, entered by event 45): its target, taken off with the free-step jump (kind 1,
+    /// `HumanGround__StartFreeStepJumpToTarget` 0xD858A0) when `jump_blend::IMPULSION_JUMP` completes (0xD8E390).
+    pub impulsion_jump: Option<JumpTarget>,
     /// The interpreter's lean push timer (+0xFC8, 0xEE75F4–0xEE763E): how long the stick has pushed within 45° of the
     /// facing while leaning; any other frame restarts it.
     pub lean_push_t: f32,
@@ -393,7 +396,85 @@ pub struct GroundOneShot {
     pub h0: Option<f32>,
 }
 
+/// Which of event 45's guards takes a jump to a target (`HumanGround__Movement_HandleEvent` 0xDB19BE; FreeRun 0xDAB32E).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event45 {
+    /// `sub_D7CA90` -> `HumanGround__StartRunJumpToTarget` 0xD837A0 (kind 0).
+    Run,
+    /// `sub_D83830` / FreeRun's `sub_D85690` -> the impulsion action, then the free-step jump.
+    Impulsion,
+    /// The playing item is locked (word bit 0x20): neither guard takes it.
+    Refused,
+}
+
 impl HumanGroundData {
+    /// Event 45, the jump to a target (IHuman vt24 from the tap jump, the free run's edge jump and the free-run target
+    /// jump). The guards read the playing item:
+    /// - locked (word & 0x20) -> refused;
+    /// - FreeRun (`free_run`, its guard `sub_D85690`) -> `sub_DA27C0`: the impulsion from its start, blended by the
+    ///   target's height v = clamp(dz, 0, 1.3) / 1.3 and its side (the signed angle a from the facing, + right): |a| < 90
+    ///   deg blends front with right / left by |a| / 90 deg, beyond it right / left with back-right / back-left;
+    /// - Movement (`sub_D83830`): standing (HG+1492 = 0) -> the impulsion at phase 1; the locomotion blend 0x05923BDB ->
+    ///   the run jump (`sub_D7CA90`); another item (a start or transition) at normalised time t < 0.75 -> the impulsion
+    ///   from phase t / 0.75 (HG+616, `sub_501D10` 0xD9C092), else the run jump. `sub_D9BE90`: front only, by height.
+    ///
+    /// Live (lab): from the impulsion wait 0.27 s of impulsion then `freestep_front_front_*_to_air`; from a walk start or
+    /// a free-step exit 0.05-0.09 s; from the running locomotion `run_front_*_to_air`. PORT: HG+616 is taken as the
+    /// impulsion's start phase (`sub_724500`'s node call is not decoded; the timings fit it).
+    pub fn event45(&mut self, feet: Vec3, forward: Vec3, target: JumpTarget, free_run: bool) -> Event45 {
+        let item = self.tr.map(|t| (t.action, t.phase)).or_else(|| self.oneshot.map(|o| (o.blend, o.t / o.duration.max(1e-4))));
+        if item.is_some_and(|(b, _)| super::anim_gate::locked(&b)) {
+            return Event45::Refused;
+        }
+        let v = (target.position.y - feet.y).clamp(0.0, 1.3) / 1.3;
+        let mut w = [0.0f32; 10];
+        let phase = if free_run {
+            let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+            let d = Vec3::new(target.position.x - feet.x, 0.0, target.position.z - feet.z).normalize_or(f);
+            let a = d.dot(super::right_of(f)).atan2(d.dot(f));
+            let q = std::f32::consts::FRAC_PI_2;
+            let (slots, k) = if a < -q {
+                ([2, 3, 6, 7], (-a - q) / q)
+            } else if a < 0.0 {
+                ([0, 1, 2, 3], -a / q)
+            } else if a < q {
+                ([0, 1, 4, 5], a / q)
+            } else {
+                ([4, 5, 8, 9], (a - q) / q)
+            };
+            let k = k.clamp(0.0, 1.0);
+            w[slots[0]] = (1.0 - v) * (1.0 - k);
+            w[slots[1]] = v * (1.0 - k);
+            w[slots[2]] = k * (1.0 - v);
+            w[slots[3]] = k * v;
+            0.0
+        } else {
+            w[0] = 1.0 - v;
+            w[1] = v;
+            match item {
+                Some((_, t)) if t >= 0.75 => return Event45::Run,
+                Some((_, t)) => (t / 0.75).max(0.0),
+                None => return Event45::Run,
+            }
+        };
+        // the foot: Movement's `sub_D9BE90` takes `Human__GetLeadingFoot` == 1 -> footl (0xD9BF5A), FreeRun's `sub_DA27C0`
+        // the playing item's word bits 2-3 == 1 -> footl (0xDA285E). PORT: from the locomotion's foot (live: 028 and
+        // freerun_north take footl from Movement with foot 1, the standing starts footr with foot 1)
+        let left = if free_run { self.blend.foot == 0 } else { self.blend.foot != 0 };
+        let id = jump_blend::IMPULSION_JUMP[(!left) as usize];
+        let Some(n) = jump_blend::action_items(id).and_then(|i| i.first().map(|c| c.len())) else { return Event45::Run };
+        let b = ActionBlend::new(id, 0, &w[..n.min(10)]);
+        self.play_oneshot(b);
+        if let Some(os) = self.oneshot.as_mut() {
+            os.t = phase * os.duration;
+            os.applied = b.disp(phase);
+        }
+        self.owner = TreeState::Other;
+        self.tr = None;
+        self.impulsion_jump = Some(target);
+        Event45::Impulsion
+    }
+
     /// Play a ground one-shot action with its root motion (landings, receptions, ledge stop).
     pub fn play_oneshot(&mut self, b: ActionBlend) {
         self.landing_seq = self.landing_seq.wrapping_add(1);
@@ -738,6 +819,7 @@ impl HumanGroundData {
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
         self.wall_start = None;
+        self.impulsion_jump = None;
         self.collide = None;
         self.look_down = None;
         self.extra = None;
@@ -857,6 +939,26 @@ pub fn update_ground(
                 continue;
             }
         }
+        // the impulsion done: the free-step takeoff from the stored request (state +245's update 0xD8E390: the action
+        // complete, `sub_501760` -> `HumanGround__StartFreeStepJumpToTarget` 0xD858A0, kind 1, the foot from the playing
+        // item's word bits 2-3); anything that took over drops it
+        if g.impulsion_jump.is_some() && !g.oneshot.is_some_and(|o| jump_blend::IMPULSION_JUMP.contains(&o.blend.id) && o.t < o.duration) {
+            let os = g.oneshot.filter(|o| jump_blend::IMPULSION_JUMP.contains(&o.blend.id));
+            let target = g.impulsion_jump.take();
+            if let (Some(os), Some(target)) = (os, target) {
+                g.oneshot = None;
+                // the item's foot bits as `Human__SetupJumpToTarget`'s a7: 0 -> `Human__GetLeadingFoot` (0xB20435;
+                // PORT: the locomotion's foot, as the impulsion's own choice reads it)
+                let foot_left = match super::anim_gate::word(&os.blend).map(|w| (w >> 2) & 3) {
+                    Some(1) => true,
+                    Some(2) => false,
+                    _ => g.blend.foot != 0,
+                };
+                jump_log("impulsion jump takeoff", body.feet, Some(&target));
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::FreeStepJump { from: body.feet, target, foot_left }));
+                continue;
+            }
+        }
         let g = &mut data.ground;
         // the step-up tracker at last frame's end (`Human__PostUpdate` runs after the contexts; event 68 reads it)
         g.step_up = g.step_up.and_then(|s| s.hold(body.feet));
@@ -919,6 +1021,9 @@ pub fn update_ground(
             }
         }
 
+        // FreeRun (state 36) able to take event 45 this frame: its guard `sub_D85690` (game time past HG+520, 0.2 s
+        // after the FreeRun start); the stick moving leaves it for Movement in the same frame
+        let mut free_run_ready = false;
         if GAME_GROUND_EXTRAS {
             g.legs_released_ago = if pad.legs_held { 0.0 } else { g.legs_released_ago+dt };
             // Event43: high profile, stationary, Legs held; native 0xEE8B93 checks button capture.
@@ -964,6 +1069,7 @@ pub fn update_ground(
                         continue;
                     }
                 }
+                free_run_ready = extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed+dt>=0.2;
                 let k=crate::anim::root_weight(anim,extra.action.id);
                 let (out,delta)=extra.advance(dt,pad.magnitude>0.35,request,g.blend.foot);
                 let delta=delta*k;
@@ -1072,6 +1178,7 @@ pub fn update_ground(
             && gated
             && g.ledge_stop.is_none()
             && g.collide.is_none()
+            && g.impulsion_jump.is_none()
             && g.oneshot.is_some_and(|o| super::anim_gate::allows_mode_exit(&o.blend, true, pad.high_profile))
         {
             g.oneshot = None;
@@ -1535,9 +1642,18 @@ pub fn update_ground(
         if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
             if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir_snap, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
                 jump_log("free-run target jump", body.feet, Some(&target));
-                let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot != 0 };
-                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
-                continue;
+                match g.event45(body.feet, body.forward(), target, free_run_ready) {
+                    Event45::Run => {
+                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot != 0 };
+                        switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+                        continue;
+                    }
+                    Event45::Impulsion => {
+                        body.velocity = Vec3::ZERO;
+                        continue;
+                    }
+                    Event45::Refused => {}
+                }
             }
         }
 
@@ -1612,9 +1728,10 @@ pub fn update_ground(
         // the free run jumps at an edge (`v142`, 0xEE7DCE: an edge report within 0.25 m with a drop over 0.5 m, within
         // 80° of the stick, Legs held or HG+588). The edge test is the vt136 report below.
         let forward = body.forward();
-        // the foot-level edge reports (IHuman vt132 0xB1BC50: 0.75 m, drops of 0.45 m or more) and the one along the
-        // facing (vt136, any angle): the free run's edge jump `v142`, the edge jump and event 68 below read it
-        let reports = super::jump_candidates::edge_reports(body.feet, 0.75, 0.45, &guidance, &collision);
+        // the foot-level edge reports (IHuman vt132 0xB1BC50: 0.75 m, drops of 0.45 m or more, with the floor report:
+        // a6 = 1, 0xEE7952) and the one along the facing (vt136, any angle): the free run's edge jump `v142`, the edge
+        // jump and event 68 below read it
+        let reports = super::jump_candidates::edge_reports(body.feet, 0.75, 0.45, Some(forward), &guidance, &collision);
         let facing_report = super::jump_candidates::pick_report(&reports, body.feet, forward, 0.75, std::f32::consts::PI);
         // v142 (0xEE7DCE): a report with a drop over 0.5 m within 0.25 m, its normal within 80 degrees of the stick,
         // Legs held
@@ -1629,6 +1746,17 @@ pub fn update_ground(
             let found = super::targets::find_target(body.feet, want, want, &super::jump_candidates::Query::TAP, false, &guidance, &collision)
                 .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, forward, &guidance, &collision)).flatten());
             jump_log("tap jump", body.feet, found.as_ref());
+            // with a target, event 45 (vt24): the impulsion or the run jump by the playing item
+            if let Some(t) = found {
+                match g.event45(body.feet, forward, t, free_run_ready) {
+                    Event45::Run => {}
+                    Event45::Impulsion => {
+                        body.velocity = Vec3::ZERO;
+                        continue;
+                    }
+                    Event45::Refused => continue,
+                }
+            }
             let entry = match found {
                 // the takeoff foot (`StartRunJumpToTarget` 0xD837A0: the playing item's word bits 2–3, 1 = the footl
                 // takeoff): the foot opposite the locomotion's (live RE/25: three free-run take-offs, the game always
@@ -1663,7 +1791,14 @@ pub fn update_ground(
                 // past the edge, room for the body beyond it (0xB2E7A0) → `ToInAir_JumpToEdge` 0xDA7A10 / 0xD9D1F0:
                 // the step off the edge. PORT: HG+609 bit 0 (set by some state enters) is taken to be clear outside
                 // one-shot actions. Not while a step-up holds (`sub_B0EBC0`, RE/24 GUIDE-15).
-                if r.drop >= 0.53 && r.sq() < -0.01 && g.step_up.is_none() && super::jump_candidates::room_past_edge(&r, &collision) {
+                // The floor report (+56, no edge) needs instead the box at the feet + 0.7 m up, half 0.25 across, 0.25
+                // along the forward and 1.0 up, empty (`Human__BoxQueryNearestFromRear` 0xB2A070 == 1000, 0xD8420E).
+                let room = if r.floor {
+                    collision.obb_free(r.point + Vec3::Y * 0.7, [super::right_of(r.normal), r.normal, Vec3::Y], Vec3::new(0.25, 0.25, 1.0))
+                } else {
+                    r.sq() < -0.01 && super::jump_candidates::room_past_edge(&r, &collision)
+                };
+                if r.drop >= 0.53 && g.step_up.is_none() && room {
                     // the takeoff foot is the one opposite the leading foot: `sub_B27180`(…, 2 − (GetLeadingFoot() != 1))
                     // 0xD9D4B9, so a left foot ahead takes off on `footr` (RE/24 AIR-28). PORT: the leading foot is the
                     // locomotion's (MoveBlend foot 0 = left ahead), not the bone test of 0xB18850
@@ -1704,7 +1839,8 @@ pub fn update_ground(
             let step = [d[0] - os.applied[0], d[1] - os.applied[1]];
             os.applied = d;
             // the wall run's lead-in holds its last frame until the switch (the next frame's start)
-            g.oneshot = (os.t < os.duration || (g.wall_start.is_some() && os.blend.id == super::walling::GROUND_LEAD_IN)).then_some(os);
+            g.oneshot = (os.t < os.duration || (g.wall_start.is_some() && os.blend.id == super::walling::GROUND_LEAD_IN)
+                || (g.impulsion_jump.is_some() && jump_blend::IMPULSION_JUMP.contains(&os.blend.id))).then_some(os);
             if g.oneshot.is_none() {
                 if let Some(next) = g.oneshot_next.take() {
                     g.play_oneshot(next);
@@ -2163,7 +2299,8 @@ fn edge_report(feet: Vec3, forward: Vec3, reach: f32, min_cos: f32, guidance: &G
 /// normal, drop).
 fn edge_report_drop(feet: Vec3, forward: Vec3, pick_radius: f32, max_sq: f32, min_cos: f32, min_drop: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3, f32)> {
     use super::jump_candidates::{edge_reports, pick_report};
-    let reports = edge_reports(feet, 0.75, 0.45, guidance, collision);
+    // (the floor report, which `ClassifyEdgeSide` refuses, only stands when no edge report does: none needed here)
+    let reports = edge_reports(feet, 0.75, 0.45, None, guidance, collision);
     let r = pick_report(&reports, feet, forward, pick_radius + 1e-3, min_cos.clamp(-1.0, 1.0).acos())?;
     (r.drop > 1.3 && r.drop > min_drop && r.sq() <= max_sq + 1e-4).then_some((r.point, r.normal, r.drop))
 }
@@ -2245,6 +2382,41 @@ impl AnyHit for std::ops::RangeInclusive<f32> {
 #[cfg(test)]
 mod reanalysis_tests {
     use super::*;
+
+    /// Event 45's guards (0xDB19BE): from the locomotion blend the run jump; from a start item early in its play the
+    /// impulsion, entered at phase t / 0.75 (HG+616), with the target kept for the free-step takeoff; late in it the run
+    /// jump; FreeRun's impulsion from its start, blended toward the target's side.
+    #[test]
+    fn event_45_picks_the_impulsion_or_the_run_jump_by_the_playing_item() {
+        let target = JumpTarget { position: Vec3::new(0.0, 0.0, -3.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
+        let start = START_MOVE.iter().flatten().copied()
+            .filter_map(|id| jump_blend::action_items(id).and_then(|i| i.first().map(|c| ActionBlend::new(id, 0, &vec![1.0 / c.len() as f32; c.len()]))))
+            .find(|b| !super::super::anim_gate::locked(b))
+            .expect("an unlocked start item");
+        let mut g = HumanGroundData::default();
+        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, target, false), Event45::Run, "the locomotion");
+        for (t, want) in [(0.3f32, Event45::Impulsion), (0.8, Event45::Run)] {
+            let mut g = HumanGroundData::default();
+            g.play_oneshot(start);
+            if let Some(os) = g.oneshot.as_mut() {
+                os.t = t * os.duration;
+            }
+            assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, target, false), want, "t {t}");
+            if want == Event45::Impulsion {
+                let os = g.oneshot.unwrap();
+                assert!(jump_blend::IMPULSION_JUMP.contains(&os.blend.id));
+                assert!((os.t / os.duration - 0.4).abs() < 1e-3, "phase {}", os.t / os.duration);
+                assert!(g.impulsion_jump.is_some());
+            }
+        }
+        // FreeRun: from the start, the target 45 degrees to the right blends front and right half and half
+        let mut g = HumanGroundData::default();
+        let right = JumpTarget { position: Vec3::new(2.0, 0.0, -2.0), ..target };
+        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, right, true), Event45::Impulsion);
+        let os = g.oneshot.unwrap();
+        let w = os.blend.weights();
+        assert!(os.t == 0.0 && (w[0] - 0.5).abs() < 1e-3 && (w[4] - 0.5).abs() < 1e-3, "{w:?}");
+    }
 
     /// RE/25 #67: the player's cycle breakers are off (HumanData +0x201 = 0): no timer, no fidget.
     #[test]

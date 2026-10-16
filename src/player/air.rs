@@ -360,7 +360,15 @@ impl HumanInAirData {
                 self.prev_y = from.y;
                 self.target_flags = target.type_flags;
                 self.target = Some(target);
-                let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
+                // a haystack target (the impulsion jump's Leap of Faith, event 45): the haystack's over-drop limits and
+                // layer, as for every kind (`sub_B1B8C0` in `Human__SetupJumpToTarget` 0xB20468; InAir entry 0xE01E19)
+                self.hay_pass = target.type_flags == jump_blend::TARGET_HAYSTACK;
+                let thr = if target.type_flags == jump_blend::TARGET_HAYSTACK {
+                    if target.position.y - from.y <= -jump_blend::FAITH_MIN_DROP { jump_blend::FAITH_DOWN } else { jump_blend::FAITH_MIN_DROP }
+                } else {
+                    OVERDROP
+                };
+                let (aim, then_fall_to) = over_drop(from, target.position, thr);
                 self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 1);
             }
             InAirEntry::SwingJump { from, target, dir } => {
