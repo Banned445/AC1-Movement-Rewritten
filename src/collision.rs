@@ -50,14 +50,24 @@ pub struct CollisionWorld {
     /// + MOPP. None = the linear scan. Candidates come back in ascending slot order, so every query returns what the
     /// linear scan returns.
     pub index: Option<TriangleGrid>,
+    /// PORT (speed): this world's identity and the count of its streamed changes (`add_triangles` / `remove_triangles`),
+    /// for results cached against it (`signature`).
+    pub(crate) id: u64,
+    pub(crate) revision: u64,
 }
 
 impl Default for CollisionWorld {
     fn default() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self { boxes: Vec::new(), triangles: Vec::new(), layers: Vec::new(),
-            native_query_culling: std::env::var("AC_NATIVE_QUERY_CULLING").as_deref() != Ok("0"), index: None }
+            native_query_culling: std::env::var("AC_NATIVE_QUERY_CULLING").as_deref() != Ok("0"), index: None,
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed), revision: 0 }
     }
 }
+
+/// What a cached query result depends on in a `CollisionWorld`: the world, its streamed changes, its counts, the
+/// boxes and the query settings.
+pub type CollisionSignature = (u64, u64, usize, usize, u64, bool, bool);
 
 /// Streamed triangle storage: slots stay put while their owner is loaded (the proxy's contacts and the contexts keep
 /// triangle indices); freed slots hold an inert triangle far outside the world until reused.
@@ -104,10 +114,27 @@ impl CollisionWorld {
         let mut grid = TriangleGrid { cell, buckets: Default::default(), large: Vec::new(), free: Vec::new(), max_y: f32::NEG_INFINITY };
         for (i, t) in self.triangles.iter().enumerate() { grid.insert(i as u32, t); }
         self.index = Some(grid);
+        self.revision += 1;
+    }
+
+    /// The world as cached results saw it: a different world, a streamed change, other counts, a moved box or other
+    /// query settings give another signature. Triangles change only through `add_triangles` / `remove_triangles` once
+    /// a world is in use.
+    pub fn signature(&self) -> CollisionSignature {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in &self.boxes {
+            for v in [b.min, b.max] {
+                for x in v.to_array() {
+                    h = (h ^ x.to_bits() as u64).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        (self.id, self.revision, self.triangles.len(), self.layers.len(), h, self.native_query_culling, self.index.is_some())
     }
 
     /// Add streamed triangles; returns their slots (stable until `remove_triangles`).
     pub fn add_triangles(&mut self, triangles: Vec<crate::triangles::Triangle>) -> Vec<u32> {
+        self.revision += 1;
         let mut slots = Vec::with_capacity(triangles.len());
         for t in triangles {
             let slot = match self.index.as_mut().and_then(|g| g.free.pop()) {
@@ -123,6 +150,7 @@ impl CollisionWorld {
     /// Free streamed triangle slots: they are unlinked from the grid and parked as inert triangles for reuse.
     pub fn remove_triangles(&mut self, slots: &[u32]) {
         if slots.is_empty() { return; }
+        self.revision += 1;
         let gone: std::collections::HashSet<u32> = slots.iter().copied().collect();
         if let Some(g) = self.index.as_mut() {
             let mut touched = std::collections::HashSet::new();
