@@ -195,7 +195,7 @@ impl Plugin for CityPlugin {
             .init_resource::<presentation::CityAmbience>()
             .add_systems(Startup, spawn_overlay)
             .add_systems(Update, (update_city.before(crate::player::PlayerSet), hold_player.after(crate::player::PlayerSet), update_overlay))
-            .add_systems(PostUpdate, (ambiance::follow_sky, presentation::update_effects, presentation::update_ambience).after(bevy::transform::TransformSystems::Propagate));
+            .add_systems(PostUpdate, (ambiance::follow_sky, presentation::update_effects, presentation::update_ambience, presentation::log_audio).chain().after(bevy::transform::TransformSystems::Propagate));
     }
 }
 

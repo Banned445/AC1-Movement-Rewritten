@@ -145,6 +145,7 @@ Set these environment variables before `cargo run --release`:
 | `AC_CITY_AT="x y z yaw"` | Starts Damascus at a game position (yaw in degrees), to compare a spot with the game |
 | `AC_CITY_OVERLAY=1` | Shows the F3 city counters from the start |
 | `AC_NO_SOUND=1` | Silences the sounds |
+| `AC_SND_LOG=<seconds>` | Logs the playing voices and the mix level at that interval |
 | `AC_NO_MODEL=1` | Runs without Altaïr's model, with the capsule |
 
 ## Tests

@@ -1445,5 +1445,6 @@ fn damascus_bureau_presentation() {
     let sets: Vec<&str> = p.cells.iter().flat_map(|c| c.ambience.iter().map(|s| s.name.as_str())).collect();
     assert!(sets.contains(&"A_City_Bureau_Main_Room"), "{sets:?}");
     let fx: Vec<_> = p.cells.iter().flat_map(|c| c.ambience.iter()).flat_map(|s| s.fx.iter()).collect();
-    assert!(!fx.is_empty() && fx.iter().all(|((lo, hi), _)| *lo > 0.0 && hi >= lo && *hi <= 600.0), "{fx:?}");
+    assert!(fx.iter().all(|f| f.delay.0 >= 0.5 && f.delay.1 >= f.delay.0 && f.distance.1 >= f.distance.0 && f.distance.1 > 0.0), "{fx:?}");
+    assert!(!fx.is_empty());
 }

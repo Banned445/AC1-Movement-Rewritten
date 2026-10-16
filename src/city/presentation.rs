@@ -21,6 +21,8 @@ pub struct CityLight {
     /// `LightColor` (sRGB, 0..1).
     pub color: Vec3,
     pub intensity: f32,
+    /// `Near` (the falloff start, not used by the port's windowed falloff).
+    #[allow(dead_code)]
     pub near: f32,
     pub far: f32,
     /// The light's world flag (serialised flag byte 3): set on the world lights, clear on the `_Char` copies that only
@@ -251,6 +253,10 @@ pub fn body_sounds(b: &[u8], position: Vec3) -> Vec<CitySound> {
 /// frame count (fountains, fires, lanterns) loop.
 const RETRIGGER: (f32, f32) = (2.0, 9.0);
 
+/// PORT: at most this many city sounds play at once; a one-shot that would go past it waits (a safety net, the DARE
+/// voice limits are not traced).
+const MAX_VOICES: usize = 24;
+
 struct RunningSound {
     cell: usize,
     sound: CitySound,
@@ -313,10 +319,14 @@ fn falloff(range: (f32, f32), d: f32) -> f32 {
     if d <= range.0 { 1.0 } else if d >= range.1 { 0.0 } else { 1.0 - (d - range.0) / (range.1 - range.0).max(1e-3) }
 }
 
+/// PORT: the city's ambience plays on its own bus at -6 dB (`sound::mix_audio`; the DARE mixer's buses are not
+/// traced).
+const AMBIENCE_BUS: f32 = 0.5;
+
 fn start_voice(commands: &mut Commands, handle: Handle<crate::sound::PcmClip>, v: &crate::assets::dare::Voice, looped: bool, at: Vec3, gain: f32) -> Entity {
     let mode = if looped { bevy::audio::PlaybackMode::Loop } else { bevy::audio::PlaybackMode::Despawn };
-    commands.spawn((crate::map_menu::MapEntity, AudioPlayer::<crate::sound::PcmClip>(handle), Transform::from_translation(at),
-        PlaybackSettings { mode, volume: bevy::audio::Volume::Linear(gain), speed: v.speed, spatial: true,
+    commands.spawn((crate::map_menu::MapEntity, crate::sound::MixVoice { gain, bus: AMBIENCE_BUS }, AudioPlayer::<crate::sound::PcmClip>(handle), Transform::from_translation(at),
+        PlaybackSettings { mode, volume: bevy::audio::Volume::Linear(gain * AMBIENCE_BUS), speed: v.speed, spatial: true,
             // the distance gain is applied here (`falloff`); the spatial sink only places the voice left / right
             spatial_scale: Some(bevy::audio::SpatialScale::new(0.02)), ..default() })).id()
 }
@@ -326,8 +336,7 @@ fn start_voice(commands: &mut Commands, handle: Handle<crate::sound::PcmClip>, v
 #[allow(clippy::too_many_arguments)]
 pub fn update_ambience(mut city: ResMut<super::stream::City>, mut amb: ResMut<CityAmbience>, sounds: Res<crate::sound::Sounds>, time: Res<Time>,
     camera: Query<(Entity, &GlobalTransform), With<crate::camera::MainCamera>>, mut commands: Commands, mut clips: ResMut<Assets<crate::sound::PcmClip>>,
-    mut sinks: Query<&mut bevy::audio::SpatialAudioSink>, mut bed_sinks: Query<&mut AudioSink>) {
-    use bevy::audio::AudioSinkPlayback;
+    mut gains: Query<&mut crate::sound::MixVoice>, alive: Query<(), With<AudioPlayer<crate::sound::PcmClip>>>) {
     let amb = &mut *amb;
     let Some(state) = city.0.as_mut() else {
         for mut s in amb.sounds.drain(..) { CityAmbience::stop(&mut s, &mut commands); }
@@ -375,13 +384,12 @@ pub fn update_ambience(mut city: ResMut<super::stream::City>, mut amb: ResMut<Ci
         for (entity, v, looped, wait) in &mut voices {
             let gain = bevy::audio::Volume::Decibels(v.gain_db).to_linear() * falloff;
             match entity {
-                Some(e) if sinks.get(*e).is_ok() => {
-                    if let Ok(mut sink) = sinks.get_mut(*e) { sink.set_volume(bevy::audio::Volume::Linear(gain)); }
+                Some(e) if alive.contains(*e) => {
+                    if let Ok(mut g) = gains.get_mut(*e) { g.gain = gain; }
                 }
-                Some(e) if *looped => { let _ = e; }
                 _ => {
                     *wait -= dt;
-                    if *wait > 0.0 { continue; }
+                    if *wait > 0.0 || (!*looped && alive.iter().count() >= MAX_VOICES) { continue; }
                     *wait = if *looped { f32::INFINITY } else { picker_range(&mut picker, RETRIGGER.0, RETRIGGER.1) };
                     // a one-shot picks again from its containers each time
                     let v = if *looped { v.clone() } else {
@@ -395,7 +403,7 @@ pub fn update_ambience(mut city: ResMut<super::stream::City>, mut amb: ResMut<Ci
         s.voices = Some(voices);
     }
     amb.sounds = list;
-    update_beds(&mut beds, amb, &archives, &state.data.grid, ear, dt, enabled, &mut picker, &mut commands, &mut clips, &mut bed_sinks);
+    update_beds(&mut beds, amb, &archives, &state.data.grid, ear, dt, enabled, &mut picker, &mut commands, &mut clips, &mut gains, &alive);
     amb.beds = Some(beds);
     amb.picker = Some(picker);
 }
@@ -407,17 +415,26 @@ fn picker_range(p: &mut crate::assets::dare::Picker, a: f32, b: f32) -> f32 {
 /// A `SoundAmbienceSet` stored in a cell file (Damascus: the wind, the rich / poor quarters, the markets, the crowd
 /// "walla" sets, the Bureau's room …): looping pads and random one-shots. Layout: `[id][class]`, the pad list
 /// (`SoundAmbiencePad` … `SoundInstance` → `SoundDescriptor` `[class][u32 event][u32 SoundBao]`), then the random FX
-/// (`SoundAmbienceRandomFX` 0xAE188AFB: floats at +4, +8, two bytes, floats at +14, +18, the pause range at +22 / +26,
-/// the count at +30, then its descriptors).
+/// (`SoundAmbienceRandomFX` 0xAE188AFB: floats at +4, +8, two bytes, floats at +14, +18, floats at +22 / +26, the count
+/// at +30, then its descriptors).
 #[derive(Clone, Debug)]
 pub struct AmbienceSet {
     pub id: u32,
     pub name: String,
     /// (event, SoundBao resource) per pad.
     pub pads: Vec<(u32, u32)>,
-    /// Per random FX: the pause range (its last two floats, seconds; PORT hypothesis: the wind gusts 20–120, a
-    /// quarter's calls 1–30) and its sounds.
-    pub fx: Vec<((f32, f32), Vec<(u32, u32)>)>,
+    pub fx: Vec<RandomFx>,
+}
+
+/// One random FX of a set. PORT (hypothesis, the DARE ambience code is not traced): +4 / +8 the delay between its
+/// sounds (1 / 9 s in every Damascus set), +22 / +26 how far from the listener a sound is placed (a quarter's calls
+/// 1–30 m, the wind's gusts 20–120 m); one sound of an FX at a time.
+#[derive(Clone, Debug)]
+pub struct RandomFx {
+    pub delay: (f32, f32),
+    pub distance: (f32, f32),
+    /// (event, SoundBao resource)
+    pub sounds: Vec<(u32, u32)>,
 }
 
 pub fn ambience_set(r: &crate::assets::forge::Resource) -> AmbienceSet {
@@ -430,10 +447,12 @@ pub fn ambience_set(r: &crate::assets::forge::Resource) -> AmbienceSet {
     let fx = fx_at.iter().enumerate().map(|(k, &p)| {
         let end = fx_at.get(k + 1).copied().unwrap_or(b.len());
         let f = |o: usize| word(b, p + o).map(f32::from_bits).unwrap_or(0.0);
-        // +4, +8 floats, two bytes, two floats, then the pause range at +22 / +26 and the count at +30
-        let (lo, hi) = (f(22), f(26));
-        let range = if lo.is_finite() && hi.is_finite() && hi >= lo && hi > 0.0 { (lo.max(0.5), hi) } else { (5.0, 30.0) };
-        (range, descriptors.iter().filter(|&&q| q > p && q < end).filter_map(|&q| pair(q)).collect())
+        let range = |lo: f32, hi: f32, fallback: (f32, f32)| {
+            if lo.is_finite() && hi.is_finite() && lo >= 0.0 && hi >= lo && hi < 1000.0 { (lo, hi) } else { fallback }
+        };
+        let delay = range(f(4), f(8), (1.0, 9.0));
+        RandomFx { delay: (delay.0.max(0.5), delay.1.max(0.5)), distance: range(f(22), f(26), (1.0, 30.0)),
+            sounds: descriptors.iter().filter(|&&q| q > p && q < end).filter_map(|&q| pair(q)).collect() }
     }).collect();
     AmbienceSet { id: r.id, name: r.name.clone(), pads, fx }
 }
@@ -456,8 +475,8 @@ struct PlayingSet {
     wanted: bool,
     /// Per pad: its voices' entities and gains.
     pads: Vec<(Entity, f32)>,
-    /// Per random FX: the time to its next sound.
-    timers: Vec<f32>,
+    /// Per random FX: the time to its next sound and the sound playing.
+    timers: Vec<(f32, Option<Entity>)>,
     started: bool,
 }
 
@@ -470,8 +489,7 @@ struct Beds {
 
 fn update_beds(beds: &mut Beds, amb_bank: &mut CityAmbience, archives: &super::archive::Archives, grid: &super::grid::Grid, player: Vec3,
     dt: f32, enabled: bool, picker: &mut crate::assets::dare::Picker, commands: &mut Commands, clips: &mut Assets<crate::sound::PcmClip>,
-    sinks: &mut Query<&mut AudioSink>) {
-    use bevy::audio::AudioSinkPlayback;
+    gains: &mut Query<&mut crate::sound::MixVoice>, alive: &Query<(), With<AudioPlayer<crate::sound::PcmClip>>>) {
     // the sets of the loaded cells under the player (PORT: the game picks them by its sound regions, not traced)
     let at = Vec2::new(player.x, -player.z);
     // (the finest cell under the player that stores sets: the coarse cells also carry the countryside's)
@@ -509,28 +527,36 @@ fn update_beds(beds: &mut Beds, amb_bank: &mut CityAmbience, archives: &super::a
                 for v in amb_bank.bank.resolve(event, &|_| None, picker) {
                     let Some(h) = amb_bank.clip(&v, clips) else { continue };
                     let gain = bevy::audio::Volume::Decibels(v.gain_db).to_linear();
-                    let e = commands.spawn((crate::map_menu::MapEntity, AudioPlayer::<crate::sound::PcmClip>(h),
+                    let e = commands.spawn((crate::map_menu::MapEntity, crate::sound::MixVoice { gain: 0.0, bus: AMBIENCE_BUS }, AudioPlayer::<crate::sound::PcmClip>(h),
                         PlaybackSettings { mode: bevy::audio::PlaybackMode::Loop, volume: bevy::audio::Volume::Linear(0.0), speed: v.speed, ..default() })).id();
                     p.pads.push((e, gain));
                 }
             }
-            for (_, sounds) in &p.set.fx { for &(_, res) in sounds { amb_bank.load(archives, res); } }
-            p.timers = p.set.fx.iter().map(|((lo, hi), _)| lo + (hi - lo) * picker.next01()).collect();
+            for fx in &p.set.fx { for &(_, res) in &fx.sounds { amb_bank.load(archives, res); } }
+            p.timers = p.set.fx.iter().map(|fx| (picker_range(picker, fx.delay.0, fx.delay.1), None)).collect();
         }
         for &(e, gain) in &p.pads {
-            if let Ok(mut s) = sinks.get_mut(e) { s.set_volume(bevy::audio::Volume::Linear(gain * p.level)); }
+            if let Ok(mut g) = gains.get_mut(e) { g.gain = gain * p.level; }
         }
         if !p.wanted { continue; }
-        for (k, ((lo, hi), sounds)) in p.set.fx.iter().enumerate() {
-            p.timers[k] -= dt;
-            if p.timers[k] > 0.0 || sounds.is_empty() { continue; }
-            p.timers[k] = lo + (hi - lo) * picker.next01();
-            let (event, _) = sounds[((picker.next01() * sounds.len() as f32) as usize).min(sounds.len() - 1)];
-            for v in amb_bank.bank.resolve(event, &|_| None, picker) {
+        for (fx, (timer, playing)) in p.set.fx.iter().zip(&mut p.timers) {
+            // one sound of an FX at a time: the delay runs once the last one has ended
+            if playing.is_some_and(|e| alive.contains(e)) { continue; }
+            *playing = None;
+            *timer -= dt;
+            if *timer > 0.0 || fx.sounds.is_empty() || alive.iter().count() >= MAX_VOICES { continue; }
+            *timer = picker_range(picker, fx.delay.0, fx.delay.1);
+            let (event, _) = fx.sounds[((picker.next01() * fx.sounds.len() as f32) as usize).min(fx.sounds.len() - 1)];
+            // somewhere around the listener at the FX's distance, faded by the event's own distances
+            let d = picker_range(picker, fx.distance.0, fx.distance.1);
+            let falloff = falloff(amb_bank.bank.event_distances(event).unwrap_or((2.0, 10.0)), d);
+            if falloff <= 0.0 { continue; }
+            let angle = picker_range(picker, 0.0, std::f32::consts::TAU);
+            let at = player + Vec3::new(angle.cos() * d, picker_range(picker, 0.0, 4.0), angle.sin() * d);
+            if let Some(v) = amb_bank.bank.resolve(event, &|_| None, picker).into_iter().next() {
                 let Some(h) = amb_bank.clip(&v, clips) else { continue };
-                let gain = bevy::audio::Volume::Decibels(v.gain_db).to_linear() * p.level;
-                commands.spawn((crate::map_menu::MapEntity, AudioPlayer::<crate::sound::PcmClip>(h),
-                    PlaybackSettings { mode: bevy::audio::PlaybackMode::Despawn, volume: bevy::audio::Volume::Linear(gain), speed: v.speed, ..default() }));
+                let gain = bevy::audio::Volume::Decibels(v.gain_db).to_linear() * falloff * p.level;
+                *playing = Some(start_voice(commands, h, &v, false, at, gain));
             }
         }
     }
@@ -557,4 +583,30 @@ mod tests {
         assert_eq!(flags, [0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
         assert_eq!((intensity, near, far), (1.0, 0.0, 9.0));
     }
+}
+
+/// `AC_SND_LOG=<seconds>`: log the city's live audio players at that interval (diagnostic).
+pub fn log_audio(time: Res<Time>, mut last: Local<f32>, players: Query<(Entity, Option<&bevy::audio::SpatialAudioSink>, Option<&AudioSink>), With<AudioPlayer<crate::sound::PcmClip>>>,
+    city: Query<&crate::sound::MixVoice>, kinds: Query<(&crate::sound::MixVoice, &PlaybackSettings)>,
+    amb: Res<CityAmbience>) {
+    let Some(every) = std::env::var("AC_SND_LOG").ok().and_then(|v| v.parse::<f32>().ok()) else { return };
+    if time.elapsed_secs() - *last < every { return; }
+    *last = time.elapsed_secs();
+    use bevy::audio::AudioSinkPlayback;
+    let (n, spatial, flat) = players.iter().fold((0, 0, 0), |(n, s, f), (_, a, b)| (n + 1, s + a.is_some() as usize, f + b.is_some() as usize));
+    let gain: f32 = players.iter().map(|(_, a, b)| a.map(|s| s.volume().to_linear()).or(b.map(|s| s.volume().to_linear())).unwrap_or(0.0)).sum();
+    let loudest = players.iter().map(|(_, a, b)| a.map(|s| s.volume().to_linear()).or(b.map(|s| s.volume().to_linear())).unwrap_or(0.0)).fold(0.0f32, f32::max);
+    let city_gain: f32 = players.iter().filter(|(e, ..)| city.get(*e).is_ok_and(|v| v.bus < 1.0)).map(|(_, a, b)| a.map(|s| s.volume().to_linear()).or(b.map(|s| s.volume().to_linear())).unwrap_or(0.0)).sum();
+    info!("audio gain sum {gain:.2} (city {city_gain:.2}), loudest {loudest:.2}");
+    let mut by = [0.0f32; 4];
+    for (v, p) in &kinds {
+        let k = if v.bus >= 1.0 { 3 } else if !p.spatial { 0 } else if matches!(p.mode, bevy::audio::PlaybackMode::Loop) { 1 } else { 2 };
+        by[k] += v.gain * v.bus;
+    }
+    info!("audio wanted: pads {:.2}, emitter loops {:.2}, one-shots {:.2}, player {:.2}", by[0], by[1], by[2], by[3]);
+    let (emitters, playing) = amb.counts();
+    let voices: usize = amb.sounds.iter().filter_map(|s| s.voices.as_ref()).map(|v| v.iter().filter(|x| x.0.is_some()).count()).sum();
+    let pads: usize = amb.beds.iter().flat_map(|b| b.playing.iter()).map(|p| p.pads.len()).sum();
+    info!("audio t={:.0}: {n} players ({spatial} spatial sinks, {flat} flat sinks), emitters {emitters} ({playing} in range, {voices} voice slots), bed pads {pads}, beds {:?}",
+        time.elapsed_secs(), amb.beds());
 }
