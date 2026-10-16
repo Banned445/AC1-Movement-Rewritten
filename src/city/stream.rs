@@ -111,7 +111,8 @@ struct FadeIn {
 enum Cell {
     Unloaded,
     Loading,
-    Loaded { objects: Vec<Obj>, materials: Vec<u32> },
+    /// `extras`: the cell's presentation entities (lights), despawned with the cell.
+    Loaded { objects: Vec<Obj>, materials: Vec<u32>, extras: Vec<Entity> },
 }
 
 struct GpuMaterial {
@@ -138,6 +139,8 @@ pub struct CityStats {
     pub physics_edges: usize,
     pub materials: usize,
     pub textures: usize,
+    /// Local lights of the loaded cells.
+    pub lights: usize,
     pub errors: usize,
     /// Last frame's streaming time per phase (ms): integrate, plan, LOD, physics, refresh.
     pub phase_ms: [f32; 5],
@@ -167,6 +170,13 @@ pub struct CityState {
     /// renderer +94 is set, which needs `g_LODBlendPassEnabled` (0x1A25846) — 0 in the running game (read live in
     /// Damascus, 2026-10-09; the `LODBlend` INI value, GraphicsSettings +0x52, is loaded but never read).
     pub lod_fade: bool,
+    /// The particle effects of newly loaded cells and the cells unloaded since, for `presentation::update_effects`.
+    pub effects_out: Vec<(usize, super::presentation::CityEffect)>,
+    pub effects_unloaded: Vec<usize>,
+    /// The same for the ambient sound emitters (`presentation::update_ambience`).
+    pub sounds_out: Vec<(usize, super::presentation::CitySound)>,
+    pub sounds_unloaded: Vec<usize>,
+    pub ambience_out: Vec<(usize, Vec<super::presentation::AmbienceSet>)>,
 }
 
 #[derive(Resource, Default)]
@@ -197,7 +207,8 @@ impl CityState {
         Self { loader: Loader::new(data.clone(), threads), data, cells: (0..n).map(|_| Cell::Unloaded).collect(), has_content,
             materials: HashMap::new(), textures: HashMap::new(), fake_spans: HashMap::new(), edge_free: Vec::new(),
             pilotis_dirty: true, haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None,
-            lod_fade: std::env::var("AC_LOD_FADE").is_ok_and(|v| v == "1") }
+            lod_fade: std::env::var("AC_LOD_FADE").is_ok_and(|v| v == "1"), effects_out: Vec::new(), effects_unloaded: Vec::new(),
+            sounds_out: Vec::new(), sounds_unloaded: Vec::new(), ambience_out: Vec::new() }
     }
 
     /// The cells the streamer wants with the player at `focus` (Bevy space), in request order.
@@ -312,7 +323,11 @@ impl CityState {
             used.push(*id);
         }
         let objects = d.objects.into_iter().map(|o| Obj { o, shown: None, entities: Vec::new(), fade: None, physics: None }).collect();
-        self.cells[d.cell] = Cell::Loaded { objects, materials: used };
+        let extras = super::presentation::spawn_lights(&d.lights, ctx.commands);
+        self.effects_out.extend(d.effects.into_iter().map(|e| (d.cell, e)));
+        self.sounds_out.extend(d.sounds.into_iter().map(|e| (d.cell, e)));
+        if !d.ambience.is_empty() { self.ambience_out.push((d.cell, d.ambience)); }
+        self.cells[d.cell] = Cell::Loaded { objects, materials: used, extras };
         for &e in self.fake_spans.get(&d.cell).into_iter().flatten() { ctx.commands.entity(e).insert(Visibility::Hidden); }
     }
 
@@ -359,7 +374,10 @@ impl CityState {
     }
 
     fn unload(&mut self, c: usize, ctx: &mut Ctx) {
-        let Cell::Loaded { objects, materials } = std::mem::replace(&mut self.cells[c], Cell::Unloaded) else { return };
+        let Cell::Loaded { objects, materials, extras } = std::mem::replace(&mut self.cells[c], Cell::Unloaded) else { return };
+        for e in extras { ctx.commands.entity(e).despawn(); }
+        self.effects_unloaded.push(c);
+        self.sounds_unloaded.push(c);
         for mut o in objects {
             for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
             for (e, _) in o.fade.take().into_iter().flat_map(|f| f.sections) { ctx.commands.entity(e).despawn(); }
@@ -489,7 +507,8 @@ impl CityState {
         for cell in &self.cells {
             match cell {
                 Cell::Loading => s.loading += 1,
-                Cell::Loaded { objects, .. } => {
+                Cell::Loaded { objects, extras, .. } => {
+                    s.lights += extras.len();
                     s.loaded += 1;
                     s.objects += objects.len();
                     for o in objects {
@@ -605,7 +624,7 @@ fn fade_material(materials: &mut HashMap<u32, GpuMaterial>, assets: &mut Assets<
     slot.clone()
 }
 
-fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: Option<&[[u8; 4]]>, indices: &[u32]) -> Mesh {
+pub(crate) fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: Option<&[[u8; 4]]>, indices: &[u32]) -> Mesh {
     let mut map = vec![u32::MAX; m.positions.len()];
     let (mut pos, mut nor, mut tan, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::with_capacity(indices.len()));
     for &i in indices {
@@ -630,7 +649,7 @@ fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: Option<&[[u8
     mesh
 }
 
-fn image(t: &TextureData, _linear: bool) -> Image {
+pub(crate) fn image(t: &TextureData, _linear: bool) -> Image {
     let mut img = Image::new_uninit(Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 }, TextureDimension::D2, t.format, RenderAssetUsages::RENDER_WORLD);
     img.texture_descriptor.mip_level_count = t.mips;
     img.data = Some(t.data.clone());

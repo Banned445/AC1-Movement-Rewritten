@@ -1,9 +1,11 @@
 //! Whole-world import with the game's streaming grid (RE/17): Damascus. Reads the user's install at runtime.
+pub mod ambiance;
 pub mod archive;
 pub mod decode;
 pub mod fakes;
 pub mod grid;
 pub mod material;
+pub mod presentation;
 pub mod shapes;
 pub mod stream;
 #[cfg(test)]
@@ -98,9 +100,22 @@ pub fn spawn_name() -> String {
     }
 }
 
+/// PORT: `AC_CITY_AT="x y z yaw"`, a start in game coordinates (yaw in degrees, the lab's `tp`: atan2 of the game
+/// forward's y and x), to compare a spot with the running game. Bevy feet and heading.
+fn debug_start() -> Option<(Vec3, f32)> {
+    let v: Vec<f32> = std::env::var("AC_CITY_AT").ok()?.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    if v.len() != 4 { return None; }
+    let yaw = v[3].to_radians();
+    let f = decode::to_bevy(Vec3::new(yaw.cos(), yaw.sin(), 0.0));
+    Some((decode::to_bevy(Vec3::new(v[0], v[1], v[2])), f.x.atan2(f.z)))
+}
+
 pub fn prepare(game: &Path, world: &CityWorld, bc: bool, spawn: &str) -> Result<Prepared, String> {
     let opened = open(game, world, bc)?;
-    let (feet, heading) = spawner(&opened.globals, spawn).ok_or_else(|| format!("{} has no {spawn}", world.world))?;
+    let (feet, heading) = match debug_start() {
+        Some(at) => at,
+        None => spawner(&opened.globals, spawn).ok_or_else(|| format!("{} has no {spawn}", world.world))?,
+    };
     let fakes = fakes::parse(&opened.data, &opened.globals)?;
     // every cell within the load radius, decoded on all cores
     let wanted = stream::wanted_cells(&opened.data, &stream::content_mask(&opened.data), feet, None);
@@ -140,13 +155,20 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
         body.feet = p.spawn; body.heading = p.heading; body.grounded = true; body.velocity = Vec3::ZERO; body.proxy.manifold.clear();
         transform.translation = p.spawn;
     }
-    // PORT: a fixed sun, sky colour and haze stand in for WorldAmbiance / LayeredSky (not decoded).
-    commands.spawn((crate::map_menu::MapEntity, DirectionalLight { illuminance: 11_000.0, shadow_maps_enabled: true, ..default() },
-        bevy::light::CascadeShadowConfigBuilder { num_cascades: 3, first_cascade_far_bound: 12.0, maximum_distance: 120.0, ..default() }.build(),
-        Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.9, -0.85, 0.0))));
-    for cam in &cams {
-        commands.entity(cam).insert(DistanceFog { color: Color::srgba(0.80, 0.78, 0.70, 1.0),
-            falloff: FogFalloff::Linear { start: 220.0, end: 1100.0 }, ..default() });
+    // the World's ambiance: the sun, the ambient cube, the fog, the post effects' grading and the sky (RE/17 §11)
+    let cams: Vec<Entity> = cams.iter().collect();
+    match ambiance::parse(&p.world.globals) {
+        Ok(a) => ambiance::spawn_scene(&a, &p.world.data, &mut commands, &mut meshes, &mut materials, &mut images, &cams),
+        Err(e) => {
+            warn!("Damascus ambiance: {e}; a fixed sun and haze instead");
+            commands.spawn((crate::map_menu::MapEntity, DirectionalLight { illuminance: 11_000.0, shadow_maps_enabled: true, ..default() },
+                bevy::light::CascadeShadowConfigBuilder { num_cascades: 3, first_cascade_far_bound: 12.0, maximum_distance: 120.0, ..default() }.build(),
+                Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.9, -0.85, 0.0))));
+            for &cam in &cams {
+                commands.entity(cam).insert(DistanceFog { color: Color::srgba(0.80, 0.78, 0.70, 1.0),
+                    falloff: FogFalloff::Linear { start: 220.0, end: 1100.0 }, ..default() });
+            }
+        }
     }
 }
 
@@ -154,7 +176,11 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
 pub fn leave(world: &mut World) {
     if world.get_resource_mut::<stream::City>().is_some_and(|mut c| c.0.take().is_some()) {
         let cams: Vec<Entity> = world.query_filtered::<Entity, With<crate::camera::MainCamera>>().iter(world).collect();
-        for c in cams { world.entity_mut(c).remove::<DistanceFog>(); }
+        for c in cams {
+            world.entity_mut(c).remove::<(DistanceFog, bevy::light::EnvironmentMapLight, ambiance::PostGrade)>()
+                .insert((bevy::camera::Exposure::default(), bevy::core_pipeline::tonemapping::Tonemapping::default()));
+        }
+        world.insert_resource(ClearColor(Color::srgb(0.62, 0.72, 0.82)));
     }
 }
 
@@ -162,9 +188,14 @@ pub struct CityPlugin;
 
 impl Plugin for CityPlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "grade.wgsl");
+        app.add_plugins(bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin::<ambiance::PostGrade>::default());
         app.init_resource::<stream::City>()
+            .init_resource::<presentation::CityEffects>()
+            .init_resource::<presentation::CityAmbience>()
             .add_systems(Startup, spawn_overlay)
-            .add_systems(Update, (update_city.before(crate::player::PlayerSet), hold_player.after(crate::player::PlayerSet), update_overlay));
+            .add_systems(Update, (update_city.before(crate::player::PlayerSet), hold_player.after(crate::player::PlayerSet), update_overlay))
+            .add_systems(PostUpdate, (ambiance::follow_sky, presentation::update_effects, presentation::update_ambience).after(bevy::transform::TransformSystems::Propagate));
     }
 }
 
@@ -220,17 +251,26 @@ struct Overlay;
 
 fn spawn_overlay(mut commands: Commands) {
     commands.spawn((Overlay, Text::new(""), TextFont { font_size: FontSize::Px(14.0), ..default() }, TextColor(Color::srgb(1.0, 1.0, 0.85)),
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), Visibility::Hidden,
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        // AC_CITY_OVERLAY=1: shown from the start (screenshots)
+        if std::env::var("AC_CITY_OVERLAY").is_ok_and(|v| v == "1") { Visibility::Inherited } else { Visibility::Hidden },
         Node { position_type: PositionType::Absolute, bottom: Val::Px(10.0), right: Val::Px(12.0), padding: UiRect::all(Val::Px(6.0)), ..default() }));
 }
 
 /// F3: streaming counters.
-fn update_overlay(keys: Res<ButtonInput<KeyCode>>, city: Res<stream::City>, time: Res<Time>, mut q: Query<(&mut Text, &mut Visibility), With<Overlay>>) {
+fn update_overlay(keys: Res<ButtonInput<KeyCode>>, city: Res<stream::City>, fx: Res<presentation::CityEffects>,
+    amb: Res<presentation::CityAmbience>, time: Res<Time>,
+    mut q: Query<(&mut Text, &mut Visibility), With<Overlay>>) {
     let Ok((mut text, mut vis)) = q.single_mut() else { return };
     if keys.just_pressed(KeyCode::F3) { *vis = if *vis == Visibility::Hidden { Visibility::Inherited } else { Visibility::Hidden }; }
     let Some(s) = city.0.as_ref().map(|c| &c.stats) else { text.0 = "no streamed world".into(); return };
-    text.0 = format!("city: {} cells loaded, {} loading | {} objects, {} drawn\nphysics: {} objects, {} triangles, {} edges\nGPU: {} materials, {} textures | {:.1} ms frame{}",
-        s.loaded, s.loading, s.objects, s.drawn, s.physics_objects, s.physics_triangles, s.physics_edges, s.materials, s.textures,
+    let (effects, running) = fx.counts();
+    let (sounds, playing) = amb.counts();
+    let beds = amb.beds().join(", ");
+    text.0 = format!("city: {} cells loaded, {} loading | {} objects, {} drawn\nphysics: {} objects, {} triangles, {} edges\n\
+        scene: {} lights, {} effects ({} running), {} sound emitters ({} playing)\nambience: {}\nGPU: {} materials, {} textures | {:.1} ms frame{}",
+        s.loaded, s.loading, s.objects, s.drawn, s.physics_objects, s.physics_triangles, s.physics_edges, s.lights, effects, running, sounds, playing, beds,
+        s.materials, s.textures,
         time.delta_secs() * 1000.0, if s.errors > 0 { format!(" | {} errors", s.errors) } else { String::new() });
 }
 

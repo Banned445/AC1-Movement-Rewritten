@@ -1223,12 +1223,16 @@ fn probe_damascus_import_census() {
     let w = super::open(&game, &super::DAMASCUS, false).unwrap();
     let mut skipped = std::collections::BTreeMap::<String, usize>::new();
     let (mut objects, mut tris, mut edges, mut cells, mut errors) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut lights, mut effects, mut emitters) = (0usize, 0usize, 0usize);
     for cell in 0..w.data.grid.cells.len() {
         if w.data.grid.cells[cell].datablock == 0 { continue; }
         match super::decode::decode_cell(&w.data, cell) {
             Ok(c) => {
                 cells += 1;
                 objects += c.objects.len();
+                lights += c.lights.iter().filter(|l| l.world).count();
+                effects += c.effects.len();
+                emitters += c.effects.iter().map(|e| e.system.emitters.len()).sum::<usize>();
                 tris += c.objects.iter().map(|o| o.collision.len()).sum::<usize>();
                 edges += c.objects.iter().map(|o| o.edges.len()).sum::<usize>();
                 for (k, v) in c.stats.skipped { *skipped.entry(k).or_default() += v; }
@@ -1236,7 +1240,7 @@ fn probe_damascus_import_census() {
             Err(e) => { errors += 1; if errors < 5 { eprintln!("CENSUS cell {cell}: {e}"); } }
         }
     }
-    eprintln!("CENSUS {cells} cells, {errors} errors, {objects} objects, {tris} tris, {edges} edges");
+    eprintln!("CENSUS {cells} cells, {errors} errors, {objects} objects, {tris} tris, {edges} edges, {lights} world lights, {effects} effects ({emitters} emitters)");
     for (k, v) in skipped { eprintln!("CENSUS skipped {v:6} {k}"); }
 }
 
@@ -1259,4 +1263,187 @@ fn damascus_mission_datablocks_load_as_always_wanted_cells() {
     assert!(d.stats.skipped.get("spawn template").copied().unwrap_or(0) > 0);
     assert!(d.objects.iter().all(|o| o.transform.w_axis.truncate().length() > 1e-3), "no template at the origin");
     assert!(super::open_with(&game, &super::DAMASCUS, false, "").unwrap().data.grid.cells.len() == 1365);
+}
+
+/// Component census (diagnostic): which reflected classes (`AC_CLASSES` = a tsv of hash / name) occur in the city's
+/// entities and the World file, counted per entity.
+#[test]
+#[ignore = "diagnostic; decodes every Damascus cell"]
+fn probe_damascus_class_census() {
+    let Ok(path) = std::env::var("AC_CLASSES") else { return };
+    let names: std::collections::HashMap<u32, String> = std::fs::read_to_string(path).unwrap().lines().filter_map(|l| {
+        let (h, n) = l.split_once('\t')?; Some((u32::from_str_radix(h, 16).ok()?, n.to_string()))
+    }).collect();
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let count = |b: &[u8], acc: &mut std::collections::BTreeMap<String, usize>| {
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..b.len().saturating_sub(3) {
+            let v = u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+            if let Some(n) = names.get(&v) { if seen.insert(v) { *acc.entry(n.clone()).or_default() += 1; } }
+        }
+    };
+    let mut cells = std::collections::BTreeMap::new();
+    for cell in 0..w.data.grid.cells.len() {
+        let c = &w.data.grid.cells[cell];
+        if c.datablock == 0 { continue; }
+        let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+        let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+        let Some(entry) = w.data.archives.find(a, &file) else { continue };
+        let Ok(res) = w.data.archives.file(a, entry) else { continue };
+        for r in res.values() { for body in super::decode::bodies(r) { count(body, &mut cells); } }
+    }
+    let mut world = std::collections::BTreeMap::new();
+    for r in &w.globals { count(&r.payload, &mut world); *world.entry(format!("[resource] {}", names.get(&r.class_hash).cloned().unwrap_or(format!("{:08x}", r.class_hash)))).or_default() += 1; }
+    let mut v: Vec<_> = cells.into_iter().collect(); v.sort_by(|a, b| b.1.cmp(&a.1));
+    for (n, c) in v { eprintln!("CLASS cells {c:7} {n}"); }
+    let mut v: Vec<_> = world.into_iter().collect(); v.sort_by(|a, b| b.1.cmp(&a.1));
+    for (n, c) in v { eprintln!("CLASS world {c:7} {n}"); }
+}
+/// Dumps cell entity bodies holding a class (`AC_DUMP_CLASS`) to `AC_DUMP_DIR`, at most `AC_DUMP_N` (diagnostic).
+#[test]
+#[ignore = "diagnostic"]
+fn probe_dump_cell_bodies() {
+    let (Ok(class), Ok(dir)) = (std::env::var("AC_DUMP_CLASS"), std::env::var("AC_DUMP_DIR")) else { return };
+    let limit: usize = std::env::var("AC_DUMP_N").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let mut n = 0;
+    for cell in 0..w.data.grid.cells.len() {
+        let c = &w.data.grid.cells[cell];
+        if c.datablock == 0 { continue; }
+        let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+        let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+        let Some(entry) = w.data.archives.find(a, &file) else { continue };
+        let Ok(res) = w.data.archives.file(a, entry) else { continue };
+        for r in res.values() {
+            if let Ok(rc) = std::env::var("AC_DUMP_RES") {
+                if r.class_hash == crate::assets::forge::crc32(&rc) && n < limit {
+                    let p = format!("{dir}/{rc}_{:08x}.bin", r.id);
+                    std::fs::write(&p, &r.payload).unwrap();
+                    eprintln!("RES {} {:08x} {} bytes", r.name, r.id, r.payload.len());
+                    n += 1;
+                }
+                continue;
+            }
+            for body in super::decode::bodies(r) {
+                let at = super::decode::markers(body, &class);
+                if at.is_empty() || n >= limit { continue; }
+                let p = format!("{dir}/{class}_{n:03}.bin");
+                std::fs::write(&p, body).unwrap();
+                eprintln!("DUMP {} {:?} at {at:?} {} bytes -> {p}", r.name, super::decode::placement(body).map(|m| m.w_axis.truncate()), body.len());
+                n += 1;
+            }
+        }
+    }
+}
+
+/// Lists the placed effects (`AC_FX_NEAR="x y"`, game coordinates: the 15 nearest) with their emitters (diagnostic).
+#[test]
+#[ignore = "diagnostic"]
+fn probe_damascus_effects() {
+    let Ok(near) = std::env::var("AC_FX_NEAR") else { return };
+    let v: Vec<f32> = near.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    let at = Vec3::new(v[0], v[1], 0.0);
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let mut all = Vec::new();
+    for cell in 0..w.data.grid.cells.len() {
+        let Ok(c) = super::decode::decode_cell(&w.data, cell) else { continue };
+        for e in c.effects { all.push(e); }
+    }
+    all.sort_by(|a, b| a.frame.t.truncate().distance(at.truncate()).total_cmp(&b.frame.t.truncate().distance(at.truncate())));
+    for e in all.iter().take(15) {
+        let em: Vec<String> = e.system.emitters.iter().map(|m| format!("{:?}/{:?} rate {} max {} tex {:08x}", m.shape, m.blend, m.rate, m.max_count, m.texture)).collect();
+        eprintln!("FX at {:?} scale {:.2}: {}", e.frame.t, e.scale, em.join(" | "));
+    }
+}
+/// event's 3D fields and what it plays (diagnostic).
+#[test]
+#[ignore = "diagnostic"]
+fn probe_damascus_emitters() {
+    use crate::assets::dare::{bao_object, load_sound_bank, Picker};
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let mut counts: std::collections::HashMap<(u32, u32, usize), (usize, String)> = Default::default();
+    for cell in 0..w.data.grid.cells.len() {
+        let c = &w.data.grid.cells[cell];
+        let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+        let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+        let Some(entry) = w.data.archives.find(a, &file) else { continue };
+        let Ok(res) = w.data.archives.file(a, entry) else { continue };
+        for r in res.values() {
+            for body in super::decode::bodies(r) {
+                let descs = super::decode::markers(body, "SoundDescriptor");
+                for p in super::decode::markers(body, "Ambient3dSoundComponent") {
+                    let mine: Vec<usize> = descs.iter().copied().filter(|&q| q > p).collect();
+                    let Some(&q) = mine.first() else { continue };
+                    let rd = |o: usize| body.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+                    let e = counts.entry((rd(q + 4), rd(q + 8), mine.len())).or_insert((0, r.name.clone()));
+                    e.0 += 1;
+                }
+            }
+        }
+    }
+    let mut v: Vec<_> = counts.into_iter().collect();
+    v.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    let mut bank = load_sound_bank(&game).unwrap();
+    let mut pick = Picker::new(1);
+    eprintln!("EMIT {} distinct", v.len());
+    for ((event, resource, n), (count, name)) in v.iter().take(25) {
+        let mut todo = vec![*resource];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = todo.pop() {
+            if !seen.insert(id) { continue; }
+            let Ok(r) = w.data.archives.get(id) else { continue };
+            if r.class_hash != crate::assets::forge::crc32("SoundBao") { continue; }
+            bank.insert(r.id, &r.name, &r.payload);
+            let wrap = r.payload.len() - bao_object(&r.payload).map_or(0, |o| o.len());
+            todo.extend((0..wrap.saturating_sub(3)).filter_map(|p| Some(u32::from_le_bytes(r.payload[p..p + 4].try_into().ok()?))).filter(|d| w.data.archives.contains(*d)));
+        }
+        let o = bank.object(*event).unwrap_or(&[]);
+        let f = |k: usize| o.get(k..k + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).unwrap_or(f32::NAN);
+        let sub = o.get(8..12).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(99);
+        let sound = o.get(12..16).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+        let st = bank.object(sound).and_then(|s| s.get(8..12)).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+        let voices = bank.resolve(*event, &|_| None, &mut pick);
+        if st == Some(2) && std::env::var("AC_SND_DUMP").is_ok() {
+            let so = bank.object(sound).unwrap();
+            for (k, ch) in so.chunks(16).enumerate().take(24) { eprintln!("EMIT2 {sound:08x} +{:03x}: {:02x?}", k * 16, ch); }
+        }
+        eprintln!("EMIT {count:4}x {event:08x} ({n} desc) on {name}: event type {sub}, sound {sound:08x} type {st:?}, 3d [{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}], voices {:?}",
+            f(0x20), f(0x24), f(0x28), f(0x2C), f(0x30), f(0x34), voices.iter().map(|v| (v.res, v.channels, v.rate, v.frames, v.gain_db)).collect::<Vec<_>>());
+    }
+}
+
+/// The presentation around the Bureau (RE/17 §11): the lantern lights, the placed particle systems, the ambient emitters
+/// (the courtyard fountain: event 0x10990006 through its SoundBao 0x5D5784A5 to a looping IMA resource, full at 2 m,
+/// silent at 15 m) and the Bureau's ambience sets.
+#[test]
+fn damascus_bureau_presentation() {
+    let Some(game) = crate::assets::find_game_dir() else { return };
+    if !game.join(super::DAMASCUS.archive).is_file() { return; }
+    let p = super::prepare(&game, &super::DAMASCUS, false, "PlayerSpawner_DEBUG_Bureau").unwrap();
+    let lights: Vec<_> = p.cells.iter().flat_map(|c| c.lights.iter()).filter(|l| l.world).collect();
+    assert!(!lights.is_empty() && lights.iter().all(|l| l.far > 0.0 && l.intensity > 0.0), "{} world lights", lights.len());
+    let effects: usize = p.cells.iter().map(|c| c.effects.len()).sum();
+    assert!(effects > 50, "{effects} effects");
+    assert!(p.cells.iter().flat_map(|c| c.effects.iter()).all(|e| !e.system.emitters.is_empty()));
+    let sounds: Vec<_> = p.cells.iter().flat_map(|c| c.sounds.iter()).collect();
+    assert!(sounds.len() > 100, "{} emitters", sounds.len());
+    let fountain = sounds.iter().find(|s| s.event == 0x1099_0006).expect("a fountain emitter");
+    assert_eq!(fountain.resource, 0x5D57_84A5);
+    let mut amb = super::presentation::CityAmbience::default();
+    amb.load_for_test(&p.world.data.archives, fountain.resource);
+    let (bank, range) = amb.bank_for_test(fountain.event);
+    assert_eq!(range, Some((2.0, 15.0)));
+    let v = bank.resolve(fountain.event, &|_| None, &mut crate::assets::dare::Picker::new(1));
+    assert_eq!(v.len(), 1);
+    assert_eq!((v[0].channels, v[0].rate, v[0].frames), (1, 32000, 0), "a loop: no stored frame count");
+    let pcm = crate::assets::dare::decode_ima(bank.object(v[0].res).unwrap(), 1, 0).unwrap();
+    assert!(pcm.len() > 32000 * 5, "{} samples", pcm.len());
+    let sets: Vec<&str> = p.cells.iter().flat_map(|c| c.ambience.iter().map(|s| s.name.as_str())).collect();
+    assert!(sets.contains(&"A_City_Bureau_Main_Room"), "{sets:?}");
+    let fx: Vec<_> = p.cells.iter().flat_map(|c| c.ambience.iter()).flat_map(|s| s.fx.iter()).collect();
+    assert!(!fx.is_empty() && fx.iter().all(|((lo, hi), _)| *lo > 0.0 && hi >= lo && *hi <= 600.0), "{fx:?}");
 }

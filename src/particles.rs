@@ -379,7 +379,7 @@ struct FxInstance {
 pub struct ContactFx {
     data: Option<Arc<ContactFxData>>,
     loading: Option<Arc<Mutex<Option<Result<ContactFxData, String>>>>>,
-    hash: SeedHash,
+    pub(crate) hash: SeedHash,
     rng: Lcg,
     active: Vec<FxInstance>,
     images: HashMap<u32, Handle<Image>>,
@@ -602,7 +602,7 @@ fn material_for(fx: &mut ContactFx, data: &ContactFxData, e: &EmitterDef, images
 /// the particle's rotation, the particle colour, UVs (0, 1) (0, 0) (1, 0) (1, 1) with the flip bits 19 / 20.
 /// PORT (hypothesis): the billboard and the rotation are done here; the game's vertex shader (not decoded) turns the
 /// corner offsets it is given. Motion stretch (+80 bit 27) and texture frames are not drawn (no contact FX uses them).
-fn build_quads(mesh: &mut Mesh, sim: &EmitterSim, sys: &ParticleSystemDef, e: &EmitterDef, right: Vec3, up: Vec3) {
+pub(crate) fn build_quads(mesh: &mut Mesh, sim: &EmitterSim, sys: &ParticleSystemDef, e: &EmitterDef, right: Vec3, up: Vec3) {
     let n = sim.particles.len();
     let mut pos = Vec::with_capacity(4 * n);
     let mut col = Vec::with_capacity(4 * n);

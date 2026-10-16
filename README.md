@@ -84,8 +84,11 @@ vegetation are absent, and materials are not exact.
 props, vegetation, collision and the climbable edges. It streams like the game does: the city's grid cells load
 around you on background threads, objects switch between their level-of-detail meshes with distance, and the
 merged low-detail "fake" meshes the game ships draw the rest of the city on the horizon. You start at the north
-gate (the arrival from the Kingdom). NPCs, crowds, sounds, missions and particles are not included, the lighting is a
-fixed sun and haze, and materials use a standard PBR shader rather than the game's.
+gate (the arrival from the Kingdom). The city's mood comes from the World file too: the sun, the ambient light, the
+distance fog, the sky and the colour grading of the game's post effects, plus the lanterns' lights, the fires, smoke
+and other particle systems placed around the city, the ambient sounds of fountains, trees, kiosks and braziers, and the
+quarters' ambience (wind, district beds and their random calls). NPCs, crowds and missions are not included, and
+materials use a standard PBR shader rather than the game's.
 
 The game loads extra mission and memory-block DataBlocks depending on story progress (for example the props of an
 opened assassination). The port loads the city grid alone unless `AC_CITY_DATABLOCKS` names some of them; a save in
@@ -139,6 +142,9 @@ Set these environment variables before `cargo run --release`:
 | `AC_SCREENSHOT=<file.png>` | Saves a screenshot and exits. `AC_SCREENSHOT_AT=<seconds>` sets when (default 3) |
 | `AC_GHOST=1` | Turns Ghost mode on after one second |
 | `AC_CITY_TOUR=<m/s>` | Flies across Damascus at that speed, to stress the streaming |
+| `AC_CITY_AT="x y z yaw"` | Starts Damascus at a game position (yaw in degrees), to compare a spot with the game |
+| `AC_CITY_OVERLAY=1` | Shows the F3 city counters from the start |
+| `AC_NO_SOUND=1` | Silences the sounds |
 | `AC_NO_MODEL=1` | Runs without Altaïr's model, with the capsule |
 
 ## Tests

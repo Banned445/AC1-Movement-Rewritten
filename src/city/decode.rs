@@ -71,6 +71,12 @@ pub struct DecodedCell {
     pub materials: Vec<(u32, Arc<MaterialData>)>,
     /// Textures the cell needs that were not on the GPU when it was decoded.
     pub textures: Vec<(u32, bool, Arc<TextureData>)>,
+    /// The cell's local lights and particle effects (`presentation`).
+    pub lights: Vec<super::presentation::CityLight>,
+    pub effects: Vec<super::presentation::CityEffect>,
+    pub sounds: Vec<super::presentation::CitySound>,
+    /// The cell file's ambience sets.
+    pub ambience: Vec<super::presentation::AmbienceSet>,
     pub stats: CellStats,
 }
 
@@ -184,9 +190,11 @@ pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> 
 /// The entities of one stored file (a grid cell or a mission DataBlock) as the streamer's objects; `cell` only labels
 /// the result.
 pub fn decode_file(data: &CityData, cell: usize, a: usize, file: &str) -> Result<DecodedCell, String> {
-    let mut out = DecodedCell { cell, objects: Vec::new(), materials: Vec::new(), textures: Vec::new(), stats: CellStats::default() };
+    let mut out = DecodedCell { cell, objects: Vec::new(), materials: Vec::new(), textures: Vec::new(), lights: Vec::new(), effects: Vec::new(), sounds: Vec::new(), ambience: Vec::new(), stats: CellStats::default() };
+    let mut systems = HashMap::new();
     let entry = data.archives.find(a, file).ok_or("cell file vanished")?;
     let resources = data.archives.file(a, entry)?;
+    out.ambience = super::presentation::cell_ambience(&resources);
     // Keep the archive order (TOC order) so object order, and with it slot order, is deterministic.
     let mut list: Vec<&Arc<Resource>> = resources.values().filter(|r| r.class_hash == crc32("Entity") || r.class_hash == crc32("EntityGroup")).collect();
     list.sort_by_key(|r| r.id);
@@ -209,6 +217,18 @@ pub fn decode_file(data: &CityData, cell: usize, a: usize, file: &str) -> Result
             if !markers(body, "BlendPosClip").is_empty() {
                 *out.stats.skipped.entry("scene-moved".into()).or_default() += 1;
                 continue;
+            }
+            if let Ok(m) = placement(body) {
+                match super::presentation::body_effect(data, body, m, &mut systems) {
+                    Some(Ok(e)) => out.effects.push(e),
+                    Some(Err(e)) => { *out.stats.skipped.entry(e).or_default() += 1; }
+                    None => {}
+                }
+                let at = TO_BEVY.transform_point3(m.w_axis.truncate());
+                out.sounds.extend(super::presentation::body_sounds(body, at));
+                out.lights.extend(super::presentation::body_lights(body, at, |id| {
+                    resources.get(&id).map(|r| r.payload.clone()).or_else(|| data.archives.get(id).ok().map(|r| r.payload.clone()))
+                }));
             }
             match decode_body(data, body, &name, &mut materials, &mut out.stats.skipped) {
                 Ok(Some(o)) => {
@@ -494,8 +514,11 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
             .find(|&id| id != 0 && data.archives.contains(id) && data.archives.get(id).is_ok_and(|m| m.class_hash == crc32("Mesh")))
             .ok_or("cloth SoftBody without a Mesh")?;
         (vec![mesh], LodTable::default())
+    } else if r.class_hash == crc32("ParticleSystem") || r.class_hash == crc32("OmniLight") {
+        // drawn by `presentation` (the effects and the lights)
+        return Ok(());
     } else {
-        return Err("unsupported drawable".into());
+        return Err(format!("unsupported drawable {:08x}", r.class_hash));
     };
     // MeshInstanceData (mesh id at +5) → the following CompiledMeshInstance's colour blob.
     let instances = markers(&b[v..], "MeshInstanceData").into_iter().map(|p| p + v).collect::<Vec<_>>();
