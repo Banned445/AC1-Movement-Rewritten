@@ -966,11 +966,12 @@ pub fn update_air(
                         // a free-step arrival (case 1 / 0x10000, 0xE097A7–0xE09B58): the reception (the flight's weights,
                         // normal / `_fast` by +0x16C) plays in NarrowObject SubState 6 while the root is interpolated
                         // from the arrival point to the stored (pulled-back) target + 0.5·forward over `FREESTEP_ARRIVE`
-                        // s (`sub_711130` 0xE09B26, RE/24 AIR-2); +0xF0 = the target + 0.5 · the jump direction, +0x100
-                        // the target's normal, +0x140 its hit type 4 (`GuidanceHit__Set` 0xE09A94)
+                        // s (`sub_711130` 0xE09B26, RE/24 AIR-2); +0xF0 = InAirData+560 + 0.5 · the jump direction
+                        // (0xE09A13), +560 being the pulled-back point the root arrives at (`sub_B12540` 0xB209BC, the
+                        // warp's end 0xB20E23): on a beam the stay's small box sits on the beam itself; +0x100 the
+                        // target's normal, +0x140 its hit type 4 (`GuidanceHit__Set` 0xE09A94)
                         None if air.target.is_some() && matches!(air.target_flags, 1 | 0x10000) => {
                             let flat = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(body.forward());
-                            let target = air.target.map(|t| t.position).unwrap_or(aim);
                             let (normal, small_box) = air.target.and_then(|t| t.support).unwrap_or((-flat, false));
                             let fw = air.flight.map(|f| f.weights().to_vec()).unwrap_or_default();
                             let id = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
@@ -982,7 +983,7 @@ pub fn update_air(
                                 to: aim + body.forward() * 0.5,
                                 root_time: FREESTEP_ARRIVE,
                                 follow_clip: true,
-                                point: target + flat * 0.5,
+                                point: aim + flat * 0.5,
                                 normal,
                                 small_box,
                                 heading: body.heading,
