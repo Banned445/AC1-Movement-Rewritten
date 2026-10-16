@@ -355,7 +355,7 @@ pub fn edge_landing(feet: Vec3, facing: Vec3, guidance: &crate::guidance::Guidan
         if past < -0.15 {
             continue;
         }
-        let report = super::jump_candidates::EdgeReport { point: Vec3::new(p.x, feet.y, p.z), normal: n, drop: 0.0, dist: -past, edge: i };
+        let report = super::jump_candidates::EdgeReport { point: Vec3::new(p.x, feet.y, p.z), normal: n, drop: 0.0, dist: -past, edge: i, floor: false };
         if !super::jump_candidates::room_past_edge(&report, collision) {
             continue;
         }

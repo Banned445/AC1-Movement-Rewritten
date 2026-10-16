@@ -1518,11 +1518,18 @@ pub fn update_narrow(
 
         // Event 17: walking into an obstacle with stick input searches a hand jump target before
         // pull-down / climb (0xEE9AF0 → 0xF7EF90 / 0xF7DB30 → 0xF70E50 → 0xB21DA0).
-        // The search is sub_F7DB30 (`ground::beam_obstacle_target`). PORT: an oriented contact box stands in for the
-        // obstacle contact (Human__GetObstacleContact 0xB25230).
+        // The search is sub_F7DB30 (`ground::beam_obstacle_target`). Its guard (`sub_F70E20`) and the search itself
+        // first need `Human__GetObstacleContact` 0xB25230 along the stick: the controller's vertical speed within 0.2
+        // and a wall contact of its manifold within 45° against the direction (`collide::has_obstacle_contact`, as event
+        // 42's guard). PORT: the beam's walk moves the root along the beam without the capsule, so its contacts are a
+        // copy of the controller swept 5 cm along the stick
+        let obstacle = || {
+            let mut probe = body.proxy.clone();
+            collision.move_capsule(&mut probe, n.stand(), pad.dir * 0.05, true, dt);
+            super::collide::has_obstacle_contact(&probe.manifold, pad.dir)
+        };
         if BEAM_COMPLETION && n.kind == NarrowKind::Beam && matches!(n.state, BeamState::Start | BeamState::Walk)
-            && stick && !collision.obb_free(n.stand() + pad.dir * 0.45 + Vec3::Y * 0.8,
-                [super::right_of(pad.dir), Vec3::Y, pad.dir], Vec3::new(0.2, 0.3, 0.1)) {
+            && stick && body.velocity.y.abs() <= 0.2 && obstacle() {
             let found = super::ground::beam_obstacle_target(n.stand(), pad.dir, &guidance, &collision);
             super::target_debug::record(|| "beam obstacle (hand target)".into(), n.stand(), pad.dir, &[], found.as_ref());
             if let Some(target) = found {

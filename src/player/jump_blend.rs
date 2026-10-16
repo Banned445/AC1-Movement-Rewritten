@@ -54,7 +54,13 @@ pub const LAND_STRAIGHT_STOP: u32 = 0x6E9C_7557;
 pub const LAND_DAMAGE: u32 = 0x010D_D707;
 pub const LAND_DAMAGE_ROLL: u32 = 0x010D_D70B;
 
+/// The impulsion jump's Ground action (event 45 in Movement, guard `sub_D83830` → `HumanGround__sub_DA9970` →
+/// `sub_D9BE90`): `xx_h_impultionstraight_foot{l,r}_to_ground_to_air_front_down_foot{r,l}` by the leading foot (1 → footl,
+/// 0xD9BF5A), then the free-step takeoff (kind 1) when it completes (state +245, 0xD8E390 → 0xD858A0).
+pub const IMPULSION_JUMP: [u32; 2] = [0x040C_793D, 0x04A9_43DE];
+
 pub const DUMPED_ACTIONS: &[u32] = &[
+    IMPULSION_JUMP[0], IMPULSION_JUMP[1],
     TAKEOFF_RUN[0], TAKEOFF_RUN[1], TAKEOFF_FREESTEP[0], TAKEOFF_FREESTEP[1], TAKEOFF_REBOUND[0], TAKEOFF_REBOUND[1],
     FLIGHT_FREESTEP[0], FLIGHT_FREESTEP[1],
     // the flights to hang targets (wall hang / ladder: `…_to_surface`; free hang and the rest: `…_to_swing`)

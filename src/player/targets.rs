@@ -95,7 +95,7 @@ pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: 
 }
 
 /// The port's jump target for a candidate and the scorer's jump type.
-pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, _collision: &CollisionWorld) -> Option<JumpTarget> {
     let base = JumpTarget { position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None, support: Some((c.wall, c.ty == 4)) };
     match ty {
         1 | 0x10000 => {
@@ -107,17 +107,11 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, c
             // the free-step arrival interpolates the root 0.5 m forward, onto the edge (`air::pull_back`, RE/24 AIR-2);
             // the roof is checked just inside it. A post's top too: the free-step stay's reception carries the root on
             // and `TryPilotisFreeStep` 0xE50190 interpolates it to the top's centre (RE/05 §2.15)
-            let narrow = super::passover::far_edge(c.pos, -c.wall, guidance).map(|(_, t)| t).filter(|t| *t < 0.9);
-            let insets: &[f32] = match narrow { Some(t) => &[t * 0.5][..], None => &[0.1, 0.25, 0.45][..] };
-            for &inset in insets {
-                let probe = c.pos - c.wall * inset;
-                if let Some(h) = collision.ground_height(probe + Vec3::Y * 0.05, 0.2) {
-                    // a wall top however thin is a free step here: the pass-over (type 2) is the scorer's mode 2 only
-                    // (`Human__SelectJumpCandidate` 0xE96BF0 at 0xE97584), which no ground jump asks for (RE/18 §1.8)
-                    return Some(JumpTarget { position: Vec3::new(c.pos.x, h, c.pos.z), ..base });
-                }
-            }
-            None
+            // the candidate itself (its position is the request's +0, `Human__SetupJumpToTarget` 0xB20468): a post's top
+            // as any edge, the free-step stay's `TryPilotisFreeStep` 0xE50190 then carries the root to its centre
+            // (RE/05 §2.15). A wall top however thin is a free step here: the pass-over (type 2) is the scorer's mode 2
+            // only (`Human__SelectJumpCandidate` 0xE96BF0 at 0xE97584), which no ground jump asks for (RE/18 §1.8)
+            Some(base)
         }
         2 => Some(JumpTarget { position: c.pos, pass: Some((c.pos, c.wall)), ..base }),
         TARGET_LEDGE | TARGET_LEDGE_FREE => {

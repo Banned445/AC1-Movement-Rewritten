@@ -44,14 +44,16 @@ pub fn in_zone(slot: usize, origin: Vec3, p: Vec3, k: f32) -> bool {
         let q = poly[i % poly.len()];
         if i % poly.len() >= 2 { [q[0] * k, q[1]] } else { q }
     };
+    // the crossing test `sub_F10030` (from `JumpZone__Contains` 0x1173590): an edge counts when y lies in (min, max]
+    // of its ends (horizontal edges never), its larger x is at or past x, and it is vertical or its crossing at y is
+    // at or past x; inside on an odd count. A point on the far (outer) boundary therefore counts as inside
     let mut inside = false;
     for i in 0..poly.len() {
         let (a, b) = (v(i), v(i + 1));
-        if (a[1] > y) != (b[1] > y) {
-            let t = (y - a[1]) / (b[1] - a[1]);
-            if x < a[0] + t * (b[0] - a[0]) {
-                inside = !inside;
-            }
+        if y > a[1].min(b[1]) && y <= a[1].max(b[1]) && a[0].max(b[0]) >= x && a[1] != b[1]
+            && (a[0] == b[0] || (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) + a[0] >= x)
+        {
+            inside = !inside;
         }
     }
     inside
@@ -616,8 +618,9 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
             // jump's frame (forward = dir, up); then `JumpZone__Contains` (0xE19D5A). A beam running along the jump
             // gives its far end
             let p = nearest_to_outline(a, b, &zone_outline(z.primary, pos, dir, if q.kind == 1 || q.kind == 2 || q.mode == 4 { 4 } else { 5 }, k));
-            // PORT: a beam crossing the outline gives the crossing point itself, on the zone's boundary, where the
-            // game's float test is untraced: it counts when 1 mm toward the beam's nearer end lies inside
+            // a beam crossing the outline gives the crossing point itself, on the zone's far boundary, which the game's
+            // test counts as inside (`sub_F10030`, inclusive there); PORT: 1 mm toward the beam's nearer end absorbs
+            // the float differences of the port's outline point
             let near = if a.distance_squared(pos) <= b.distance_squared(pos) { a } else { b };
             let p = if in1_test(p) { p } else { p + (near - p).normalize_or_zero() * 0.001 };
             if !in1_test(p) {
@@ -808,6 +811,8 @@ pub struct EdgeReport {
     /// The horizontal distance to the edge, negative once the feet are past it (the game stores its square, `sq`).
     pub dist: f32,
     pub edge: usize,
+    /// +56: the floor report (no guidance edge; the drop under the feet, `edge_reports`' `floor`).
+    pub floor: bool,
 }
 
 impl EdgeReport {
@@ -819,13 +824,22 @@ impl EdgeReport {
     }
 }
 
-/// `Human__BuildEdgeReports` 0xB1BC50 (pos, radius, min drop; the floor case is not ported): every guidance piece
-/// within `radius` that is not steep, whose perpendicular through the feet meets it within ±0.3 m of foot height,
-/// with a drop ≥ `min_drop` beyond it. The drop is measured with the caller's position as the feet
-/// (`Human__MeasureDropBeyondEdge`(this, pos, point, normal, 7, 0.02) at 0xB1BE87), so the lip and line checks run first:
-/// at the seam between two buildings the next roof is found there, where the sweep alone would start inside it.
-pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<EdgeReport> {
+/// `Human__BuildEdgeReports` 0xB1BC50 (pos, radius, min drop, a6 = `floor`): every guidance piece
+/// within `radius` that is not steep, whose perpendicular through the feet meets it (`sub_9765E0`: within the piece,
+/// t in 0..1) within ±0.3 m of foot height, with a drop ≥ `min_drop` beyond it. The drop is measured with the caller's
+/// position as the feet (`Human__MeasureDropBeyondEdge`(this, pos, point, normal, 7, 0.02) at 0xB1BE87), so the lip and
+/// line checks run first: at the seam between two buildings the next roof is found there, where the sweep alone would
+/// start inside it.
+///
+/// The floor case (0xB1BF9C–0xB1C06E): with `floor` (the entity's forward axis; the ground interpreter passes a6 = 1,
+/// 0xEE7952), no report and no piece refused for its drop (v32), the drop under the feet themselves
+/// (`MeasureDropBeyondEdge`(pos, pos, zero normal, 7, 0.02)) of `min_drop` or more is a report at the feet: normal =
+/// the forward axis, +52 = 0, +56 = 1. Running through the gap between two edge pieces (the line through the feet meets
+/// neither) the free run still jumps on this report (v142 0xEE7D64 and the edge jump 0xEE864F read no +56); only
+/// `HumanGround__ClassifyEdgeSide` 0xD9D7F0 refuses it (the ledge stop, the pull-down).
+pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, floor: Option<Vec3>, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<EdgeReport> {
     let mut out = Vec::new();
+    let mut shallow = false;
     for (i, e) in guidance.edges.iter().enumerate() {
         if matches!(e.subtype, GuidanceSubType::Ladder | GuidanceSubType::Beam) {
             continue;
@@ -854,11 +868,18 @@ pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWo
         }
         let drop = measure_drop_from(Some(pos), p, n, 7.0, 0.02, collision, Some(guidance));
         if drop < min_drop {
+            shallow = true;
             continue;
         }
         let h = Vec2::new(p.x - pos.x, p.z - pos.z).length();
         let dist = if n.dot(pos - p) > 0.0 { -h } else { h };
-        out.push(EdgeReport { point: p, normal: n, drop, dist, edge: i });
+        out.push(EdgeReport { point: p, normal: n, drop, dist, edge: i, floor: false });
+    }
+    if let Some(forward) = floor.filter(|_| out.is_empty() && !shallow) {
+        let drop = measure_drop_from(Some(pos), pos, Vec3::ZERO, 7.0, 0.02, collision, Some(guidance));
+        if drop >= min_drop {
+            out.push(EdgeReport { point: pos, normal: forward, drop, dist: 0.0, edge: usize::MAX, floor: true });
+        }
     }
     out
 }
@@ -910,10 +931,6 @@ pub(crate) fn measure_drop_from(feet: Option<Vec3>, p: Vec3, n: Vec3, max: f32, 
             }
         }
     }
-    if n == Vec3::ZERO {
-        let o = p + Vec3::Y * 0.05;
-        return collision.ray_distance(o, -Vec3::Y, max + 0.05, RAY_LAYER) - 0.05;
-    }
     let tilted = |axis: Vec3, deg: f32| Quat::from_axis_angle(axis, (-deg).to_radians()) * -Vec3::Y;
     // the ray from `o` along `d` down to the height `h` (`Vec_ProjectOntoPlane` 0x9470B0 with a horizontal plane)
     let to_plane = |o: Vec3, d: Vec3, h: f32| if d.y < -1e-6 { ((o.y - h) / -d.y).max(0.0) } else { 0.0 };
@@ -921,7 +938,7 @@ pub(crate) fn measure_drop_from(feet: Option<Vec3>, p: Vec3, n: Vec3, max: f32, 
         let drop = p.y - hit.y;
         let r = 0.2 * (drop / 3.0).clamp(0.0, 1.0);
         let below = guidance.filter(|_| r > 0.01).map_or(0.0, |g| {
-            edge_reports(hit, r, 0.45, g, collision).iter().map(|e| e.drop).fold(0.0, f32::max)
+            edge_reports(hit, r, 0.45, None, g, collision).iter().map(|e| e.drop).fold(0.0, f32::max)
         });
         drop + below
     };
@@ -929,12 +946,39 @@ pub(crate) fn measure_drop_from(feet: Option<Vec3>, p: Vec3, n: Vec3, max: f32, 
     let mut from = p + n * step;
     let mut dir = tilted(axis, 45.0);
     let mut len = to_plane(from, dir, p.y - max.min(0.5));
+    // no normal (the floor report, v93): straight down from 0.5 m above `feet` to 0.5 m below (layer 35, 0xB19ADE–
+    // 0xB19BAD); a floor within 45° of level is the drop, a steeper one is slid down (as below); then the next ray goes
+    // straight down rather than 10° out (0xB1A272)
+    let mut straight = n == Vec3::ZERO;
+    if straight {
+        let base = feet.unwrap_or(p);
+        let o = base + Vec3::Y * 0.5;
+        match collision.ray_hit(o, -Vec3::Y, 1.0, RAY_LAYER) {
+            Some((d, normal)) => {
+                let hit = o - Vec3::Y * d;
+                let side = flat(normal);
+                if side == Vec3::ZERO || normal.angle_between(Vec3::Y) <= 45f32.to_radians() {
+                    return stepped(hit);
+                }
+                axis = Vec3::Y.cross(side);
+                from = hit + side * 0.01;
+                dir = tilted(axis, 45.0);
+                len = to_plane(from, dir, hit.y - 0.5);
+            }
+            None => {
+                from = o;
+                dir = -Vec3::Y;
+                len = 1.0;
+            }
+        }
+    }
     for _ in 0..32 {
         if let Some((d, _)) = collision.ray_hit(from, dir, len, RAY_LAYER) {
             return stepped(from + dir * d);
         }
         from += dir * len;
-        dir = tilted(axis, 10.0);
+        dir = if straight { -Vec3::Y } else { tilted(axis, 10.0) };
+        straight = false;
         len = to_plane(from, dir, p.y - max);
         let Some((d, normal)) = collision.ray_hit(from, dir, len, RAY_LAYER) else { return max };
         let hit = from + dir * d;
@@ -984,6 +1028,29 @@ mod tests {
     use super::*;
     use crate::collision::Aabb3;
     use crate::guidance::{GuidanceEdge, GuidanceWorld};
+
+    /// `Human__BuildEdgeReports` 0xB1BC50's floor case: the feet over the gap between two pieces of a roof edge (the line
+    /// through the feet meets neither) get no edge report; with a6 (the ground interpreter's call) the drop under the
+    /// feet is reported there instead, along the forward axis, so the free run still jumps (RE/24 GROUND-2).
+    #[test]
+    fn a_gap_between_edge_pieces_gives_the_floor_report() {
+        let mut c = CollisionWorld::default();
+        // two roofs 4 m up with a 0.3 m slot between them along x; the street below
+        c.boxes.push(Aabb3 { min: Vec3::new(-20.0, -1.0, -20.0), max: Vec3::new(20.0, 0.0, 20.0) });
+        c.boxes.push(Aabb3 { min: Vec3::new(-5.0, 0.0, 0.0), max: Vec3::new(-0.15, 4.0, 5.0) });
+        c.boxes.push(Aabb3 { min: Vec3::new(0.15, 0.0, 0.0), max: Vec3::new(5.0, 4.0, 5.0) });
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: Vec3::new(-5.0, 4.0, 0.0), p1: Vec3::new(-0.15, 4.0, 0.0), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab });
+        g.edges.push(GuidanceEdge { p0: Vec3::new(0.15, 4.0, 0.0), p1: Vec3::new(5.0, 4.0, 0.0), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab });
+        // in the slot, running along +x
+        let feet = Vec3::new(0.0, 4.0, 1.0);
+        assert!(edge_reports(feet, 0.75, 0.45, None, &g, &c).is_empty(), "no piece crosses the line through the feet");
+        let r = edge_reports(feet, 0.75, 0.45, Some(Vec3::X), &g, &c);
+        assert_eq!(r.len(), 1);
+        assert!(r[0].floor && r[0].dist == 0.0 && r[0].normal == Vec3::X && r[0].drop > 3.9, "{:?}", r[0]);
+        // on the roof itself: nothing under the feet, no report
+        assert!(edge_reports(Vec3::new(2.0, 4.0, 2.0), 0.75, 0.45, Some(Vec3::X), &g, &c).is_empty());
+    }
 
     fn crate_world(h: f32, depth: f32) -> (CollisionWorld, GuidanceWorld) {
         let mut c = CollisionWorld::default();

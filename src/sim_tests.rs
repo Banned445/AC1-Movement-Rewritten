@@ -31,6 +31,26 @@ impl Sim {
         s
     }
 
+    /// As `new`, falling from `feet`: a plain fall in InAir from the first frame. The game's spawners place the
+    /// character on the ground, so a Ground start in mid-air is the harness's own: its first frame would take the step
+    /// off the floor report (event 68, `Human__BuildEdgeReports`' floor case) instead of a fall.
+    fn new_falling(feet: Vec3, heading: f32) -> Self {
+        let mut s = Self::new_raw(feet, heading);
+        s.start_falling();
+        s.app.update();
+        s
+    }
+
+    fn start_falling(&mut self) {
+        use crate::player::air::{FallOrigin, InAirEntry};
+        use crate::player::{switch_context, TransitionSetup};
+        let w = self.app.world_mut();
+        let mut q = w.query::<(&mut Locomotion, &mut HumanDataBundle, &Body)>();
+        let (mut loco, mut data, body) = q.get_mut(w, self.player).unwrap();
+        let entry = InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin: FallOrigin::Ground, speed_param: 0.0 };
+        switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+    }
+
     /// As `new`, without running the first frame (a recording replays its own first frame).
     fn new_raw(feet: Vec3, heading: f32) -> Self {
         let mut app = App::new();
@@ -3279,7 +3299,7 @@ fn falling_past_a_ladder_with_empty_hand_held_catches_it() {
 
 #[test]
 fn falling_past_a_ladder_with_only_legs_does_not_catch_it() {
-    let mut s = Sim::new(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
+    let mut s = Sim::new_falling(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
     s.pad(Vec3::ZERO, 0.0, false, true);
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "never landed");
     assert!(s.saw_air);
@@ -4663,7 +4683,7 @@ fn flat_fall_height_scenarios_reach_the_expected_player_bands() {
 /// none).
 #[test]
 fn a_plain_fall_enters_a_haystack_through_the_top() {
-    let mut s = Sim::new(Vec3::new(37.5, 4.5, 26.0), 0.0);
+    let mut s = Sim::new_falling(Vec3::new(37.5, 4.5, 26.0), 0.0);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::HayStack), "no entry: {:?} {:?}", s.loco().current, s.body().feet);
     assert_eq!(s.data().hay.kind, crate::player::hay::HayEntry::Top);
     assert!(s.ground().last_landing.is_none());
@@ -4790,6 +4810,7 @@ fn ground_extras_steep_surface_slides_in_air_then_lands_on_flat() {
     let mut s=Sim::new_raw(Vec3::new(-30.0,9.0,-30.0),0.0);
     crate::recorder::ground_checks::slope_fixture(&mut s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>());
     s.app.insert_resource(crate::guidance::GuidanceWorld::default());
+    s.start_falling();
     s.app.update();
     assert!(s.run_until(2.0,|s|s.data().air.slope_slide.start_y.is_some()),"no steep contact: {:?}",s.body().feet);
     assert_eq!(s.loco().current,ActorContextId::InAir);
@@ -5323,7 +5344,7 @@ fn the_ability_stack_gates_the_jump() {
     }
     // Grasp gates the InAir empty-hand catch (0xEDBC26): the same fall past a ladder with the hand held
     for allowed in [false, true] {
-        let mut s = Sim::new(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
+        let mut s = Sim::new_falling(Vec3::new(50.0, 3.2, 62.9), FACE_PZ);
         let flags = if allowed { u64::MAX } else { !(1u64 << Ability::Grasp as u32) };
         s.app.world_mut().insert_resource(AbilitySet { flags, max_speed: 4, all_actions: true, high_profile: true });
         s.pad(Vec3::ZERO, 0.0, false, false);
@@ -6228,3 +6249,4 @@ fn the_wall_run_pitches_with_a_leaning_wall_and_the_rebound_straightens_it() {
     assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir), "no rebound: {:?}", s.loco().current);
     assert_eq!(s.body().tilt, Quat::IDENTITY, "the push-off is upright");
 }
+
