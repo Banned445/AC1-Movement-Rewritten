@@ -1561,11 +1561,11 @@ pub fn update_narrow(
             && stick
             && a < 60f32.to_radians()
         {
-            if let Some((contact, normal)) = super::walling::wall_ahead(n.stand(), facing, &collision) {
+            if let Some((contact, normal, slope)) = super::walling::wall_ahead(n.stand(), facing, &collision) {
                 pad.consume_jump();
                 let from = n.stand();
                 body.feet = from;
-                switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: BEAM_COMPLETION.then_some(0.13) }));
+                switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, slope, from, warp_duration: BEAM_COMPLETION.then_some(0.13) }));
                 continue;
             }
         }

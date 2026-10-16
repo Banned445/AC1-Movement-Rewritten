@@ -99,7 +99,7 @@ pub struct HumanGroundData {
     pub edge_halt_t: f32,
     /// The wall run waiting for its Ground lead-in (`walling::GROUND_LEAD_IN`) to end: the wall's contact and normal
     /// (the payload 0xD857C0 keeps at HG+1344).
-    pub wall_start: Option<(Vec3, Vec3)>,
+    pub wall_start: Option<(Vec3, Vec3, Vec3)>,
     /// The interpreter's lean push timer (+0xFC8, 0xEE75F4–0xEE763E): how long the stick has pushed within 45° of the
     /// facing while leaning; any other frame restarts it.
     pub lean_push_t: f32,
@@ -851,9 +851,9 @@ pub fn update_ground(
         // the wall run's lead-in done: the wall run (PORT: a frame after its end; anything that took over drops it)
         if g.wall_start.is_some() && !g.oneshot.is_some_and(|o| o.blend.id == super::walling::GROUND_LEAD_IN && o.t < o.duration) {
             g.oneshot = None;
-            if let Some((contact, normal)) = g.wall_start.take() {
+            if let Some((contact, normal, slope)) = g.wall_start.take() {
                 let from = body.feet;
-                switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
+                switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, slope, from, warp_duration: None }));
                 continue;
             }
         }
@@ -948,19 +948,19 @@ pub fn update_ground(
                     && pad.strong_dir.length()>0.75 && pad.strong_dir.angle_between(body.forward())<60f32.to_radians()
                     && ab.allows(Ability::Walling)
                 {
-                    if let Some((contact,normal))=super::walling::wall_ahead(body.feet,body.forward(),&collision) {
+                    if let Some((contact,normal,slope))=super::walling::wall_ahead(body.feet,body.forward(),&collision) {
                         g.extra=None;
                         // standing (HG+1492 = 0): `FreeRun_WallingGuardA` 0xDA2DD0 → the Ground lead-in first (0xD89AA0 →
                         // 0xD857C0; live RE/25 #49 `wall41_legs_hold`)
                         if let Some(b)=super::ledge_moves::single_item(super::walling::GROUND_LEAD_IN,0) {
                             g.play_oneshot(b);
                             g.owner=TreeState::Other;
-                            g.wall_start=Some((contact,normal));
+                            g.wall_start=Some((contact,normal,slope));
                             body.velocity=Vec3::ZERO;
                             continue;
                         }
                         let from=body.feet;
-                        switch_context(&mut loco,&mut data,TransitionSetup::ToWalling(super::walling::WallingEntry{contact,normal,from,warp_duration:None}));
+                        switch_context(&mut loco,&mut data,TransitionSetup::ToWalling(super::walling::WallingEntry{contact,normal,slope,from,warp_duration:None}));
                         continue;
                     }
                 }
@@ -1350,7 +1350,7 @@ pub fn update_ground(
             // event 49 in the lean (`ObstacleCollision` handler 0xDA6FF0: HG+1492 clear → FindWallingWall → 0xDA5680,
             // RE/24 WALL-19): the wall run starts from the lean with the same input as from Movement
             if g.high_profile && wall_run_input && ab.allows(Ability::Walling) && c.phase == super::collide::CollidePhase::Wait {
-                if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
+                if let Some((contact, normal, slope)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
                     if pad.jump_buffered() {
                         pad.consume_jump();
                     }
@@ -1362,12 +1362,12 @@ pub fn update_ground(
                     if let Some(b) = super::ledge_moves::single_item(super::walling::GROUND_LEAD_IN, 0) {
                         g.play_oneshot(b);
                         g.owner = TreeState::Other;
-                        g.wall_start = Some((contact, normal));
+                        g.wall_start = Some((contact, normal, slope));
                         body.velocity = Vec3::ZERO;
                         continue;
                     }
                     let from = body.feet;
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, slope, from, warp_duration: None }));
                     continue;
                 }
             }
@@ -1505,7 +1505,7 @@ pub fn update_ground(
         // Both read the stick itself (+0x1240 > 0.35, its angle +0x1244), not the wanted speed: snug against the wall
         // the wall slide zeroes the speed (0xEDD7C0 result 2) but the wall run still starts (bug-1791665811).
         if g.high_profile && wall_run_input && !busy && ab.allows(Ability::Walling) {
-            if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
+            if let Some((contact, normal, slope)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
                 if pad.jump_buffered() {
                     pad.consume_jump();
                 }
@@ -1517,13 +1517,13 @@ pub fn update_ground(
                         g.extra = None;
                         g.play_oneshot(b);
                         g.owner = TreeState::Other;
-                        g.wall_start = Some((contact, normal));
+                        g.wall_start = Some((contact, normal, slope));
                         body.velocity = Vec3::ZERO;
                         continue;
                     }
                 }
                 let from = body.feet;
-                switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: None }));
+                switch_context(&mut loco, &mut data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, slope, from, warp_duration: None }));
                 continue;
             }
         }

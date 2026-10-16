@@ -18,7 +18,11 @@ pub const IMPACT_ELBOW: u32 = 0x8AAE_420E;
 /// up 100/300}cm_to_air`.
 pub const TAKEOFF_SWING: u32 = 0x0292_655B;
 
-pub const DUMPED_ACTIONS: &[u32] = &[SWING_LANDING, SWING_CYCLE, SWING_STOP[0], SWING_STOP[1], IMPACT_LEGS, IMPACT_SHOULDER, IMPACT_ELBOW, TAKEOFF_SWING];
+/// The build-up from a still hang (`xx_h_swing_momentum_front_up`): event 5 (0xDD2940 → `sub_DCF080` 0xDCF080) plays
+/// the cycle with this as its transition (0.1 s blend), so a swing started from the hang swings forward twice.
+pub const SWING_MOMENTUM: u32 = 0x023E_0C5F;
+
+pub const DUMPED_ACTIONS: &[u32] = &[SWING_LANDING, SWING_CYCLE, SWING_STOP[0], SWING_STOP[1], IMPACT_LEGS, IMPACT_SHOULDER, IMPACT_ELBOW, TAKEOFF_SWING, SWING_MOMENTUM];
 
 use bevy::prelude::*;
 
@@ -30,6 +34,8 @@ use crate::collision::CollisionWorld;
 pub enum SwingPhase {
     /// The landing on the bar (root interpolated onto the free-hang root over it).
     Landing,
+    /// The build-up from a still hang (`SWING_MOMENTUM`, the cycle's transition), then the cycle.
+    Momentum,
     /// Swing cycle item 0..3.
     Cycle(usize),
     /// A stop or the landing's impact settle: (action, item); then the free hang.
@@ -88,10 +94,16 @@ pub fn enter(from: Vec3, root: Vec3, fwd: Vec3, hands_mid: Vec3, flight: Option<
 }
 
 /// Event 5 (`HumanLedge` guard 0xDD3750, action 0xDD2940 → SwingReception, Human+2704 = 3): start swinging from a still
-/// free hang on a pole: the cycle from its first item at the hang root.
+/// free hang on a pole, at the hang root. `sub_DCF080` 0xDCF080 plays the cycle with the build-up `SWING_MOMENTUM` as its
+/// transition (blend 0.1 s, 0xDCF164–0xDCF177), so the momentum swing plays first and the cycle from its first item
+/// after it. Only this start builds up: a landing on the bar goes straight into the cycle (0xE095FC). PORT: the
+/// transition's 0.1 s blend type 2 is the animator's usual blend.
 pub fn start(root: Vec3, fwd: Vec3, hands_mid: Vec3, seq: u32) -> Option<Swing> {
-    let action = single(SWING_CYCLE, 0, &[])?;
-    Some(Swing { phase: SwingPhase::Cycle(0), action, t: 0.0, from: root, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), on_pole: true })
+    let (phase, action) = match single(SWING_MOMENTUM, 0, &[]) {
+        Some(a) => (SwingPhase::Momentum, a),
+        None => (SwingPhase::Cycle(0), single(SWING_CYCLE, 0, &[])?),
+    };
+    Some(Swing { phase, action, t: 0.0, from: root, root, fwd, hands_mid, jump_req: false, target: None, seq: seq.wrapping_add(1), on_pole: true })
 }
 
 fn single(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
@@ -177,9 +189,22 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump: bool, feet: &mut Vec3, c
             if !done {
                 return SwingOut::Stay;
             }
+            // event 7 at the landing's end (guard `HumanLedge__Guard_SwingJump` 0xDCD000: both hands on a pole and the
+            // landing 0x02926510 ending this frame, `Anim__ItemEndsThisFrame` 0xDCD059): arriving with momentum the swing
+            // jumps on at once, without a cycle first
+            if s.jump_req {
+                if let Some(t) = s.target.or_else(|| find_target(s.root, s.fwd)) {
+                    return SwingOut::Jump(Some(t));
+                }
+                if free_jump_room(s.root, s.fwd, collision) {
+                    return SwingOut::Jump(None);
+                }
+            }
             // 0xDD24F0: legs blocked → the legs impact for any bar (`SwingLandingToImpactLegs` 0xDCFE90 runs first); on a
             // pole (both hands, `SwingLandingToSettle` 0xDCD300) the landing goes on into the cycle; on a ledge-type free
-            // hang it settles (`PlaySwingImpact` 0xDD0140)
+            // hang it settles (`PlaySwingImpact` 0xDD0140). The third branch (`HumanLedge__SwingReactionFlag4Exit` 0xDCD260 →
+            // `SwingToInAir` 0xDCF8E0) is not a support test: it reads bit 4 of Human+0xB90 (IHuman vt276), which movement
+            // code only sets to 1 (`Human__Reset` 0xB286AE) or 0 (the landings, 0xE059D4); not ported (RE/24 NARROW-15)
             let impact_id = impact(s, collision);
             if impact_id != IMPACT_LEGS && s.on_pole {
                 if let Some(a) = single(SWING_CYCLE, 0, &[]) {
@@ -199,6 +224,21 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump: bool, feet: &mut Vec3, c
             s.t = 0.0;
             s.seq = s.seq.wrapping_add(1);
             SwingOut::Stay
+        }
+        SwingPhase::Momentum => {
+            *feet = s.root;
+            if !done {
+                return SwingOut::Stay;
+            }
+            // the transition done: the cycle from its first item (its stop and jump guards read the cycle's items)
+            if let Some(a) = single(SWING_CYCLE, 0, &[]) {
+                s.phase = SwingPhase::Cycle(0);
+                s.action = a;
+                s.t = 0.0;
+                s.seq = s.seq.wrapping_add(1);
+                return SwingOut::Stay;
+            }
+            SwingOut::Hang
         }
         SwingPhase::Cycle(i) => {
             *feet = s.root;

@@ -2744,7 +2744,8 @@ fn a_free_hang_hand_step_lifts_the_body_with_the_first_hand() {
 
 /// The swing's held-button rules (RE/24 LEDGE-17 / CENSUS-3, the interpreter 0xEECCF9–0xEED11F): on a bar (a Pole edge),
 /// releasing high profile + Legs stops the swing (event 6) into the free hang; holding them again from the still hang
-/// starts it (event 5, 0xDD3750 → 0xDD2940).
+/// starts it (event 5, 0xDD3750 → 0xDD2940) with the momentum build-up first (`sub_DCF080` 0xDCF080: the cycle with
+/// `SWING_MOMENTUM` as its transition).
 #[test]
 fn the_swing_stops_and_starts_with_high_profile_and_legs_held() {
     use crate::player::swing::SwingPhase;
@@ -2753,16 +2754,51 @@ fn the_swing_stops_and_starts_with_high_profile_and_legs_held() {
     s.run(0.35);
     s.press_legs();
     assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some()), "never swung");
-    s.pad(Vec3::Z, 1.0, true, true);
+    // held with the stick neutral: no jump, the cycle
+    s.pad(Vec3::ZERO, 0.0, true, true);
     assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle");
     // release: the stop on a down item, then the free hang
     s.pad(Vec3::ZERO, 0.0, false, false);
     assert!(s.run_until(4.0, |s| s.data().ledge.swing.is_none() && s.loco().current == ActorContextId::Ledge), "never stopped: {:?}", s.data().ledge.swing.map(|w| w.phase));
     s.run(0.5);
     assert!(s.data().ledge.swing.is_none(), "stays still with the buttons released");
-    // hold them again: swinging starts from the hang
+    // hold them again: swinging starts from the hang with the build-up, then the cycle
     s.pad(Vec3::ZERO, 0.0, true, true);
-    assert!(s.run_until(1.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "event 5 never started the swing");
+    assert!(s.run_until(1.0, |s| s.data().ledge.swing.is_some()), "event 5 never started the swing");
+    let w = s.data().ledge.swing.unwrap();
+    if crate::player::jump_blend::action_items(crate::player::swing::SWING_MOMENTUM).is_some() {
+        assert_eq!((w.phase, w.action.id), (SwingPhase::Momentum, crate::player::swing::SWING_MOMENTUM), "the build-up first");
+    }
+    assert!(s.run_until(1.5, |s| s.data().ledge.swing.is_some_and(|w| w.phase == SwingPhase::Cycle(0))), "the cycle after the build-up");
+}
+
+/// RE/24 / bug report 2026-10-16: arriving on a bar with momentum (the stick toward the facing, high profile and Legs
+/// held), the swing jumps on at the landing's end (`HumanLedge__Guard_SwingJump` 0xDCD000 takes the landing 0x02926510
+/// ending this frame); it never swings a cycle or builds up first.
+#[test]
+fn a_swing_landing_with_momentum_jumps_on_without_swinging_again() {
+    use crate::player::swing::{SwingPhase, SWING_LANDING, TAKEOFF_SWING};
+    let mut s = Sim::new(Vec3::new(60.0, 1.2, 85.0), std::f32::consts::PI);
+    s.pad(Vec3::Z, 1.0, true, false);
+    s.run(0.35);
+    s.press_legs();
+    assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some()), "never swung");
+    assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_LANDING);
+    s.pad(Vec3::Z, 1.0, true, true);
+    let mut phases = Vec::new();
+    let jumped = s.run_until(2.0, |s| {
+        if let Some(w) = s.data().ledge.swing {
+            if !matches!(w.phase, SwingPhase::Landing) {
+                return true;
+            }
+        }
+        s.loco().current == ActorContextId::InAir
+    });
+    if let Some(w) = s.data().ledge.swing {
+        phases.push(w.phase);
+    }
+    assert!(jumped && phases.is_empty(), "jumped at the landing's end, no other phase: {phases:?} {:?}", s.loco().current);
+    assert_eq!(s.data().air.takeoff.unwrap().id, TAKEOFF_SWING);
 }
 
 /// bug-1791661604: the far jump from the 3.5 m roof (x 5..11, z 9..15) at the 3.2 m block's -Z face (z 21.5) is a
@@ -2797,7 +2833,7 @@ fn a_free_hang_jump_at_a_wall_lands_feet_on_the_wall() {
 
 #[test]
 fn swing_from_bar_to_bar() {
-    use crate::player::swing::{SwingPhase, SWING_CYCLE, SWING_LANDING, TAKEOFF_SWING};
+    use crate::player::swing::{SWING_LANDING, TAKEOFF_SWING};
     let mut s = Sim::new(Vec3::new(60.0, 1.2, 85.0), std::f32::consts::PI);
     s.pad(Vec3::Z, 1.0, true, false);
     s.run(0.35);
@@ -2806,19 +2842,17 @@ fn swing_from_bar_to_bar() {
     assert_eq!(s.data().air.target.unwrap().type_flags, crate::player::targets::TARGET_LEDGE_FREE);
     assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some()), "never swung: {:?} {:?}", s.loco().current, s.body().feet);
     assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_LANDING);
-    // both hands on a pole (the bars are Pole edges) → the swing cycle; high profile and Legs held keep it going and
-    // jump with the stick toward the facing, without a press (Legs held, 0xEECE5E; RE/24 LEDGE-17, RE/27 C1)
+    // both hands on a pole (the bars are Pole edges); high profile and Legs held with the stick toward the facing jump
+    // on without a press (Legs held, 0xEECE5E; RE/24 LEDGE-17, RE/27 C1): with the landing's momentum, at its end
+    // (0xDCD000), without a cycle in between
     assert!(s.data().ledge.swing.unwrap().on_pole, "the bar is a pole");
     s.pad(Vec3::Z, 1.0, true, true);
-    assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle: {:?}", s.data().ledge.swing.map(|w| w.phase));
-    assert_eq!(s.data().ledge.swing.unwrap().action.id, SWING_CYCLE);
     for z in [93.5f32, 97.0] {
         assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no swing jump toward {z}");
         assert_eq!(s.data().air.takeoff.unwrap().id, TAKEOFF_SWING);
         assert!(s.run_until(3.0, |s| s.data().ledge.swing.is_some() && s.loco().current == ActorContextId::Ledge), "never reached bar {z}: {:?} {:?}", s.loco().current, s.body().feet);
         let mid = (s.data().ledge.hand_l + s.data().ledge.hand_r) * 0.5;
         assert!((mid.z - (z - 0.1)).abs() < 0.05, "hands on bar {z}: {mid:?}");
-        assert!(s.run_until(2.0, |s| s.data().ledge.swing.is_some_and(|w| matches!(w.phase, SwingPhase::Cycle(_)))), "no cycle on {z}");
     }
     // and onto the far platform, still only holding
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir));
@@ -4395,7 +4429,10 @@ fn pulling_up_at_the_end_of_a_wall_uses_one_hand() {
         let want = if one { ACT_PULLUP_WALL_ONEHAND } else { ACT_PULLUP_WALL };
         assert_eq!(mv.seq[0].map(|a| a.id), Some(want), "x {x}");
         if one {
-            assert_eq!(mv.seq[2].map(|a| a.id), Some(ACT_KNEE_ONEHAND_TO_FREESTEP));
+            // the second item and the stand-up follow as the queued move (RE/24 LEDGE-15: the interpolator covers item a)
+            let rest = s.data().ledge.queue.first().copied().expect("the pull-up's second part");
+            assert_eq!(rest.seq[0].map(|a| (a.id, a.item)), Some((ACT_PULLUP_WALL_ONEHAND, 1)));
+            assert_eq!(rest.seq[1].map(|a| a.id), Some(ACT_KNEE_ONEHAND_TO_FREESTEP));
         }
         s.pad(Vec3::Z, 0.0, false, false);
         assert!(s.run_until(4.0, stood_up), "never stood up at x {x}");
@@ -6157,4 +6194,37 @@ fn a_jump_arrival_takes_its_hands_from_the_hand_pair_probe() {
         assert!(l.x > r.x, "hand 0 on the character's left: {l:?} {r:?}");
     }
     assert!(crate::player::ledge::arrival_hands(Vec3::new(-30.0, 9.6, -30.0), Vec3::NEG_Z, false, g).is_none());
+}
+
+/// RE/24 WALL-3: up a wall leaning back 15°, the wall run's frame pitches with the wall over the entry warp (forward 15°
+/// down into the face) and keeps it while running up; a push-off snaps it upright (0xE382EB).
+#[test]
+fn the_wall_run_pitches_with_a_leaning_wall_and_the_rebound_straightens_it() {
+    use crate::player::walling::WallingSubState;
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    {
+        // a face 6 m wide at z −33.5 facing +z, its top leaning back 15° (toward −z), 4 m high
+        let t = 15f32.to_radians();
+        let (a, b) = (Vec3::new(-33.0, 0.0, -33.5), Vec3::new(-27.0, 0.0, -33.5));
+        let top = Vec3::new(0.0, 4.0 * t.cos(), -4.0 * t.sin());
+        let mut tris = Vec::new();
+        for q in [[a, b, b + top], [a, b + top, a + top]] {
+            let tri = crate::triangles::Triangle::new(q, crate::layers::STATIC).unwrap();
+            let tri = if tri.normal.z > 0.0 { tri } else { crate::triangles::Triangle::new([q[0], q[2], q[1]], crate::layers::STATIC).unwrap() };
+            tris.push(tri);
+        }
+        s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().add_triangles(tris);
+    }
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.body().feet.z < -31.6));
+    s.pad(Vec3::NEG_Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(1.5, |s| s.loco().current == ActorContextId::Walling), "no wall run: {:?} at {:?}", s.loco().current, s.body().feet);
+    let down = |s: &Sim| -(s.body().tilt * s.body().forward()).y;
+    assert!(s.run_until(1.0, |s| s.data().walling.sub_state == WallingSubState::Vertical), "no vertical step: {:?}", s.loco().current);
+    assert!((down(&s) - 15f32.to_radians().sin()).abs() < 0.02, "pitched 15° into the face: {}", down(&s));
+    s.pad(Vec3::Z, 1.0, true, true);
+    s.press_legs();
+    assert!(s.run_until(0.1, |s| s.loco().current == ActorContextId::InAir), "no rebound: {:?}", s.loco().current);
+    assert_eq!(s.body().tilt, Quat::IDENTITY, "the push-off is upright");
 }

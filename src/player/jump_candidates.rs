@@ -821,7 +821,9 @@ impl EdgeReport {
 
 /// `Human__BuildEdgeReports` 0xB1BC50 (pos, radius, min drop; the floor case is not ported): every guidance piece
 /// within `radius` that is not steep, whose perpendicular through the feet meets it within ±0.3 m of foot height,
-/// with a drop ≥ `min_drop` beyond it.
+/// with a drop ≥ `min_drop` beyond it. The drop is measured with the caller's position as the feet
+/// (`Human__MeasureDropBeyondEdge`(this, pos, point, normal, 7, 0.02) at 0xB1BE87), so the lip and line checks run first:
+/// at the seam between two buildings the next roof is found there, where the sweep alone would start inside it.
 pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<EdgeReport> {
     let mut out = Vec::new();
     for (i, e) in guidance.edges.iter().enumerate() {
@@ -850,7 +852,7 @@ pub fn edge_reports(pos: Vec3, radius: f32, min_drop: f32, guidance: &GuidanceWo
         if n == Vec3::ZERO {
             continue;
         }
-        let drop = measure_drop_stepped(p, n, 7.0, 0.02, collision, Some(guidance));
+        let drop = measure_drop_from(Some(pos), p, n, 7.0, 0.02, collision, Some(guidance));
         if drop < min_drop {
             continue;
         }
@@ -875,7 +877,8 @@ pub(crate) fn measure_drop(p: Vec3, n: Vec3, max: f32, step: f32, collision: &Co
 /// - Stairs: with a drop d, the edge reports at the floor (IHuman vt132 with radius 0.2 · clamp(d / 3, 0, 1) when that
 ///   exceeds 0.01, minimum drop 0.45, no floor report) add the deepest one's drop (`sub_B14CA0`), so a ledge below the
 ///   edge adds the drop beyond it (RE/25 #2: the 1.61 m roof edge over a 0.6 m shelf halts the walk).
-/// The two checks before the sweep need the caller's feet (`measure_drop_from`); these callers pass none. PORT: the rays
+/// The two checks before the sweep need the caller's feet (`measure_drop_from`; the edge reports pass theirs); this entry
+/// passes none. PORT: the rays
 /// use one layer (the game's 12, or 22 for the player, then 35).
 pub(crate) fn measure_drop_stepped(p: Vec3, n: Vec3, max: f32, step: f32, collision: &CollisionWorld, guidance: Option<&GuidanceWorld>) -> f32 {
     measure_drop_from(None, p, n, max, step, collision, guidance)

@@ -1303,8 +1303,8 @@ pub fn update_climb(
     let dt = time.delta_secs().min(1.0 / 20.0);
     for (mut loco, mut body, mut data, mut limbs) in &mut q {
         if loco.current != ActorContextId::Climb {
-            // the root frame's pitch belongs to the climb (and the ladder's, which sets its own)
-            if loco.current != ActorContextId::Ladder && body.tilt != Quat::IDENTITY {
+            // the root frame's pitch belongs to the climb (and the ladder's and the wall run's, which set their own)
+            if !matches!(loco.current, ActorContextId::Ladder | ActorContextId::Walling) && body.tilt != Quat::IDENTITY {
                 body.tilt = Quat::IDENTITY;
             }
             continue;

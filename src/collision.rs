@@ -241,7 +241,16 @@ impl CollisionWorld {
     /// and each is written as `sub_6712D0` does: its end nearer the start at sample ⌊a₀ / spacing⌋, its far end at
     /// ⌊a₁ / spacing⌋ (each the min of the sample and that end's depth), the samples between by the line through them.
     /// So sample k covers [k, k + 1) × spacing, and a solid on the sampling line writes depth 0 (its segments clipped at
-    /// depth 0; the game's inside intervals, `sub_6720C0`). Boxes are cut as their 12 triangles.
+    /// depth 0). Boxes are cut as their 12 triangles.
+    ///
+    /// Then the inside intervals (`sub_6720C0`): a clipped segment with exactly one end on the sampling line (depth within
+    /// 0.5 mm) is a crossing at that end's position, entering the solid when its face's normal points against `along`
+    /// (`sub_670930`: normal · along ≤ 0), leaving it otherwise. With a leaving sentinel at 0 and an entering one at
+    /// `span`, sorted by position, coincident enter / leave pairs cancelled, the coverage counts down at two leavings in a
+    /// row and up at two enterings; only the stretches from a leaving to the next entering at the lowest count are free
+    /// (their samples ⌊start / spacing⌋ ..= ⌊end / spacing⌋, `sub_670A10`). Every other sample is 0: the sampling line is
+    /// inside solid there, even where no face crosses it (a seam between two buildings, whose detectors start inside the
+    /// next one).
     #[allow(clippy::too_many_arguments)]
     pub fn depth_samples(&self, origin: Vec3, along: Vec3, dir: Vec3, span: f32, length: f32, spacing: f32, layer: u8) -> Vec<f32> {
         let count = (span / spacing) as usize + 1;
@@ -252,7 +261,9 @@ impl CollisionWorld {
         }
         let corners = [origin, origin + along * span, origin + dir * length, origin + along * span + dir * length];
         let (lo, hi) = corners.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), c| (l.min(*c), h.max(*c)));
-        let mut write = |p: Vec3, q: Vec3| {
+        // the crossings of the sampling line: (position along, entering)
+        let mut crossings: Vec<(f32, bool)> = Vec::new();
+        let mut write = |p: Vec3, q: Vec3, n: Vec3| {
             let (a0, d0) = ((p - origin).dot(along), (p - origin).dot(dir));
             let (a1, d1) = ((q - origin).dot(along), (q - origin).dot(dir));
             // Liang–Barsky against [0, span] × [0, length]
@@ -275,6 +286,11 @@ impl CollisionWorld {
             if a.0 > b.0 {
                 std::mem::swap(&mut a, &mut b);
             }
+            // a crossing: one end on the sampling line, the other off it (0x6713E0–0x671486)
+            let on = |d: f32| d.abs() <= 0.0005;
+            if on(b.1) != on(a.1) {
+                crossings.push((if on(b.1) { b.0 } else { a.0 }, n.dot(along) <= 0.0));
+            }
             let last = count - 1;
             // floored in x87 double precision, as the game (0x6712D0)
             let i0 = ((a.0 as f64 / spacing as f64) as usize).min(last);
@@ -288,7 +304,7 @@ impl CollisionWorld {
                 }
             }
         };
-        let mut cut = |vs: [Vec3; 3]| {
+        let mut cut = |vs: [Vec3; 3], n: Vec3| {
             let sd = vs.map(|v| (v - origin).dot(m));
             let mut pts: Vec<Vec3> = Vec::with_capacity(2);
             for i in 0..3 {
@@ -300,7 +316,7 @@ impl CollisionWorld {
                 }
             }
             if pts.len() >= 2 {
-                write(pts[0], pts[1]);
+                write(pts[0], pts[1], n);
             }
         };
         for (i, b) in self.boxes.iter().enumerate() {
@@ -308,17 +324,64 @@ impl CollisionWorld {
                 continue;
             }
             let c = |x: usize, y: usize, z: usize| Vec3::new([b.min.x, b.max.x][x], [b.min.y, b.max.y][y], [b.min.z, b.max.z][z]);
-            for (p0, p1, p2, p3) in [
-                (c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0)), (c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1)),
-                (c(0, 0, 0), c(1, 0, 0), c(1, 0, 1), c(0, 0, 1)), (c(0, 1, 0), c(1, 1, 0), c(1, 1, 1), c(0, 1, 1)),
-                (c(0, 0, 0), c(0, 1, 0), c(0, 1, 1), c(0, 0, 1)), (c(1, 0, 0), c(1, 1, 0), c(1, 1, 1), c(1, 0, 1)),
+            for (p0, p1, p2, p3, n) in [
+                (c(0, 0, 0), c(1, 0, 0), c(1, 1, 0), c(0, 1, 0), Vec3::NEG_Z), (c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1), Vec3::Z),
+                (c(0, 0, 0), c(1, 0, 0), c(1, 0, 1), c(0, 0, 1), Vec3::NEG_Y), (c(0, 1, 0), c(1, 1, 0), c(1, 1, 1), c(0, 1, 1), Vec3::Y),
+                (c(0, 0, 0), c(0, 1, 0), c(0, 1, 1), c(0, 0, 1), Vec3::NEG_X), (c(1, 0, 0), c(1, 1, 0), c(1, 1, 1), c(1, 0, 1), Vec3::X),
             ] {
-                cut([p0, p1, p2]);
-                cut([p0, p2, p3]);
+                cut([p0, p1, p2], n);
+                cut([p0, p2, p3], n);
             }
         }
         for t in self.triangles_in_bounds(lo, hi).filter(|t| layer == 0 || crate::layers::collides(layer, t.layer)) {
-            cut(t.vertices);
+            cut(t.vertices, t.normal);
+        }
+        // the inside intervals (`sub_6720C0`): a leaving sentinel at 0, an entering one at the span's end
+        let mut ev: Vec<(f32, bool)> = Vec::with_capacity(crossings.len() + 2);
+        ev.push((0.0, false));
+        ev.push((span, true));
+        ev.extend(crossings);
+        ev.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // coincident enter / leave pairs cancel
+        let mut i = 0;
+        while i < ev.len() {
+            if i + 1 < ev.len() && ev[i].1 != ev[i + 1].1 && ev[i].0 == ev[i + 1].0 {
+                ev.drain(i..i + 2);
+            } else if i > 0 && ev[i].1 != ev[i - 1].1 && ev[i].0 == ev[i - 1].0 {
+                ev.drain(i - 1..i + 1);
+                i -= 1;
+            } else {
+                i += 1;
+            }
+        }
+        let mut level = vec![0i32; ev.len()];
+        let (mut c, mut min) = (0i32, 0i32);
+        for i in 1..ev.len() {
+            match (ev[i - 1].1, ev[i].1) {
+                (false, false) => c -= 1,
+                (true, true) => c += 1,
+                _ => {}
+            }
+            level[i] = c;
+            min = min.min(c);
+        }
+        let mut free = vec![false; count];
+        let mut i = 0;
+        while i + 1 < ev.len() {
+            if !ev[i].1 && ev[i + 1].1 && level[i] == min && level[i + 1] == min {
+                let k0 = (ev[i].0 as f64 / spacing as f64) as usize;
+                let k1 = ((ev[i + 1].0 as f64 / spacing as f64) as usize).min(count - 1);
+                for f in free.iter_mut().take(k1 + 1).skip(k0) {
+                    *f = true;
+                }
+                i += 1;
+            }
+            i += 1;
+        }
+        for (s, f) in samples.iter_mut().zip(free) {
+            if !f {
+                *s = 0.0;
+            }
         }
         samples
     }

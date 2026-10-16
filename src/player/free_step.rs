@@ -350,10 +350,10 @@ pub fn update(
     // high profile, Legs held, the stick past 0.35 within 60° of the facing, the Walling ability; the guard is the wall
     // test 1.5 · h ahead (`StateMovement_GuardWallRun` 0xE503D0 → `Human__WallingWallTest` 0xE18390), the fill 0xB263B0
     if high && moving && pad.legs_held && pad.stick_facing_angle.abs() < WALL_RUN_ANGLE && ab.allows(Ability::Walling) {
-        if let Some((contact, normal)) = super::walling::wall_ahead(body.feet, forward, collision) {
+        if let Some((contact, normal, slope)) = super::walling::wall_ahead(body.feet, forward, collision) {
             pad.consume_jump();
             let from = body.feet;
-            switch_context(loco, data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, from, warp_duration: Some(WALL_RUN_WARP) }));
+            switch_context(loco, data, TransitionSetup::ToWalling(super::walling::WallingEntry { contact, normal, slope, from, warp_duration: Some(WALL_RUN_WARP) }));
             return;
         }
     }

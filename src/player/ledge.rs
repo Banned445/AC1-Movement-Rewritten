@@ -1268,9 +1268,11 @@ pub fn update_ledge(
                         }
                     }
                     if room {
-                        // root: along the pull-up clips' own displacement (up, then in over the lip; FROMANIM). PORT: with a
-                        // floor 0.5 m in (Pullup_Start 0xDDBE80's stand point) the root is also corrected onto it; on a
-                        // narrow top (a beam) the clips alone place it, and the free-step stay mounts what is there
+                        // root: from a wall hang, linear up to the hands' height, then the second item's own motion in over
+                        // the lip (RE/24 LEDGE-15, `pullup_move`); from a free hang along the clips' own displacement
+                        // (FROMANIM). PORT: for the free hang, with a floor 0.5 m in (Pullup_Start 0xDDBE80's stand point)
+                        // the root is also corrected onto it; on a narrow top (a beam) the clips alone place it, and the
+                        // free-step stay mounts what is there
                         let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
                         let standable = collision
                             .ground_height(top + Vec3::Y * 0.05, 0.3)
