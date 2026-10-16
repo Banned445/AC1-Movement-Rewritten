@@ -83,7 +83,7 @@ impl CitySim {
             .insert_resource(crate::map_menu::neutral_pad())
             .insert_resource(crate::player::SpawnPoint(Vec3::ZERO))
             .init_resource::<crate::camera::CameraRig>()
-            .init_resource::<Assets<Mesh>>().init_resource::<Assets<StandardMaterial>>().init_resource::<Assets<Image>>()
+            .init_resource::<Assets<Mesh>>().init_resource::<Assets<StandardMaterial>>().init_resource::<Assets<super::ground::GroundSurface>>().init_resource::<Assets<Image>>()
             .init_resource::<CollisionWorld>().init_resource::<crate::guidance::GuidanceWorld>()
             .init_resource::<super::stream::City>()
             .add_systems(Update, (super::update_city, crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,

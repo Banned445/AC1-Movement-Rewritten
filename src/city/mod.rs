@@ -4,6 +4,7 @@ pub mod archive;
 pub mod decode;
 pub mod fakes;
 pub mod grid;
+pub mod ground;
 pub mod material;
 pub mod presentation;
 pub mod shapes;
@@ -131,6 +132,7 @@ pub fn prepare(game: &Path, world: &CityWorld, bc: bool, spawn: &str) -> Result<
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>,
+    mut grounds: ResMut<Assets<ground::GroundSurface>>,
     mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>, mut guidance: ResMut<crate::guidance::GuidanceWorld>,
     mut spawn_point: ResMut<crate::player::SpawnPoint>, mut camera: ResMut<crate::camera::CameraRig>, mut city: ResMut<stream::City>,
     mut players: Query<(&mut crate::player::Body, &mut Transform), With<crate::player::Player>>,
@@ -139,7 +141,7 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
     collision.enable_index(8.0);
     *guidance = crate::guidance::GuidanceWorld { jump_pilotis: Some(Vec::new()), ..default() };
     let mut state = stream::CityState::new(p.world.data.clone());
-    let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, images: &mut images,
+    let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, grounds: &mut grounds, images: &mut images,
         collision: &mut collision, guidance: &mut guidance };
     let n = p.cells.len();
     for d in p.cells { state.integrate(d, &mut ctx); }
@@ -190,6 +192,7 @@ pub struct CityPlugin;
 impl Plugin for CityPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "grade.wgsl");
+        ground::install(app);
         app.add_plugins(bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin::<ambiance::PostGrade>::default());
         app.init_resource::<stream::City>()
             .init_resource::<presentation::CityEffects>()
@@ -205,7 +208,7 @@ impl Plugin for CityPlugin {
 const VOID_Y: f32 = -150.0;
 
 pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn: Res<crate::player::SpawnPoint>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>,
+    mut materials: ResMut<Assets<StandardMaterial>>, mut grounds: ResMut<Assets<ground::GroundSurface>>, mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>,
     mut guidance: ResMut<crate::guidance::GuidanceWorld>, mut players: Query<(&mut crate::player::Body, &mut crate::player::Locomotion, &mut crate::player::HumanDataBundle), With<crate::player::Player>>,
     cams: Query<(&GlobalTransform, Option<&Projection>), With<crate::camera::MainCamera>>) {
     let Some(state) = city.0.as_mut() else { return };
@@ -226,7 +229,7 @@ pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn
     // 0xA2F890: renderer +684 = tan(fov_y / 2) · 2.414213, the LOD distance scale (1 at a 45° vertical field of view)
     let fov = cams.iter().next().and_then(|(_, p)| match p { Some(Projection::Perspective(p)) => Some(p.fov), _ => None }).unwrap_or(std::f32::consts::FRAC_PI_4);
     let lod_scale = (fov * 0.5).tan() * 2.414_213;
-    let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, images: &mut images,
+    let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, grounds: &mut grounds, images: &mut images,
         collision: &mut collision, guidance: &mut guidance };
     state.update(body.feet, eye, view, lod_scale, time.delta_secs(), &mut ctx);
     // AC_CITY_LOG=<seconds>: log the streaming counters and frame times at that interval
@@ -547,6 +550,49 @@ mod tests {
                     println!("pilotis {} top {:.2?} sides {size:.2?}", o.name, g);
                     found += 1;
                     if found >= 40 { return; }
+                }
+            }
+        }
+    }
+
+    /// The drawn objects over `LAB_POS` ("x y", game coordinates): their mesh sections' materials (template, every
+    /// TextureSet channel, the parameter dictionary) and the vertex / instance colour ranges (ground-material probe).
+    #[test]
+    #[ignore]
+    fn probe_ground_materials() {
+        use crate::assets::static_mesh::word;
+        let Some(w) = damascus() else { return };
+        let Some(p) = std::env::var("LAB_POS").ok().map(|s| s.split_whitespace().filter_map(|x| x.parse().ok()).collect::<Vec<f32>>()) else { return };
+        let (x, z) = (p[0], -p[1]);
+        let a = &w.data.archives;
+        let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let mut seen = std::collections::HashSet::new();
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in &d.objects {
+                let b = &o.visual_bounds;
+                if o.meshes.is_empty() || x < b.min.x || x > b.max.x || z < b.min.z || z > b.max.z { continue; }
+                let m = &o.meshes[0];
+                println!("== {} (cell {cell}) mesh {:#x} {} verts, y {:.1}..{:.1}", o.name, m.id, m.mesh.positions.len(), b.min.y, b.max.y);
+                let range = |c: &mut dyn Iterator<Item = [f32; 4]>| { let (mut lo, mut hi) = ([1f32; 4], [0f32; 4]); for v in c { for k in 0..4 { lo[k] = lo[k].min(v[k]); hi[k] = hi[k].max(v[k]); } } (lo, hi) };
+                println!("   vertex colour {:.2?}", range(&mut m.mesh.colors.iter().copied()));
+                if let Some(c) = &m.colors { println!("   instance colour {:.2?}", range(&mut c.iter().map(|c| c.map(|b| b as f32 / 255.0)))); }
+                let uv = m.mesh.uvs.iter().fold((Vec2::MAX, Vec2::MIN), |(l, h), u| (l.min(*u), h.max(*u)));
+                println!("   uv {uv:.2?}");
+                for s in &m.mesh.sections {
+                    let Ok(r) = a.get(s.material) else { continue };
+                    let t = a.get(word(&r.payload, 8).unwrap_or(0)).map(|t| t.name.clone()).unwrap_or_default();
+                    println!("   section {} tris: {} [{t}]", s.indices.len() / 3, r.name);
+                    if !seen.insert(s.material) { continue; }
+                    println!("     material {}", hex(&r.payload));
+                    let Ok(set) = a.get(word(&r.payload, 12).unwrap_or(0)) else { continue };
+                    for q in (8..set.payload.len().saturating_sub(3)).step_by(4) {
+                        let id = word(&set.payload, q).unwrap();
+                        if id == 0 || !a.contains(id) { continue; }
+                        let spec = a.get(id).unwrap();
+                        let tex = word(&spec.payload, spec.payload.len().saturating_sub(4)).ok().and_then(|t| a.get(t).ok()).map(|t| t.name.clone()).unwrap_or_default();
+                        println!("     set +{q}: {} -> {tex}\n       {}", spec.name, hex(&spec.payload));
+                    }
                 }
             }
         }

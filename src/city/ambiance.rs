@@ -354,7 +354,7 @@ pub fn spawn_scene(a: &Ambiance, data: &super::decode::CityData, commands: &mut 
             double_sided: true, depth_bias: -1.0e6, ..default() });
         let radius = m.positions.iter().map(|p| p.length()).fold(0.0f32, f32::max).max(1e-3);
         for sec in &m.sections {
-            let mesh = meshes.add(super::stream::section_mesh(&m, None, &sec.indices));
+            let mesh = meshes.add(super::stream::section_mesh(&m, None, &sec.indices, false));
             commands.spawn((crate::map_menu::MapEntity, SkyDome, Mesh3d(mesh), MeshMaterial3d(mat.clone()),
                 bevy::light::NotShadowCaster, bevy::camera::visibility::NoFrustumCulling,
                 Transform::from_matrix(Mat4::from_scale(Vec3::splat(SKY_RADIUS / radius)) * super::decode::TO_BEVY)));

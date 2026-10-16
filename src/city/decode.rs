@@ -125,7 +125,7 @@ fn bind_pose_mesh(d: &[u8]) -> Option<StaticMesh> {
     let short = |v: &[u8], p: usize| i16::from_le_bytes([v[p], v[p + 1]]) as f32;
     let dir = |v: &[u8], p: usize| (Vec3::new(v[p] as f32, v[p + 1] as f32, v[p + 2] as f32) / 127.5 - Vec3::ONE).normalize_or_zero();
     let mut out = StaticMesh { positions: Vec::with_capacity(n), normals: Vec::with_capacity(n), tangents: Vec::with_capacity(n), uvs: Vec::with_capacity(n),
-        colors: Vec::with_capacity(n), sections: Vec::new() };
+        colors: Vec::with_capacity(n), blend: Vec::new(), sections: Vec::new() };
     for v in vertices.chunks_exact(stride) {
         let (nm, t) = (dir(v, 8), dir(v, 12));
         out.normals.push(nm);
@@ -139,6 +139,7 @@ fn bind_pose_mesh(d: &[u8]) -> Option<StaticMesh> {
             out.positions.push(Vec3::new(short(v, 0), short(v, 2), short(v, 4)) * scale);
             out.tangents.push(t.extend(short(v, 6).signum()));
             out.colors.push([v[16] as f32 / 255.0, v[17] as f32 / 255.0, v[18] as f32 / 255.0, v[19] as f32 / 255.0]);
+            out.blend.push([v[11], v[15]]);
         }
     }
     let tail = cm + 8 + size;
@@ -257,7 +258,7 @@ pub fn decode_file(data: &CityData, cell: usize, a: usize, file: &str) -> Result
     }
     let resident = data.resident.lock().unwrap().clone();
     for (id, m) in materials {
-        for (tex, linear) in m.diffuse.map(|d| (d, false)).into_iter().chain(m.normal.map(|n| (n, true))) {
+        for (tex, linear) in m.maps() {
             if resident.contains(&tex) || out.textures.iter().any(|t| t.0 == tex) { continue; }
             match data.materials.texture(&data.archives, tex, linear, data.bc) {
                 Ok(t) => out.textures.push((tex, linear, t)),

@@ -15,6 +15,9 @@ pub struct StaticMesh {
     pub tangents: Vec<Vec4>,
     pub uvs: Vec<Vec2>,
     pub colors: Vec<[f32; 4]>,
+    /// The MultiBlender layer weights: the normal's and the tangent's fourth byte (Env_MultiBlender vertex shader: COLOR1 =
+    /// (normal.w, tangent.w) / 255, RE/17 §12). Empty for the skinned vertex.
+    pub blend: Vec<[u8; 2]>,
     pub sections: Vec<StaticSection>,
 }
 
@@ -47,7 +50,7 @@ pub fn parse_static_mesh(d: &[u8]) -> Result<StaticMesh, String> {
     let vertices = blob.get(36..36 + vb).ok_or("truncated static vertices")?;
     let indices = index_buffer(blob, vb, ib, count)?;
     if indices.iter().any(|&i| i as usize >= vertices.len() / 24) { return Err("static index outside vertex buffer".into()); }
-    let mut mesh = StaticMesh { positions: Vec::new(), normals: Vec::new(), tangents: Vec::new(), uvs: Vec::new(), colors: Vec::new(), sections: Vec::new() };
+    let mut mesh = StaticMesh { positions: Vec::new(), normals: Vec::new(), tangents: Vec::new(), uvs: Vec::new(), colors: Vec::new(), blend: Vec::new(), sections: Vec::new() };
     for v in vertices.chunks_exact(24) {
         let short = |p| i16::from_le_bytes(v[p..p + 2].try_into().unwrap()) as f32;
         // GEN_Standard packed-position vertex shader (MaterialTemplate in Game Bootstrap Settings):
@@ -61,6 +64,7 @@ pub fn parse_static_mesh(d: &[u8]) -> Result<StaticMesh, String> {
         // PORT: existing atlas UV convention until the vertex-declaration normalization is audited.
         mesh.uvs.push(Vec2::new(short(20), short(22)) * (1.0 / 2048.0));
         mesh.colors.push([v[16] as f32 / 255.0, v[17] as f32 / 255.0, v[18] as f32 / 255.0, v[19] as f32 / 255.0]);
+        mesh.blend.push([v[11], v[15]]);
     }
     let tail = 34 + size;
     // CompiledMesh__Read 0xA96610 consumes blob then two u32 fields; Mesh__Read 0x9F6EE0
