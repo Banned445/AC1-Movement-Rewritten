@@ -358,6 +358,64 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     Ok(Some(o))
 }
 
+/// A skinned Mesh of a city entity at its pose (RE/17 §3.4): the Mesh's bones (`MeshBone`: BoneID and inverse bind
+/// matrix) and per-vertex palette indices and weights (`ac_formats::parse_mesh`), the entity's Skeleton
+/// (`SkeletonComponent`) and the first key of the first Animation its `AnimComponent` lists. The vertices are stored in
+/// their bones' frames (a kiosk's stall drawn as stored lies folded under the street); each one is
+/// `Σ w · (G_bone · invBind_bone) · v`, G the bone's global transform from the skeleton's local transforms with the
+/// animation's keys over them. A kiosk's animations (standing, knocked over in four directions) all start standing.
+/// PORT: the props are drawn at that pose; the knocked-over states (`InertSwitch`, `BhvKiosk`) are not played.
+/// None when the mesh is not skinned.
+fn pose_skinned(data: &CityData, b: &[u8], mesh_id: u32, base: &StaticMesh) -> Option<StaticMesh> {
+    let r = data.archives.get(mesh_id).ok()?;
+    let m = crate::assets::ac_formats::parse_mesh(&r.payload)?;
+    if m.bones.is_empty() || m.positions.len() != base.positions.len() { return None; }
+    let refs = |class: &str| -> Vec<Arc<Resource>> {
+        let c = crc32(class);
+        let mut seen = std::collections::HashSet::new();
+        (0..b.len().saturating_sub(3)).filter_map(|p| word(b, p).ok())
+            .filter(|&id| id != 0 && seen.insert(id) && data.archives.contains(id))
+            .filter_map(|id| data.archives.get(id).ok().filter(|r| r.class_hash == c)).collect()
+    };
+    let skeleton = refs("Skeleton").first().map(|s| crate::assets::ac_formats::parse_skeleton(&s.payload)).unwrap_or_default();
+    let (rot, pos) = refs("Animation").first().and_then(|a| crate::assets::ac_anim::decode(&a.payload).ok())
+        .map(|a| crate::assets::ac_anim::bone_tracks(&a)).unwrap_or_default();
+    // skeleton order has parents first (`parse_skeleton` resolves them by index)
+    let mut global: Vec<Mat4> = Vec::with_capacity(skeleton.len());
+    for bone in &skeleton {
+        let rotation = rot.get(&bone.bone_id).and_then(|k| k.first()).map_or(bone.local_rot, |k| k.1);
+        let translation = pos.get(&bone.bone_id).and_then(|k| k.first()).map_or(bone.local_pos, |k| k.1);
+        let local = Mat4::from_rotation_translation(Quat::from_array(rotation).normalize(), Vec3::from(translation));
+        let g = bone.parent.and_then(|p| global.get(p).copied()).map_or(local, |p| p * local);
+        global.push(g);
+    }
+    let skin: Vec<Mat4> = m.bones.iter().map(|mb| {
+        let g = skeleton.iter().position(|s| s.bone_id == mb.bone_id).map_or(Mat4::IDENTITY, |j| global[j]);
+        g * Mat4::from_cols_array(&mb.inv_bind)
+    }).collect();
+    let mut out = base.clone();
+    for s in &m.submeshes {
+        for i in s.vstart as usize..(s.vstart + s.vcount) as usize {
+            let mut mat = Mat4::ZERO;
+            let mut total = 0.0;
+            for k in 0..4 {
+                let w = m.bone_w[i][k] as f32 / 255.0;
+                if w == 0.0 { continue; }
+                let Some(&bone) = s.palette.get(m.bone_idx[i][k] as usize).and_then(|&x| skin.get(x as usize)).as_ref() else { continue };
+                mat += bone * w;
+                total += w;
+            }
+            if total <= 0.0 { continue; }
+            let mat = mat * (1.0 / total);
+            out.positions[i] = mat.transform_point3(base.positions[i]);
+            out.normals[i] = mat.transform_vector3(base.normals[i]).normalize_or_zero();
+            let t = base.tangents[i];
+            out.tangents[i] = mat.transform_vector3(t.truncate()).normalize_or_zero().extend(t.w);
+        }
+    }
+    Some(out)
+}
+
 /// An Entity or EntityGroup body's placement (Entity__Read 0x450E90 → 0x4D9C10): 16 floats after the id/class.
 /// Some authored matrices carry w = 0.99999994; accept affine within 1e-4.
 pub fn placement(b: &[u8]) -> Result<Mat4, String> {
@@ -534,6 +592,8 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
     for (slot, &id) in slots.iter().enumerate() {
         if id == 0 { continue; }
         let mesh = data.meshes.get(&data.archives, id)?;
+        // a skinned prop (a kiosk's stall …): its vertices are stored per bone; pose it
+        let mesh = match pose_skinned(data, b, id, &mesh) { Some(posed) => Arc::new(posed), None => mesh };
         let col = colors.get(&id).and_then(|blob| {
             let n = mesh.positions.len();
             (blob.len() == 16 + n * 4 && word(blob, 8).ok()? as usize == n * 4)

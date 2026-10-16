@@ -2,11 +2,13 @@
 use bevy::prelude::*;
 use super::forge::crc32;
 
+#[derive(Clone)]
 pub struct StaticSection {
     pub indices: Vec<u32>,
     pub material: u32,
 }
 
+#[derive(Clone)]
 pub struct StaticMesh {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,

@@ -1448,3 +1448,67 @@ fn damascus_bureau_presentation() {
     assert!(fx.iter().all(|f| f.delay.0 >= 0.5 && f.delay.1 >= f.delay.0 && f.distance.1 >= f.distance.0 && f.distance.1 > 0.0), "{fx:?}");
     assert!(!fx.is_empty());
 }
+
+/// Entities whose name has `AC_PROBE_NAME`: their Visuals, drawables and what the decoder makes of them (diagnostic).
+#[test]
+#[ignore = "diagnostic"]
+fn probe_damascus_named_entities() {
+    let Ok(pat) = std::env::var("AC_PROBE_NAME") else { return };
+    let limit: usize = std::env::var("AC_DUMP_N").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let cls = |id: u32| w.data.archives.get(id).map(|r| format!("{:08x} {}", r.class_hash, r.name)).unwrap_or_else(|e| format!("? {e}"));
+    let mut n = 0;
+    'outer: for cell in 0..w.data.grid.cells.len() {
+        let c = &w.data.grid.cells[cell];
+        let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+        let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+        let Some(entry) = w.data.archives.find(a, &file) else { continue };
+        let Ok(res) = w.data.archives.file(a, entry) else { continue };
+        let mut list: Vec<_> = res.values().filter(|r| r.name.contains(&pat)).collect();
+        list.sort_by_key(|r| r.id);
+        for r in list {
+            let bodies = super::decode::bodies(r);
+            eprintln!("NAMED {} class {:08x} {} bytes, {} bodies, cell {cell} level {}", r.name, r.class_hash, r.payload.len(), bodies.len(), c.level);
+            for (k, b) in bodies.iter().enumerate() {
+                let vis = super::decode::markers(b, "Visual");
+                let rd = |o: usize| b.get(o..o + 4).map(|x| u32::from_le_bytes(x.try_into().unwrap())).unwrap_or(0);
+                let v: Vec<String> = vis.iter().map(|&p| format!("@{p} u8 {} -> {}", b[p + 4], cls(rd(p + 5)))).collect();
+                let comps: Vec<&str> = ["InertSwitch", "InertComponent", "RigidBodyComponent", "SkeletonComponent", "AnimComponent", "BhvKiosk", "Kiosk", "LODSelector", "BlendPosClip", "GuidanceSystem", "EntityGroup", "ReactiveProp"]
+                    .into_iter().filter(|n| !super::decode::markers(b, n).is_empty()).collect();
+                eprintln!("NAMED   body {k} ({} bytes) at {:?}: visuals {v:?} comps {comps:?}", b.len(), super::decode::placement(b).map(|m| m.w_axis.truncate()));
+            }
+            let d = super::decode::decode_file(&w.data, cell, a, &file);
+            if let Ok(d) = d {
+                for o in d.objects.iter().filter(|o| o.name.contains(&pat)) {
+                    let m = o.meshes.first();
+                    let local = m.map(|m| m.mesh.positions.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), p| (l.min(*p), h.max(*p))));
+                    eprintln!("NAMED   -> object {} meshes {} lod {:?} verts {:?} local {:?} world {:?}..{:?} sections {:?}", o.name, o.meshes.len(), o.lod.mesh,
+                        m.map(|m| m.mesh.positions.len()), local, o.visual_bounds.min, o.visual_bounds.max, m.map(|m| m.mesh.sections.iter().map(|s| (s.indices.len() / 3, s.material)).collect::<Vec<_>>()));
+                }
+                for (k, v) in &d.stats.skipped { eprintln!("NAMED   cell skip {v} {k}"); }
+            }
+            n += 1;
+            if n >= limit { break 'outer; }
+        }
+    }
+}
+
+/// A kiosk's stall (`Outdoor_Market_Stall_Skinned`, Kiosk_Vases_034 by the Souk) is a skinned mesh stored per bone: posed
+/// by its skeleton and its animations' first key it stands on the street (ground 8.0) up to its awning, instead of
+/// lying folded under the street.
+#[test]
+fn damascus_kiosk_stall_is_posed() {
+    let Some(game) = crate::assets::find_game_dir() else { return };
+    if !game.join(super::DAMASCUS.archive).is_file() { return; }
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let at = super::decode::to_bevy(Vec3::new(-183.24, -104.34, 8.0));
+    let cell = super::stream::wanted_cells(&w.data, &super::stream::content_mask(&w.data), at, None).into_iter()
+        .find(|&c| super::decode::decode_cell(&w.data, c).is_ok_and(|d| d.objects.iter().any(|o| o.name.starts_with("Kiosk_Vases_034/")))).unwrap();
+    let d = super::decode::decode_cell(&w.data, cell).unwrap();
+    let stall = d.objects.iter().filter(|o| o.name.starts_with("Kiosk_Vases_034/"))
+        .max_by_key(|o| o.meshes.first().map_or(0, |m| m.mesh.positions.len())).unwrap();
+    let b = stall.visual_bounds;
+    assert!(b.min.y > 7.5 && b.min.y < 8.1 && b.max.y > 10.8 && b.max.y < 11.6, "{:?}", b);
+    assert!((b.max.x - b.min.x) > 3.5 || (b.max.z - b.min.z) > 3.5, "the stall's length {:?}", b);
+}

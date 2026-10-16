@@ -146,7 +146,8 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
     state.spawn_fakes(p.fakes, &mut ctx);
     let eye = p.spawn + Vec3::Y * 3.0;
     state.prime(p.spawn, eye, &mut ctx);
-    info!("Damascus: {n} cells around the spawn, {:?}", state.stats);
+    let g = Vec3::new(p.spawn.x, -p.spawn.z, p.spawn.y);
+    info!("Damascus: {n} cells around the spawn at game ({:.2} {:.2} {:.2}), {:?}", g.x, g.y, g.z, state.stats);
     city.0 = Some(Box::new(state));
     spawn_point.0 = p.spawn;
     *camera = default();
