@@ -44,14 +44,16 @@ pub fn in_zone(slot: usize, origin: Vec3, p: Vec3, k: f32) -> bool {
         let q = poly[i % poly.len()];
         if i % poly.len() >= 2 { [q[0] * k, q[1]] } else { q }
     };
+    // the crossing test `sub_F10030` (from `JumpZone__Contains` 0x1173590): an edge counts when y lies in (min, max]
+    // of its ends (horizontal edges never), its larger x is at or past x, and it is vertical or its crossing at y is
+    // at or past x; inside on an odd count. A point on the far (outer) boundary therefore counts as inside
     let mut inside = false;
     for i in 0..poly.len() {
         let (a, b) = (v(i), v(i + 1));
-        if (a[1] > y) != (b[1] > y) {
-            let t = (y - a[1]) / (b[1] - a[1]);
-            if x < a[0] + t * (b[0] - a[0]) {
-                inside = !inside;
-            }
+        if y > a[1].min(b[1]) && y <= a[1].max(b[1]) && a[0].max(b[0]) >= x && a[1] != b[1]
+            && (a[0] == b[0] || (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) + a[0] >= x)
+        {
+            inside = !inside;
         }
     }
     inside
@@ -616,8 +618,9 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
             // jump's frame (forward = dir, up); then `JumpZone__Contains` (0xE19D5A). A beam running along the jump
             // gives its far end
             let p = nearest_to_outline(a, b, &zone_outline(z.primary, pos, dir, if q.kind == 1 || q.kind == 2 || q.mode == 4 { 4 } else { 5 }, k));
-            // PORT: a beam crossing the outline gives the crossing point itself, on the zone's boundary, where the
-            // game's float test is untraced: it counts when 1 mm toward the beam's nearer end lies inside
+            // a beam crossing the outline gives the crossing point itself, on the zone's far boundary, which the game's
+            // test counts as inside (`sub_F10030`, inclusive there); PORT: 1 mm toward the beam's nearer end absorbs
+            // the float differences of the port's outline point
             let near = if a.distance_squared(pos) <= b.distance_squared(pos) { a } else { b };
             let p = if in1_test(p) { p } else { p + (near - p).normalize_or_zero() * 0.001 };
             if !in1_test(p) {

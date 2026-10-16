@@ -102,7 +102,7 @@ pub struct HumanGroundData {
     pub wall_start: Option<(Vec3, Vec3, Vec3)>,
     /// The impulsion jump (state +245, entered by event 45): its target, taken off with the free-step jump (kind 1,
     /// `HumanGround__StartFreeStepJumpToTarget` 0xD858A0) when `jump_blend::IMPULSION_JUMP` completes (0xD8E390).
-    pub impulsion_jump: Option<JumpTarget>,
+    pub impulsion_jump: Option<ImpulsionJump>,
     /// The interpreter's lean push timer (+0xFC8, 0xEE75F4–0xEE763E): how long the stick has pushed within 45° of the
     /// facing while leaning; any other frame restarts it.
     pub lean_push_t: f32,
@@ -396,6 +396,15 @@ pub struct GroundOneShot {
     pub h0: Option<f32>,
 }
 
+/// What the impulsion jump takes off to: the stored target, or the free target of a jump without one (IHuman vt68
+/// mode 0 -> IHumanGround vt28 `HumanGround__JumpToTargetOfType` 0xD832F0 -> vt24, event 45 like a target: 8 m along
+/// the searched direction, 3 m down, type 1).
+#[derive(Clone, Copy, Debug)]
+pub enum ImpulsionJump {
+    Target(JumpTarget),
+    Free { dir: Vec3 },
+}
+
 /// Which of event 45's guards takes a jump to a target (`HumanGround__Movement_HandleEvent` 0xDB19BE; FreeRun 0xDAB32E).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event45 {
@@ -421,16 +430,20 @@ impl HumanGroundData {
     /// Live (lab): from the impulsion wait 0.27 s of impulsion then `freestep_front_front_*_to_air`; from a walk start or
     /// a free-step exit 0.05-0.09 s; from the running locomotion `run_front_*_to_air`. PORT: HG+616 is taken as the
     /// impulsion's start phase (`sub_724500`'s node call is not decoded; the timings fit it).
-    pub fn event45(&mut self, feet: Vec3, forward: Vec3, target: JumpTarget, free_run: bool) -> Event45 {
+    pub fn event45(&mut self, feet: Vec3, forward: Vec3, jump: ImpulsionJump, free_run: bool) -> Event45 {
+        let target_pos = match jump {
+            ImpulsionJump::Target(t) => t.position,
+            ImpulsionJump::Free { dir } => feet + Vec3::new(dir.x, 0.0, dir.z).normalize_or(forward) * FREE_JUMP_AHEAD - Vec3::Y * crate::tuning::FREE_JUMP_DOWN,
+        };
         let item = self.tr.map(|t| (t.action, t.phase)).or_else(|| self.oneshot.map(|o| (o.blend, o.t / o.duration.max(1e-4))));
         if item.is_some_and(|(b, _)| super::anim_gate::locked(&b)) {
             return Event45::Refused;
         }
-        let v = (target.position.y - feet.y).clamp(0.0, 1.3) / 1.3;
+        let v = (target_pos.y - feet.y).clamp(0.0, 1.3) / 1.3;
         let mut w = [0.0f32; 10];
         let phase = if free_run {
             let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-            let d = Vec3::new(target.position.x - feet.x, 0.0, target.position.z - feet.z).normalize_or(f);
+            let d = Vec3::new(target_pos.x - feet.x, 0.0, target_pos.z - feet.z).normalize_or(f);
             let a = d.dot(super::right_of(f)).atan2(d.dot(f));
             let q = std::f32::consts::FRAC_PI_2;
             let (slots, k) = if a < -q {
@@ -471,7 +484,7 @@ impl HumanGroundData {
         }
         self.owner = TreeState::Other;
         self.tr = None;
-        self.impulsion_jump = Some(target);
+        self.impulsion_jump = Some(jump);
         Event45::Impulsion
     }
 
@@ -944,8 +957,8 @@ pub fn update_ground(
         // item's word bits 2-3); anything that took over drops it
         if g.impulsion_jump.is_some() && !g.oneshot.is_some_and(|o| jump_blend::IMPULSION_JUMP.contains(&o.blend.id) && o.t < o.duration) {
             let os = g.oneshot.filter(|o| jump_blend::IMPULSION_JUMP.contains(&o.blend.id));
-            let target = g.impulsion_jump.take();
-            if let (Some(os), Some(target)) = (os, target) {
+            let jump = g.impulsion_jump.take();
+            if let (Some(os), Some(jump)) = (os, jump) {
                 g.oneshot = None;
                 // the item's foot bits as `Human__SetupJumpToTarget`'s a7: 0 -> `Human__GetLeadingFoot` (0xB20435;
                 // PORT: the locomotion's foot, as the impulsion's own choice reads it)
@@ -954,8 +967,17 @@ pub fn update_ground(
                     Some(2) => false,
                     _ => g.blend.foot != 0,
                 };
-                jump_log("impulsion jump takeoff", body.feet, Some(&target));
-                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::FreeStepJump { from: body.feet, target, foot_left }));
+                let entry = match jump {
+                    ImpulsionJump::Target(target) => {
+                        jump_log("impulsion jump takeoff", body.feet, Some(&target));
+                        InAirEntry::FreeStepJump { from: body.feet, target, foot_left }
+                    }
+                    ImpulsionJump::Free { dir } => {
+                        jump_log("impulsion free jump takeoff", body.feet, None);
+                        InAirEntry::FreeStepFreeJump { from: body.feet, dir, ahead: FREE_JUMP_AHEAD, down: crate::tuning::FREE_JUMP_DOWN, foot_left }
+                    }
+                };
+                switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 continue;
             }
         }
@@ -1642,7 +1664,7 @@ pub fn update_ground(
         if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
             if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir_snap, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
                 jump_log("free-run target jump", body.feet, Some(&target));
-                match g.event45(body.feet, body.forward(), target, free_run_ready) {
+                match g.event45(body.feet, body.forward(), ImpulsionJump::Target(target), free_run_ready) {
                     Event45::Run => {
                         let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot != 0 };
                         switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
@@ -1746,16 +1768,19 @@ pub fn update_ground(
             let found = super::targets::find_target(body.feet, want, want, &super::jump_candidates::Query::TAP, false, &guidance, &collision)
                 .or_else(|| ab.allows(Ability::LeapOfFaith).then(|| super::targets::haystack_target(body.feet, want, forward, &guidance, &collision)).flatten());
             jump_log("tap jump", body.feet, found.as_ref());
-            // with a target, event 45 (vt24): the impulsion or the run jump by the playing item
-            if let Some(t) = found {
-                match g.event45(body.feet, forward, t, free_run_ready) {
-                    Event45::Run => {}
-                    Event45::Impulsion => {
-                        body.velocity = Vec3::ZERO;
-                        continue;
-                    }
-                    Event45::Refused => continue,
+            // event 45 (vt24; without a target through vt28 with the free target): the impulsion or the run jump by the
+            // playing item
+            let jump = match found {
+                Some(t) => ImpulsionJump::Target(t),
+                None => ImpulsionJump::Free { dir: want },
+            };
+            match g.event45(body.feet, forward, jump, free_run_ready) {
+                Event45::Run => {}
+                Event45::Impulsion => {
+                    body.velocity = Vec3::ZERO;
+                    continue;
                 }
+                Event45::Refused => continue,
             }
             let entry = match found {
                 // the takeoff foot (`StartRunJumpToTarget` 0xD837A0: the playing item's word bits 2–3, 1 = the footl
@@ -2142,7 +2167,7 @@ fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &Gui
 /// shortened 0.5 m at both ends. A wall right over the edge (the top ray of `static_target_type`: from the hold + 0.5·n
 /// + 0.3 m up back toward the wall, 1.75 m, less 0.5 under 0.3) rejects it. `Human__PickStaticReport` 0xE97720 picks
 /// one (`choose_static_report`), and the straight jump takes it.
-/// PORT: the obstacle contact the search needs (`Human__GetObstacleContact` 0xB25230) is the caller's box test.
+/// The obstacle contact the search needs first (`Human__GetObstacleContact` 0xB25230) is the caller's test.
 pub fn beam_obstacle_target(stand: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
     use crate::guidance::GuidanceSubType as S;
     let dir = dir.with_y(0.0).normalize_or_zero();
@@ -2394,14 +2419,14 @@ mod reanalysis_tests {
             .find(|b| !super::super::anim_gate::locked(b))
             .expect("an unlocked start item");
         let mut g = HumanGroundData::default();
-        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, target, false), Event45::Run, "the locomotion");
+        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), false), Event45::Run, "the locomotion");
         for (t, want) in [(0.3f32, Event45::Impulsion), (0.8, Event45::Run)] {
             let mut g = HumanGroundData::default();
             g.play_oneshot(start);
             if let Some(os) = g.oneshot.as_mut() {
                 os.t = t * os.duration;
             }
-            assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, target, false), want, "t {t}");
+            assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), false), want, "t {t}");
             if want == Event45::Impulsion {
                 let os = g.oneshot.unwrap();
                 assert!(jump_blend::IMPULSION_JUMP.contains(&os.blend.id));
@@ -2412,7 +2437,7 @@ mod reanalysis_tests {
         // FreeRun: from the start, the target 45 degrees to the right blends front and right half and half
         let mut g = HumanGroundData::default();
         let right = JumpTarget { position: Vec3::new(2.0, 0.0, -2.0), ..target };
-        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, right, true), Event45::Impulsion);
+        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(right), true), Event45::Impulsion);
         let os = g.oneshot.unwrap();
         let w = os.blend.weights();
         assert!(os.t == 0.0 && (w[0] - 0.5).abs() < 1e-3 && (w[4] - 0.5).abs() < 1e-3, "{w:?}");
