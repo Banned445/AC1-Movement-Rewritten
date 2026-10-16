@@ -1076,3 +1076,68 @@ fn probe_damascus_beam_frame_cost() {
         eprintln!("DCOST frame {label}: {:.2} ms/frame, {:?} {:?} feet {:?}", t.elapsed().as_secs_f64() * 1000.0 / 30.0, s.loco().current, s.data().narrow.state, s.body().feet);
     }
 }
+
+/// Bug report 2026-10-16: running over the seams between Damascus buildings (two roof edges facing each other a few
+/// centimetres apart) stopped at them and hung from them, the hang inside the next building, and free running jumped at
+/// them. The edge reports measure the drop with the caller's feet (`Human__BuildEdgeReports` 0xB1BC50 →
+/// `Human__MeasureDropBeyondEdge`(this, pos, …) at 0xB1BE87): the lip and line checks find the next roof, where the
+/// sweep alone started inside it and measured a 7 m drop. Running and free running over level seams near the Bureau:
+/// no hang from a seam and no takeoff at one.
+#[test]
+fn damascus_runs_over_the_seams_between_buildings() {
+    use crate::guidance::GuidanceSubType;
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.settle_streaming(20.0, None);
+    let roofs: Vec<_> = s.guidance().edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.n0.y > 0.9 && e.n1.y.abs() < 0.3 && e.p0.distance(e.p1) > 1.0).cloned().collect();
+    let mut seams = Vec::new();
+    for a in &roofs {
+        let na = Vec3::new(a.n1.x, 0.0, a.n1.z).normalize_or_zero();
+        let qa = (a.p0 + a.p1) * 0.5;
+        for b in &roofs {
+            let nb = Vec3::new(b.n1.x, 0.0, b.n1.z).normalize_or_zero();
+            let qb = b.closest_point(qa);
+            let gap = (qb - qa).dot(na);
+            if na.dot(nb) > -0.9 || !(-0.05..=0.1).contains(&gap) || (qb - qa - na * gap).with_y(0.0).length() > 0.3 || (qb.y - qa.y).abs() > 0.1 {
+                continue;
+            }
+            let start = qa - na * 4.0;
+            let c = s.collision();
+            let Some(floor) = c.floor_height_below(start + Vec3::Y * 0.4, 0.8) else { continue };
+            let feet = Vec3::new(start.x, floor, start.z);
+            // level roof all the way to the seam and 2 m past it
+            let level = (-7..=4).all(|k| c.floor_height_below(qa + na * (k as f32 * 0.5) + Vec3::Y * 0.4, 0.8).is_some_and(|y| (y - qa.y).abs() < 0.15));
+            if (floor - qa.y).abs() > 0.3 || !level || !c.capsule_fits(feet) {
+                continue;
+            }
+            seams.push((feet, na, qa, a.clone(), b.clone()));
+        }
+    }
+    assert!(seams.len() >= 4, "only {} level seams near the Bureau", seams.len());
+    let mut failures = Vec::new();
+    for (feet, dir, qa, ea, eb) in seams.iter().take(10) {
+        let on_seam = |p: Vec3| ea.closest_point(p).distance(p) < 0.1 || eb.closest_point(p).distance(p) < 0.1;
+        for legs in [false, true] {
+            s.place(*feet, *dir);
+            s.run(0.2);
+            s.pad(*dir, 1.0, true, legs);
+            for _ in 0..120 {
+                s.step();
+                let cur = s.loco().current;
+                if cur == ActorContextId::Ledge && (on_seam(s.data().ledge.hand_l) || on_seam(s.data().ledge.hand_r)) {
+                    failures.push(format!("hung from the seam at {qa} (legs {legs})"));
+                    break;
+                }
+                if cur == ActorContextId::InAir && (s.body().feet - *qa).with_y(0.0).length() < 1.0 {
+                    failures.push(format!("took off at the seam at {qa} (legs {legs}): {}", s.body().feet));
+                    break;
+                }
+                if (s.body().feet - *qa).dot(*dir) > 2.0 {
+                    break;
+                }
+            }
+            s.pad(*dir, 0.0, false, false);
+            s.run(0.5);
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

@@ -74,7 +74,7 @@ mod beam_warp_tests {
     fn beam_wall_run_reaches_contact_at_130_ms_then_keeps_root_motion() {
         let mut w = HumanWallingData::default();
         let target = Vec3::new(0.0, 1.0, -0.8);
-        w.enter(WallingEntry { contact: target, normal: Vec3::Z, from: Vec3::ZERO, warp_duration: Some(0.13) });
+        w.enter(WallingEntry { contact: target, normal: Vec3::Z, slope: Vec3::Z, from: Vec3::ZERO, warp_duration: Some(0.13) });
         assert!(w.root_at(0.0).length() < 1e-6);
         assert!(w.root_at(0.13).distance(target) < 1e-5);
         assert!(w.root_at(0.14).distance(w.root_at(0.13)) < 0.1);
@@ -99,6 +99,9 @@ pub struct WallingEntry {
     pub contact: Vec3,
     /// Outward wall normal.
     pub normal: Vec3,
+    /// The wall's tilted outward normal (`slope_normal`; `normal` on a vertical wall): the entry warp pitches the
+    /// character's frame to face along its reverse (RE/24 WALL-3).
+    pub slope: Vec3,
     pub from: Vec3,
     /// Beam event 15 uses a 0.13 s warp (0xB263B0); ground entries use the action length.
     pub warp_duration: Option<f32>,
@@ -119,6 +122,27 @@ pub struct HumanWallingData {
     /// HumanWallingData+0x14.
     pub start_height: f32,
     warp_duration: Option<f32>,
+    /// The root frame's pitch (RE/24 WALL-3): the entry warp's target frame (forward = −slope normal, up = right ×
+    /// forward, 0xDA2D77 → `sub_710C20`), held through EntryB and Vertical, turned back upright in VerticalEnd.
+    pub pitch: Quat,
+}
+
+/// The pitch that turns the flat facing (−`normal` flattened) onto −`slope` about the wall's horizontal axis.
+pub fn wall_pitch(normal: Vec3, slope: Vec3) -> Quat {
+    let f = -Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
+    let s = slope.normalize_or_zero();
+    if f == Vec3::ZERO || s == Vec3::ZERO {
+        return Quat::IDENTITY;
+    }
+    Quat::from_rotation_arc(f, -s)
+}
+
+/// VerticalEnd's turn back upright (0xE39274–0xE392E7): the frame's up lerps toward world up by 4·dt each frame
+/// (`sub_42ECC0`, normalised), the forward re-squared to it (`sub_52BD40`).
+pub fn pitch_toward_upright(pitch: Quat, dt: f32) -> Quat {
+    let up = pitch * Vec3::Y;
+    let up = (up + (Vec3::Y - up) * (4.0 * dt)).normalize_or(Vec3::Y);
+    Quat::from_rotation_arc(Vec3::Y, up)
 }
 
 fn single(id: u32, item: usize) -> Option<ActionBlend> {
@@ -142,6 +166,7 @@ impl HumanWallingData {
     /// contact over the action's length.
     pub fn enter(&mut self, e: WallingEntry) {
         self.normal = e.normal;
+        self.pitch = wall_pitch(e.normal, e.slope);
         self.start_height = e.from.y;
         self.play(WallingSubState::EntryA, single(ENTRY_A, 0), None, e.from, Some(e.contact));
         self.warp_duration = e.warp_duration;
@@ -255,8 +280,8 @@ fn slope_normal(hit: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> 
 /// 1.5·h long, on the walling layer; the hit's own normal flattened (0xE184EA, RE/24 WALL-2) must face back within 45°;
 /// the width check (`width_check`) may move the contact or reject; the slope (`slope_normal`) may reject. Returns the warp
 /// target (contact + 0.5·h along the slope normal, 0.3·h down: feet + h on a vertical wall) and the flat outward normal.
-/// PORT: the run's facing frame stays upright (the game pitches it with the slope normal and lerps back in VerticalEnd).
-pub fn wall_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> Option<(Vec3, Vec3)> {
+/// Returns (warp target, flat outward normal, slope normal); the slope normal pitches the run (`wall_pitch`).
+pub fn wall_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> Option<(Vec3, Vec3, Vec3)> {
     let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let o = feet + Vec3::Y * (1.3 * H);
     // the wall ray: filter 47 (`sub_4FB6E0`(47) 0xE18404, RaycastFuzzyZone); a hit on a fuzzy zone (layers 24 / 26 / 25 /
@@ -274,7 +299,7 @@ pub fn wall_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> Opti
     let hit = width_check(o + f * d, n, collision)?;
     let slope = slope_normal(hit, n, collision)?;
     let contact = hit + slope * (0.5 * H) - Vec3::Y * (0.3 * H);
-    Some((contact, n))
+    Some((contact, n, slope))
 }
 
 // ---------------------------------------------------------------- ledge probes (0xE36BD0)
@@ -587,6 +612,20 @@ pub fn update_walling(
         let feet = body.feet;
         body.feet = collision.move_capsule(&mut body.proxy, feet, planned - feet, false, dt).position;
         body.heading = super::heading_of(w.facing());
+        // the root frame's pitch (RE/24 WALL-3): the entry warp slerps the frame from the start frame (upright) onto the
+        // pitched target frame with the warp's progress (`RootInterp__Advance` 0x7113F0, `Quat__Slerp`); EntryB and
+        // Vertical keep it; VerticalEnd turns it back upright by 4·dt a frame (0xE39295)
+        body.tilt = match w.sub_state {
+            WallingSubState::EntryA => {
+                let warp = w.warp_duration.unwrap_or(w.duration()).max(1e-4);
+                Quat::IDENTITY.slerp(w.pitch, (w.t / warp).min(1.0))
+            }
+            WallingSubState::EntryB | WallingSubState::Vertical => w.pitch,
+            WallingSubState::VerticalEnd => {
+                w.pitch = pitch_toward_upright(w.pitch, dt);
+                w.pitch
+            }
+        };
         body.velocity = Vec3::ZERO;
         body.grounded = false;
         let facing = w.facing();
@@ -635,6 +674,8 @@ pub fn update_walling(
             }
             // turned away from the wall (`sub_52BD40` 0xE366BD), then jump kind 2: the rebound takeoff's side groups
             // turn the character toward the target (RE/24 WALL-10 / AIR-5)
+            // the frame snaps upright first (`sub_52BD40`(forward, world up) at 0xE37717 / 0xE382EB / 0xE39322; RE/24 WALL-3)
+            body.tilt = Quat::IDENTITY;
             body.heading = super::heading_of(normal);
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::ReboundJump { from, target, dir, foot_left }));
             continue;
@@ -654,6 +695,9 @@ pub fn update_walling(
                 if let Some(e) = probe_entry(&guidance, feet, facing, &collision) {
                     // the hangs enter the Ledge's Entry state (+76 = 0; the pull-ups 4): its end re-poses the hands (LEDGE-22)
                     let hang = e.sub_state != LedgeSubState::Pullup;
+                    // PORT: upright at once; the game's exits interpolate the frame to world up over their warp
+                    // (`sub_711130` with up (0, 0, 1), 0xE37C41 / 0xE38057 / 0xE38964 / 0xE38EA0 / 0xE391D9; RE/24 WALL-3)
+                    body.tilt = Quat::IDENTITY;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                     data.ledge.repose_at_entry_end = hang;
                     continue;
@@ -664,6 +708,9 @@ pub fn update_walling(
             WallingSubState::Vertical => {
                 if let Some(e) = probe_vertical(&guidance, feet, facing, &collision) {
                     let hang = e.sub_state != LedgeSubState::Pullup;
+                    // PORT: upright at once; the game's exits interpolate the frame to world up over their warp
+                    // (`sub_711130` with up (0, 0, 1), 0xE37C41 / 0xE38057 / 0xE38964 / 0xE38EA0 / 0xE391D9; RE/24 WALL-3)
+                    body.tilt = Quat::IDENTITY;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                     data.ledge.repose_at_entry_end = hang;
                     continue;
@@ -674,6 +721,8 @@ pub fn update_walling(
             WallingSubState::VerticalEnd => {
                 // the rebound clip done (sub_501760) → `rebound_footr_tr_fall` and leave (flag +0x32): falling back off
                 // the wall
+                // (the frame snapped upright, 0xE3936F; RE/24 WALL-3)
+                body.tilt = Quat::IDENTITY;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(fall));
                 data.air.fall_action = single(REBOUND_TO_FALL, 0);
             }
@@ -764,7 +813,7 @@ mod wall_entry_tests {
         let feet = Vec3::new(0.0, 0.0, 1.0);
         let mut post = CollisionWorld::default();
         post.boxes.push(Aabb3 { min: Vec3::new(-0.15, 0.0, -0.3), max: Vec3::new(0.15, 4.0, 0.0) });
-        let (contact, n) = wall_ahead(feet, Vec3::NEG_Z, &post).expect("a 0.3 m post runs up");
+        let (contact, n, _) = wall_ahead(feet, Vec3::NEG_Z, &post).expect("a 0.3 m post runs up");
         assert!(n.dot(Vec3::Z) > 0.999 && (contact - Vec3::new(0.0, 1.0, 0.5)).length() < 1e-3, "{contact:?} {n:?}");
         let mut end = CollisionWorld::default();
         end.boxes.push(Aabb3 { min: Vec3::new(-0.2, 0.0, -1.0), max: Vec3::new(5.0, 4.0, 0.0) });
@@ -774,7 +823,7 @@ mod wall_entry_tests {
         let mut pil = CollisionWorld::default();
         pil.boxes.push(Aabb3 { min: Vec3::new(-5.0, 0.0, -1.0), max: Vec3::new(5.0, 4.0, 0.0) });
         pil.boxes.push(Aabb3 { min: Vec3::new(0.25, 0.0, 0.0), max: Vec3::new(0.45, 4.0, 0.5) });
-        let (contact, _) = wall_ahead(feet, Vec3::NEG_Z, &pil).expect("stepped away from the pilaster");
+        let (contact, _, _) = wall_ahead(feet, Vec3::NEG_Z, &pil).expect("stepped away from the pilaster");
         assert!(contact.x < -0.01 && (contact.z - 0.5).abs() < 1e-3, "the contact moved away from the pilaster: {contact:?}");
     }
 
@@ -791,7 +840,7 @@ mod wall_entry_tests {
         c.triangles.clear();
         quad(&mut c, a, b, cc, d);
         let feet = out * 0.8;
-        let (_, n) = wall_ahead(feet, -out, &c).expect("an oblique wall");
+        let (_, n, _) = wall_ahead(feet, -out, &c).expect("an oblique wall");
         assert!(n.dot(out) > 0.999, "not snapped to an axis: {n:?}");
     }
 
@@ -830,9 +879,35 @@ mod wall_entry_tests {
             c
         };
         let feet = Vec3::new(0.0, 0.0, 0.8);
-        let (vert, _) = wall_ahead(feet, Vec3::NEG_Z, &lean(0.0)).expect("vertical");
-        let (leaning, _) = wall_ahead(feet, Vec3::NEG_Z, &lean(15.0)).expect("15 degrees back");
+        let (vert, _, _) = wall_ahead(feet, Vec3::NEG_Z, &lean(0.0)).expect("vertical");
+        let (leaning, _, slope) = wall_ahead(feet, Vec3::NEG_Z, &lean(15.0)).expect("15 degrees back");
         assert!(leaning.y > vert.y + 0.05, "the contact follows the tilted normal: {leaning:?} vs {vert:?}");
         assert!(wall_ahead(feet, Vec3::NEG_Z, &lean(50.0)).is_none(), "a 50-degree lean is refused");
+        // the run is pitched with the wall: the frame's forward points along −slope, 15° down into the wall, its up
+        // leaning back with the face
+        let p = wall_pitch(Vec3::Z, slope);
+        let (fwd, up) = (p * Vec3::NEG_Z, p * Vec3::Y);
+        assert!((fwd.y + 15f32.to_radians().sin()).abs() < 0.02, "forward pitched 15° down: {fwd}");
+        assert!(up.z < -0.2 && (up.z + 15f32.to_radians().sin()).abs() < 0.02, "up leans back with the wall: {up}");
+        assert_eq!(wall_pitch(Vec3::Z, Vec3::Z), Quat::IDENTITY, "a vertical wall leaves the run upright");
+    }
+
+    /// RE/24 WALL-3: VerticalEnd turns the frame's up toward world up by 4·dt a frame (0xE39295): 1 − 4·dt of the
+    /// lean is left after a 60 Hz frame (to first order), about a third after 0.25 s, nearly none after a second.
+    #[test]
+    fn vertical_end_turns_the_pitch_back_upright() {
+        let lean = |q: Quat| (q * Vec3::Y).angle_between(Vec3::Y);
+        let mut p = Quat::from_rotation_x(-15f32.to_radians());
+        let a0 = lean(p);
+        p = pitch_toward_upright(p, 1.0 / 60.0);
+        assert!((lean(p) / a0 - (1.0 - 4.0 / 60.0)).abs() < 0.01, "one frame: {} of {a0}", lean(p));
+        for _ in 1..15 {
+            p = pitch_toward_upright(p, 1.0 / 60.0);
+        }
+        assert!((0.3..0.4).contains(&(lean(p) / a0)), "after 0.25 s: {}", lean(p) / a0);
+        for _ in 15..60 {
+            p = pitch_toward_upright(p, 1.0 / 60.0);
+        }
+        assert!(lean(p) < a0 * 0.03, "after a second: {}", lean(p));
     }
 }

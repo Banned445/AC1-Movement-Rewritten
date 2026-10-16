@@ -1858,12 +1858,16 @@ pub const ACT_PULLUP_FREE_ONEHAND: u32 = 0x3995_5505;
 pub const ACT_WAIST_TO_KNEE_ONEHAND: u32 = 0x3995_5506;
 pub const ACT_KNEE_ONEHAND_TO_FREESTEP: u32 = 0x3919_3BBB;
 
-/// The pull-up onto the top: the root follows the clips' own displacement (FROMANIM: up first, then in over
-/// the lip) and is corrected onto the stand point 0.5 m inside the edge (Pullup_Start 0xDDBE80). A straight
-/// line from the hang to that point cuts through the wall. Returns the move and, for the free hang (5 clips),
-/// the queued second part. `one_hand`: the one-hand variants (0xDD1120: the top drops away beside the hands).
-/// `top_feet` None (a narrow top, RE/28 §1): no correction, the clips' own end.
-pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, top_feet: Option<Vec3>) -> (LedgeMove, Option<LedgeMove>) {
+/// The pull-up onto the top (Pullup_Start 0xDDBE80). Returns the first move and the queued rest.
+/// - Wall hang (RE/24 LEDGE-15): the root goes linearly from the hang onto the hands' midpoint − 0.5·flat forward, at
+///   the hands' height, over the pull-up's first item (`sub_711130` with no action, 0xDDC2D2, over `sub_502570`(0) =
+///   the playing item's length, `sub_724D50`); once the interpolation is done the second item's own root motion carries
+///   it in over the lip (0.6 m: it ends 0.1 m inside the edge), and the stand-up follows. Live RE/25 #47: up 1.10 m in
+///   0.34 s, then forward 0.60 m in 0.14 s.
+/// - Free hang (5 clips): the clips' own displacement (`sub_711130` with the action, 0xDDC5D5), the second part
+///   corrected onto the stand point 0.5 m inside the edge; `top_feet` None (a narrow top, RE/28 §1): no correction.
+/// `one_hand`: the one-hand variants (0xDD1120: the top drops away beside the hands).
+pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, top_feet: Option<Vec3>) -> (LedgeMove, Vec<LedgeMove>) {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mk = |seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, end_stand: bool| {
         let durations = seq_durations(&seq);
@@ -1898,9 +1902,15 @@ pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3
     };
     match hang {
         LedgeHangType::Wall => {
-            let mut m = mk([first_clip(wall, 0), first_clip(wall, 1), stand, None], from, from, true);
-            m.to = top_feet.unwrap_or_else(|| m.natural_end());
-            (m, None)
+            // the first item: the interpolator, linear (0xDDC28D–0xDDC2D2)
+            let target = (hand_l + hand_r) * 0.5 - facing * 0.5;
+            let mut a = mk([first_clip(wall, 0), None, None, None], from, target, false);
+            a.follow_disp = false;
+            // the second item and the stand-up: their own root motion from there (the stand-up hands over to the free-step
+            // stay as it starts)
+            let mut b = mk([first_clip(wall, 1), stand, None, None], target, target, true);
+            b.to = b.natural_end();
+            (a, vec![b])
         }
         LedgeHangType::Free | LedgeHangType::WallFree => {
             // `HumanLedge__Pullup_Tick` 0xDE2EE0 plays the waist step as soon as the playing item is no longer locked: the
@@ -1911,7 +1921,7 @@ pub fn pullup_move(hang: LedgeHangType, one_hand: bool, from: Vec3, hand_l: Vec3
             a.to = a.natural_end();
             let mut b = mk([stand, None, None, None], a.to, a.to, true);
             b.to = top_feet.unwrap_or_else(|| b.natural_end());
-            (a, Some(b))
+            (a, vec![b])
         }
     }
 }
@@ -2312,5 +2322,33 @@ mod tests {
             let expect = if reaches_right { want } else { -want };
             assert!((side - expect).abs() < 0.02, "reaches right {reaches_right}: the hand at {side:.3} m along the right");
         }
+    }
+
+    /// RE/24 LEDGE-15: the wall pull-up's first item moves the root linearly from the hang onto the hands' midpoint 0.5 m
+    /// out, at the hands' height (0xDDC2D2, over the item's length); the second item's own motion then carries it 0.6 m
+    /// in over the lip. Live RE/25 #47: up 1.10 m, then forward 0.60 m.
+    #[test]
+    fn the_wall_pull_up_rises_linearly_then_the_clip_carries_it_over_the_lip() {
+        let n = Vec3::Z;
+        let (hl, hr) = (Vec3::new(-0.2, 3.0, 0.0), Vec3::new(0.2, 3.0, 0.0));
+        let from = crate::player::ledge::hang_root(hl, hr, n, LedgeHangType::Wall);
+        let (mut a, rest) = pullup_move(LedgeHangType::Wall, false, from, hl, hr, n, Some(Vec3::new(0.0, 3.0, -0.5)));
+        if a.seq[0].is_none() {
+            eprintln!("skipped: game install not found");
+            return;
+        }
+        let target = Vec3::new(0.0, 3.0, 0.5);
+        assert_eq!(a.seq[1], None, "the first move is the first item alone");
+        assert!(!a.follow_disp && a.to == target, "linear onto the hands' midpoint 0.5 m out: {}", a.to);
+        assert!((from.y - 1.9).abs() < 1e-4 && (a.to.y - from.y - 1.1).abs() < 1e-4, "a 1.10 m rise");
+        let (p, _) = a.advance(a.duration() * 0.5);
+        assert!((p - from.lerp(target, 0.5)).length() < 1e-4, "straight up: {p}");
+        let (p, done) = a.advance(a.duration());
+        assert!(done && p == target);
+        assert_eq!(rest.len(), 1);
+        let mut b = rest[0];
+        assert!(b.follow_disp && b.end_stand && b.to == b.natural_end(), "the clips' own motion, no correction");
+        let (p, _) = b.advance(b.durations[0]);
+        assert!((p.y - 3.0).abs() < 0.02 && (p.z - (-0.1)).abs() < 0.02, "0.6 m in over the lip, 0.1 m inside the edge: {p}");
     }
 }
