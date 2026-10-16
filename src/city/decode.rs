@@ -174,12 +174,18 @@ pub fn bodies(r: &Resource) -> Vec<&[u8]> {
 
 pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> {
     let c = &data.grid.cells[cell];
-    let mut out = DecodedCell { cell, objects: Vec::new(), materials: Vec::new(), textures: Vec::new(), stats: CellStats::default() };
     let Some((archive, file)) = data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else {
         return Err(format!("cell {cell}: datablock {:#x} not in the archives", c.datablock));
     };
     let a = data.archives.names.iter().position(|n| *n == archive).unwrap();
-    let entry = data.archives.find(a, &file).ok_or("cell file vanished")?;
+    decode_file(data, cell, a, &file)
+}
+
+/// The entities of one stored file (a grid cell or a mission DataBlock) as the streamer's objects; `cell` only labels
+/// the result.
+pub fn decode_file(data: &CityData, cell: usize, a: usize, file: &str) -> Result<DecodedCell, String> {
+    let mut out = DecodedCell { cell, objects: Vec::new(), materials: Vec::new(), textures: Vec::new(), stats: CellStats::default() };
+    let entry = data.archives.find(a, file).ok_or("cell file vanished")?;
     let resources = data.archives.file(a, entry)?;
     // Keep the archive order (TOC order) so object order, and with it slot order, is deterministic.
     let mut list: Vec<&Arc<Resource>> = resources.values().filter(|r| r.class_hash == crc32("Entity") || r.class_hash == crc32("EntityGroup")).collect();
@@ -193,7 +199,17 @@ pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> 
             // PORT: an entity its own Scene moves (`BlendPosClip`) is left out. Its authored placement is not where the
             // game keeps it, and the scene's positions are not decoded. Damascus has one with collision: the Bureau's
             // roof hatch `BA_Trap_Group_001` (live 2026-10-12: open in the game, the player falls through the entrance).
-            if !markers(body, "BlendPosClip").is_empty() { *out.stats.skipped.entry("scene-moved".into()).or_default() += 1; continue; }
+            // a mission DataBlock's entities at the origin are spawn templates (NPCs, weapons, carried props): the game
+            // places copies of them at run time, never the entity itself
+            if data.grid.cells.get(cell).is_some_and(|c| c.level == super::grid::DATABLOCK_LEVEL)
+                && placement(body).is_ok_and(|m| m.w_axis.truncate().length() < 1e-3) {
+                *out.stats.skipped.entry("spawn template".into()).or_default() += 1;
+                continue;
+            }
+            if !markers(body, "BlendPosClip").is_empty() {
+                *out.stats.skipped.entry("scene-moved".into()).or_default() += 1;
+                continue;
+            }
             match decode_body(data, body, &name, &mut materials, &mut out.stats.skipped) {
                 Ok(Some(o)) => {
                     out.stats.triangles += o.collision.len();
@@ -260,7 +276,7 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     }
     // --- collision
     for &p in &rigid {
-        if word(b, p + 8)? != crc32("CollisionFilterInfo") { continue; }
+        if word(b, p + 8)? != crc32("CollisionFilterInfo") { *skipped.entry("rigid body without a collision filter".into()).or_default() += 1; continue; }
         // the owning component (`InertComponent` / `RigidBodyComponent`, 17 bytes before its RigidBody) carries the
         // component's active byte (`Physic` reader 0x4D7850): an inactive one is another state of the entity (a kiosk's
         // knocked-over stall behind its `InertSwitch`, a gate's other position) and has no collision while inactive
@@ -293,10 +309,16 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     // --- guidance
     for &g in &guidance {
         let Some(start) = g.checked_sub(4) else { continue };
-        let Ok(parsed) = parse_guidance(&b[start..]) else { continue };
+        let parsed = match parse_guidance(&b[start..]) {
+            Ok(p) => p,
+            Err(e) => { *skipped.entry(format!("guidance: {e}")).or_default() += 1; continue; }
+        };
         let p = NativePlacement { id: parsed.id, name: name.to_string(), transform: placement, guidance: parsed };
         for (active, mut edge) in p.world_edges() {
-            if !active { *skipped.entry(format!("guidance edge inactive ({:?})", edge.subtype)).or_default() += 1; continue; }
+            if !active {
+                *skipped.entry(format!("guidance edge inactive ({:?})", edge.subtype)).or_default() += 1;
+                continue;
+            }
             // movement probes expect n1 to be the lower face normal (0x66BB40)
             if edge.n1.y > edge.n0.y { std::mem::swap(&mut edge.n0, &mut edge.n1); }
             if p.guidance.check_world_orientation && !crate::native_map::filter_accepts(&p.guidance, edge.n0, edge.n1) { *skipped.entry(format!("guidance edge filtered ({:?})", edge.subtype)).or_default() += 1; continue; }

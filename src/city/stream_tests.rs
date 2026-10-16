@@ -1214,3 +1214,49 @@ fn damascus_a_jump_onto_a_crossbeam_with_the_stick_released_stays_on_it() {
         "not on the crossbeam: {:?} {:?} at {f}", s.loco().current, s.data().narrow.kind);
     assert!(Vec2::new(f.x - 205.65, f.z + 63.78).length() < 0.3 && (f.y - 6.84).abs() < 0.1, "where the game stops: {f}");
 }
+
+/// Import census (diagnostic): every cell decoded, with what the decoder leaves out and why.
+#[test]
+#[ignore = "diagnostic; decodes every Damascus cell"]
+fn probe_damascus_import_census() {
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let mut skipped = std::collections::BTreeMap::<String, usize>::new();
+    let (mut objects, mut tris, mut edges, mut cells, mut errors) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for cell in 0..w.data.grid.cells.len() {
+        if w.data.grid.cells[cell].datablock == 0 { continue; }
+        match super::decode::decode_cell(&w.data, cell) {
+            Ok(c) => {
+                cells += 1;
+                objects += c.objects.len();
+                tris += c.objects.iter().map(|o| o.collision.len()).sum::<usize>();
+                edges += c.objects.iter().map(|o| o.edges.len()).sum::<usize>();
+                for (k, v) in c.stats.skipped { *skipped.entry(k).or_default() += v; }
+            }
+            Err(e) => { errors += 1; if errors < 5 { eprintln!("CENSUS cell {cell}: {e}"); } }
+        }
+    }
+    eprintln!("CENSUS {cells} cells, {errors} errors, {objects} objects, {tris} tris, {edges} edges");
+    for (k, v) in skipped { eprintln!("CENSUS skipped {v:6} {k}"); }
+}
+
+/// Mission DataBlocks (`AC_CITY_DATABLOCKS`): a named block becomes a cell that is always wanted, its placed entities
+/// decoded like a grid cell's and its spawn templates at the origin left out. The Vizier's opened mission brings the
+/// party's tables and their ledges near (−114, −107).
+#[test]
+fn damascus_mission_datablocks_load_as_always_wanted_cells() {
+    let Some(game) = crate::assets::find_game_dir() else { return };
+    if !game.join(super::DAMASCUS.archive).is_file() { return; }
+    let w = super::open_with(&game, &super::DAMASCUS, false, "M33_Vizier_MissionOpened").unwrap();
+    let cell = w.data.grid.cells.len() - 1;
+    assert_eq!(w.data.grid.cells[cell].level, super::grid::DATABLOCK_LEVEL);
+    let far = Vec3::new(400.0, 0.0, 400.0);
+    assert!(super::stream::wanted_cells(&w.data, &super::stream::content_mask(&w.data), far, None).contains(&cell), "wanted from anywhere");
+    let d = super::decode::decode_cell(&w.data, cell).unwrap();
+    let edges: usize = d.objects.iter().map(|o| o.edges.len()).sum();
+    let tris: usize = d.objects.iter().map(|o| o.collision.len()).sum();
+    assert!(edges > 500 && tris > 10_000, "{edges} edges, {tris} triangles");
+    assert!(d.stats.skipped.get("spawn template").copied().unwrap_or(0) > 0);
+    assert!(d.objects.iter().all(|o| o.transform.w_axis.truncate().length() > 1e-3), "no template at the origin");
+    assert!(super::open_with(&game, &super::DAMASCUS, false, "").unwrap().data.grid.cells.len() == 1365);
+}

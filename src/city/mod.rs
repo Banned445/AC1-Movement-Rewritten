@@ -33,6 +33,11 @@ pub struct OpenedWorld {
 }
 
 pub fn open(game: &Path, world: &CityWorld, bc: bool) -> Result<OpenedWorld, String> {
+    open_with(game, world, bc, &std::env::var("AC_CITY_DATABLOCKS").unwrap_or_default())
+}
+
+/// `open` with the mission DataBlocks named in `datablocks` (`mission_datablocks`).
+pub fn open_with(game: &Path, world: &CityWorld, bc: bool, datablocks: &str) -> Result<OpenedWorld, String> {
     let archives = archive::shared(game, &[world.archive, "DataPC_Common.forge", "DataPC.forge"])?;
     let entry = archives.find(0, world.world).ok_or_else(|| format!("{} has no {} file", world.archive, world.world))?;
     let file = archives.file(0, entry)?;
@@ -41,9 +46,27 @@ pub fn open(game: &Path, world: &CityWorld, bc: bool) -> Result<OpenedWorld, Str
     let w = globals.iter().find(|r| r.class_hash == crc32("World")).ok_or("no World resource")?;
     let (size, origin, width, radius) = grid::parse_layout(&w.payload)?;
     let partition = globals.iter().find(|r| r.class_hash == crc32("GridPartition")).ok_or("no GridPartition")?;
-    let grid = grid::parse_partition(&partition.payload, size, origin, width, radius)?;
+    let mut grid = grid::parse_partition(&partition.payload, size, origin, width, radius)?;
+    grid.add_datablocks(&mission_datablocks(&archives, world, datablocks)?);
     let data = CityData { archives, grid, meshes: Default::default(), materials: Default::default(), bc, resident: Mutex::default() };
     Ok(OpenedWorld { data: Arc::new(data), globals })
+}
+
+/// The mission / memory-block DataBlocks to load with the grid (PORT: the game picks them by story progress, which the
+/// port has no state for): `AC_CITY_DATABLOCKS`, a comma-separated list of the archive's DataBlock names (with or
+/// without `<World>_` and `_DataBlock`), or `none` (the default: the grid alone). Their header resource ids.
+pub fn mission_datablocks(archives: &archive::Archives, world: &CityWorld, list: &str) -> Result<Vec<u32>, String> {
+    let mut ids = Vec::new();
+    for item in list.split(',').map(str::trim).filter(|s| !s.is_empty() && *s != "none") {
+        let mut name = item.to_string();
+        if !name.starts_with(&format!("{}_", world.world)) { name = format!("{}_{name}", world.world); }
+        if !name.ends_with("_DataBlock") { name.push_str("_DataBlock"); }
+        let entry = archives.find(0, &name).ok_or_else(|| format!("{}: no {name}", world.archive))?;
+        let file = archives.file(0, entry)?;
+        let header = file.values().find(|r| r.name == name).ok_or_else(|| format!("{name}: no DataBlock header"))?;
+        ids.push(header.id);
+    }
+    Ok(ids)
 }
 
 /// A named player spawner in the World file (`PlayerSpawner_*`): Bevy-space feet and heading.

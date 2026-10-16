@@ -87,11 +87,18 @@ merged low-detail "fake" meshes the game ships draw the rest of the city on the 
 gate (the arrival from the Kingdom). NPCs, crowds, sounds, missions and particles are not included, the lighting is a
 fixed sun and haze, and materials use a standard PBR shader rather than the game's.
 
+The game loads extra mission and memory-block DataBlocks depending on story progress (for example the props of an
+opened assassination). The port loads the city grid alone unless `AC_CITY_DATABLOCKS` names some of them; a save in
+Memory Block 2 during Tamir's investigation has `Memory Block 2`, `MB02 - Side Quest`, `M13_Tamir` and
+`M13_Tamir_Investigation`, and the opened assassinations add `M13_Tamir_MissionOpened`, `M33_Vizier_MissionOpened` or
+`M58_Jubair_MissionOpened`.
+
 To start on a native map from the command line:
 
 ```powershell
 $env:AC_NATIVE_MAP = "damascus"   # or "masyaf-village" / "masyaf-roofs"; unset to use the greybox
 $env:AC_CITY_SPAWN = "Souk"       # Damascus only, optional: Bureau, Academy, Palace or Souk
+$env:AC_CITY_DATABLOCKS = "M13_Tamir_MissionOpened"  # Damascus only, optional: mission / memory-block content to load, comma-separated
 $env:AC_LOD_FADE = "1"            # optional: cross-fade between LODs (the retail game switches them)
 cargo run --release
 ```
