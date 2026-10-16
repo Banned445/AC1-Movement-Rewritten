@@ -69,19 +69,18 @@ impl Swing {
     }
 }
 
-/// 0xE07D00 (type 0x80, no foot holds): the landing `0x02926510`, weighted like the flight it ends (PORT: the
-/// flight's front / down / up x distance weights are matched by clip name), root to the free-hang root over it.
+/// 0xE07D00 (type 0x80, no foot holds): the landing `0x02926510` as the cycle's transition (0xE095A8–0xE09603), its
+/// weights set from InAirData+452 by `sub_502E30` (0xE09615): for type 0x80 `sub_B1EAA0` stores the flight's own weights
+/// there, and they are copied slot by slot (`sub_4FE810`), not matched by clip name. The flight lists front / down / up
+/// and the landing down / front / up, so a front flight weights the landing's down clips; the landing's length follows
+/// (0.19 s live on a 3 m bar-to-bar chain, 2026-10-16). Root to the free-hang root over it.
 pub fn enter(from: Vec3, root: Vec3, fwd: Vec3, hands_mid: Vec3, flight: Option<ActionBlend>, seq: u32) -> Option<Swing> {
     let items = jump_blend::action_items(SWING_LANDING)?;
     let clips = items.first()?;
     let mut w = vec![0.0f32; clips.len()];
     if let Some(f) = flight {
-        for (name, fw) in f.clips().iter().zip(f.weights()) {
-            // "xx_h_air_front_300cm_footl_to_swing" -> "front_300cm"
-            let key: String = name.trim_start_matches("xx_h_air_").split("_foot").next().unwrap_or("").into();
-            if let Some(k) = clips.iter().position(|c| c.contains(&format!("air_{key}"))) {
-                w[k] += *fw;
-            }
+        for (k, fw) in f.weights().iter().enumerate().take(w.len()) {
+            w[k] = fw.clamp(0.0, 1.0);
         }
     }
     if w.iter().sum::<f32>() <= 0.0 {
