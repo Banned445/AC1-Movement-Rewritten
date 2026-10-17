@@ -119,6 +119,9 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     CATCH_REACH[0].1, CATCH_REACH[1].1, CATCH_REACH[2].1,
     // hang-type switches (0xDE1060)
     TO_WALL[0], TO_WALL[1], TO_FREE[0], TO_FREE[1], TO_FREE[2], TO_FREE[3],
+    // the pull-up's switch from a free hang with the feet on the wall (0xDD4160; live RE/29 #72: `hangfree_tr_hangwall`,
+    // 0.66 s, the root 1.23 m up); without its clip the switch ran on the shimmy timer
+    PULLUP_FREE_TO_WALL,
     // straight jump to a hand target (0xB21DA0) and its arrivals (0xE07D00)
     0x0129_0ECF, 0x0127_2A69, 0x0127_1631, 0x0127_1639, 0x0121_A598, 0x0121_A8B1,
     0x0129_0ED0, 0x0127_2A6A, 0x0127_163A, 0x0127_1632, 0x0121_B072, 0x0127_23A5,

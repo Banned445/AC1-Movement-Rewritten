@@ -1590,7 +1590,10 @@ pub fn update_ground(
                     // the far side's box blocked → the near side (RE/24 LADDER-23)
                     n = super::ladder::top_entry_side(base, top, n, &collision);
                 }
-                if !from_top && super::ladder::attach_blocked(base + n * super::ladder::ATTACH_OUT, -n, &collision) {
+                let buried = if from_top { 0.0 } else { super::ladder::buried_depth(base, top, &collision) };
+                // the box sits at the entry's root target, the attach rung (0xE26AFB after 0xE26A73–0xE26AE2)
+                let attach = super::ladder::ground_attach(base, top, n, body.feet, g.high_profile, buried);
+                if !from_top && super::ladder::attach_blocked(attach, -n, &collision) {
                     // the item by the signed angle about up from the ladder → root direction to the ladder's normal on
                     // the root's side (0xE269FC, v74 = angle / 90 deg): above 0 → TURN[0] (`turn_l`), else TURN[1]
                     // (0xE26B26; live, RE/25: the root 0.13 m to the side of the line → `turn_l`, on it → `turn_r`)
@@ -1605,7 +1608,6 @@ pub fn update_ground(
                 // the entry's column: 2·(`Human__GetLeadingFoot` ≠ 1) (0xE26A4C, RE/24 LADDER-24); PORT without a pose: the
                 // locomotion blend's foot
                 let foot = leading_foot.unwrap_or((g.blend.foot != 0) as usize);
-                let buried = if from_top { 0.0 } else { super::ladder::buried_depth(base, top, &collision) };
                 let e = super::ladder::LadderEntry { base, top, n, from: body.feet, facing: body.forward(), from_top, high: g.high_profile, foot, from_ledge: false, action: None, back_turn, buried, ..Default::default() };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
                 continue;

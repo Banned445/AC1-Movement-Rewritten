@@ -194,6 +194,27 @@ pub fn attach_blocked(attach: Vec3, f: Vec3, collision: &CollisionWorld) -> bool
     !collision.obb_free(attach + Vec3::Y * 0.95, [super::right_of(f), Vec3::Y, f], Vec3::new(0.45, 0.35, 0.45))
 }
 
+/// The ground entry's attach rung (`sub_E1F8E0` 0xE1F95D–0xE1F984): the nearest 0.5 m rung to the root's HeightInLadder,
+/// below the ladder's height − 1.95 m; a ladder buried more than 0.1 m starts at the rung 1 + trunc(2 × buried) at
+/// least (0xE1F99B: `1 − (int)(−2·b)`; live RE/25: the Bureau ladder, 0.67 m below the ground, attached at 1.0 m); high
+/// profile 0.5 m higher (0xE26AB5–0xE26AE2, RE/24 LADDER-5).
+pub fn entry_rung_height(len: f32, h_in: f32, high: bool, buried: f32) -> f32 {
+    let mut k = ((h_in.max(0.0).min(len - 1.95).max(0.0) + 0.25) * 2.0).trunc();
+    if buried > 0.1 {
+        k = k.max(1.0 + (2.0 * buried).trunc());
+    }
+    0.5 * k + if high { 0.5 } else { 0.0 }
+}
+
+/// The ground entry's attach point, the root target `StateEntry_Enter` computes (0xE26A73–0xE26AE2) before it tests
+/// `sub_E24FD0`'s box there (0xE26AFB): the attach rung 0.5 m out on the climber's side. Live (RE/29 #38): a ladder whose
+/// base lies 1.3 m under the roof it is walked onto from (17.54 −6.92) is entered from the front; the box at the base
+/// sat inside the roof and turned the port round it.
+pub fn ground_attach(base: Vec3, top: Vec3, n: Vec3, from: Vec3, high: bool, buried: f32) -> Vec3 {
+    let l = HumanLadderData { base, top, n, ..Default::default() };
+    l.root_at(entry_rung_height(l.len(), l.height_of(from), high, buried))
+}
+
 #[derive(Debug, Default)]
 pub struct HumanLadderData {
     pub base: Vec3,
@@ -448,17 +469,8 @@ impl HumanLadderData {
             let k = a / std::f32::consts::FRAC_PI_2;
             let left = to_char.dot(super::right_of(-self.n)) < 0.0;
             let w = if left { [1.0 - k, k, 0.0] } else { [1.0 - k, 0.0, k] };
-            // the attach rung (`sub_E1F8E0` 0xE1F95D–0xE1F984): the nearest 0.5 m rung to the root's height, below the
-            // ladder's height − 1.95 m; high profile 0.5 m higher (0xE26AB5–0xE26AE2, RE/24 LADDER-5). PORT: the buried
-            // base (`sub_E25B20`) is not measured
-            let h_in = self.height_of(e.from).max(0.0);
-            let mut k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
-            // a ladder buried more than 0.1 m starts at the rung 1 + trunc(2 × buried) at least (0xE1F95D: `1 − (int)(−2·b)`;
-            // live RE/25: the Bureau ladder, 0.67 m below the ground, attached at 1.0 m)
-            if e.buried > 0.1 {
-                k = k.max(1.0 + (2.0 * e.buried).trunc());
-            }
-            self.height = 0.5 * k + if e.high { 0.5 } else { 0.0 };
+            // the attach rung (`entry_rung_height`, RE/24 LADDER-5)
+            self.height = entry_rung_height(self.len(), self.height_of(e.from), e.high, e.buried);
             let to = self.root_at(self.height);
             if let Some(left) = e.back_turn {
                 // the back-approach turn (+908 bit 2: 0x0A64400C / D, items a then b into the wait, single-weight blend;

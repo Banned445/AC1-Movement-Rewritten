@@ -601,6 +601,42 @@ fn a_ladder_entry_takes_the_leading_foot_column() {
     assert_eq!(seen.len(), 2, "both feet led at some entry");
 }
 
+/// Live (RE/29 #38, course `ladder38_side`): the ladder at (17.54 −6.92) starts 1.3 m under the roof it is walked onto
+/// from, and the game enters it from the front (`xx_l_wait_hipm_footr_tr_l_ladder_climb_up_l`). `sub_E24FD0`'s box sits
+/// at the entry's root target, the attach rung (0xE26AFB after 0xE26A73–0xE26AE2), not at the base: at the base it lay
+/// inside the roof and the port turned round the ladder (`xx_h_ladder_turn_l`).
+#[test]
+fn a_ladder_buried_under_the_floor_is_entered_from_the_front() {
+    use crate::collision::{Aabb3, CollisionWorld};
+    use crate::guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld};
+    use crate::player::ladder::{ENTER_GROUND, TURN};
+    let mut s = Sim::new(Vec3::new(0.0, 1.3, 1.8), 0.0);
+    {
+        let w = s.app.world_mut();
+        let mut c = CollisionWorld::default();
+        // the wall behind the ladder (z < 0) and the floor slab in front of it, 1.3 m above the ladder's base
+        c.boxes.push(Aabb3 { min: Vec3::new(-4.0, -1.0, -2.0), max: Vec3::new(4.0, 8.0, 0.0) });
+        c.boxes.push(Aabb3 { min: Vec3::new(-4.0, -1.0, 0.0), max: Vec3::new(4.0, 1.3, 6.0) });
+        *w.resource_mut::<CollisionWorld>() = c;
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: Vec3::new(0.0, 0.0, 0.05), p1: Vec3::new(0.0, 7.5, 0.05), n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::Ladder });
+        *w.resource_mut::<GuidanceWorld>() = g;
+    }
+    s.run(0.3);
+    s.pad(Vec3::NEG_Z, 0.8, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "no entry: {:?} at {:?}", s.loco().current, s.body().feet);
+    let id = s.data().ladder.action.map(|a| a.id);
+    assert!(!TURN.iter().any(|&t| Some(t) == id), "turned round the ladder");
+    assert!(ENTER_GROUND[0].iter().any(|&t| Some(t) == id), "not the front entry: {id:?}");
+    // the box at the base (inside the slab) is blocked; at the attach rung it is free
+    let c = s.app.world().resource::<CollisionWorld>();
+    let (base, top, n) = (Vec3::new(0.0, 0.0, 0.05), Vec3::new(0.0, 7.5, 0.05), Vec3::Z);
+    assert!(crate::player::ladder::attach_blocked(base + n * crate::player::ladder::ATTACH_OUT, -n, c));
+    let buried = crate::player::ladder::buried_depth(base, top, c);
+    assert!((buried - 1.3).abs() < 0.01, "buried {buried}");
+    assert!(!crate::player::ladder::attach_blocked(crate::player::ladder::ground_attach(base, top, n, Vec3::new(0.0, 1.3, 1.0), false, buried), -n, c));
+}
+
 #[test]
 fn climb_start_from_the_ground_uses_the_leading_foot() {
     // sub_B26080 (0xB261A8): 0x01BC382C + (Human__GetLeadingFoot() != 1)
@@ -5060,6 +5096,30 @@ fn a_free_hang_whose_feet_find_the_wall_switches_to_it_before_it_pulls_up() {
     assert!(was_wall, "never switched to the wall hang");
     assert!(worst <= 0.55, "the root left the wall by {worst} m");
     assert!(stood_up(&s) && (s.body().feet.y - 2.6).abs() < 0.05, "pull-up failed: {:?}", s.body().feet);
+}
+
+/// Live (RE/29 #72, course `straight72_swing37`): after the straight jump's wall-free reception the push up plays
+/// `xx_h_hangfree_tr_hangwall` (0x01B702FD) for 0.66 s before the wall idle. The action was missing from the clip table,
+/// so the switch played nothing and ran on the shimmy timer (0.54 s).
+#[test]
+fn the_free_to_wall_switch_plays_its_own_clip_for_its_length() {
+    let item = crate::player::jump_blend::action_items(crate::player::ledge_moves::PULLUP_FREE_TO_WALL).expect("0x01B702FD in the clip table");
+    assert_eq!(item[0], &["xx_h_hangfree_tr_hangwall"]);
+    let mut s = hang_on_jump_up_wall();
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ledge.mv.is_some()));
+    assert_eq!(s.data().ledge.last_action, "switch to wall hang (pull-up)");
+    let mv = s.data().ledge.mv.unwrap();
+    assert_eq!(mv.seq[0].map(|a| a.id), Some(crate::player::ledge_moves::PULLUP_FREE_TO_WALL));
+    assert!((mv.durations[0] - 0.667).abs() < 0.01, "switch length {}", mv.durations[0]);
+    let mut took = 0.0;
+    while s.data().ledge.mv.is_some() && took < 2.0 {
+        s.run(1.0 / 60.0 + 1e-4);
+        took += 1.0 / 60.0;
+    }
+    assert!((0.6..0.75).contains(&took), "the switch took {took} s");
+    assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Wall);
 }
 
 /// The WallFree type's readers (never held in v1.02): `Pullup_Start` 0xDDC2E3 plays `hangwallfree_tr_hangwall`
