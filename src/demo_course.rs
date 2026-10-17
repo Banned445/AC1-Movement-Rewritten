@@ -100,7 +100,7 @@ pub fn add(collision: &mut CollisionWorld, guidance: &mut GuidanceWorld) {
         guidance.edges.push(GuidanceEdge { p0: Vec3::new(x, y, z0), p1: Vec3::new(x, y, z1), n0: Vec3::Y, n1: Vec3::NEG_X, subtype: GuidanceSubType::LedgeGrab });
     }
     for &(x, z, s, h) in HAYSTACKS {
-        guidance.haystacks.push(Aabb3 { min: Vec3::new(x - s * 0.5, 0.0, z - s * 0.5), max: Vec3::new(x + s * 0.5, h, z + s * 0.5) });
+        guidance.haystacks.push(crate::collision::HayStack::from_box(Aabb3 { min: Vec3::new(x - s * 0.5, 0.0, z - s * 0.5), max: Vec3::new(x + s * 0.5, h, z + s * 0.5) }));
     }
 }
 

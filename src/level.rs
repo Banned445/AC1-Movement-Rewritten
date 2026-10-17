@@ -361,7 +361,7 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
     collision.layers.resize(collision.boxes.len(), crate::layers::STATIC);
     for &(x, z, sx, sz, h) in HAYSTACKS {
         let b = Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) };
-        guidance.haystacks.push(b);
+        guidance.haystacks.push(crate::collision::HayStack::from_box(b));
         collision.boxes.push(b);
         collision.layers.push(crate::layers::DYNAMIC);
     }

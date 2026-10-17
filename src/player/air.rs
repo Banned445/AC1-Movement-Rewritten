@@ -958,11 +958,8 @@ pub fn update_air(
                     }
                     if air.target_flags == jump_blend::TARGET_HAYSTACK && then_fall_to.is_none() {
                         // PORT: the game requests the haystack on every arrival at the target (its owner entity); the
-                        // port finds the stack by its box widened 0.3 m (no game source, RE/24 AIR-36)
-                        if let Some(stack) = guidance.haystacks.iter().find(|s| {
-                            let p = body.feet;
-                            p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3
-                        }) {
+                        // port finds the stack by its collision footprint widened 0.3 m (no game source, RE/24 AIR-36)
+                        if let Some(stack) = guidance.haystacks.iter().find(|s| s.over(body.feet, 0.3)) {
                             // arrival on a haystack target (0xE07D00 clears InAir+340 → RequestHayStack 0xE01AF0 →
                             // 0xE00E30: entry Top, the faith landing, for every target arrival)
                             hay_on = Some(super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });

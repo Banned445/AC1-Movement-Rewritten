@@ -472,7 +472,7 @@ mod tests {
                 let h = o.haystack.unwrap();
                 let up = o.collision.iter().filter(|t| t.normal.y > 0.7).count();
                 let down = o.collision.iter().filter(|t| t.normal.y < -0.7).count();
-                println!("{}: hay {:.2}..{:.2}; collision {layers:?} y {lo:.2}..{hi:.2}, up-facing {up}, down-facing {down}", o.name, h.min.y, h.max.y);
+                println!("{}: hay {:.2}..{:.2}; collision {layers:?} y {lo:.2}..{hi:.2}, up-facing {up}, down-facing {down}", o.name, h.bounds.min.y, h.bounds.max.y);
                 n += 1;
                 if n >= 12 { return; }
             }
@@ -501,8 +501,8 @@ mod tests {
         for cell in 0..w.data.grid.cells.len() {
             let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
             for o in &d.objects {
-                if let Some(h) = o.haystack.filter(|h| near((h.min + h.max) * 0.5)) {
-                    println!("haystack {} centre {:.2?} top {:.2}", o.name, game((h.min + h.max) * 0.5), h.max.y);
+                if let Some(h) = o.haystack.filter(|h| near((h.bounds.min + h.bounds.max) * 0.5)) {
+                    println!("haystack {} centre {:.2?} top {:.2}", o.name, game((h.bounds.min + h.bounds.max) * 0.5), h.bounds.max.y);
                 }
                 for e in o.edges.iter().filter(|e| near((e.p0 + e.p1) * 0.5)) {
                     use crate::guidance::GuidanceSubType as T;

@@ -26,7 +26,7 @@ use bevy::prelude::*;
 
 use super::jump_blend::ActionBlend;
 use super::{switch_context, ActorContextId, Body, HumanDataBundle, Locomotion, Player, TransitionSetup};
-use crate::collision::{Aabb3, CollisionWorld};
+use crate::collision::{CollisionWorld, HayStack};
 use crate::guidance::GuidanceWorld;
 use crate::input::PadInput;
 
@@ -54,7 +54,7 @@ pub enum HayEntry {
 
 #[derive(Clone, Copy, Debug)]
 pub struct HayStackEntry {
-    pub stack: Aabb3,
+    pub stack: HayStack,
     pub kind: HayEntry,
     pub from: Vec3,
     /// Speed at arrival (the interpolator time is distance / speed).
@@ -80,7 +80,7 @@ pub enum HayPhase {
 
 #[derive(Debug, Default)]
 pub struct HumanHayStackData {
-    pub stack: Option<Aabb3>,
+    pub stack: Option<HayStack>,
     pub phase: HayPhase,
     /// The playing action (entry, then wait) and its time.
     pub action: Option<ActionBlend>,
@@ -109,8 +109,8 @@ impl HumanHayStackData {
         self.kind = e.kind;
         self.t = 0.0;
         self.from = e.from;
-        // the haystack entity's position: its base centre
-        self.to = Vec3::new((e.stack.min.x + e.stack.max.x) * 0.5, e.stack.min.y, (e.stack.min.z + e.stack.max.z) * 0.5);
+        // the haystack entity's position (its origin)
+        self.to = e.stack.origin;
         self.face = None;
         match e.kind {
             HayEntry::Top | HayEntry::SideJump => {
@@ -171,8 +171,7 @@ pub const SUPPORT: HaySearch = HaySearch { width: (3.0, 3.0), depth: (2.5, 2.5),
 ///   CENSUS-5: the midpoint has no height share), then to 0.25 m above the top (`sub_E1C470`, layer 5 / 21).
 /// With `pre_ray`, a 3 m ray from the feet + 1 m along `dir` pitched 20° down must be clear first, else nothing
 /// (0xE15DCD; the pitch's sign is a hypothesis). The first one that qualifies is taken (the entity list's order).
-pub fn search(feet: Vec3, dir: Vec3, facing: Vec3, p: &HaySearch, stacks: &[Aabb3], collision: &CollisionWorld) -> Option<Aabb3> {
-    const TOP: f32 = 1.6;
+pub fn search(feet: Vec3, dir: Vec3, facing: Vec3, p: &HaySearch, stacks: &[HayStack], collision: &CollisionWorld) -> Option<HayStack> {
     let d = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     let f = Vec3::new(facing.x, 0.0, facing.z).normalize_or_zero();
     if d == Vec3::ZERO {
@@ -193,7 +192,7 @@ pub fn search(feet: Vec3, dir: Vec3, facing: Vec3, p: &HaySearch, stacks: &[Aabb
     }
     let lerp = |(a, b): (f32, f32), t: f32| a + (b - a) * t;
     stacks.iter().copied().find(|s| {
-        let top = Vec3::new((s.min.x + s.max.x) * 0.5, s.min.y + TOP, (s.min.z + s.max.z) * 0.5);
+        let top = s.top();
         let dz = top.y - feet.y;
         if !(dz > p.dz_min && dz < p.dz_max) {
             return false;
@@ -219,51 +218,40 @@ pub fn search(feet: Vec3, dir: Vec3, facing: Vec3, p: &HaySearch, stacks: &[Aabb
 }
 
 /// The free-step arrival's haystack search (`HumanNarrowObject__CheckSupportAndFall` 0xE51190 → vt80): `SUPPORT`.
-pub fn find_support(feet: Vec3, dir: Vec3, facing: Vec3, stacks: &[Aabb3], collision: &CollisionWorld) -> Option<Aabb3> {
+pub fn find_support(feet: Vec3, dir: Vec3, facing: Vec3, stacks: &[HayStack], collision: &CollisionWorld) -> Option<HayStack> {
     search(feet, dir, facing, &SUPPORT, stacks, collision)
 }
 
 /// The haystack's top as the search reports it (the entity origin + 1.6 m).
-pub fn top_of(s: &Aabb3) -> Vec3 {
-    Vec3::new((s.min.x + s.max.x) * 0.5, s.min.y + 1.6, (s.min.z + s.max.z) * 0.5)
+pub fn top_of(s: &HayStack) -> Vec3 {
+    s.top()
 }
 
 /// The controller's contacts with a haystack: the haystack's collision (a box on layer Dynamic) whose contact point lies
 /// in a haystack volume (the game: the contact's entity is type 3 with descriptor 8, a haystack, or 9, a hiding place).
 /// Returns the stack and the contact normal (from the haystack toward the body) of each.
-pub fn haystack_contacts<'a>(manifold: &'a [crate::proxy::Contact], stacks: &'a [Aabb3], collision: &'a CollisionWorld) -> impl Iterator<Item = (Aabb3, Vec3)> + 'a {
+pub fn haystack_contacts<'a>(manifold: &'a [crate::proxy::Contact], stacks: &'a [HayStack], collision: &'a CollisionWorld) -> impl Iterator<Item = (HayStack, Vec3)> + 'a {
     manifold.iter().filter(|c| collision.layer_of(c.body) == crate::layers::DYNAMIC).filter_map(|c| {
-        let s = stacks.iter().find(|s| c.pos.cmpge(s.min - Vec3::splat(0.1)).all() && c.pos.cmple(s.max + Vec3::splat(0.1)).all())?;
+        let s = stacks.iter().find(|s| s.contains(c.pos, 0.1))?;
         Some((*s, c.normal))
     })
 }
 
 /// `HumanInAir__CheckHayStackEntry` 0xE05490's dive branch (the faith dive playing, IHumanInAir vt72): a ray from the
 /// controller's last position along this frame's step, three times its length (`Human__RayClear`, layer Character); a
-/// hit near the known haystack enters it. PORT: the ray is tested against the haystack volumes.
-pub fn dive_hit(from: Vec3, to: Vec3, stacks: &[Aabb3]) -> Option<Aabb3> {
+/// hit near the known haystack enters it. PORT: the ray is tested against the haystacks' collision boxes.
+pub fn dive_hit(from: Vec3, to: Vec3, stacks: &[HayStack]) -> Option<HayStack> {
     let d = (to - from) * 3.0;
     if d.length_squared() < 1e-10 {
         return None;
     }
-    stacks.iter().copied().find(|s| {
-        let (mut lo, mut hi) = (0.0f32, 1.0f32);
-        (0..3).all(|k| {
-            if d[k].abs() < 1e-8 {
-                return from[k] >= s.min[k] && from[k] <= s.max[k];
-            }
-            let (a, b) = ((s.min[k] - from[k]) / d[k], (s.max[k] - from[k]) / d[k]);
-            lo = lo.max(a.min(b));
-            hi = hi.min(a.max(b));
-            lo <= hi
-        })
-    })
+    stacks.iter().copied().find(|s| s.segment_hits(from, d))
 }
 
 /// Ground event 122's guard (`HumanGround__Guard_Event122_HayStack` 0xD8F0B0): a wall-class contact (`sub_4F8C40`(4):
 /// |normal z| <= 0.707) with a haystack, the facing within 100 degrees of the flattened contact (-n . facing > -0.1736)
 /// and the stick within 45 degrees into it (-n . stick > 0.7071). Standing on top is a ground contact: no entry there.
-pub fn ground_entry(feet: Vec3, facing: Vec3, stick: Vec3, manifold: &[crate::proxy::Contact], stacks: &[Aabb3], collision: &CollisionWorld) -> Option<HayStackEntry> {
+pub fn ground_entry(feet: Vec3, facing: Vec3, stick: Vec3, manifold: &[crate::proxy::Contact], stacks: &[HayStack], collision: &CollisionWorld) -> Option<HayStackEntry> {
     haystack_contacts(manifold, stacks, collision).find_map(|(s, n)| {
         if n.y.abs() > std::f32::consts::FRAC_1_SQRT_2 {
             return None;
@@ -283,19 +271,19 @@ fn single(id: u32) -> Option<ActionBlend> {
 /// `Guard_HopOut` 0xE434E0: the ray along `dir` from the root leaves the stack's footprint; the room is
 /// `Human__BoxQueryEmpty` at the exit + 0.5·dir, 1.25 m above the root, half extents (0.35, 0.5, 0.75) across / along /
 /// up, the stack itself ignored (the port's haystacks are not solid), filter 8; no ground needed (RE/24 NARROW-20).
-/// Returns where the hop leaves (at the root's height). PORT: the footprint is the stack's box.
-pub fn hop_out_exit(stack: &Aabb3, centre: Vec3, dir: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
+/// Returns where the hop leaves (at the root's height). The footprint is the collision shape's local box placed by
+/// the body's transform (0xE434E0: `sub_6D1D40` / `sub_6D1DB0` / `sub_6D22A0`, four `sub_DEE760` edges).
+pub fn hop_out_exit(stack: &HayStack, centre: Vec3, dir: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
     let dir = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     if dir == Vec3::ZERO {
         return None;
     }
     // ray from the centre to the footprint's boundary
-    let tx = if dir.x.abs() > 1e-5 { ((if dir.x > 0.0 { stack.max.x } else { stack.min.x }) - centre.x) / dir.x } else { f32::INFINITY };
-    let tz = if dir.z.abs() > 1e-5 { ((if dir.z > 0.0 { stack.max.z } else { stack.min.z }) - centre.z) / dir.z } else { f32::INFINITY };
-    let edge = centre + dir * tx.min(tz);
+    let edge = stack.footprint_exit(centre, dir);
     let probe = Vec3::new(edge.x, centre.y, edge.z) + dir * 0.5;
-    // the query leaves the stack itself out
-    let room = collision.obb_free_except(probe + Vec3::Y * 1.25, [super::right_of(dir), dir, Vec3::Y], Vec3::new(0.35, 0.5, 0.75), |b| b.min == stack.min && b.max == stack.max);
+    // the query leaves the stack itself out (its collision: boxes and triangles inside its bounds)
+    let (lo, hi) = (stack.bounds.min - Vec3::splat(0.01), stack.bounds.max + Vec3::splat(0.01));
+    let room = collision.obb_free_except(probe + Vec3::Y * 1.25, [super::right_of(dir), dir, Vec3::Y], Vec3::new(0.35, 0.5, 0.75), |b| b.min.cmpge(lo).all() && b.max.cmple(hi).all());
     room.then_some(probe)
 }
 
@@ -410,12 +398,13 @@ pub fn pass_over_candidate(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, coll
 #[cfg(test)]
 mod search_tests {
     use super::*;
+    use crate::collision::Aabb3;
 
     /// RE/24 NARROW-20: the hop out needs only the room box past the stack's side, no ground: an open drop is fine, a
     /// wall right beside the stack is not.
     #[test]
     fn the_hop_out_needs_the_room_box_not_ground() {
-        let stack = Aabb3 { min: Vec3::new(-1.0, 0.0, -1.0), max: Vec3::new(1.0, 1.5, 1.0) };
+        let stack = HayStack::from_box(Aabb3 { min: Vec3::new(-1.0, 0.0, -1.0), max: Vec3::new(1.0, 1.5, 1.0) });
         let centre = Vec3::ZERO;
         assert!(hop_out_exit(&stack, centre, Vec3::X, &CollisionWorld::default()).is_some(), "nothing beyond: room");
         let mut c = CollisionWorld::default();
@@ -428,7 +417,7 @@ mod search_tests {
     /// (dz < 1.2), not one behind; a wall in the 3 m forward ray refuses everything.
     #[test]
     fn the_leap_of_faith_search_takes_the_box_the_window_and_the_rays() {
-        let stack = |x: f32, y: f32, z: f32| Aabb3 { min: Vec3::new(x - 1.5, y, z - 1.5), max: Vec3::new(x + 1.5, y + 1.5, z + 1.5) };
+        let stack = |x: f32, y: f32, z: f32| HayStack::from_box(Aabb3 { min: Vec3::new(x - 1.5, y, z - 1.5), max: Vec3::new(x + 1.5, y + 1.5, z + 1.5) });
         let c = CollisionWorld::default();
         let feet = Vec3::new(0.0, 10.0, 0.0);
         let below = [stack(0.0, 0.0, -6.0)];

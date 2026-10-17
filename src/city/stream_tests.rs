@@ -441,7 +441,7 @@ fn damascus_leap_of_faith_lands_in_a_city_haystack() {
         let c = s.collision();
         let mut spots = Vec::new();
         for st in &stacks {
-            let top = Vec3::new((st.min.x + st.max.x) * 0.5, st.max.y, (st.min.z + st.max.z) * 0.5);
+            let top = Vec3::new((st.bounds.min.x + st.bounds.max.x) * 0.5, st.bounds.max.y, (st.bounds.min.z + st.bounds.max.z) * 0.5);
             for e in s.guidance().edges.iter().filter(|e| e.subtype == GuidanceSubType::LedgeGrab && e.n0.y > 0.9 && e.n1.y.abs() < 0.3) {
                 let q = e.closest_point(Vec3::new(top.x, e.p0.y, top.z));
                 let n = Vec3::new(e.n1.x, 0.0, e.n1.z).normalize_or_zero();
@@ -1535,4 +1535,26 @@ fn damascus_kiosk_stall_is_posed() {
     let b = stall.visual_bounds;
     assert!(b.min.y > 7.5 && b.min.y < 8.1 && b.max.y > 10.8 && b.max.y < 11.6, "{:?}", b);
     assert!((b.max.x - b.min.x) > 3.5 || (b.max.z - b.min.z) > 3.5, "the stall's length {:?}", b);
+}
+
+/// Haystack census (diagnostic, plan W1): per haystack, the entity origin (what the game's searches read, 0xE15E6D)
+/// and the collision box (the contacts, the dive ray and the hop-out footprint, 0xE05490 / 0xE434E0) beside the hay
+/// mesh's bounds (the old stand-in).
+#[test]
+#[ignore = "diagnostic; decodes every Damascus cell"]
+fn probe_damascus_haystack_census() {
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let mut n = 0;
+    for cell in 0..w.data.grid.cells.len() {
+        if w.data.grid.cells[cell].datablock == 0 { continue; }
+        let Ok(c) = super::decode::decode_cell(&w.data, cell) else { continue };
+        for o in c.objects.iter() {
+            let Some(h) = o.haystack else { continue };
+            n += 1;
+            let mesh = o.meshes.first().map(|m| super::decode::mesh_bounds(&m.mesh, o.transform));
+            eprintln!("HAY {cell:5} origin {:.2} box centre {:.2} half {:.2} | mesh {:.2?}", h.origin, h.centre, h.half, mesh.map(|m| (m.min, m.max)));
+        }
+    }
+    eprintln!("HAY {n} haystacks");
 }
