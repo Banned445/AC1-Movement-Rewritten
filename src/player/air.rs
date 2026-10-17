@@ -200,6 +200,19 @@ pub fn pull_back(from: Vec3, aim: Vec3, target_type: u32) -> Vec3 {
 /// The over-drop rule `sub_B1B8C0` (0xB1B9A8 / 0xB1BA76–0xB1BB42): a target more than `thr` below the start is aimed at
 /// `thr` down, pulled back horizontally by min(dist, 1.5)·k with k = clamp((dz − thr) / −30, 0, 2) (RE/24 AIR-20); the
 /// free fall then steers to the true target. Returns (aim, the fall's target).
+/// `sub_B1B8C0`'s threshold by target type and jump kind (a6): −5 m; a haystack (0x800) −3 m, and for the ground and
+/// free-step kinds (< 2) −30 m when the drop is 3 m or more (the Leap of Faith, +506 mode 2); the rebound (2) and the
+/// swing (3) keep −3 m with no faith mode (0xB1B9DF–0xB1BA19, RE/30).
+fn over_drop_threshold(type_flags: u32, dz: f32, kind: u32) -> f32 {
+    if type_flags != jump_blend::TARGET_HAYSTACK {
+        OVERDROP
+    } else if kind < 2 && dz <= -jump_blend::FAITH_MIN_DROP {
+        jump_blend::FAITH_DOWN
+    } else {
+        jump_blend::FAITH_MIN_DROP
+    }
+}
+
 fn over_drop(from: Vec3, target: Vec3, thr: f32) -> (Vec3, Option<Vec3>) {
     let dz = target.y - from.y;
     if dz >= -thr {
@@ -335,11 +348,7 @@ impl HumanInAirData {
                 let mut aim = target.position;
                 let mut then_fall_to = None;
                 // haystack: −3 m, or −30 m when deeper (Leap of Faith)
-                let thr = if target.type_flags == jump_blend::TARGET_HAYSTACK {
-                    if target.position.y - from.y <= -jump_blend::FAITH_MIN_DROP { jump_blend::FAITH_DOWN } else { jump_blend::FAITH_MIN_DROP }
-                } else {
-                    OVERDROP
-                };
+                let thr = over_drop_threshold(target.type_flags, target.position.y - from.y, 0);
                 if target.straight.is_none() {
                     (aim, then_fall_to) = over_drop(from, target.position, thr);
                 } else if target.position.y < from.y - thr {
@@ -363,11 +372,7 @@ impl HumanInAirData {
                 // a haystack target (the impulsion jump's Leap of Faith, event 45): the haystack's over-drop limits and
                 // layer, as for every kind (`sub_B1B8C0` in `Human__SetupJumpToTarget` 0xB20468; InAir entry 0xE01E19)
                 self.hay_pass = target.type_flags == jump_blend::TARGET_HAYSTACK;
-                let thr = if target.type_flags == jump_blend::TARGET_HAYSTACK {
-                    if target.position.y - from.y <= -jump_blend::FAITH_MIN_DROP { jump_blend::FAITH_DOWN } else { jump_blend::FAITH_MIN_DROP }
-                } else {
-                    OVERDROP
-                };
+                let thr = over_drop_threshold(target.type_flags, target.position.y - from.y, 1);
                 let (aim, then_fall_to) = over_drop(from, target.position, thr);
                 self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 1);
             }
@@ -382,7 +387,8 @@ impl HumanInAirData {
                     Some(target) => {
                         self.target_flags = target.type_flags;
                         self.target = Some(target);
-                        let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
+                        let thr = over_drop_threshold(target.type_flags, target.position.y - from.y, 3);
+                        let (aim, then_fall_to) = over_drop(from, target.position, thr);
                         self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 3);
                     }
                     None => {
@@ -405,7 +411,8 @@ impl HumanInAirData {
                     Some(target) => {
                         self.target_flags = target.type_flags;
                         self.target = Some(target);
-                        let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
+                        let thr = over_drop_threshold(target.type_flags, target.position.y - from.y, 2);
+                        let (aim, then_fall_to) = over_drop(from, target.position, thr);
                         self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 2);
                     }
                     None => {
@@ -1402,6 +1409,14 @@ mod fall_tests {
         assert!((aim - Vec3::new(0.0, -OVERDROP, -6.0 + 1.5 * k)).length() < 1e-5, "{aim}");
         assert_eq!(fall, Some(Vec3::new(0.0, -20.0, -6.0)));
         assert_eq!(over_drop(from, roof, OVERDROP), (roof, None));
+        // 0xB1B9BC–0xB1BA19: a haystack 3 m down or more is the Leap of Faith (−30 m) for the ground and free-step
+        // kinds only; the rebound (2) and swing (3) jumps keep −3 m (RE/30)
+        let hay = jump_blend::TARGET_HAYSTACK;
+        assert_eq!(over_drop_threshold(hay, -6.0, 0), jump_blend::FAITH_DOWN);
+        assert_eq!(over_drop_threshold(hay, -2.0, 0), jump_blend::FAITH_MIN_DROP);
+        assert_eq!(over_drop_threshold(hay, -6.0, 2), jump_blend::FAITH_MIN_DROP);
+        assert_eq!(over_drop_threshold(hay, -6.0, 3), jump_blend::FAITH_MIN_DROP);
+        assert_eq!(over_drop_threshold(TARGET_FREESTEP, -6.0, 3), OVERDROP);
     }
 
     /// RE/24 AIR-1: the free jump's target lies 3 m down. On solid ground ahead the sweep hits and the jump flies the
