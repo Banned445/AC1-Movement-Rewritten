@@ -1792,7 +1792,7 @@ pub fn update_ground(
                 // vt28: free jump without a target, along the direction the candidates were searched in (IHuman vt68
                 // gets the query's own direction pointer, 0xEE842D / 0xEE81CE; live RE/25 freerun_east: the stick's
                 // (0.999, −0.038) while the body still faced 12° to the right)
-                None => InAirEntry::FreeJump { from: body.feet, dir: want, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
+                None => InAirEntry::FreeJump { from: body.feet, dir: want, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0, tap: true },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;
@@ -2345,7 +2345,7 @@ fn step_off_entry(feet: Vec3, facing: Vec3, r: &super::jump_candidates::EdgeRepo
     }
     let dir = if angle.abs() <= 60f32.to_radians() { facing } else { Quat::from_rotation_y(60f32.to_radians() * angle.signum()) * r.normal };
     let a = if high { 1.0 } else { 0.0 };
-    Some(InAirEntry::FreeJump { from: feet, dir, ahead: 1.0 + 2.0 * a * speed_param, speed_param, foot_left })
+    Some(InAirEntry::FreeJump { from: feet, dir, ahead: 1.0 + 2.0 * a * speed_param, speed_param, foot_left, tap: false })
 }
 
 /// `AC_JUMP_LOG=1`: which of the ground's jump paths fired, from where, at what target.
