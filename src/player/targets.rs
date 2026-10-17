@@ -40,25 +40,6 @@ pub const TARGET_LEDGE_FREE: u32 = 0x80;
 /// Ladder targets (flight `…_to_surface`, arrival `HumanInAir__CheckJumpTargetArrival` 0xE07D00 case 0x1000).
 pub const TARGET_LADDER: u32 = 0x1000;
 
-/// PORT: static post candidates depend on map geometry, not the jumper. Build after all placements load.
-pub(crate) fn find_jump_pilotis(guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<Vec3> {
-    pilotis_for_edges(guidance.edges.iter(), guidance, collision)
-}
-
-/// The posts among some of the world's edges (a streamed map adds them per object as it loads).
-pub(crate) fn pilotis_for_edges<'a>(edges: impl Iterator<Item = &'a crate::guidance::GuidanceEdge>, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Vec<Vec3> {
-    let mut pilotis: Vec<Vec3> = Vec::new();
-    for e in edges {
-        if e.subtype != GuidanceSubType::LedgeGrab { continue; }
-        let mid = (e.p0 + e.p1) * 0.5;
-        let into = -Vec3::new(e.n1.x, 0.0, e.n1.z);
-        if let Some(top) = super::narrow::find_pilotis(mid, mid, into, false, guidance, collision) {
-            if !pilotis.iter().any(|p| (*p - top).length() < 0.1) { pilotis.push(top); }
-        }
-    }
-    pilotis
-}
-
 /// The tap jump's target (the interpreter's jump branch 0xEE817E): the game's candidate query with beams
 /// (`jump_candidates::query`, kind 0) and the scorer 0xE96BF0 (mode 1). With no candidate, the Leap of Faith search
 /// (IHuman vt76, the haystacks) follows, as in the interpreter (0xEE8239).

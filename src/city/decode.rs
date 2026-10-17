@@ -51,9 +51,6 @@ pub struct CityObject {
     pub collision: Vec<Triangle>,
     pub edges: Vec<GuidanceEdge>,
     pub haystack: Option<Aabb3>,
-    /// Posts among the object's ledge edges (`targets::pilotis_for_edges`), found against its own cell's geometry
-    /// on the loader thread.
-    pub pilotis: Vec<Vec3>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -243,19 +240,6 @@ pub fn decode_file(data: &CityData, cell: usize, a: usize, file: &str) -> Result
         }
     }
     out.stats.objects = out.objects.len();
-    // PORT: posts are looked for among the cell's own geometry (the game's candidates come from guidance queries at
-    // jump time, RE/04 §4.1); a post whose neighbourhood spans two cells is judged on its own cell.
-    if out.objects.iter().any(|o| o.edges.iter().any(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab)) {
-        let mut collision = crate::collision::CollisionWorld::default();
-        collision.enable_index(8.0);
-        collision.add_triangles(out.objects.iter().flat_map(|o| o.collision.iter().cloned()).collect());
-        let guidance = crate::guidance::GuidanceWorld { edges: out.objects.iter().flat_map(|o| o.edges.iter().cloned()).collect(), ..Default::default() };
-        for o in &mut out.objects {
-            if o.edges.iter().any(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab) {
-                o.pilotis = crate::player::targets::pilotis_for_edges(o.edges.iter(), &guidance, &collision);
-            }
-        }
-    }
     let resident = data.resident.lock().unwrap().clone();
     for (id, m) in materials {
         for (tex, linear) in m.maps() {
@@ -281,7 +265,7 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     let mut o = CityObject { name: name.to_string(), transform, center: transform.w_axis.truncate(), radius: 0.0,
         bounds: Aabb3 { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) }, meshes: Vec::new(), lod: LodTable::default(),
         visual_bounds: Aabb3 { min: Vec3::ZERO, max: Vec3::ZERO },
-        collision: Vec::new(), edges: Vec::new(), haystack: None, pilotis: Vec::new() };
+        collision: Vec::new(), edges: Vec::new(), haystack: None };
     // --- visual
     if let Some(&v) = visuals.first() {
         if b.get(v + 4) == Some(&1) {

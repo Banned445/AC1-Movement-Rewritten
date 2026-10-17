@@ -3261,6 +3261,23 @@ fn on_the_ladder() -> Sim {
     s
 }
 
+/// `HumanLadder__ChooseClimbAnim` 0xE24540 chooses the step's rate every frame: a low-profile stick at or below 0.5
+/// plays it at half rate (0xE2490B), the stick let go at 1.0 (0xE24AD3). Live (RE/29 #61): with the stick released
+/// the slow step finishes at twice the speed.
+#[test]
+fn a_slow_ladder_step_finishes_at_full_rate_once_the_stick_is_let_go() {
+    use crate::player::ladder::LadderPhase;
+    let mut s = on_the_ladder();
+    s.pad(Vec3::Z, 0.6, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ladder.phase == Some(LadderPhase::ClimbUp)), "no climb");
+    s.run(0.1);
+    assert_eq!(s.data().ladder.rate, 0.5, "the walk band climbs at half rate");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0 / 30.0);
+    assert_eq!(s.data().ladder.phase, Some(LadderPhase::ClimbUp), "the step goes on");
+    assert_eq!(s.data().ladder.rate, 1.0, "released: full rate");
+}
+
 #[test]
 fn letting_go_of_a_ladder_falls() {
     use crate::player::ladder::RELEASE;

@@ -175,7 +175,6 @@ pub struct CityState {
     /// finest cell → fake span entities hidden while the cell is loaded
     fake_spans: HashMap<usize, Vec<Entity>>,
     edge_free: Vec<usize>,
-    pilotis_dirty: bool,
     haystacks_dirty: bool,
     plan_timer: f32,
     pub stats: CityStats,
@@ -226,7 +225,7 @@ impl CityState {
         let n = data.grid.cells.len();
         Self { loader: Loader::new(data.clone(), threads), data, cells: (0..n).map(|_| Cell::Unloaded).collect(), has_content,
             materials: HashMap::new(), textures: HashMap::new(), fake_spans: HashMap::new(), edge_free: Vec::new(),
-            pilotis_dirty: true, haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None,
+            haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None,
             lod_fade: std::env::var("AC_LOD_FADE").is_ok_and(|v| v == "1"), effects_out: Vec::new(), effects_unloaded: Vec::new(),
             sounds_out: Vec::new(), sounds_unloaded: Vec::new(), ambience_out: Vec::new() }
     }
@@ -291,17 +290,6 @@ impl CityState {
     }
 
     fn refresh(&mut self, ctx: &mut Ctx) {
-        if self.pilotis_dirty {
-            self.pilotis_dirty = false;
-            let mut all: Vec<Vec3> = Vec::new();
-            for cell in &self.cells {
-                let Cell::Loaded { objects, .. } = cell else { continue };
-                for o in objects.iter().filter(|o| o.physics.is_some()) {
-                    for &p in &o.o.pilotis { if !all.iter().any(|q| (*q - p).length() < 0.1) { all.push(p); } }
-                }
-            }
-            ctx.guidance.jump_pilotis = Some(all);
-        }
         if self.haystacks_dirty {
             self.haystacks_dirty = false;
             ctx.guidance.haystacks = self.cells.iter().filter_map(|c| match c { Cell::Loaded { objects, .. } => Some(objects), _ => None })
@@ -418,7 +406,7 @@ impl CityState {
         for mut o in objects {
             for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
             for (e, _) in o.fade.take().into_iter().flat_map(|f| f.sections) { ctx.commands.entity(e).despawn(); }
-            if let Some(p) = o.physics.take() { self.remove_physics(p, ctx); self.haystacks_dirty |= o.o.haystack.is_some(); self.pilotis_dirty |= !o.o.pilotis.is_empty(); }
+            if let Some(p) = o.physics.take() { self.remove_physics(p, ctx); self.haystacks_dirty |= o.o.haystack.is_some(); }
         }
         for m in materials { self.release_material(m, ctx); }
         for &e in self.fake_spans.get(&c).into_iter().flatten() { ctx.commands.entity(e).insert(Visibility::Inherited); }
@@ -512,7 +500,6 @@ impl CityState {
                 else if o.physics.is_some() && d > PHYSICS_RADIUS + PHYSICS_MARGIN {
                     let p = o.physics.take().unwrap();
                     self.haystacks_dirty |= o.o.haystack.is_some();
-                    self.pilotis_dirty |= !o.o.pilotis.is_empty();
                     remove_physics(&mut self.edge_free, p, ctx);
                 }
             }
@@ -533,7 +520,6 @@ impl CityState {
             }
             o.physics = Some(Physics { triangles, edges });
             self.haystacks_dirty |= o.o.haystack.is_some();
-            self.pilotis_dirty |= !o.o.pilotis.is_empty();
         }
     }
 

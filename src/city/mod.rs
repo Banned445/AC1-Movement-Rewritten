@@ -139,7 +139,7 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
     cams: Query<Entity, With<crate::camera::MainCamera>>) {
     *collision = crate::collision::CollisionWorld::default();
     collision.enable_index(8.0);
-    *guidance = crate::guidance::GuidanceWorld { jump_pilotis: Some(Vec::new()), ..default() };
+    *guidance = crate::guidance::GuidanceWorld::default();
     let mut state = stream::CityState::new(p.world.data.clone());
     let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, grounds: &mut grounds, images: &mut images,
         collision: &mut collision, guidance: &mut guidance };

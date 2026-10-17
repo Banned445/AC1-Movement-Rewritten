@@ -591,8 +591,8 @@ pub fn try_corner(
 /// otherwise a hang (1 wall, 2 free). A landing whose body sweep (`Human__CapsuleCastFree` 0xB136E0) fails moves on to
 /// the next pass. `long` = flat distance from the pass's hand start / 1.6 ≥ 0.5.
 ///
-/// PORT: the hang's feet support (`sub_11718B0`, 1.0 m below the hand box) is the collision foot rays
-/// (`hang_type_at`); the hang's body sweep is the capsule test at the target.
+/// The hang's feet support is `Guidance__FindWallSupport` 1.0 m below the hand box (`foot_support_below`); the body
+/// sweep is `side_jump_clear`.
 /// `TrySideJumpToLedge` 0xDDD490's clearance (0xDDDF85): a capsule r 0.35 from Q = `sub_B18140`(root) − 0.2625·u +
 /// 0.15·outward (u the flat unit vector toward the target pose; `sub_B18140` adds the horizontal part of the root's
 /// pitched up axis, nothing for the upright root, RE/24 CLIMB-13), 1.8 / 1.0 / 2.0 m tall for jump types 0 / 1 / 2,
@@ -604,10 +604,12 @@ fn side_jump_clear(root: Vec3, target: Vec3, n: Vec3, ty: usize, collision: &Col
     collision.capsule_cast_free(q, [1.8, 1.0, 2.0][ty], 0.35, target - root)
 }
 
-/// The side jumps' foot support at the target (`Guidance__FindWallSupport` 0x11718B0, 1.0 m below the hand box, depth
-/// 0.3 m). PORT: its ray (`ledge::support_ray`) under the hand box centre and under the hand hit, in place of the box.
-fn foot_support_below(hand_centre: Vec3, hit: Vec3, nn: Vec3, collision: &CollisionWorld) -> bool {
-    [hand_centre, Vec3::new(hit.x, hand_centre.y, hit.z)].iter().any(|&c| super::ledge::support_ray(c - Vec3::Y, nn, 0.3, 0.0, collision))
+/// The side jumps' foot support at the target (`Human__StepSearchHolds` 0xB153C0 → `Guidance__FindWallSupport`
+/// 0x11718B0 at 0xB15793): 1.0 m below the hand box's centre, the search box's own half extents (0.175 across, 0.3 deep,
+/// 0.3 high) and step 0.07; a support makes the wall hang (type 1), none the free hang (type 2).
+fn foot_support_below(hand_centre: Vec3, _hit: Vec3, nn: Vec3, collision: &CollisionWorld) -> bool {
+    let b = super::ledge::SupportBox { across: 0.175, depth: 0.3, height: 0.3, step: 0.07 };
+    super::ledge::wall_support(hand_centre - Vec3::Y, nn, 0.0, 0.0, b, collision)
 }
 
 pub fn try_side_jump(
@@ -687,9 +689,7 @@ pub fn try_side_jump(
             };
             return Some((mv, Some(climb)));
         }
-        // the feet's wall support (sub_11718B0 1.0 m below the hand box, its depth 0.3 m). PORT: the ray only, cast under
-        // the box centre and under the hand hit (the box spans the hand box, so a hit at the end of a wall still finds the
-        // wall below it); this search's box and step (for its Surface slices) are not traced
+        // the feet's wall support (`foot_support_below`, 0xB15793)
         let new_hang = if foot_support_below(found.hand_centre, hit.point, nn, collision) { LedgeHangType::Wall } else { LedgeHangType::Free };
         let to = hang_root_at(hl, hr, nn, new_hang, true, collision);
         let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };

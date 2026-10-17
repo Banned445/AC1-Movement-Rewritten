@@ -981,7 +981,13 @@ pub fn update_ladder(
                     }
                 }
                 let stepping = matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done;
-                let thick_top = *l.thick_top.get_or_insert_with(|| wall_top_behind(l.top, l.n, &guidance));
+                // the step's playback rate is chosen every frame (`HumanLadder__ChooseClimbAnim` 0xE24540): the stick
+                // released (input ≤ 0.0005) plays it at 1.0 (0xE24AD3), a low-profile stick at or below 0.5 at 0.5
+                // (0xE2490B), else 1.0. Live (RE/29 #61): with the stick let go the slow step finishes at twice the speed
+                if stepping {
+                    l.rate = if !stick || l.high || pad.band > 1 { 1.0 } else { 0.5 };
+                }
+                let thick_top =*l.thick_top.get_or_insert_with(|| wall_top_behind(l.top, l.n, &guidance));
                 // ReachedTop / ReachedBottom (`UpdateReachedTopBottom` 0xE1D490) on the continuous height while climbing,
                 // and the exits posted every frame (LadderState 0xEEBF87, events 2 / 3): mid-step too (RE/24 LADDER-9).
                 // The top margin: 1.63 m in low profile or with a wall top (0x20), else 1.95 m (LADDER-8)
