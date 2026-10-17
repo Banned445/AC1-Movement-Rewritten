@@ -143,6 +143,7 @@ Set these environment variables before `cargo run --release`:
 | `AC_GHOST=1` | Turns Ghost mode on after one second |
 | `AC_CITY_TOUR=<m/s>` | Flies across Damascus at that speed, to stress the streaming |
 | `AC_CITY_AT="x y z yaw"` | Starts Damascus at a game position (yaw in degrees), to compare a spot with the game |
+| `AC_SHOTS=t1,t2,…` | Freezes at each time and saves a screenshot per view (`AC_VIEWS=back,left,…`, `AC_SHOT_DIR`). `AC_SHOT_CAMS=<file>` places the cameras exactly instead, one line `name x y z qx qy qz qw` per view in game space |
 | `AC_CITY_OVERLAY=1` | Shows the F3 city counters from the start |
 | `AC_NO_SOUND=1` | Silences the sounds |
 | `AC_SND_LOG=<seconds>` | Logs the playing voices and the mix level at that interval |

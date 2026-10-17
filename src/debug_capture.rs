@@ -838,6 +838,9 @@ fn capture(mut commands: Commands, time: Res<Time<Real>>, mut cap: ResMut<Captur
 // simulation freezes (virtual time paused), the camera visits every view (one frame each, positioned
 // relative to the player's facing) and a screenshot `<dir>/<t>_<view>.png` is saved; then time resumes.
 // Time advances in fixed 1/60 s steps so runs are reproducible.
+// `AC_SHOT_CAMS=file` replaces the views with cameras placed exactly: one line `name x y z qx qy qz qw` per view
+// (game space, Z up, the camera's forward its local +y, as the lab's shots.py logs them), for screenshots that
+// match the running game's (no guidance overlay, no fill light).
 
 #[derive(Resource)]
 struct Shots {
@@ -848,6 +851,24 @@ struct Shots {
     view: Option<usize>,
     done_at: Option<u32>,
     frames: u32,
+    /// `AC_SHOT_CAMS`: per view, the eye and the forward / up axes in Bevy space.
+    cams: Vec<(Vec3, Vec3, Vec3)>,
+}
+
+/// Reads `AC_SHOT_CAMS`' lines into view names and Bevy-space eyes / forwards / ups.
+fn shot_cams(path: &str) -> (Vec<String>, Vec<(Vec3, Vec3, Vec3)>) {
+    let to_bevy = |v: Vec3| Vec3::new(v.x, v.z, -v.y);
+    let mut names = Vec::new();
+    let mut cams = Vec::new();
+    for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        if w.len() != 8 || w[0].starts_with('#') { continue; }
+        let Ok(v) = w[1..].iter().map(|x| x.parse::<f32>()).collect::<Result<Vec<_>, _>>() else { continue };
+        let q = Quat::from_xyzw(v[3], v[4], v[5], v[6]).normalize();
+        names.push(w[0].to_string());
+        cams.push((to_bevy(Vec3::new(v[0], v[1], v[2])), to_bevy(q * Vec3::Y), to_bevy(q * Vec3::Z)));
+    }
+    (names, cams)
 }
 
 pub struct ShotsPlugin;
@@ -857,14 +878,20 @@ impl Plugin for ShotsPlugin {
         let Ok(list) = std::env::var("AC_SHOTS") else { return };
         let mut times: Vec<f32> = list.split(',').filter_map(|s| s.trim().parse().ok()).collect();
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let views = std::env::var("AC_VIEWS").unwrap_or("back,left,right,high,hands".into()).split(',').map(String::from).collect();
+        let mut views: Vec<String> = std::env::var("AC_VIEWS").unwrap_or("back,left,right,high,hands".into()).split(',').map(String::from).collect();
+        let mut cams = Vec::new();
+        if let Ok(path) = std::env::var("AC_SHOT_CAMS") {
+            (views, cams) = shot_cams(&path);
+            // the game's shots have no guidance overlay
+            app.insert_resource(crate::guidance::ShowGuidance(false));
+        }
         let dir = std::env::var("AC_SHOT_DIR").unwrap_or(".".into());
         let _ = std::fs::create_dir_all(&dir);
         let fps = std::env::var("AC_SHOT_FPS").ok().and_then(|v| v.parse::<f64>().ok())
             .filter(|v| v.is_finite() && (1.0..=240.0).contains(v)).unwrap_or(60.0);
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(1.0 / fps)))
-            .insert_resource(Shots { times, views, dir, next: 0, view: None, done_at: None, frames: 0 })
-            .add_systems(Startup, fill_light)
+            .add_systems(Startup, fill_light.run_if(|s: Res<Shots>| s.cams.is_empty()))
+            .insert_resource(Shots { times, views, dir, next: 0, view: None, done_at: None, frames: 0, cams })
             .add_systems(PostUpdate, shots.before(bevy::transform::TransformSystems::Propagate));
     }
 }
@@ -907,7 +934,7 @@ fn shots(
     let hips = rig.single().ok().and_then(|r| r.bone_ids.iter().position(|b| *b == 0xded1_0611).and_then(|i| globals.get(r.joints[i]).ok()));
     let focus = hips.map(|g| g.translation()).unwrap_or(body.feet + Vec3::Y * 1.0);
     if std::env::var_os("AC_SHOT_LOG").is_some() {
-        info!("shot t={t:.2} feet {:?} hips {:?}", body.feet, hips.map(|g| g.translation()));
+        info!("shot t={t:.2} view {vi} feet {:?} fwd {fwd:?} hips {:?}", body.feet, hips.map(|g| g.translation()));
     }
     let name = shots.views[vi].clone();
     let (target, eye) = match name.as_str() {
@@ -932,7 +959,10 @@ fn shots(
         _ => (focus, focus - fwd * 3.2 + Vec3::Y * 0.6),
     };
     if let Ok(mut c) = cam.single_mut() {
-        *c = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+        *c = match shots.cams.get(vi) {
+            Some(&(e, f, u)) => Transform::from_translation(e).looking_to(f, u),
+            None => Transform::from_translation(eye).looking_at(target, Vec3::Y),
+        };
     }
     let path = format!("{}/{:05.2}_{}.png", shots.dir, shots.times[shots.next], name);
     commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));

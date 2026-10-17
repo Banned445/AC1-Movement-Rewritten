@@ -65,7 +65,8 @@ pub struct Grading {
     pub brightness: f32,
     pub contrast: f32,
     pub balance: bool,
-    /// The nine colour-balance shifts (three ranges × R, G, B), then black, white, gamma, opacity.
+    /// The nine colour-balance shifts, per channel R, G, B: highlights, midtones, shadows (`ColorBalance__ApplyShifts`
+    /// 0xAD7750 reads R from words 0..2, G from 3..5, B from 6..8), then black, white, gamma, opacity.
     pub shifts: [f32; 9],
     pub black: f32,
     pub white: f32,
@@ -275,11 +276,8 @@ pub struct PostGrade {
     pub r: Vec4,
     pub g: Vec4,
     pub b: Vec4,
-    /// ColorBalance shifts per range (rgb) and its levels (black, white, gamma, opacity).
-    pub shadows: Vec4,
-    pub midtones: Vec4,
-    pub highlights: Vec4,
-    pub levels: Vec4,
+    /// ColorBalance's per-channel curves at x = i / 15 (R in 0..4, G in 4..8, B in 8..12, four nodes each).
+    pub curve: [Vec4; 12],
     /// x: ColourControl on, y: ColorBalance on.
     pub enabled: Vec4,
 }
@@ -309,13 +307,55 @@ pub fn colour_control(hue: f32, saturation: f32, brightness: f32, contrast: f32)
     ]
 }
 
+/// ColorBalance's weight for a shift at value `x` (`ColorBalance__ShadowWeights` 0xAD75F0 /
+/// `ColorBalance__HighlightWeights` 0xAD74E0, GIMP's colour-balance transfer curves; 15.93 = 255 / 16).
+fn balance_weight(range: usize, x: f32, shift: f32) -> f32 {
+    let mid = 0.667 * (1.0 - (2.0 * x - 1.0) * (2.0 * x - 1.0));
+    match range {
+        0 if shift <= 0.0 => 1.075 - 1.0 / ((1.0 - x) * 15.93 + 1.0),
+        2 if shift > 0.0 => 1.075 - 1.0 / (x * 15.93 + 1.0),
+        _ => mid,
+    }
+}
+
+/// ColorBalance's per-channel curves as `ColorBalance__BuildLut` 0xAD7B80 bakes them into the 16³ LUT: at x = i / 15,
+/// levels (black, 1 / (white − black)), `pow(1 / gamma)`, clamped; the shifts (0xAD7750: shadows, midtones, then
+/// highlights, each weighted by the value it starts from and clamped); then `x + (c − x) · opacity`. The player's
+/// brightness option (byte +343 of the options, 0xAD7B80) moves black and gamma; its middle value 5 leaves them, the
+/// port's (PORT: no brightness option).
+pub fn balance_curves(g: &Grading) -> [[f32; 16]; 3] {
+    let mut out = [[0.0; 16]; 3];
+    for (i, x) in (0..16).map(|i| (i, i as f32 / 15.0)) {
+        if !g.balance {
+            for c in &mut out { c[i] = x; }
+            continue;
+        }
+        let range = g.white - g.black;
+        let scale = if range == 0.0 { 1.0 } else { 1.0 / range };
+        let e = if g.gamma == 0.0 { 1.0 } else { 1.0 / g.gamma };
+        let c = ((x - g.black).max(0.0) * scale).powf(e).clamp(0.0, 1.0);
+        for (k, curve) in out.iter_mut().enumerate() {
+            let mut v = c;
+            // the channel's words: highlights, midtones, shadows; applied shadows first
+            for range in 0..3 {
+                let shift = g.shifts[k * 3 + 2 - range];
+                v = (v + balance_weight(range, v, shift) * shift).clamp(0.0, 1.0);
+            }
+            curve[i] = (v - x) * g.opacity + x;
+        }
+    }
+    out
+}
+
 /// The post grade for the World's `ColourControlSettings` and `ColorBalanceSettings`.
 pub fn post_grade(g: &Grading) -> PostGrade {
     let [r, gr, b] = colour_control(g.hue, g.saturation, g.brightness, g.contrast);
-    let s = &g.shifts;
-    PostGrade { r, g: gr, b, shadows: Vec4::new(s[0], s[1], s[2], 0.0), midtones: Vec4::new(s[3], s[4], s[5], 0.0),
-        highlights: Vec4::new(s[6], s[7], s[8], 0.0), levels: Vec4::new(g.black, g.white, g.gamma, g.opacity),
-        enabled: Vec4::new(g.control as u8 as f32, g.balance as u8 as f32, 0.0, 0.0) }
+    let curves = balance_curves(g);
+    let curve = std::array::from_fn(|n| {
+        let c = &curves[n / 4][(n % 4) * 4..];
+        Vec4::new(c[0], c[1], c[2], c[3])
+    });
+    PostGrade { r, g: gr, b, curve, enabled: Vec4::new(g.control as u8 as f32, g.balance as u8 as f32, 0.0, 0.0) }
 }
 
 /// Lights, fog, grading and the sky from the World's ambiance. Returns the entities it spawns (the map owns them).
@@ -389,6 +429,27 @@ mod tests {
         let h = colour_control(120.0, 1.0, 1.0, 1.0);
         for row in h { assert!((row.truncate().element_sum() - 1.0).abs() < 1e-4); }
         assert!((h[0].y - 1.0).abs() < 1e-4 && (h[1].z - 1.0).abs() < 1e-4 && (h[2].x - 1.0).abs() < 1e-4, "120 degrees: a channel turn {h:?}");
+    }
+
+    /// ColorBalance's curves (0xAD7B80): off is the identity; Damascus's shifts warm the midtones (R +0.045,
+    /// B −0.102 in the channels' middle words), its levels lift the top (white 0.93) and darken the middle (gamma 0.8).
+    #[test]
+    fn colour_balance_curves() {
+        let off = balance_curves(&Grading::default());
+        for c in off { for (i, v) in c.iter().enumerate() { assert!((v - i as f32 / 15.0).abs() < 1e-6); } }
+        let g = Grading { balance: true, shifts: [0.011, 0.045, 0.0, 0.0, -0.022, 0.0, 0.011, -0.102, 0.0], black: 0.0,
+            white: 0.93, gamma: 0.8, opacity: 0.6, ..default() };
+        let [r, gr, b] = balance_curves(&g);
+        assert!(r[7] > gr[7] && gr[7] > b[7], "warm midtones {} {} {}", r[7], gr[7], b[7]);
+        // black: only the highlight weight's floor (1.075 − 1) · 0.011 · 0.6
+        assert!((r[0] - 0.075 * 0.011 * 0.6).abs() < 1e-5 && (r[15] - 1.0).abs() < 1e-6, "black stays, white clips");
+        for c in [r, gr, b] { assert!(c.windows(2).all(|w| w[1] >= w[0]), "monotone {c:?}"); }
+        // the channel's own curve at the middle, by hand: c = (0.4667 / 0.93)^1.25 = 0.4226; shadows 0; midtones
+        // + 0.667 · (1 − (2c − 1)²) · 0.045; highlights + (1.075 − 1 / (15.93 c' + 1)) · 0.011; x + 0.6 (c'' − x)
+        let c: f32 = (7.0f32 / 15.0 / 0.93).powf(1.25);
+        let c1 = c + 0.667 * (1.0 - (2.0 * c - 1.0).powi(2)) * 0.045;
+        let c2 = c1 + (1.075 - 1.0 / (15.93 * c1 + 1.0)) * 0.011;
+        assert!((r[7] - (7.0 / 15.0 + 0.6 * (c2 - 7.0 / 15.0))).abs() < 1e-5, "{}", r[7]);
     }
 
     /// Damascus's World: the values decoded by hand from the install (RE/17 §11).

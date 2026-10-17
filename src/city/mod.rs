@@ -77,9 +77,9 @@ pub fn spawner(globals: &[Arc<Resource>], name: &str) -> Option<(Vec3, f32)> {
     let r = globals.iter().find(|r| r.class_hash == crc32("Entity") && r.name == name)?;
     let m = crate::assets::world::entity_transform(&r.payload).ok()?;
     let p = decode::to_bevy(m.w_axis.truncate());
-    // The entity's forward axis (game +Y) as a Bevy heading (the port's heading 0 faces +Z).
+    // The entity's forward axis (game +Y) as a port heading (`Body::forward` is (-sin, 0, -cos)).
     let f = decode::to_bevy(m.y_axis.truncate());
-    Some((p, f.x.atan2(f.z)))
+    Some((p, (-f.x).atan2(-f.z)))
 }
 
 /// A decoded city ready to spawn: the world, the cells around the spawn (decoded before the current map is torn
@@ -108,7 +108,7 @@ fn debug_start() -> Option<(Vec3, f32)> {
     if v.len() != 4 { return None; }
     let yaw = v[3].to_radians();
     let f = decode::to_bevy(Vec3::new(yaw.cos(), yaw.sin(), 0.0));
-    Some((decode::to_bevy(Vec3::new(v[0], v[1], v[2])), f.x.atan2(f.z)))
+    Some((decode::to_bevy(Vec3::new(v[0], v[1], v[2])), (-f.x).atan2(-f.z)))
 }
 
 pub fn prepare(game: &Path, world: &CityWorld, bc: bool, spawn: &str) -> Result<Prepared, String> {
@@ -153,7 +153,7 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
     city.0 = Some(Box::new(state));
     spawn_point.0 = p.spawn;
     *camera = default();
-    camera.yaw = p.heading + std::f32::consts::PI;
+    camera.yaw = p.heading;
     if let Ok((mut body, mut transform)) = players.single_mut() {
         body.feet = p.spawn; body.heading = p.heading; body.grounded = true; body.velocity = Vec3::ZERO; body.proxy.manifold.clear();
         transform.translation = p.spawn;
