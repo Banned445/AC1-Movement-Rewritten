@@ -321,8 +321,8 @@ fn balance_weight(range: usize, x: f32, shift: f32) -> f32 {
 /// ColorBalance's per-channel curves as `ColorBalance__BuildLut` 0xAD7B80 bakes them into the 16³ LUT: at x = i / 15,
 /// levels (black, 1 / (white − black)), `pow(1 / gamma)`, clamped; the shifts (0xAD7750: shadows, midtones, then
 /// highlights, each weighted by the value it starts from and clamped); then `x + (c − x) · opacity`. The player's
-/// brightness option (byte +343 of the options, 0xAD7B80) moves black and gamma; its middle value 5 leaves them, the
-/// port's (PORT: no brightness option).
+/// brightness option (byte +343 of the options, 0xAD7B80) moves black and gamma; the value 5 (read live) leaves them,
+/// as here (PORT: no brightness option).
 pub fn balance_curves(g: &Grading) -> [[f32; 16]; 3] {
     let mut out = [[0.0; 16]; 3];
     for (i, x) in (0..16).map(|i| (i, i as f32 / 15.0)) {
