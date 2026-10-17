@@ -255,6 +255,19 @@ fn replay_trace(s: &mut CitySim, path: &str, respawn: bool) {
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
     let player = s.player;
     trace.apply_start(s.app.world_mut(), player);
+    // `AC_LAB_EXPORT=<folder>`: the recording's inputs as a bug folder's `input.txt` (the F9 format), for the windowed
+    // replay (`AC_REPLAY`, `AC_VIDEO`) with `AC_NATIVE_MAP=damascus AC_CITY_AT=<the recording's start>`
+    if let Ok(dir) = std::env::var("AC_LAB_EXPORT") {
+        let mut txt = String::from("# ac_port recording v1 (exported from a lab recording)\n");
+        txt.push_str(&format!("start {:?} {:?} {:?} {:?}\n", start.x, start.y, start.z, trace.heading));
+        for f in &trace.frames {
+            txt.push_str(&f.to_line());
+            txt.push('\n');
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(std::path::Path::new(&dir).join("input.txt"), txt).expect("write the exported input.txt");
+        eprintln!("exported {} frames to {dir}; start game ({:.3} {:.3} {:.3})", trace.frames.len(), trace.start.x, trace.start.y, trace.start.z);
+    }
     let mut out = String::from(crate::sim_tests::LAB_TRACE_HEADER);
     let mut t = 0.0f32;
     for (i, frame) in trace.frames.iter().enumerate() {

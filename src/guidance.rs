@@ -1089,8 +1089,9 @@ impl Plugin for GuidancePlugin {
 #[derive(Resource)]
 pub struct ShowGuidance(pub bool);
 impl Default for ShowGuidance {
+    /// On, unless `AC_NO_GUIDANCE` is set (videos and screenshots); G toggles it.
     fn default() -> Self {
-        Self(true)
+        Self(std::env::var_os("AC_NO_GUIDANCE").is_none())
     }
 }
 

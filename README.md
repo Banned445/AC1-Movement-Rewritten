@@ -137,6 +137,7 @@ Set these environment variables before `cargo run --release`:
 | `AC_VIDEO=<out.mp4>` | With `AC_REPLAY`: pipes every replayed frame to ffmpeg. `AC_FFMPEG` sets the ffmpeg path, `AC_VIDEO_CRF` the quality |
 | `AC_WINDOW=<w>x<h>` | Window size. The default is 1600 x 900 |
 | `AC_NO_HUD=1` | Hides the debug HUD |
+| `AC_NO_GUIDANCE=1` | Starts with the guidance lines hidden (G shows them) |
 | `AC_DEMO_COURSE=1` | Adds a parkour course on the greybox's empty north side. Its scripted run is written as a recording by `cargo test --release demo_course_run -- --ignored --nocapture` (output in `target/demo-course/`) |
 | `AC_AUTOPILOT=roofs`, `climb` or `ledge` | Scripted input for that scenario |
 | `AC_SCREENSHOT=<file.png>` | Saves a screenshot and exits. `AC_SCREENSHOT_AT=<seconds>` sets when (default 3) |
