@@ -880,8 +880,13 @@ pub fn update_ledge(
         let playing = d.mv.and_then(|m| m.current()).map(|(b, _)| b.id).or(d.catch_action);
         let ik_runs = ledge_ik_runs(d.sub_state, playing);
         limbs.suspended = !ik_runs;
-        limbs.hands = ik_runs.then_some((d.hand_l, d.hand_r));
-        limbs.normal = n;
+        // the contacts are the running move's holds (the jumps' `sub_E55CB0`(0 / 1) set them when the move starts,
+        // e.g. `TrySideJumpToLedge` 0xDDDBC9–0xDDDD42): the clip's tags release the hands and attach them again on the
+        // new hold (live climb_24: through `hangwall_tr_hangwall_right_2_c` the hands sit 0.09 m apart on the one hold,
+        // where the port's stayed on the old records 0.6 m apart)
+        let (ik_hands, ik_n) = d.mv.map_or(((d.hand_l, d.hand_r), n), |m| ((m.hand_l, m.hand_r), m.normal));
+        limbs.hands = ik_runs.then_some(ik_hands);
+        limbs.normal = ik_n;
         // PORT: the travel time of a clip without contact tags (tagged clips use their window; RE/24 CLIMB-27)
         limbs.transit = d.moves.first().map(|m| m.duration).unwrap_or(SHIMMY_OPEN_TIME) * 0.8;
         // the feet follow the hang clip (braced against the wall, or dangling); only the hands are pinned
