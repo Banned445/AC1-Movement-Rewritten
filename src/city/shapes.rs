@@ -62,12 +62,14 @@ fn barrel(d: &[u8]) -> Result<(CollisionMesh, usize), String> {
         for k in 1..ring.len() - 1 { indices.extend([ring[0], ring[k], ring[k + 1]]); }
     }
     if indices.is_empty() { return Err("BarrelShape has no faces".into()); }
-    // PORT: the hull's CollisionMaterial reference is not read (no material)
-    let materials = vec![0; indices.len() / 3];
+    // the hull's CollisionMaterial reference is its last word, as the box's (plan W9)
+    let materials = vec![word(d, end - 4)?; indices.len() / 3];
     Ok((CollisionMesh { vertices: vertices.iter().map(|&p| m.transform_point3(p)).collect(), indices, materials }, end))
 }
 
-/// PORT: Havok collides with the exact capsule; the port's triangle world gets a 12-sided capsule hull.
+/// PORT: Havok collides with the exact capsule; the port's triangle world gets a 12-sided capsule hull. Damascus's 45
+/// capsules are all haystack camera barriers (layer 18, radius 1.0 / 1.3 m; plan W3, 2026-10-17): the player never
+/// collides with them, so the hull's inset (up to 8 cm between the hemisphere rings) only touches the camera.
 fn capsule(d: &[u8]) -> Result<(CollisionMesh, usize), String> {
     let (a, b, r) = (vec3(d, 8)?, vec3(d, 24)?, float(d, 40)?);
     if !(r > 0.0) || d.len() < 48 { return Err("invalid CapsuleShape".into()); }
@@ -96,8 +98,8 @@ fn capsule(d: &[u8]) -> Result<(CollisionMesh, usize), String> {
         }
         indices.extend([1 + 3 * SIDES as u16 + k, 1 + 3 * SIDES as u16 + n, top]);
     }
-    // PORT: the capsule's CollisionMaterial reference is not read (no material)
-    let materials = vec![0; indices.len() / 3];
+    // the capsule's CollisionMaterial reference follows the radius (plan W9)
+    let materials = vec![word(d, 44)?; indices.len() / 3];
     Ok((CollisionMesh { vertices, indices, materials }, 48))
 }
 

@@ -1558,3 +1558,21 @@ fn probe_damascus_haystack_census() {
     }
     eprintln!("HAY {n} haystacks");
 }
+
+/// Surface-material census (diagnostic, plan W9): collision triangles with a resolved sound material.
+#[test]
+#[ignore = "diagnostic; decodes every Damascus cell"]
+fn probe_damascus_material_census() {
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let (mut all, mut with) = (0usize, 0usize);
+    for cell in 0..w.data.grid.cells.len() {
+        if w.data.grid.cells[cell].datablock == 0 { continue; }
+        let Ok(c) = super::decode::decode_cell(&w.data, cell) else { continue };
+        for t in c.objects.iter().flat_map(|o| o.collision.iter()) {
+            all += 1;
+            with += (t.material != crate::triangles::NO_MATERIAL) as usize;
+        }
+    }
+    eprintln!("MATERIALS {with} of {all} collision triangles have a sound material");
+}

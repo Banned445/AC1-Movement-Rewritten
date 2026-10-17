@@ -24,7 +24,9 @@ use crate::{assets::{forge::{crc32, Resource}, static_mesh::{parse_static_mesh, 
 pub const TO_BEVY: Mat4 = Mat4::from_cols(Vec4::X, Vec4::new(0.0, 0.0, -1.0, 0.0), Vec4::Y, Vec4::W);
 pub fn to_bevy(p: Vec3) -> Vec3 { Vec3::new(p.x, p.z, -p.y) }
 
-/// PORT: entity names left out, after AC1-rs's list (RE/15 §3): mission/debug helpers and markers.
+/// PORT: entity names left out, after AC1-rs's list (RE/15 §3): mission/debug helpers and markers. In Damascus that is
+/// 28 `GP_MARK_*` (a marker mesh each, no collision, no guidance) and 8 empty `PositionHelper`s (plan W4, 2026-10-17):
+/// nothing the player touches.
 const EXCLUDED: [&str; 4] = ["GP_MARK", "PositionHelper", "PillarDust", "OutOfBound"];
 
 pub struct LodMesh {
