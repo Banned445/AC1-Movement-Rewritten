@@ -483,10 +483,19 @@ pub const SUPPORT_FEET: SupportBox = SupportBox { across: 0.25, depth: 0.625, he
 /// the character within 45° (its normal flattened, not renormalised, · into < −0.7071) is a support; the game returns the
 /// point on the nearest piece (shortened 5 cm at each end, `Guidance__NearestOnShortenedSegment`) to the offset point.
 pub fn wall_support(origin: Vec3, n: Vec3, x: f32, z: f32, b: SupportBox, collision: &CollisionWorld) -> bool {
+    wall_support_point(origin, n, x, z, b, collision).is_some()
+}
+
+/// `wall_support` with the support's point (the record the game keeps): the ray's hit, else the point on the nearest
+/// Surface piece, shortened 5 cm at each end, to the offset point.
+pub fn wall_support_point(origin: Vec3, n: Vec3, x: f32, z: f32, b: SupportBox, collision: &CollisionWorld) -> Option<Vec3> {
     let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let across = into.cross(Vec3::Y);
-    if support_ray(origin + across * x, n, b.depth, z, collision) {
-        return true;
+    let at = origin + across * x + Vec3::Y * z;
+    let start = at - into * b.depth;
+    let d = collision.sphere_free_distance(start, into, 0.01, 2.0 * b.depth);
+    if d < 2.0 * b.depth - 1e-3 {
+        return Some(start + into * (d + 0.01));
     }
     let mut heights = vec![z];
     let mut h = z + b.step;
@@ -502,7 +511,16 @@ pub fn wall_support(origin: Vec3, n: Vec3, x: f32, z: f32, b: SupportBox, collis
     collision
         .surface_slices(origin, across, into, Vec3::new(b.across, b.depth, b.height), &heights)
         .iter()
-        .any(|&(_, _, sn)| into.dot(Vec3::new(sn.x, 0.0, sn.z)) < -std::f32::consts::FRAC_1_SQRT_2)
+        .filter(|&&(_, _, sn)| into.dot(Vec3::new(sn.x, 0.0, sn.z)) < -std::f32::consts::FRAC_1_SQRT_2)
+        .map(|&(p, q, _)| {
+            let v = q - p;
+            let len = v.length();
+            let (p, q) = if len > 0.1 { (p + v / len * 0.05, q - v / len * 0.05) } else { let m = (p + q) * 0.5; (m, m) };
+            let w = q - p;
+            let t = if w.length_squared() > 1e-8 { ((at - p).dot(w) / w.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+            p + w * t
+        })
+        .min_by(|a, b| a.distance(at).total_cmp(&b.distance(at)))
 }
 
 /// `Human__FindWallHangFeetSupports` 0xB16130: the wall-hang feet supports under a hold point `hand` (the free-hang drop
@@ -510,9 +528,18 @@ pub fn wall_support(origin: Vec3, n: Vec3, x: f32, z: f32, b: SupportBox, collis
 /// 0.125 m into the wall, one 0.2 m to the left raised 0.1 m and one under the point lowered 0.1 m (`SUPPORT_FEET`);
 /// either is enough (the other foot then shares it).
 pub fn feet_supports(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
+    feet_supports_point(hand, n, collision).is_some()
+}
+
+/// `feet_supports` with the foot records it leaves: the two supports' midpoint, or the one found (the other foot
+/// shares it).
+pub fn feet_supports_point(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let c = hand - Vec3::Y + facing * 0.125;
-    wall_support(c, n, -0.2, 0.1, SUPPORT_FEET, collision) || wall_support(c, n, 0.0, -0.1, SUPPORT_FEET, collision)
+    match (wall_support_point(c, n, -0.2, 0.1, SUPPORT_FEET, collision), wall_support_point(c, n, 0.0, -0.1, SUPPORT_FEET, collision)) {
+        (Some(a), Some(b)) => Some((a + b) * 0.5),
+        (a, b) => a.or(b),
+    }
 }
 
 /// The jump arrival's hand records (`HumanInAir__CheckJumpTargetArrival` 0xE07D00): `Guidance__ProbeBoxHandPair`
@@ -614,6 +641,11 @@ pub fn feet_record(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec
 /// gives the upright axis, 1.1 m down and 0.5 m out; live (RE/29): on the inset wall at (56.07 13.16) the root sits
 /// 0.31 m from the edge. No foot record: upright.
 pub fn wall_hang_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, feet: Option<Vec3>, higher: bool) -> Vec3 {
+    wall_hang_pose(hand_l, hand_r, n, feet, higher).0
+}
+
+/// `sub_B157B0`'s whole pose: the root, its forward (into the wall, square to the body axis) and its up (the body axis).
+pub fn wall_hang_pose(hand_l: Vec3, hand_r: Vec3, n: Vec3, feet: Option<Vec3>, higher: bool) -> (Vec3, Vec3, Vec3) {
     let mid = (hand_l + hand_r) * 0.5;
     let y = if higher { hand_l.y.max(hand_r.y) } else { hand_l.y.min(hand_r.y) };
     let out = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
@@ -626,7 +658,25 @@ pub fn wall_hang_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, feet: Option<Vec3>, h
         .filter(|a| a.length_squared() > 0.5)
         .unwrap_or(Vec3::Y);
     let fwd = side.cross(axis).normalize_or_zero();
-    Vec3::new(mid.x, y, mid.z) - axis * WALL_HANG_DROP - fwd * WALL_HANG_OUT
+    (Vec3::new(mid.x, y, mid.z) - axis * WALL_HANG_DROP - fwd * WALL_HANG_OUT, -fwd, axis)
+}
+
+/// The new hang's body boxes at its pose (`Human__WallHangBodyBoxFree` 0xB2DC80 oriented on `sub_B157B0`'s forward and
+/// up, or the free hang's `Human__FreeHangBodyBoxesFree` 0xB2DD50), the wall hang's foot records from `feet`.
+pub fn hang_boxes_at(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, feet: Option<Vec3>, collision: &CollisionWorld) -> bool {
+    match hang {
+        LedgeHangType::Free => super::climb::hang_boxes_free(collision, hang_root(hand_l, hand_r, n, hang), -Vec3::new(n.x, 0.0, n.z).normalize_or_zero(), false),
+        _ => {
+            let (root, fwd, up) = wall_hang_pose(hand_l, hand_r, n, feet, true);
+            super::climb::wall_hang_box_free(collision, root, fwd, up)
+        }
+    }
+}
+
+/// A new wall hang's foot records (the entries' `Human__FindWallHangFeetSupports` 0xB16130 search under the hands), else
+/// the hang-type switch's rays (`HumanLedge__ProbeFootSupport` 0xDE0A60, `feet_record`).
+pub fn entry_feet(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
+    feet_supports_point(mid, n, collision).or_else(|| feet_record(mid, n, collision))
 }
 
 /// A hand step's root (`ComputeRootFromHandTargets` 0xDD6730): the free pose, or the wall pose from the held foot
@@ -645,7 +695,7 @@ pub fn hang_root_at(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, hi
         LedgeHangType::Free => hang_root(hand_l, hand_r, n, hang),
         _ => {
             let mid = (hand_l + hand_r) * 0.5;
-            wall_hang_root(hand_l, hand_r, n, feet_record(mid, n, collision), higher)
+            wall_hang_root(hand_l, hand_r, n, entry_feet(mid, n, collision), higher)
         }
     }
 }
@@ -966,7 +1016,7 @@ pub fn update_ledge(
                 };
                 d.hang_set = true;
                 d.mv = None;
-                d.feet = feet_record(hand_mid(d), d.normal, &collision);
+                d.feet = if matches!(mv.kind, ledge_moves::MoveKind::SwitchHang { .. }) { feet_record(hand_mid(d), d.normal, &collision) } else { entry_feet(hand_mid(d), d.normal, &collision) };
                 d.sub_state = LedgeSubState::Movement;
                 // the Entry state's end (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0, RE/24 LEDGE-22): the entries in the
                 // Entry state (+76 = 0: walling's hangs, the climb's jump up, the swing back's second part) re-pose the
@@ -1043,7 +1093,7 @@ pub fn update_ledge(
         let mut move_done = false;
         if d.moves.first().is_some_and(|m| m.to.is_nan()) {
             // deferred target (entry): the hang root for the current hands, the foot records probed at them
-            d.feet = feet_record(hand_mid(d), n, &collision);
+            d.feet = entry_feet(hand_mid(d), n, &collision);
             let to = if d.hang_type == LedgeHangType::Free { hang_root(d.hand_l, d.hand_r, n, d.hang_type) } else { wall_hang_root(d.hand_l, d.hand_r, n, d.feet, true) };
             d.moves[0].to = to;
         }
@@ -1311,7 +1361,7 @@ pub fn update_ledge(
                     if d.hang_type == LedgeHangType::Free && d.pending_vstep.is_none() {
                         let (a, b) = feet_on_wall(hand_mid(d), n, &collision);
                         let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-                        if a && b && super::climb::hang_boxes_free(&collision, hang_root(d.hand_l, d.hand_r, n, LedgeHangType::Wall), facing, true) {
+                        if a && b && hang_boxes_at(d.hand_l, d.hand_r, n, LedgeHangType::Wall, feet_record(hand_mid(d), n, &collision), &collision) {
                             start_move(d, ledge_moves::pullup_switch_to_wall_move(body.feet, d.hand_l, d.hand_r, n, &collision), "switch to wall hang (pull-up)");
                             continue;
                         }

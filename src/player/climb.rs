@@ -818,7 +818,8 @@ fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWor
     let wall = side_grab_feet(h.point, n, collision);
     let hang = if wall { super::ledge::LedgeHangType::Wall } else { super::ledge::LedgeHangType::Free };
     let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, n, hang, true, collision);
-    if !hang_boxes_free(collision, to, hf, wall) || !lateral_path_free(collision, root, facing, to, hf, if wall { 1.1 } else { 2.4 }) {
+    let feet = super::ledge::entry_feet((e.hand_l + e.hand_r) * 0.5, n, collision);
+    if !super::ledge::hang_boxes_at(e.hand_l, e.hand_r, n, hang, feet, collision) || !lateral_path_free(collision, root, facing, to, hf, if wall { 1.1 } else { 2.4 }) {
         return None;
     }
     let mv = super::ledge_moves::climb_to_hang_move(root, e.hand_l, e.hand_r, n, CLIMB_TO_HANG[!wall as usize][dir], hang, collision);
@@ -1220,11 +1221,18 @@ pub const LEDGE_GRAB_SIDE: [[[u32; 2]; 3]; 2] = [
 pub fn hang_boxes_free(collision: &crate::collision::CollisionWorld, root: Vec3, facing: Vec3, wall: bool) -> bool {
     let axes = [right_of(facing), facing, Vec3::Y];
     if wall {
-        collision.obb_free(root + Vec3::Y * 0.65, axes, Vec3::new(0.375, 0.25, 0.65))
+        wall_hang_box_free(collision, root, facing, Vec3::Y)
     } else {
         collision.obb_free(root - facing * 0.5 + Vec3::Y * 1.2, axes, Vec3::new(0.375, 0.25, 1.2))
             && collision.obb_free(root - facing * 0.25 + Vec3::Y * 0.8, axes, Vec3::new(0.375, 0.22, 0.6))
     }
+}
+
+/// `Human__WallHangBodyBoxFree` 0xB2DC80 at a pose: the box at root + 0.65·up ((1.1 + 0.2) / 2), half 0.375 / 0.25 / 0.65,
+/// its axes the pose's forward and up (`sub_B157B0` leans them with the body axis).
+pub fn wall_hang_box_free(collision: &crate::collision::CollisionWorld, root: Vec3, fwd: Vec3, up: Vec3) -> bool {
+    let right = fwd.cross(up).normalize_or(right_of(fwd));
+    collision.obb_free(root + up * 0.65, [right, fwd, up], Vec3::new(0.375, 0.25, 0.65))
 }
 
 /// IsGridMoveValid 0xDECD70: every moving side needs a foot hold and a hand hold two rows up, and the body must fit at
@@ -1667,7 +1675,7 @@ pub fn update_climb(
             let fits = |hang: super::ledge::LedgeHangType| {
                 let root = super::ledge::hang_root_at(h.pos, h.pos, hn, hang, true, &collision);
                 let off_floor = collision.floor_height_below(root + Vec3::Y * 0.05, 0.35).is_none();
-                off_floor && hang_boxes_free(&collision, root, hf, hang == super::ledge::LedgeHangType::Wall) && lateral_path_free(&collision, body.feet, facing, root, hf, if hang == super::ledge::LedgeHangType::Wall { 1.1 } else { 2.4 })
+                off_floor && super::ledge::hang_boxes_at(h.pos, h.pos, hn, hang, super::ledge::entry_feet(h.pos, hn, &collision), &collision) && lateral_path_free(&collision, body.feet, facing, root, hf, if hang == super::ledge::LedgeHangType::Wall { 1.1 } else { 2.4 })
             };
             let wall_ok = super::ledge::feet_supports(h.pos, hn, &collision) && fits(super::ledge::LedgeHangType::Wall);
             let hang = if wall_ok { Some(super::ledge::LedgeHangType::Wall) } else { fits(super::ledge::LedgeHangType::Free).then_some(super::ledge::LedgeHangType::Free) };

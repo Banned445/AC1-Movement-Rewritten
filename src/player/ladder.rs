@@ -703,7 +703,7 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
         let e = LedgeEntry { hand_l: hl, hand_r: hr, ..LedgeEntry::at(mid, wn, root, LedgeSubState::TransitionInFromClimb) };
         let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, wn, hang, true, collision);
         let hf = -Vec3::new(wn.x, 0.0, wn.z).normalize_or(fwd);
-        if super::climb::hang_boxes_free(collision, to, hf, wall) {
+        if super::ledge::hang_boxes_at(e.hand_l, e.hand_r, wn, hang, super::ledge::entry_feet((e.hand_l + e.hand_r) * 0.5, wn, collision), collision) {
             let id = TO_HANG_SIDE[!wall as usize][right as usize];
             let mv = super::ledge_moves::climb_to_hang_move(root, e.hand_l, e.hand_r, wn, id, hang, collision);
             return Some(LadderSide::Hang(LedgeEntry { entry_move: Some(mv), ..e }));

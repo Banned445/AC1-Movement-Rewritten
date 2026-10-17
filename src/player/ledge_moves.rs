@@ -596,12 +596,14 @@ pub fn try_corner(
 /// `TrySideJumpToLedge` 0xDDD490's clearance (0xDDDF85): a capsule r 0.35 from Q = `sub_B18140`(root) − 0.2625·u +
 /// 0.15·outward (u the flat unit vector toward the target pose; `sub_B18140` adds the horizontal part of the root's
 /// pitched up axis, nothing for the upright root, RE/24 CLIMB-13), 1.8 / 1.0 / 2.0 m tall for jump types 0 / 1 / 2,
-/// swept by the move to the target root; a blocked pass goes on to the next one (RE/24 LEDGE-28).
+/// swept by the target root − (the base − 0.2625·u); a blocked pass goes on to the next one (RE/24 LEDGE-28).
 fn side_jump_clear(root: Vec3, target: Vec3, n: Vec3, ty: usize, collision: &CollisionWorld) -> bool {
     let out = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let u = Vec3::new(target.x - root.x, 0.0, target.z - root.z).normalize_or_zero();
-    let q = root - u * 0.2625 + out * 0.15;
-    collision.capsule_cast_free(q, [1.8, 1.0, 2.0][ty], 0.35, target - root)
+    // the sweep runs from Q0 = the base − 0.2625·u to the target (0xDDDEB4–0xDDDEF9: target − Q0), the capsule 0.15 m out
+    // from Q0, so it ends 0.15 m out from the target
+    let q0 = root - u * 0.2625;
+    collision.capsule_cast_free(q0 + out * 0.15, [1.8, 1.0, 2.0][ty], 0.35, target - q0)
 }
 
 /// The side jumps' foot support at the target (`Human__StepSearchHolds` 0xB153C0 → `Guidance__FindWallSupport`
@@ -2011,7 +2013,9 @@ pub fn lateral_path_free(a: Vec3, fa: Vec3, ha: f32, b: Vec3, fb: Vec3, hb: f32,
 /// from the current pose (`lateral_path_free`, 0xDE1802 / 0xDE1644); either failing leaves the hang type as it is.
 pub fn switch_allowed(mv: &LedgeMove, cur: LedgeHangType, right: bool, collision: &CollisionWorld) -> bool {
     let to_wall = mv.end_wall;
-    if !super::climb::hang_boxes_free(collision, mv.to, mv.facing_to, to_wall) {
+    let hang = if to_wall { LedgeHangType::Wall } else { LedgeHangType::Free };
+    let feet = super::ledge::feet_record((mv.hand_l + mv.hand_r) * 0.5, mv.normal, collision);
+    if !super::ledge::hang_boxes_at(mv.hand_l, mv.hand_r, mv.normal, hang, feet, collision) {
         return false;
     }
     // `sub_DCE2F0`: 2.4 for any type but the wall hang (0)
@@ -2035,7 +2039,8 @@ pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec
         // wall → free sets +104 = 1, the plain free hang (0xDE1822), its root from `Human__FreeHangPoseFromHolds`
         // 0xB15AD0 (the holds' midpoint, 2.4 m below the higher one, no step out); never the wall-free pose 0.5 m out,
         // which every later step then kept (bug 1792058748)
-        to: hang_root_at(hand_l, hand_r, n, hang, true, collision),
+        // the switch's foot records are its own two rays (`HumanLedge__ProbeFootSupport` 0xDE0A60, 0xDE1459 / 0xDE14CC)
+        to: if to_wall { super::ledge::wall_hang_root(hand_l, hand_r, n, super::ledge::feet_record((hand_l + hand_r) * 0.5, n, collision), true) } else { hang_root(hand_l, hand_r, n, hang) },
         facing_from: facing,
         facing_to: facing,
         // the root interpolator over the action (0xDE1060 → sub_711130)
