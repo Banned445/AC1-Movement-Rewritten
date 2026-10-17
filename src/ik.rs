@@ -739,7 +739,7 @@ pub(crate) fn solve_limbs(
         }
         // feet without a hold: kept above the surface under them
         let mut ground_fix: [Option<Vec3>; 4] = [None; 4];
-        if let Some(c) = collision.as_deref() {
+        if let Some(c) = collision.as_deref().filter(|_| !targets.no_ground_fix) {
             for limb in 2..4 {
                 if goals[limb].is_none() {
                     ground_fix[limb] = ground_foot_target(global[chains[limb][2]].pos, c);
