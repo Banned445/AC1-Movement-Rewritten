@@ -238,6 +238,8 @@ pub struct HumanLadderData {
     to: Vec3,
     /// The root follows the action's displacement plus a linear correction to `to`.
     follow: bool,
+    /// The followed clip plays in the character's start frame (`fwd`, upright): the back-approach turn.
+    start_frame: bool,
     fwd: Vec3,
     pub heading: Vec3,
     /// The jump's push-off direction (horizontal), set when the jump starts.
@@ -342,6 +344,7 @@ impl HumanLadderData {
         self.from = from;
         self.to = to;
         self.follow = follow;
+        self.start_frame = false;
         self.rate = 1.0;
         self.seq = self.seq.wrapping_add(1);
     }
@@ -477,7 +480,13 @@ impl HumanLadderData {
                 // RE/24 LADDER-4), ending on the approach side (live RE/25 #68). PORT: the heading snaps (the game slerps
                 // at rate 1.6)
                 self.chain = true;
-                self.play(LadderPhase::Entry, blend(TURN[(!left) as usize], 0, &[]), e.from, to, false);
+                // the root follows the turn's clip in the character's start frame, with the linear correction onto the
+                // rung (live, the Bureau ladder: the root swings 0.5 m to the side and back over the turn's first 0.7 s).
+                // PORT: the game keeps the root's distance from the ladder through the turn, where the clip's forward
+                // path less the correction leaves a 0.4 m excursion halfway
+                self.fwd = Vec3::new(e.facing.x, 0.0, e.facing.z).normalize_or(-self.n);
+                self.play(LadderPhase::Entry, blend(TURN[(!left) as usize], 0, &[]), e.from, to, true);
+                self.start_frame = true;
                 return;
             }
             // the clip plays in the character's frame at the entry (start matrix +592, RE/24 LADDER-6)
@@ -805,7 +814,7 @@ pub fn update_ladder(
             let dend = l.action.map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
             // the frame: the character's upright start frame for the ground entry (+592, RE/24 LADDER-6) and the revolve,
             // else the ladder frame (F × Z, F, Z) the root holds on the ladder (`sub_E21600`; RE/24 LADDER-17)
-            let (f, u) = if matches!(phase, LadderPhase::EnterGround | LadderPhase::Revolve(_)) { (l.fwd, Vec3::Y) } else { (-l.out(), l.axis()) };
+            let (f, u) = if matches!(phase, LadderPhase::EnterGround | LadderPhase::Revolve(_)) || l.start_frame { (l.fwd, Vec3::Y) } else { (-l.out(), l.axis()) };
             let r = f.cross(u).normalize_or(super::right_of(f));
             let w = |d: [f32; 3]| r * d[0] + f * d[1] + u * d[2];
             // the ground entry drives the correction by min(2s, 1) (`sub_E1EF50`; RE/24 LADDER-6), the others linearly
