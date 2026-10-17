@@ -9,8 +9,11 @@
 //!   11 = SwitchEvent (+0x10 switch id, +0x14 default event, +0x1C case count, cases at +0x68: event, -, value;
 //!   0x7DD4B0); 12 = MultiEvent (+0x10 count, events at +0x68, all played at once; 0x7DF640).
 //! - Sound: +8 type. 1 = one resource (+0x20 resource id, +0x48 channels, +0x4C rate, +0x50 bytes/s, +0x54 frames,
-//!   +0x58 resource size); 4 = random container (+0x20 count, entries at +0x84: sound id, weight 16.16, repeat flag,
-//!   -; picked by 0x80D170).
+//!   +0x58 resource size); 2 = layers (+0x30 count, sound ids from +0x84, all started; read from the Damascus ambient
+//!   emitters' sounds, the type's code is not traced); 4 = random container (+0x20 count, entries at +0x84: sound id,
+//!   weight 16.16, repeat flag, -; picked by 0x80D170).
+//! - A play event's +0x28 / +0x2C: the distances the sound is full / silent at (metres; the ambient emitters'
+//!   events: a fountain 2 / 15, a lantern 1 / 6, a palm 5 / 7.5).
 //! - Audio resource: +4 the TImaAdpcm header (28 bytes, 0x839150), then the first frames as PCM, then the nibbles.
 
 use std::collections::HashMap;
@@ -80,6 +83,10 @@ impl Picker {
     pub fn new(seed: u32) -> Self {
         Picker { state: seed.max(1), last: HashMap::new() }
     }
+    /// A random value in 0 ..= 1 from the same source.
+    pub fn next01(&mut self) -> f32 {
+        self.rand16() as f32 / 65536.0
+    }
     /// `sub_7F7B20(0x10000)`: rand() / 0x7FFF scaled to 16.16, so 0 ..= 65536.
     /// PORT: an xorshift stands in for the CRT rand().
     fn rand16(&mut self) -> u32 {
@@ -122,6 +129,13 @@ impl SoundBank {
 
     pub fn object(&self, id: u32) -> Option<&[u8]> {
         self.objects.get(&id).map(|o| &o[..])
+    }
+
+    /// A play event's distances (+0x28 full, +0x2C silent), metres.
+    pub fn event_distances(&self, id: u32) -> Option<(f32, f32)> {
+        let o = self.object(id)?;
+        (u32_at(o, 8)? == 1).then(|| Some((f32::from_bits(u32_at(o, 0x28)?), f32::from_bits(u32_at(o, 0x2C)?)))).flatten()
+            .filter(|(a, b)| a.is_finite() && b.is_finite() && *b > 0.0)
     }
 
     /// Every voice an event starts. `switch` gives a switch's current value (the game asks the sound object's type
@@ -187,6 +201,14 @@ impl SoundBank {
                     out.push(Voice { res, channels: ch as u16, rate, frames, gain_db, speed });
                 }
             }
+            Some(2) => {
+                let Some(n) = u32_at(o, 0x30) else { return };
+                for j in 0..n.min(16) as usize {
+                    if let Some(s) = u32_at(o, 0x84 + 4 * j) {
+                        self.sound(s, gain_db, speed, pick, depth + 1, out);
+                    }
+                }
+            }
             Some(4) => {
                 let Some(n) = u32_at(o, 0x20) else { return };
                 let entries: Vec<(u32, u32, u32)> = (0..n as usize)
@@ -245,6 +267,8 @@ fn ima_step(n: u8, pred: &mut i32, index: &mut i32) -> i16 {
 /// nibble first) or per stereo frame (high nibble left).
 pub fn decode_ima(obj: &[u8], channels: u16, frames: u32) -> Option<Vec<i16>> {
     let h = obj.get(4..32)?;
+    // the ambient sounds store 0 frames: as many as the resource holds
+    let frames = if frames > 0 { frames } else { ima_frames(obj, channels)? };
     if h[0] != 5 || (h[12] == 1) != (channels == 2) {
         return None;
     }
@@ -276,6 +300,17 @@ pub fn decode_ima(obj: &[u8], channels: u16, frames: u32) -> Option<Vec<i16>> {
     }
     out.extend(trailing);
     Some(out)
+}
+
+/// The frames an IMA resource holds: the PCM frames in front, two (mono) or one (stereo) per byte after them, and the
+/// trailing sample.
+pub fn ima_frames(obj: &[u8], channels: u16) -> Option<u32> {
+    let h = obj.get(4..32)?;
+    let ch = channels.max(1) as usize;
+    let raw = i16_at(h, 14)? as u16 as usize;
+    let bytes = obj.len().checked_sub(32 + 2 * raw * ch)?;
+    let trailing = (h[24] == 1 && ch == 1) as usize;
+    Some((raw + if ch == 1 { 2 * bytes } else { bytes } + trailing) as u32)
 }
 
 /// The ContactTable's event per ContactEventTypeHuman (ContactTable_AlTair in "Rank 9": 24 material groups of 15
@@ -429,6 +464,47 @@ mod tests {
         assert!((two[1].speed - 1.0).abs() <= 0.0625 + 1e-4, "range 1/16");
         let one = bank.resolve(0x1000_0004, &|_| None, &mut pick);
         assert_eq!(one.len(), 1, "no switch value: the default event");
+    }
+
+    /// Type 2 starts every layer (+0x30 count, ids from +0x84); a stored frame count of 0 decodes the whole resource.
+    #[test]
+    fn layers_start_every_child_and_zero_frames_decode_all() {
+        let mut bank = SoundBank::default();
+        // an IMA resource: 2 PCM frames, then 3 bytes = 6 samples, no trailing sample
+        let mut res = vec![0u8; 4];
+        let mut h = [0u8; 28];
+        h[0] = 5;
+        h[14] = 2;
+        res.extend_from_slice(&h);
+        res.extend_from_slice(&[1, 0, 2, 0, 0x11, 0x22, 0x33]);
+        assert_eq!(ima_frames(&res, 1), Some(8));
+        assert_eq!(decode_ima(&res, 1, 0).unwrap().len(), 8);
+        bank.objects.insert(0x3000_0001, res.into());
+        let single = |gain: i32| {
+            let mut s = vec![0u8; 0x84];
+            s[8..12].copy_from_slice(&1u32.to_le_bytes());
+            s[0x18..0x1C].copy_from_slice(&((gain << 16) as u32).to_le_bytes());
+            s[0x20..0x24].copy_from_slice(&0x3000_0001u32.to_le_bytes());
+            s[0x48..0x4C].copy_from_slice(&1u32.to_le_bytes());
+            s[0x4C..0x50].copy_from_slice(&16000u32.to_le_bytes());
+            s
+        };
+        bank.objects.insert(0x2000_0001, single(-3).into());
+        bank.objects.insert(0x2000_0002, single(-5).into());
+        let mut layers = vec![0u8; 0x84 + 8];
+        layers[8..12].copy_from_slice(&2u32.to_le_bytes());
+        layers[0x18..0x1C].copy_from_slice(&((-10i32 << 16) as u32).to_le_bytes());
+        layers[0x30..0x34].copy_from_slice(&2u32.to_le_bytes());
+        layers[0x84..0x88].copy_from_slice(&0x2000_0001u32.to_le_bytes());
+        layers[0x88..0x8C].copy_from_slice(&0x2000_0002u32.to_le_bytes());
+        bank.objects.insert(0x2000_0003, layers.into());
+        let mut e = event_play(0x1000_0001, 0x2000_0003, 0);
+        e[0x28..0x2C].copy_from_slice(&2.0f32.to_le_bytes());
+        e[0x2C..0x30].copy_from_slice(&15.0f32.to_le_bytes());
+        bank.objects.insert(0x1000_0001, e.into());
+        let v = bank.resolve(0x1000_0001, &|_| None, &mut Picker::new(1));
+        assert_eq!(v.iter().map(|v| v.gain_db).collect::<Vec<_>>(), vec![-13.0, -15.0], "both layers, gains summed");
+        assert_eq!(bank.event_distances(0x1000_0001), Some((2.0, 15.0)));
     }
 
     /// The install's player sounds resolve and decode.

@@ -19,7 +19,7 @@ use std::{collections::{HashMap, VecDeque}, sync::{mpsc, Arc, Condvar, Mutex}};
 use bevy::{asset::RenderAssetUsages, image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor}, light::NotShadowCaster,
     mesh::{Indices, PrimitiveTopology}, prelude::*, render::render_resource::{Extent3d, TextureDimension}};
 
-use super::{decode::{decode_cell, CityData, CityObject, DecodedCell, LodMesh}, fakes::FakeBlock, material::{MaterialData, TextureData}};
+use super::{decode::{decode_cell, CityData, CityObject, DecodedCell, LodMesh}, fakes::FakeBlock, ground::GroundSurface, material::{MaterialData, TextureData}};
 use crate::{collision::CollisionWorld, guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld}};
 
 /// `GridStreamer__RequestCellsInBox` priority weight (dword_18D6780).
@@ -111,17 +111,37 @@ struct FadeIn {
 enum Cell {
     Unloaded,
     Loading,
-    Loaded { objects: Vec<Obj>, materials: Vec<u32> },
+    /// `extras`: the cell's presentation entities (lights), despawned with the cell.
+    Loaded { objects: Vec<Obj>, materials: Vec<u32>, extras: Vec<Entity> },
+}
+
+/// A city material on the GPU: plain (Bevy PBR) or layered (`ground`).
+#[derive(Clone)]
+enum CityMaterial {
+    Plain(Handle<StandardMaterial>),
+    Ground(Handle<GroundSurface>),
+}
+
+impl CityMaterial {
+    fn layered(&self) -> bool { matches!(self, CityMaterial::Ground(_)) }
+
+    fn insert(&self, e: &mut EntityCommands) {
+        match self { CityMaterial::Plain(h) => e.insert(MeshMaterial3d(h.clone())), CityMaterial::Ground(h) => e.insert(MeshMaterial3d(h.clone())) };
+    }
+
+    fn remove(&self, ctx: &mut Ctx) {
+        match self { CityMaterial::Plain(h) => { ctx.materials.remove(h); } CityMaterial::Ground(h) => { ctx.grounds.remove(h); } }
+    }
 }
 
 struct GpuMaterial {
-    handle: Handle<StandardMaterial>,
+    handle: CityMaterial,
     textures: Vec<u32>,
     refs: u32,
     /// Opaque materials can fade; the water material is already translucent.
     fadeable: bool,
     /// Translucent copies per fade level (created on first use).
-    fades: Vec<Option<Handle<StandardMaterial>>>,
+    fades: Vec<Option<CityMaterial>>,
 }
 
 /// Counters for the debug overlay and tests.
@@ -138,6 +158,8 @@ pub struct CityStats {
     pub physics_edges: usize,
     pub materials: usize,
     pub textures: usize,
+    /// Local lights of the loaded cells.
+    pub lights: usize,
     pub errors: usize,
     /// Last frame's streaming time per phase (ms): integrate, plan, LOD, physics, refresh.
     pub phase_ms: [f32; 5],
@@ -167,6 +189,13 @@ pub struct CityState {
     /// renderer +94 is set, which needs `g_LODBlendPassEnabled` (0x1A25846) — 0 in the running game (read live in
     /// Damascus, 2026-10-09; the `LODBlend` INI value, GraphicsSettings +0x52, is loaded but never read).
     pub lod_fade: bool,
+    /// The particle effects of newly loaded cells and the cells unloaded since, for `presentation::update_effects`.
+    pub effects_out: Vec<(usize, super::presentation::CityEffect)>,
+    pub effects_unloaded: Vec<usize>,
+    /// The same for the ambient sound emitters (`presentation::update_ambience`).
+    pub sounds_out: Vec<(usize, super::presentation::CitySound)>,
+    pub sounds_unloaded: Vec<usize>,
+    pub ambience_out: Vec<(usize, Vec<super::presentation::AmbienceSet>)>,
 }
 
 #[derive(Resource, Default)]
@@ -184,6 +213,7 @@ pub struct Ctx<'a, 'w, 's> {
     pub commands: &'a mut Commands<'w, 's>,
     pub meshes: &'a mut Assets<Mesh>,
     pub materials: &'a mut Assets<StandardMaterial>,
+    pub grounds: &'a mut Assets<GroundSurface>,
     pub images: &'a mut Assets<Image>,
     pub collision: &'a mut CollisionWorld,
     pub guidance: &'a mut GuidanceWorld,
@@ -197,7 +227,8 @@ impl CityState {
         Self { loader: Loader::new(data.clone(), threads), data, cells: (0..n).map(|_| Cell::Unloaded).collect(), has_content,
             materials: HashMap::new(), textures: HashMap::new(), fake_spans: HashMap::new(), edge_free: Vec::new(),
             pilotis_dirty: true, haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None,
-            lod_fade: std::env::var("AC_LOD_FADE").is_ok_and(|v| v == "1") }
+            lod_fade: std::env::var("AC_LOD_FADE").is_ok_and(|v| v == "1"), effects_out: Vec::new(), effects_unloaded: Vec::new(),
+            sounds_out: Vec::new(), sounds_unloaded: Vec::new(), ambience_out: Vec::new() }
     }
 
     /// The cells the streamer wants with the player at `focus` (Bevy space), in request order.
@@ -312,7 +343,11 @@ impl CityState {
             used.push(*id);
         }
         let objects = d.objects.into_iter().map(|o| Obj { o, shown: None, entities: Vec::new(), fade: None, physics: None }).collect();
-        self.cells[d.cell] = Cell::Loaded { objects, materials: used };
+        let extras = super::presentation::spawn_lights(&d.lights, ctx.commands);
+        self.effects_out.extend(d.effects.into_iter().map(|e| (d.cell, e)));
+        self.sounds_out.extend(d.sounds.into_iter().map(|e| (d.cell, e)));
+        if !d.ambience.is_empty() { self.ambience_out.push((d.cell, d.ambience)); }
+        self.cells[d.cell] = Cell::Loaded { objects, materials: used, extras };
         for &e in self.fake_spans.get(&d.cell).into_iter().flatten() { ctx.commands.entity(e).insert(Visibility::Hidden); }
     }
 
@@ -326,10 +361,27 @@ impl CityState {
             self.data.resident.lock().unwrap().insert(id);
             Some(h)
         };
+        if !m.layers.is_empty() {
+            // the layered ground (`ground`): every map once
+            let mut handles = HashMap::new();
+            for (id, linear) in m.maps() {
+                if let Some(h) = texture(id, linear) { handles.insert(id, h); }
+            }
+            let map = |k: usize, normal: bool| m.layers.get(k).and_then(|l| if normal { l.normal } else { l.diffuse }).and_then(|id| handles.get(&id).cloned());
+            let mut controls = super::ground::controls(&m.layers);
+            for k in 0..3 { if map(k, true).is_none() { controls.tiles[k].w = 0.0; } }
+            let blend = super::ground::GroundBlend { controls, base: map(0, false), layer1: map(1, false), layer2: map(2, false),
+                base_normal: map(0, true), layer1_normal: map(1, true), layer2_normal: map(2, true) };
+            // PORT: opaque; the native shader writes the vertex colour's alpha (its alpha test is not checked)
+            let surface = GroundSurface { base: StandardMaterial { flip_normal_map_y: true, perceptual_roughness: 0.9, double_sided: true, cull_mode: None, ..default() },
+                extension: blend };
+            let textures = handles.into_keys().collect();
+            return Some(GpuMaterial { handle: CityMaterial::Ground(ctx.grounds.add(surface)), textures, refs: 0, fadeable: true, fades: Vec::new() });
+        }
         let diffuse = match m.diffuse { Some(id) => Some(texture(id, false)?), None => None };
         let normal = m.normal.and_then(|id| texture(id, true));
         let textures = m.diffuse.into_iter().chain(m.normal.filter(|_| normal.is_some())).collect();
-        // PORT: Bevy PBR replaces the native shaders (MultiBlender layers, specular, the water shader).
+        // PORT: Bevy PBR replaces the native shaders (specular, the water shader); the MultiBlender layers are `ground`.
         let material = if m.water {
             StandardMaterial { base_color: Color::srgba(0.16, 0.24, 0.24, 0.55), normal_map_texture: normal, flip_normal_map_y: true,
                 perceptual_roughness: 0.06, reflectance: 0.6, alpha_mode: AlphaMode::Blend, double_sided: true, cull_mode: None, ..default() }
@@ -337,7 +389,7 @@ impl CityState {
             StandardMaterial { base_color_texture: diffuse, normal_map_texture: normal, flip_normal_map_y: true,
                 perceptual_roughness: 0.9, double_sided: true, cull_mode: None, alpha_mode: AlphaMode::Mask(0.5), ..default() }
         };
-        Some(GpuMaterial { handle: ctx.materials.add(material), textures, refs: 0, fadeable: !m.water, fades: Vec::new() })
+        Some(GpuMaterial { handle: CityMaterial::Plain(ctx.materials.add(material)), textures, refs: 0, fadeable: !m.water, fades: Vec::new() })
     }
 
     fn release_material(&mut self, id: u32, ctx: &mut Ctx) {
@@ -345,8 +397,8 @@ impl CityState {
         m.refs -= 1;
         if m.refs > 0 { return; }
         let m = self.materials.remove(&id).unwrap();
-        ctx.materials.remove(&m.handle);
-        for h in m.fades.iter().flatten() { ctx.materials.remove(h); }
+        m.handle.remove(ctx);
+        for h in m.fades.iter().flatten() { h.remove(ctx); }
         for t in m.textures {
             let Some(e) = self.textures.get_mut(&t) else { continue };
             e.1 -= 1;
@@ -359,7 +411,10 @@ impl CityState {
     }
 
     fn unload(&mut self, c: usize, ctx: &mut Ctx) {
-        let Cell::Loaded { objects, materials } = std::mem::replace(&mut self.cells[c], Cell::Unloaded) else { return };
+        let Cell::Loaded { objects, materials, extras } = std::mem::replace(&mut self.cells[c], Cell::Unloaded) else { return };
+        for e in extras { ctx.commands.entity(e).despawn(); }
+        self.effects_unloaded.push(c);
+        self.sounds_unloaded.push(c);
         for mut o in objects {
             for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
             for (e, _) in o.fade.take().into_iter().flat_map(|f| f.sections) { ctx.commands.entity(e).despawn(); }
@@ -411,7 +466,7 @@ impl CityState {
                     for (e, id) in o.fade.take().unwrap().sections {
                         let Some(m) = self.materials.get(&id) else { ctx.commands.entity(e).despawn(); continue };
                         let mut e = ctx.commands.entity(e);
-                        e.insert(MeshMaterial3d(m.handle.clone()));
+                        m.handle.insert(&mut e);
                         if d <= SHADOW_DISTANCE { e.remove::<NotShadowCaster>(); }
                         o.entities.push(e.id());
                     }
@@ -428,7 +483,7 @@ impl CityState {
                     if f.level == level { continue; }
                     f.level = level;
                     for &(e, id) in &f.sections {
-                        if let Some(h) = fade_material(&mut self.materials, ctx.materials, id, level) { ctx.commands.entity(e).insert(MeshMaterial3d(h)); }
+                        if let Some(h) = fade_material(&mut self.materials, ctx, id, level) { h.insert(&mut ctx.commands.entity(e)); }
                     }
                 }
                 (fade, current) => {
@@ -438,7 +493,7 @@ impl CityState {
                     let cost = lod.mesh.positions.len();
                     if cost > budget { continue; }
                     budget -= cost;
-                    let handles: Vec<_> = lod.mesh.sections.iter().map(|s| fade_material(&mut self.materials, ctx.materials, s.material, level)).collect();
+                    let handles: Vec<_> = lod.mesh.sections.iter().map(|s| fade_material(&mut self.materials, ctx, s.material, level)).collect();
                     let complete = handles.iter().all(Option::is_some);
                     o.fade = Some(FadeIn { mesh: m, level, sections: spawn_lod(lod, &handles, transform, false, ctx), complete });
                 }
@@ -489,7 +544,8 @@ impl CityState {
         for cell in &self.cells {
             match cell {
                 Cell::Loading => s.loading += 1,
-                Cell::Loaded { objects, .. } => {
+                Cell::Loaded { objects, extras, .. } => {
+                    s.lights += extras.len();
                     s.loaded += 1;
                     s.objects += objects.len();
                     for o in objects {
@@ -522,16 +578,19 @@ impl CityState {
                     let range = s.first as usize..(s.first + s.count).min(section.indices.len() as u32) as usize;
                     if range.is_empty() { continue; }
                     for f in &mut covered[range.clone()] { *f = true; }
-                    let mesh = section_mesh(&b.mesh, b.colors.as_deref(), &section.indices[range]);
+                    let mesh = section_mesh(&b.mesh, b.colors.as_deref(), &section.indices[range], material.layered());
                     let loaded = s.cell.is_some_and(|c| matches!(self.cells[c], Cell::Loaded { .. }));
-                    let e = ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(ctx.meshes.add(mesh)), MeshMaterial3d(material.clone()), transform,
-                        NotShadowCaster, if loaded { Visibility::Hidden } else { Visibility::Inherited })).id();
+                    let mut e = ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(ctx.meshes.add(mesh)), transform,
+                        NotShadowCaster, if loaded { Visibility::Hidden } else { Visibility::Inherited }));
+                    material.insert(&mut e);
+                    let e = e.id();
                     if let Some(c) = s.cell { self.fake_spans.entry(c).or_default().push(e); }
                 }
                 let rest: Vec<u32> = section.indices.chunks_exact(3).enumerate().filter(|(t, _)| !covered[3 * t]).flat_map(|(_, t)| t.iter().copied()).collect();
                 if !rest.is_empty() {
-                    ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(ctx.meshes.add(section_mesh(&b.mesh, b.colors.as_deref(), &rest))),
-                        MeshMaterial3d(material.clone()), transform, NotShadowCaster));
+                    let mut e = ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(ctx.meshes.add(section_mesh(&b.mesh, b.colors.as_deref(), &rest, material.layered()))),
+                        transform, NotShadowCaster));
+                    material.insert(&mut e);
                 }
             }
         }
@@ -577,12 +636,13 @@ fn remove_physics(edge_free: &mut Vec<usize>, p: Physics, ctx: &mut Ctx) {
 
 /// One mesh section with only the vertices it uses.
 /// One entity per mesh section that has a material; returns (entity, material id).
-fn spawn_lod(lod: &LodMesh, materials: &[Option<Handle<StandardMaterial>>], transform: Transform, shadow: bool, ctx: &mut Ctx) -> Vec<(Entity, u32)> {
+fn spawn_lod(lod: &LodMesh, materials: &[Option<CityMaterial>], transform: Transform, shadow: bool, ctx: &mut Ctx) -> Vec<(Entity, u32)> {
     let mut out = Vec::with_capacity(lod.mesh.sections.len());
     for (section, material) in lod.mesh.sections.iter().zip(materials) {
         let Some(material) = material else { continue };
-        let mesh = section_mesh(&lod.mesh, lod.colors.as_deref().map(|c| c.as_slice()), &section.indices);
-        let mut e = ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(ctx.meshes.add(mesh)), MeshMaterial3d(material.clone()), transform));
+        let mesh = section_mesh(&lod.mesh, lod.colors.as_deref().map(|c| c.as_slice()), &section.indices, material.layered());
+        let mut e = ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(ctx.meshes.add(mesh)), transform));
+        material.insert(&mut e);
         if !shadow { e.insert(NotShadowCaster); }
         out.push((e.id(), section.material));
     }
@@ -593,21 +653,30 @@ fn spawn_lod(lod: &LodMesh, materials: &[Option<Handle<StandardMaterial>>], tran
 fn fade_level(alpha: f32) -> u8 { ((alpha * FADE_LEVELS as f32).round() as u8).clamp(1, FADE_LEVELS as u8) }
 
 /// The translucent copy of a material for a fade level: the blend factor as alpha, drawn depth-biased toward the camera.
-fn fade_material(materials: &mut HashMap<u32, GpuMaterial>, assets: &mut Assets<StandardMaterial>, id: u32, level: u8) -> Option<Handle<StandardMaterial>> {
+fn fade_material(materials: &mut HashMap<u32, GpuMaterial>, ctx: &mut Ctx, id: u32, level: u8) -> Option<CityMaterial> {
     let m = materials.get_mut(&id).filter(|m| m.fadeable)?;
     if m.fades.is_empty() { m.fades = vec![None; FADE_LEVELS]; }
     let slot = &mut m.fades[level as usize - 1];
     if slot.is_none() {
-        let base = assets.get(&m.handle)?.clone();
         let alpha = level as f32 / FADE_LEVELS as f32;
-        *slot = Some(assets.add(StandardMaterial { base_color: base.base_color.with_alpha(alpha), alpha_mode: AlphaMode::Blend, depth_bias: FADE_DEPTH_BIAS, ..base }));
+        let fade = |base: StandardMaterial| StandardMaterial { base_color: base.base_color.with_alpha(alpha), alpha_mode: AlphaMode::Blend, depth_bias: FADE_DEPTH_BIAS, ..base };
+        *slot = Some(match &m.handle {
+            CityMaterial::Plain(h) => { let base = ctx.materials.get(h)?.clone(); CityMaterial::Plain(ctx.materials.add(fade(base))) }
+            CityMaterial::Ground(h) => {
+                let g = ctx.grounds.get(h)?.clone();
+                CityMaterial::Ground(ctx.grounds.add(GroundSurface { base: fade(g.base), extension: g.extension }))
+            }
+        });
     }
     slot.clone()
 }
 
-fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: Option<&[[u8; 4]]>, indices: &[u32]) -> Mesh {
+/// `layered`: the section draws with a layered material (`ground`), whose weights ride in UV_1.
+pub(crate) fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: Option<&[[u8; 4]]>, indices: &[u32], layered: bool) -> Mesh {
     let mut map = vec![u32::MAX; m.positions.len()];
     let (mut pos, mut nor, mut tan, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::with_capacity(indices.len()));
+    let blended = layered && m.blend.len() == m.positions.len();
+    let mut weights = Vec::new();
     for &i in indices {
         let i = i as usize;
         if map[i] == u32::MAX {
@@ -617,6 +686,7 @@ fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: Option<&[[u8
             tan.push(m.tangents[i].to_array());
             uv.push(m.uvs[i].to_array());
             col.push(match colors { Some(c) => c[i].map(|b| b as f32 / 255.0), None => m.colors[i] });
+            if blended { weights.push([m.blend[i][0] as f32 / 255.0, m.blend[i][1] as f32 / 255.0]); }
         }
         idx.push(map[i]);
     }
@@ -626,11 +696,12 @@ fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: Option<&[[u8
     mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, tan);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    if blended { mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, weights); }
     mesh.insert_indices(Indices::U32(idx));
     mesh
 }
 
-fn image(t: &TextureData, _linear: bool) -> Image {
+pub(crate) fn image(t: &TextureData, _linear: bool) -> Image {
     let mut img = Image::new_uninit(Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 }, TextureDimension::D2, t.format, RenderAssetUsages::RENDER_WORLD);
     img.texture_descriptor.mip_level_count = t.mips;
     img.data = Some(t.data.clone());

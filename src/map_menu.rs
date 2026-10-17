@@ -193,6 +193,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<crate::city::ground::GroundSurface>::default());
         world.insert_resource(Assets::<Image>::default());
         world.insert_resource(CollisionWorld::default());
         world.insert_resource(GuidanceWorld::default());

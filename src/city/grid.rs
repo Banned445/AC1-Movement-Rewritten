@@ -17,6 +17,9 @@ use bevy::prelude::*;
 
 use crate::assets::{forge::crc32, static_mesh::word};
 
+/// The level of a cell that is a whole mission DataBlock (`Grid::add_datablocks`): always in range.
+pub const DATABLOCK_LEVEL: u32 = u32::MAX;
+
 #[derive(Clone, Debug)]
 pub struct GridCell {
     pub level: u32,
@@ -45,12 +48,18 @@ pub struct Grid {
 impl Grid {
     /// Game-space rectangle (min, max) of a cell.
     pub fn cell_rect(&self, c: &GridCell) -> (Vec2, Vec2) {
+        if c.level == DATABLOCK_LEVEL {
+            return (self.origin, self.origin);
+        }
         let size = self.cell_size * (1u32 << c.level) as f32;
         let min = self.origin + Vec2::new(c.col as f32, c.row as f32) * size;
         (min, min + Vec2::splat(size))
     }
 
     pub fn level_size(&self, level: u32) -> f32 {
+        if level == DATABLOCK_LEVEL {
+            return 0.0;
+        }
         self.cell_size * (1u32 << level) as f32
     }
 
@@ -73,6 +82,9 @@ impl Grid {
     /// `GridPartition__IterCellsInBox` 0x68C3E0 + `GridStreamer__RequestCellAndParents` 0x55CC70: the finest cells under the
     /// square box `(int)p ± r` (clamped to the grid) and all their parents, i.e. every cell of any level overlapping it.
     pub fn cell_in_box(&self, c: &GridCell, p: Vec2, r: i32) -> bool {
+        if c.level == DATABLOCK_LEVEL {
+            return true;
+        }
         let size = self.cell_size as i32;
         let w = self.width as i32;
         let lo = |v: i32, o: i32| ((v - r - o).max(0) / size).min(w - 1);
@@ -83,6 +95,18 @@ impl Grid {
         let shift = c.level as i32;
         let (x0, x1, y0, y1) = (lo(px, ox) >> shift, hi(px, ox) >> shift, lo(py, oy) >> shift, hi(py, oy) >> shift);
         (x0..=x1).contains(&(c.col as i32)) && (y0..=y1).contains(&(c.row as i32))
+    }
+}
+
+impl Grid {
+    /// Mission / memory-block DataBlocks the game has loaded besides the grid (live 2026-10-16: they sit in the World's
+    /// list of loaded files with the cells, which story progress fills; the Bureau save in Memory Block 2 holds
+    /// `Memory Block 2`, `MB02 - Side Quest`, `M13_Tamir` and `M13_Tamir_Investigation`). Each becomes a cell that is
+    /// always in range, decoded like the grid's.
+    pub fn add_datablocks(&mut self, ids: &[u32]) {
+        for &datablock in ids {
+            self.cells.push(GridCell { level: DATABLOCK_LEVEL, col: 0, row: 0, datablock, dependencies: Vec::new() });
+        }
     }
 }
 

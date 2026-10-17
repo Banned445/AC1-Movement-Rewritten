@@ -1,9 +1,12 @@
 //! Whole-world import with the game's streaming grid (RE/17): Damascus. Reads the user's install at runtime.
+pub mod ambiance;
 pub mod archive;
 pub mod decode;
 pub mod fakes;
 pub mod grid;
+pub mod ground;
 pub mod material;
+pub mod presentation;
 pub mod shapes;
 pub mod stream;
 #[cfg(test)]
@@ -33,6 +36,11 @@ pub struct OpenedWorld {
 }
 
 pub fn open(game: &Path, world: &CityWorld, bc: bool) -> Result<OpenedWorld, String> {
+    open_with(game, world, bc, &std::env::var("AC_CITY_DATABLOCKS").unwrap_or_default())
+}
+
+/// `open` with the mission DataBlocks named in `datablocks` (`mission_datablocks`).
+pub fn open_with(game: &Path, world: &CityWorld, bc: bool, datablocks: &str) -> Result<OpenedWorld, String> {
     let archives = archive::shared(game, &[world.archive, "DataPC_Common.forge", "DataPC.forge"])?;
     let entry = archives.find(0, world.world).ok_or_else(|| format!("{} has no {} file", world.archive, world.world))?;
     let file = archives.file(0, entry)?;
@@ -41,9 +49,27 @@ pub fn open(game: &Path, world: &CityWorld, bc: bool) -> Result<OpenedWorld, Str
     let w = globals.iter().find(|r| r.class_hash == crc32("World")).ok_or("no World resource")?;
     let (size, origin, width, radius) = grid::parse_layout(&w.payload)?;
     let partition = globals.iter().find(|r| r.class_hash == crc32("GridPartition")).ok_or("no GridPartition")?;
-    let grid = grid::parse_partition(&partition.payload, size, origin, width, radius)?;
+    let mut grid = grid::parse_partition(&partition.payload, size, origin, width, radius)?;
+    grid.add_datablocks(&mission_datablocks(&archives, world, datablocks)?);
     let data = CityData { archives, grid, meshes: Default::default(), materials: Default::default(), bc, resident: Mutex::default() };
     Ok(OpenedWorld { data: Arc::new(data), globals })
+}
+
+/// The mission / memory-block DataBlocks to load with the grid (PORT: the game picks them by story progress, which the
+/// port has no state for): `AC_CITY_DATABLOCKS`, a comma-separated list of the archive's DataBlock names (with or
+/// without `<World>_` and `_DataBlock`), or `none` (the default: the grid alone). Their header resource ids.
+pub fn mission_datablocks(archives: &archive::Archives, world: &CityWorld, list: &str) -> Result<Vec<u32>, String> {
+    let mut ids = Vec::new();
+    for item in list.split(',').map(str::trim).filter(|s| !s.is_empty() && *s != "none") {
+        let mut name = item.to_string();
+        if !name.starts_with(&format!("{}_", world.world)) { name = format!("{}_{name}", world.world); }
+        if !name.ends_with("_DataBlock") { name.push_str("_DataBlock"); }
+        let entry = archives.find(0, &name).ok_or_else(|| format!("{}: no {name}", world.archive))?;
+        let file = archives.file(0, entry)?;
+        let header = file.values().find(|r| r.name == name).ok_or_else(|| format!("{name}: no DataBlock header"))?;
+        ids.push(header.id);
+    }
+    Ok(ids)
 }
 
 /// A named player spawner in the World file (`PlayerSpawner_*`): Bevy-space feet and heading.
@@ -75,9 +101,22 @@ pub fn spawn_name() -> String {
     }
 }
 
+/// PORT: `AC_CITY_AT="x y z yaw"`, a start in game coordinates (yaw in degrees, the lab's `tp`: atan2 of the game
+/// forward's y and x), to compare a spot with the running game. Bevy feet and heading.
+fn debug_start() -> Option<(Vec3, f32)> {
+    let v: Vec<f32> = std::env::var("AC_CITY_AT").ok()?.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    if v.len() != 4 { return None; }
+    let yaw = v[3].to_radians();
+    let f = decode::to_bevy(Vec3::new(yaw.cos(), yaw.sin(), 0.0));
+    Some((decode::to_bevy(Vec3::new(v[0], v[1], v[2])), f.x.atan2(f.z)))
+}
+
 pub fn prepare(game: &Path, world: &CityWorld, bc: bool, spawn: &str) -> Result<Prepared, String> {
     let opened = open(game, world, bc)?;
-    let (feet, heading) = spawner(&opened.globals, spawn).ok_or_else(|| format!("{} has no {spawn}", world.world))?;
+    let (feet, heading) = match debug_start() {
+        Some(at) => at,
+        None => spawner(&opened.globals, spawn).ok_or_else(|| format!("{} has no {spawn}", world.world))?,
+    };
     let fakes = fakes::parse(&opened.data, &opened.globals)?;
     // every cell within the load radius, decoded on all cores
     let wanted = stream::wanted_cells(&opened.data, &stream::content_mask(&opened.data), feet, None);
@@ -93,6 +132,7 @@ pub fn prepare(game: &Path, world: &CityWorld, bc: bool, spawn: &str) -> Result<
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>,
+    mut grounds: ResMut<Assets<ground::GroundSurface>>,
     mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>, mut guidance: ResMut<crate::guidance::GuidanceWorld>,
     mut spawn_point: ResMut<crate::player::SpawnPoint>, mut camera: ResMut<crate::camera::CameraRig>, mut city: ResMut<stream::City>,
     mut players: Query<(&mut crate::player::Body, &mut Transform), With<crate::player::Player>>,
@@ -101,14 +141,15 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
     collision.enable_index(8.0);
     *guidance = crate::guidance::GuidanceWorld { jump_pilotis: Some(Vec::new()), ..default() };
     let mut state = stream::CityState::new(p.world.data.clone());
-    let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, images: &mut images,
+    let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, grounds: &mut grounds, images: &mut images,
         collision: &mut collision, guidance: &mut guidance };
     let n = p.cells.len();
     for d in p.cells { state.integrate(d, &mut ctx); }
     state.spawn_fakes(p.fakes, &mut ctx);
     let eye = p.spawn + Vec3::Y * 3.0;
     state.prime(p.spawn, eye, &mut ctx);
-    info!("Damascus: {n} cells around the spawn, {:?}", state.stats);
+    let g = Vec3::new(p.spawn.x, -p.spawn.z, p.spawn.y);
+    info!("Damascus: {n} cells around the spawn at game ({:.2} {:.2} {:.2}), {:?}", g.x, g.y, g.z, state.stats);
     city.0 = Some(Box::new(state));
     spawn_point.0 = p.spawn;
     *camera = default();
@@ -117,13 +158,20 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
         body.feet = p.spawn; body.heading = p.heading; body.grounded = true; body.velocity = Vec3::ZERO; body.proxy.manifold.clear();
         transform.translation = p.spawn;
     }
-    // PORT: a fixed sun, sky colour and haze stand in for WorldAmbiance / LayeredSky (not decoded).
-    commands.spawn((crate::map_menu::MapEntity, DirectionalLight { illuminance: 11_000.0, shadow_maps_enabled: true, ..default() },
-        bevy::light::CascadeShadowConfigBuilder { num_cascades: 3, first_cascade_far_bound: 12.0, maximum_distance: 120.0, ..default() }.build(),
-        Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.9, -0.85, 0.0))));
-    for cam in &cams {
-        commands.entity(cam).insert(DistanceFog { color: Color::srgba(0.80, 0.78, 0.70, 1.0),
-            falloff: FogFalloff::Linear { start: 220.0, end: 1100.0 }, ..default() });
+    // the World's ambiance: the sun, the ambient cube, the fog, the post effects' grading and the sky (RE/17 §11)
+    let cams: Vec<Entity> = cams.iter().collect();
+    match ambiance::parse(&p.world.globals) {
+        Ok(a) => ambiance::spawn_scene(&a, &p.world.data, &mut commands, &mut meshes, &mut materials, &mut images, &cams),
+        Err(e) => {
+            warn!("Damascus ambiance: {e}; a fixed sun and haze instead");
+            commands.spawn((crate::map_menu::MapEntity, DirectionalLight { illuminance: 11_000.0, shadow_maps_enabled: true, ..default() },
+                bevy::light::CascadeShadowConfigBuilder { num_cascades: 3, first_cascade_far_bound: 12.0, maximum_distance: 120.0, ..default() }.build(),
+                Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.9, -0.85, 0.0))));
+            for &cam in &cams {
+                commands.entity(cam).insert(DistanceFog { color: Color::srgba(0.80, 0.78, 0.70, 1.0),
+                    falloff: FogFalloff::Linear { start: 220.0, end: 1100.0 }, ..default() });
+            }
+        }
     }
 }
 
@@ -131,7 +179,11 @@ pub fn spawn(In(p): In<Prepared>, mut commands: Commands, mut meshes: ResMut<Ass
 pub fn leave(world: &mut World) {
     if world.get_resource_mut::<stream::City>().is_some_and(|mut c| c.0.take().is_some()) {
         let cams: Vec<Entity> = world.query_filtered::<Entity, With<crate::camera::MainCamera>>().iter(world).collect();
-        for c in cams { world.entity_mut(c).remove::<DistanceFog>(); }
+        for c in cams {
+            world.entity_mut(c).remove::<(DistanceFog, bevy::light::EnvironmentMapLight, ambiance::PostGrade)>()
+                .insert((bevy::camera::Exposure::default(), bevy::core_pipeline::tonemapping::Tonemapping::default()));
+        }
+        world.insert_resource(ClearColor(Color::srgb(0.62, 0.72, 0.82)));
     }
 }
 
@@ -139,9 +191,15 @@ pub struct CityPlugin;
 
 impl Plugin for CityPlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "grade.wgsl");
+        ground::install(app);
+        app.add_plugins(bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin::<ambiance::PostGrade>::default());
         app.init_resource::<stream::City>()
+            .init_resource::<presentation::CityEffects>()
+            .init_resource::<presentation::CityAmbience>()
             .add_systems(Startup, spawn_overlay)
-            .add_systems(Update, (update_city.before(crate::player::PlayerSet), hold_player.after(crate::player::PlayerSet), update_overlay));
+            .add_systems(Update, (update_city.before(crate::player::PlayerSet), hold_player.after(crate::player::PlayerSet), update_overlay))
+            .add_systems(PostUpdate, (ambiance::follow_sky, presentation::update_effects, presentation::update_ambience, presentation::log_audio).chain().after(bevy::transform::TransformSystems::Propagate));
     }
 }
 
@@ -150,7 +208,7 @@ impl Plugin for CityPlugin {
 const VOID_Y: f32 = -150.0;
 
 pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn: Res<crate::player::SpawnPoint>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>,
+    mut materials: ResMut<Assets<StandardMaterial>>, mut grounds: ResMut<Assets<ground::GroundSurface>>, mut images: ResMut<Assets<Image>>, mut collision: ResMut<crate::collision::CollisionWorld>,
     mut guidance: ResMut<crate::guidance::GuidanceWorld>, mut players: Query<(&mut crate::player::Body, &mut crate::player::Locomotion, &mut crate::player::HumanDataBundle), With<crate::player::Player>>,
     cams: Query<(&GlobalTransform, Option<&Projection>), With<crate::camera::MainCamera>>) {
     let Some(state) = city.0.as_mut() else { return };
@@ -171,7 +229,7 @@ pub(crate) fn update_city(mut city: ResMut<stream::City>, time: Res<Time>, spawn
     // 0xA2F890: renderer +684 = tan(fov_y / 2) · 2.414213, the LOD distance scale (1 at a 45° vertical field of view)
     let fov = cams.iter().next().and_then(|(_, p)| match p { Some(Projection::Perspective(p)) => Some(p.fov), _ => None }).unwrap_or(std::f32::consts::FRAC_PI_4);
     let lod_scale = (fov * 0.5).tan() * 2.414_213;
-    let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, images: &mut images,
+    let mut ctx = stream::Ctx { commands: &mut commands, meshes: &mut meshes, materials: &mut materials, grounds: &mut grounds, images: &mut images,
         collision: &mut collision, guidance: &mut guidance };
     state.update(body.feet, eye, view, lod_scale, time.delta_secs(), &mut ctx);
     // AC_CITY_LOG=<seconds>: log the streaming counters and frame times at that interval
@@ -197,17 +255,26 @@ struct Overlay;
 
 fn spawn_overlay(mut commands: Commands) {
     commands.spawn((Overlay, Text::new(""), TextFont { font_size: FontSize::Px(14.0), ..default() }, TextColor(Color::srgb(1.0, 1.0, 0.85)),
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), Visibility::Hidden,
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        // AC_CITY_OVERLAY=1: shown from the start (screenshots)
+        if std::env::var("AC_CITY_OVERLAY").is_ok_and(|v| v == "1") { Visibility::Inherited } else { Visibility::Hidden },
         Node { position_type: PositionType::Absolute, bottom: Val::Px(10.0), right: Val::Px(12.0), padding: UiRect::all(Val::Px(6.0)), ..default() }));
 }
 
 /// F3: streaming counters.
-fn update_overlay(keys: Res<ButtonInput<KeyCode>>, city: Res<stream::City>, time: Res<Time>, mut q: Query<(&mut Text, &mut Visibility), With<Overlay>>) {
+fn update_overlay(keys: Res<ButtonInput<KeyCode>>, city: Res<stream::City>, fx: Res<presentation::CityEffects>,
+    amb: Res<presentation::CityAmbience>, time: Res<Time>,
+    mut q: Query<(&mut Text, &mut Visibility), With<Overlay>>) {
     let Ok((mut text, mut vis)) = q.single_mut() else { return };
     if keys.just_pressed(KeyCode::F3) { *vis = if *vis == Visibility::Hidden { Visibility::Inherited } else { Visibility::Hidden }; }
     let Some(s) = city.0.as_ref().map(|c| &c.stats) else { text.0 = "no streamed world".into(); return };
-    text.0 = format!("city: {} cells loaded, {} loading | {} objects, {} drawn\nphysics: {} objects, {} triangles, {} edges\nGPU: {} materials, {} textures | {:.1} ms frame{}",
-        s.loaded, s.loading, s.objects, s.drawn, s.physics_objects, s.physics_triangles, s.physics_edges, s.materials, s.textures,
+    let (effects, running) = fx.counts();
+    let (sounds, playing) = amb.counts();
+    let beds = amb.beds().join(", ");
+    text.0 = format!("city: {} cells loaded, {} loading | {} objects, {} drawn\nphysics: {} objects, {} triangles, {} edges\n\
+        scene: {} lights, {} effects ({} running), {} sound emitters ({} playing)\nambience: {}\nGPU: {} materials, {} textures | {:.1} ms frame{}",
+        s.loaded, s.loading, s.objects, s.drawn, s.physics_objects, s.physics_triangles, s.physics_edges, s.lights, effects, running, sounds, playing, beds,
+        s.materials, s.textures,
         time.delta_secs() * 1000.0, if s.errors > 0 { format!(" | {} errors", s.errors) } else { String::new() });
 }
 
@@ -483,6 +550,49 @@ mod tests {
                     println!("pilotis {} top {:.2?} sides {size:.2?}", o.name, g);
                     found += 1;
                     if found >= 40 { return; }
+                }
+            }
+        }
+    }
+
+    /// The drawn objects over `LAB_POS` ("x y", game coordinates): their mesh sections' materials (template, every
+    /// TextureSet channel, the parameter dictionary) and the vertex / instance colour ranges (ground-material probe).
+    #[test]
+    #[ignore]
+    fn probe_ground_materials() {
+        use crate::assets::static_mesh::word;
+        let Some(w) = damascus() else { return };
+        let Some(p) = std::env::var("LAB_POS").ok().map(|s| s.split_whitespace().filter_map(|x| x.parse().ok()).collect::<Vec<f32>>()) else { return };
+        let (x, z) = (p[0], -p[1]);
+        let a = &w.data.archives;
+        let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let mut seen = std::collections::HashSet::new();
+        for cell in 0..w.data.grid.cells.len() {
+            let Ok(d) = decode::decode_cell(&w.data, cell) else { continue };
+            for o in &d.objects {
+                let b = &o.visual_bounds;
+                if o.meshes.is_empty() || x < b.min.x || x > b.max.x || z < b.min.z || z > b.max.z { continue; }
+                let m = &o.meshes[0];
+                println!("== {} (cell {cell}) mesh {:#x} {} verts, y {:.1}..{:.1}", o.name, m.id, m.mesh.positions.len(), b.min.y, b.max.y);
+                let range = |c: &mut dyn Iterator<Item = [f32; 4]>| { let (mut lo, mut hi) = ([1f32; 4], [0f32; 4]); for v in c { for k in 0..4 { lo[k] = lo[k].min(v[k]); hi[k] = hi[k].max(v[k]); } } (lo, hi) };
+                println!("   vertex colour {:.2?}", range(&mut m.mesh.colors.iter().copied()));
+                if let Some(c) = &m.colors { println!("   instance colour {:.2?}", range(&mut c.iter().map(|c| c.map(|b| b as f32 / 255.0)))); }
+                let uv = m.mesh.uvs.iter().fold((Vec2::MAX, Vec2::MIN), |(l, h), u| (l.min(*u), h.max(*u)));
+                println!("   uv {uv:.2?}");
+                for s in &m.mesh.sections {
+                    let Ok(r) = a.get(s.material) else { continue };
+                    let t = a.get(word(&r.payload, 8).unwrap_or(0)).map(|t| t.name.clone()).unwrap_or_default();
+                    println!("   section {} tris: {} [{t}]", s.indices.len() / 3, r.name);
+                    if !seen.insert(s.material) { continue; }
+                    println!("     material {}", hex(&r.payload));
+                    let Ok(set) = a.get(word(&r.payload, 12).unwrap_or(0)) else { continue };
+                    for q in (8..set.payload.len().saturating_sub(3)).step_by(4) {
+                        let id = word(&set.payload, q).unwrap();
+                        if id == 0 || !a.contains(id) { continue; }
+                        let spec = a.get(id).unwrap();
+                        let tex = word(&spec.payload, spec.payload.len().saturating_sub(4)).ok().and_then(|t| a.get(t).ok()).map(|t| t.name.clone()).unwrap_or_default();
+                        println!("     set +{q}: {} -> {tex}\n       {}", spec.name, hex(&spec.payload));
+                    }
                 }
             }
         }
