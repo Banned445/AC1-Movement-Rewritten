@@ -49,8 +49,6 @@ pub struct GuidanceWorld {
     pub edges: Vec<GuidanceEdge>,
     /// Haystacks (EntityDescriptorObject_HayStack): Leap of Faith / jump targets of type 0x800, not solid.
     pub haystacks: Vec<crate::collision::Aabb3>,
-    /// PORT: derived once after loading an immutable native map; never populated for editable greybox worlds.
-    pub jump_pilotis: Option<Vec<Vec3>>,
     /// PORT (speed): `ledge_report_depth`'s depth-filtered pieces per edge (`DepthCache`).
     pub(crate) depth_cache: std::sync::Mutex<DepthCache>,
 }
@@ -1091,8 +1089,9 @@ impl Plugin for GuidancePlugin {
 #[derive(Resource)]
 pub struct ShowGuidance(pub bool);
 impl Default for ShowGuidance {
+    /// On, unless `AC_NO_GUIDANCE` is set (videos and screenshots); G toggles it.
     fn default() -> Self {
-        Self(true)
+        Self(std::env::var_os("AC_NO_GUIDANCE").is_none())
     }
 }
 

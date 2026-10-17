@@ -1838,6 +1838,7 @@ pub fn update_narrow(
                     n.play(BeamState::TurnTo90, t);
                 } else if BEAM_COMPLETION && forward && n.kind == NarrowKind::Beam && at_end {
                     n.step_off_to = n.stand() + n.facing() * 0.8;
+                    n.foot = n.item_foot();
                     n.play(BeamState::StepOff, n.ground_step(false));
                 } else if forward && !clamped {
                     // the start seeds the speed at band 0 (0xF724C4)
@@ -2104,6 +2105,10 @@ pub fn update_narrow(
             if BEAM_COMPLETION {
                 let n = &mut data.narrow;
                 n.step_off_to = body.feet + n.facing() * 0.8;
+                // `sub_F708F0` hands the Ground the playing item's foot (word bits 2–3, TransitionSetupDataToMovement +16),
+                // 0 → the pose's leading foot (`PickLocomotionFoot`): the walk's item by that foot (live beam_turns 005:
+                // item 0 with the left foot ahead, where the beam's stored foot took item 1)
+                n.foot = n.item_foot();
                 n.play(BeamState::StepOff, n.ground_step(jog));
             } else {
                 body.feet += n.facing() * (BEAM_STEP_OFF + 0.2);

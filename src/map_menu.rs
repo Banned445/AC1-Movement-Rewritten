@@ -134,6 +134,8 @@ fn switch_from(world: &mut World, map: Map, game: &std::path::Path) -> Result<()
         .is_some_and(|d| d.features().contains(bevy::render::render_resource::WgpuFeatures::TEXTURE_COMPRESSION_BC));
     let city = match map { Map::Damascus => Some(crate::city::prepare(game, &crate::city::DAMASCUS, bc, &crate::city::spawn_name())?), _ => None };
     let imported = match map { Map::MasyafRoofs=>Some(crate::native_map::load(game)?),Map::MasyafVillage=>Some(crate::native_map::load_village(game)?),Map::Greybox|Map::Damascus=>None };
+    // the city's spawner (or `AC_CITY_AT`) sets the start heading; the other maps face -Z
+    let heading = city.as_ref().map_or(std::f32::consts::PI, |c| c.heading);
     crate::city::leave(world);
     let entities: Vec<_> = world.query_filtered::<Entity,With<MapEntity>>().iter(world).collect();
     for entity in entities { world.despawn(entity); }
@@ -146,17 +148,17 @@ fn switch_from(world: &mut World, map: Map, game: &std::path::Path) -> Result<()
         world.resource_mut::<SpawnPoint>().0 = Vec3::new(0.0,0.0,4.0);
         *world.resource_mut::<crate::camera::CameraRig>() = default();
     }
-    reset_player(world);
+    reset_player(world, heading);
     let mut menu = world.resource_mut::<MapMenu>();
     menu.active = map; menu.error = None;
     Ok(())
 }
 
-fn reset_player(world: &mut World) {
+fn reset_player(world: &mut World, heading: f32) {
     let spawn = world.resource::<SpawnPoint>().0;
     let players: Vec<_> = world.query_filtered::<Entity,With<Player>>().iter(world).collect();
     for entity in players {
-        world.entity_mut(entity).insert((crate::player::player_components(spawn,std::f32::consts::PI), Transform::from_translation(spawn)));
+        world.entity_mut(entity).insert((crate::player::player_components(spawn,heading), Transform::from_translation(spawn)));
         if world.entity(entity).contains::<crate::anim::AnimPlayer>() {
             world.entity_mut(entity).insert(crate::anim::AnimPlayer::default());
         }
@@ -193,6 +195,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<crate::city::ground::GroundSurface>::default());
         world.insert_resource(Assets::<Image>::default());
         world.insert_resource(CollisionWorld::default());
         world.insert_resource(GuidanceWorld::default());

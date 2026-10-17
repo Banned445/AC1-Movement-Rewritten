@@ -601,6 +601,42 @@ fn a_ladder_entry_takes_the_leading_foot_column() {
     assert_eq!(seen.len(), 2, "both feet led at some entry");
 }
 
+/// Live (RE/29 #38, course `ladder38_side`): the ladder at (17.54 −6.92) starts 1.3 m under the roof it is walked onto
+/// from, and the game enters it from the front (`xx_l_wait_hipm_footr_tr_l_ladder_climb_up_l`). `sub_E24FD0`'s box sits
+/// at the entry's root target, the attach rung (0xE26AFB after 0xE26A73–0xE26AE2), not at the base: at the base it lay
+/// inside the roof and the port turned round the ladder (`xx_h_ladder_turn_l`).
+#[test]
+fn a_ladder_buried_under_the_floor_is_entered_from_the_front() {
+    use crate::collision::{Aabb3, CollisionWorld};
+    use crate::guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld};
+    use crate::player::ladder::{ENTER_GROUND, TURN};
+    let mut s = Sim::new(Vec3::new(0.0, 1.3, 1.8), 0.0);
+    {
+        let w = s.app.world_mut();
+        let mut c = CollisionWorld::default();
+        // the wall behind the ladder (z < 0) and the floor slab in front of it, 1.3 m above the ladder's base
+        c.boxes.push(Aabb3 { min: Vec3::new(-4.0, -1.0, -2.0), max: Vec3::new(4.0, 8.0, 0.0) });
+        c.boxes.push(Aabb3 { min: Vec3::new(-4.0, -1.0, 0.0), max: Vec3::new(4.0, 1.3, 6.0) });
+        *w.resource_mut::<CollisionWorld>() = c;
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: Vec3::new(0.0, 0.0, 0.05), p1: Vec3::new(0.0, 7.5, 0.05), n0: Vec3::Y, n1: Vec3::Z, subtype: GuidanceSubType::Ladder });
+        *w.resource_mut::<GuidanceWorld>() = g;
+    }
+    s.run(0.3);
+    s.pad(Vec3::NEG_Z, 0.8, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "no entry: {:?} at {:?}", s.loco().current, s.body().feet);
+    let id = s.data().ladder.action.map(|a| a.id);
+    assert!(!TURN.iter().any(|&t| Some(t) == id), "turned round the ladder");
+    assert!(ENTER_GROUND[0].iter().any(|&t| Some(t) == id), "not the front entry: {id:?}");
+    // the box at the base (inside the slab) is blocked; at the attach rung it is free
+    let c = s.app.world().resource::<CollisionWorld>();
+    let (base, top, n) = (Vec3::new(0.0, 0.0, 0.05), Vec3::new(0.0, 7.5, 0.05), Vec3::Z);
+    assert!(crate::player::ladder::attach_blocked(base + n * crate::player::ladder::ATTACH_OUT, -n, c));
+    let buried = crate::player::ladder::buried_depth(base, top, c);
+    assert!((buried - 1.3).abs() < 0.01, "buried {buried}");
+    assert!(!crate::player::ladder::attach_blocked(crate::player::ladder::ground_attach(base, top, n, Vec3::new(0.0, 1.3, 1.0), false, buried), -n, c));
+}
+
 #[test]
 fn climb_start_from_the_ground_uses_the_leading_foot() {
     // sub_B26080 (0xB261A8): 0x01BC382C + (Human__GetLeadingFoot() != 1)
@@ -762,7 +798,7 @@ fn climbing_under_wall_k_bay_never_puts_the_body_inside_it() {
     let worst = std::cell::Cell::new(None);
     let left = s.run_until(15.0, |s| {
         let d = &s.data().climb;
-        if s.loco().current == ActorContextId::Climb && d.moving.is_none() && !climb::body_boxes_free(&collision, &d.frame, 0) {
+        if s.loco().current == ActorContextId::Climb && d.moving.is_none() && !climb::body_boxes_free(&collision, &d.frame, 0, false) {
             if worst.get().is_none() { worst.set(Some((d.last_action, d.frame.root))); }
         }
         s.loco().current == ActorContextId::Ledge
@@ -1197,6 +1233,24 @@ fn letting_go_above_a_haystack_dives_into_it() {
     assert_eq!(s.data().air.target.map(|t| t.type_flags), Some(crate::player::jump_blend::TARGET_HAYSTACK), "the let-go record's haystack");
     assert!(s.data().air.dive_wait.is_some());
     assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::HayStack), "never dove in: {:?} {:?}", s.loco().current, s.body().feet);
+    // the dive branch enters as SideJump, `xx_h_air_to_haystack` (live RE/20 #43: HayStack entry 4 after every let-go dive)
+    assert_eq!(s.data().hay.kind, crate::player::hay::HayEntry::SideJump);
+}
+
+/// RE/20 #43 (live 2026-10-17): the let-go's first item moves the body by its own root motion before the dive (the game
+/// held 0.13 s, then fell at the clip's 4.97 m/s), not by gravity from rest.
+#[test]
+fn the_let_go_before_the_dive_moves_by_its_clip() {
+    let mut s = hang_at(Vec3::new(33.0, 9.5, 23.6), Vec3::X);
+    s.press_hand();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "no let-go");
+    let (item, d) = s.data().air.dive_item.expect("the let-go item");
+    let y0 = s.body().feet.y;
+    assert!(s.run_until(d + 0.1, |s| s.data().air.dive_wait.is_none()), "the let-go never ended");
+    let want = item.disp(1.0)[2];
+    assert!(want < -0.5, "the let-go clip moves down: {want}");
+    let got = s.body().feet.y - y0;
+    assert!((got - want).abs() < 0.08, "fell {got:.3} m over the let-go, its clip {want:.3} m");
 }
 
 #[test]
@@ -3225,6 +3279,23 @@ fn on_the_ladder() -> Sim {
     s
 }
 
+/// `HumanLadder__ChooseClimbAnim` 0xE24540 chooses the step's rate every frame: a low-profile stick at or below 0.5
+/// plays it at half rate (0xE2490B), the stick let go at 1.0 (0xE24AD3). Live (RE/29 #61): with the stick released
+/// the slow step finishes at twice the speed.
+#[test]
+fn a_slow_ladder_step_finishes_at_full_rate_once_the_stick_is_let_go() {
+    use crate::player::ladder::LadderPhase;
+    let mut s = on_the_ladder();
+    s.pad(Vec3::Z, 0.6, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ladder.phase == Some(LadderPhase::ClimbUp)), "no climb");
+    s.run(0.1);
+    assert_eq!(s.data().ladder.rate, 0.5, "the walk band climbs at half rate");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0 / 30.0);
+    assert_eq!(s.data().ladder.phase, Some(LadderPhase::ClimbUp), "the step goes on");
+    assert_eq!(s.data().ladder.rate, 1.0, "released: full rate");
+}
+
 #[test]
 fn letting_go_of_a_ladder_falls() {
     use crate::player::ladder::RELEASE;
@@ -4148,9 +4219,14 @@ pub(crate) fn lab_trace_row(i: usize, t: f32, ctx: ActorContextId, clip: &str, r
     let mut row = format!("{i},{t:.5},{ctx:?},{clip},{:.4},{:.4},{:.4},{:.4}", rel.x, -rel.z, rel.y, Vec2::new(vel.x, vel.z).length());
     let pose = world.get::<BonePose>(player);
     let skel = world.get_resource::<PoseSkeleton>();
+    // with the headless rig (`AC_LAB_IK`) the bones after the limb IK, else the animation's pose
+    let solved = world.get::<crate::model::Rig>(player).filter(|_| pose.is_some_and(|p| p.seq > 0)).map(|r| (r.bone_ids.clone(), crate::ik::rig_model_positions(world, r)));
     for bone in [HEAD, SPINE, LEFT_HAND, RIGHT_HAND, LEFT_FOOT, RIGHT_FOOT] {
         // the player's space faces -Z with +X to the right
-        let m = pose.zip(skel).and_then(|(p, k)| p.model_pos(k, bone)).unwrap_or(Vec3::ZERO);
+        let m = match &solved {
+            Some((ids, pos)) => ids.iter().position(|b| *b == bone).map(|i| pos[i]),
+            None => pose.zip(skel).and_then(|(p, k)| p.model_pos(k, bone)),
+        }.unwrap_or(Vec3::ZERO);
         row.push_str(&format!(",{:.4},{:.4},{:.4}", -m.z, m.x, m.y));
     }
     row.push('\n');
@@ -5060,6 +5136,30 @@ fn a_free_hang_whose_feet_find_the_wall_switches_to_it_before_it_pulls_up() {
     assert!(was_wall, "never switched to the wall hang");
     assert!(worst <= 0.55, "the root left the wall by {worst} m");
     assert!(stood_up(&s) && (s.body().feet.y - 2.6).abs() < 0.05, "pull-up failed: {:?}", s.body().feet);
+}
+
+/// Live (RE/29 #72, course `straight72_swing37`): after the straight jump's wall-free reception the push up plays
+/// `xx_h_hangfree_tr_hangwall` (0x01B702FD) for 0.66 s before the wall idle. The action was missing from the clip table,
+/// so the switch played nothing and ran on the shimmy timer (0.54 s).
+#[test]
+fn the_free_to_wall_switch_plays_its_own_clip_for_its_length() {
+    let item = crate::player::jump_blend::action_items(crate::player::ledge_moves::PULLUP_FREE_TO_WALL).expect("0x01B702FD in the clip table");
+    assert_eq!(item[0], &["xx_h_hangfree_tr_hangwall"]);
+    let mut s = hang_on_jump_up_wall();
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_none()));
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().ledge.mv.is_some()));
+    assert_eq!(s.data().ledge.last_action, "switch to wall hang (pull-up)");
+    let mv = s.data().ledge.mv.unwrap();
+    assert_eq!(mv.seq[0].map(|a| a.id), Some(crate::player::ledge_moves::PULLUP_FREE_TO_WALL));
+    assert!((mv.durations[0] - 0.667).abs() < 0.01, "switch length {}", mv.durations[0]);
+    let mut took = 0.0;
+    while s.data().ledge.mv.is_some() && took < 2.0 {
+        s.run(1.0 / 60.0 + 1e-4);
+        took += 1.0 / 60.0;
+    }
+    assert!((0.6..0.75).contains(&took), "the switch took {took} s");
+    assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Wall);
 }
 
 /// The WallFree type's readers (never held in v1.02): `Pullup_Start` 0xDDC2E3 plays `hangwallfree_tr_hangwall`

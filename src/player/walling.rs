@@ -16,7 +16,6 @@ use super::{right_of, switch_context, ActorContextId, Body, HumanDataBundle, Loc
 use crate::collision::CollisionWorld;
 use crate::guidance::GuidanceWorld;
 use crate::input::PadInput;
-use crate::tuning::PULLUP_IN;
 
 /// HumanWalling block actions (matched by clip name; the exe requests some through runtime ids 68 / 69).
 pub const ENTRY_A: u32 = 0x00D8_2C5C; // xx_h_wallingfront_entry_footl_a (id 68, 0xDA2C30)
@@ -233,10 +232,11 @@ const FUZZY_LAYERS: [u8; 5] = [crate::layers::FUZZY_ZONE, crate::layers::FUZZY_Z
 
 /// `Human__WallingWidthCheck` 0xE149E0 (RE/24 WALL-1): from the hit + 0.001·n, a ray 0.5 m along n turned −45° and then
 /// +45° about up. Both clear → accept the hit. A ray that hits found something jutting out beside the contact (an inner
-/// corner, a pilaster): `sub_E14790` steps away from it (hypothesis: the side of n × ±up away from it; toward it the ray
-/// would start inside it): from that hit a ray 0.3 m along the wall (away from
-/// that side) must be clear, then from there a ray back along −n, as long as the distance to the original wall plane +
-/// 0.25 m, must hit; that hit becomes the contact. A failed step rejects the wall. Narrow walls, posts and a wall's outer end are accepted.
+/// corner, a pilaster): the contact becomes that hit (0xE14AED / 0xE14BD4) and `sub_E14790` steps from it along n × (s·up)
+/// (s = −1 after the −45° ray, +1 after the +45° one: away from the jut): a ray 0.3 m along it must be clear, then from
+/// there a ray back along −n as long as the distance to the plane through the jut's hit (zero: the step runs along it)
+/// + 0.25 m must hit (0xE148C8–0xE14934); that hit becomes the contact. A failed step rejects the wall, so a jut standing
+/// more than 0.25 m out from the wall behind it does. Narrow walls, posts and a wall's outer end are accepted.
 fn width_check(hit: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
     let start = hit + n * 0.001;
     for a in [-std::f32::consts::FRAC_PI_4, std::f32::consts::FRAC_PI_4] {
@@ -248,7 +248,8 @@ fn width_check(hit: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
             return None;
         }
         let from = jut + along * 0.3;
-        let back = (from - hit).dot(n) + 0.25;
+        // the distance to the plane through the jut's hit with normal n (`Vec_ProjectOntoPlane` 0xE148C8), + 0.25
+        let back = (from - jut).dot(n).abs() + 0.25;
         let (d2, _) = collision.ray_hit(from, -n, back, WALL_RAY_LAYER)?;
         return Some(from - n * d2);
     }
@@ -474,14 +475,14 @@ fn pullup_exit(id: u32, b: f32, root: Vec3, c: &LedgeCandidate) -> LedgeEntry {
         let stand_id = ledge_moves::ACT_KNEE_TO_FREESTEP[(id == STEP1_TO_KNEE) as usize];
         let seq = [single(stand_id, 0), None, None, None];
         let d = seq.map(|a| a.map(|a| a.duration()).unwrap_or(0.0));
-        let top = c.point + into * PULLUP_IN;
         let stand = LedgeMove {
             kind: MoveKind::Pullup,
             seq,
             durations: if d[0] > 0.0 { d } else { [0.4, 0.0, 0.0, 0.0] },
             t: 0.0,
             from: knee,
-            to: Vec3::new(top.x, c.point.y, top.z),
+            // no root motion in `hangknee_tr_freestep_entry` (see `ledge_moves::climb_out_moves`)
+            to: knee,
             follow_disp: false,
             end_stand: true,
             ..mv
@@ -818,13 +819,19 @@ mod wall_entry_tests {
         let mut end = CollisionWorld::default();
         end.boxes.push(Aabb3 { min: Vec3::new(-0.2, 0.0, -1.0), max: Vec3::new(5.0, 4.0, 0.0) });
         assert!(wall_ahead(feet, Vec3::NEG_Z, &end).is_some(), "the last 0.2 m of a wall runs up");
-        // a pilaster 0.25 m to the right (x 0.25..0.45), jutting 0.5 m out: the right 45° ray meets it, the contact steps
-        // 0.3 m away from it along the wall
+        // a pilaster 0.15 m to the right (x 0.15..0.35), jutting 0.5 m out: the right 45° ray meets its side 0.15 m out,
+        // the contact steps 0.3 m away from it along the wall and back onto the wall within 0.25 m (0xE14790)
         let mut pil = CollisionWorld::default();
         pil.boxes.push(Aabb3 { min: Vec3::new(-5.0, 0.0, -1.0), max: Vec3::new(5.0, 4.0, 0.0) });
-        pil.boxes.push(Aabb3 { min: Vec3::new(0.25, 0.0, 0.0), max: Vec3::new(0.45, 4.0, 0.5) });
+        pil.boxes.push(Aabb3 { min: Vec3::new(0.15, 0.0, 0.0), max: Vec3::new(0.35, 4.0, 0.5) });
         let (contact, _, _) = wall_ahead(feet, Vec3::NEG_Z, &pil).expect("stepped away from the pilaster");
         assert!(contact.x < -0.01 && (contact.z - 0.5).abs() < 1e-3, "the contact moved away from the pilaster: {contact:?}");
+        // 0.3 m to the right the 45° ray meets the side 0.3 m out: the back ray (0.25 m from the jut's hit) misses the
+        // wall and the wall is refused
+        let mut far = CollisionWorld::default();
+        far.boxes.push(Aabb3 { min: Vec3::new(-5.0, 0.0, -1.0), max: Vec3::new(5.0, 4.0, 0.0) });
+        far.boxes.push(Aabb3 { min: Vec3::new(0.3, 0.0, 0.0), max: Vec3::new(0.5, 4.0, 0.5) });
+        assert!(wall_ahead(feet, Vec3::NEG_Z, &far).is_none(), "a jut 0.3 m out beside the contact refuses the wall");
     }
 
     /// RE/24 WALL-2: the hit's own normal, not the nearest axis: a wall at 45° keeps its 45° normal.

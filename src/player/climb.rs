@@ -804,7 +804,7 @@ fn side_column_holds(g: &GuidanceWorld, d: &HumanClimbData, facing: Vec3, dir: u
 /// (`sub_B157B0`, `Human__WallHangBodyBoxFree`, lateral path 1.8 × 1.1 m), else a free hang (`sub_B15AD0`,
 /// `Human__FreeHangBodyBoxesFree`, 1.8 × 2.4 m). The Ledge fill (`HumanClimb__FillLedge_FromClimb` 0xDEEAC0, SubState 9)
 /// plays `CLIMB_TO_HANG[wall / free][+2940]` while the root goes to the hang.
-/// A wall hang whose box fails is not tried as a free hang (0xDF26E6). PORT: the lateral path is `lateral_path_free`.
+/// A wall hang whose box fails is not tried as a free hang (0xDF26E6). The lateral path is `lateral_path_free`.
 fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize, near: bool) -> Option<LedgeEntry> {
     let (side, row) = corner_side(dir)?;
     let base = feet_base(d);
@@ -817,8 +817,9 @@ fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWor
     let e = LedgeEntry::at(g.fit_hands(h.point, n), n, root, LedgeSubState::TransitionInFromClimb);
     let wall = side_grab_feet(h.point, n, collision);
     let hang = if wall { super::ledge::LedgeHangType::Wall } else { super::ledge::LedgeHangType::Free };
-    let to = super::ledge::hang_root(e.hand_l, e.hand_r, n, hang);
-    if !hang_boxes_free(collision, to, hf, wall) || !lateral_path_free(collision, root, facing, to, hf) {
+    let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, n, hang, true, collision);
+    let feet = super::ledge::entry_feet((e.hand_l + e.hand_r) * 0.5, n, collision);
+    if !super::ledge::hang_boxes_at(e.hand_l, e.hand_r, n, hang, feet, collision) || !lateral_path_free(collision, root, facing, to, hf, if wall { 1.1 } else { 2.4 }) {
         return None;
     }
     let mv = super::ledge_moves::climb_to_hang_move(root, e.hand_l, e.hand_r, n, CLIMB_TO_HANG[!wall as usize][dir], hang, collision);
@@ -843,31 +844,20 @@ pub const CLIMB_TO_HANG: [[u32; 10]; 2] = [
 
 /// `Human__ClimbBodyBoxesFree` 0xB2DF90 at a climb pose (S = F × U): a box at root + 0.5·U (half extents 0.375 / 0.25 /
 /// 0.5 along S / F / U) and one at root + 1.4·U (0.15 / 0.15 / 0.4) hold nothing. A sideways LONG move (`side` ±1)
-/// widens the first box to 0.575 and moves it 0.05·side against S.
-pub(crate) fn body_boxes_free(collision: &crate::collision::CollisionWorld, pose: &ClimbPose, side: i32) -> bool {
+/// widens the first box to 0.575 and moves it 0.05·side against S; `wide` (the ledge's move round the far corner onto
+/// climb holds, 0xDD4A6E) widens it to 0.875 and moves it 0.25·side.
+pub(crate) fn body_boxes_free(collision: &crate::collision::CollisionWorld, pose: &ClimbPose, side: i32, wide: bool) -> bool {
     let s = pose.forward.cross(pose.up).normalize_or_zero();
     let axes = [s, pose.forward, pose.up];
-    let (half_s, shift) = if side != 0 { (0.575, -0.05 * side as f32) } else { (0.375, 0.0) };
+    let (half_s, shift) = if wide { (0.875, -0.25 * side as f32) } else if side != 0 { (0.575, -0.05 * side as f32) } else { (0.375, 0.0) };
     collision.obb_free(pose.root + pose.up * 0.5 + s * shift, axes, Vec3::new(half_s, 0.25, 0.5))
         && collision.obb_free(pose.root + pose.up * 1.4, axes, Vec3::new(0.15, 0.15, 0.4))
 }
 
-/// `Human__LateralPathFree` 0xB2A410 (heights 1.8 / 1.8): the body's path from one root to the other goes through the
-/// point where the two roots' side lines meet (the corner), at the lower root's height. PORT: two capsule casts (r 0.35,
-/// 1.8 m) along that path stand in for the game's ray and box sweeps.
-fn lateral_path_free(collision: &crate::collision::CollisionWorld, from: Vec3, from_fwd: Vec3, to: Vec3, to_fwd: Vec3) -> bool {
-    let y = from.y.min(to.y);
-    let (a, b) = (Vec3::new(from.x, y, from.z), Vec3::new(to.x, y, to.z));
-    let (sa, sb) = (right_of(from_fwd), right_of(to_fwd));
-    let denom = sa.x * sb.z - sa.z * sb.x;
-    let corner = (denom.abs() > 1e-4).then(|| {
-        let d = b - a;
-        a + sa * ((d.x * sb.z - d.z * sb.x) / denom)
-    });
-    match corner {
-        Some(p) => collision.capsule_cast_free(a, 1.8, 0.35, p - a) && collision.capsule_cast_free(p, 1.8, 0.35, b - p),
-        None => collision.capsule_cast_free(a, 1.8, 0.35, b - a),
-    }
+/// `Human__LateralPathFree` 0xB2A410 from the climb pose (body 1.8 m) to a pose `hb` m tall: the shared port in
+/// `ledge_moves::lateral_path_free`.
+fn lateral_path_free(collision: &crate::collision::CollisionWorld, from: Vec3, from_fwd: Vec3, to: Vec3, to_fwd: Vec3, hb: f32) -> bool {
+    super::ledge_moves::lateral_path_free(from, from_fwd, 1.8, to, to_fwd, hb, 1.0, collision)
 }
 
 /// `HumanClimb__TrySideJump` 0xDF29E0: both feet on the side column's foot record, both hands on the one 1.2 m above
@@ -877,10 +867,10 @@ fn lateral_path_free(collision: &crate::collision::CollisionWorld, from: Vec3, f
 fn corner_climb(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize, near: bool) -> Option<(Hold, Hold, ClimbPose, u32)> {
     let (f, h) = side_column_holds(g, d, facing, dir, near)?;
     let pose = climb_pose([h.pos, h.pos, f.pos, f.pos], [h.normal, h.normal, f.normal, f.normal], -f.normal);
-    if !body_boxes_free(collision, &pose, 0) {
+    if !body_boxes_free(collision, &pose, 0, false) {
         return None;
     }
-    if !near && !lateral_path_free(collision, root, facing, pose.root, -pose.normal()) {
+    if !near && !lateral_path_free(collision, root, facing, pose.root, -pose.normal(), 1.8) {
         return None;
     }
     Some((f, h, pose, CORNER_CLIMB[!near as usize][dir - 4]))
@@ -974,10 +964,17 @@ fn side_ladder(g: &GuidanceWorld, root: Vec3, facing: Vec3, dir: usize) -> Optio
 /// 1.2 m up or down, then 0.4 m to the leading hand's side and to the other (box 0.2 across, 0.5 deep, 0.4 up and down —
 /// 0.3 after the first foot hit; 45°; nearest a point 0.2 m out), each with a hand hold 1.2 m above it (0.375 across,
 /// 0.5 deep, 0.3). Both feet on the foot hold, both hands on the hand hold; clearance: a capsule (r 0.35, 1.8 m) from
-/// `sub_B18140`(root) + 0.15 m out, swept to `sub_B18140`(new root): it ends at the target (0xDF0509; `sub_B18140` 0xB18140
-/// adds the horizontal part of the pose's 1.8 m up axis, nothing on an upright root). Long when (|dz| − 0.8) / 1.3 ≥ 0.5;
+/// `upper_base`(root) + 0.15 m out, swept to `upper_base`(new root): it ends at the target (0xDF0509). Long when (|dz| − 0.8) / 1.3 ≥ 0.5;
 /// the entry's dir: up 0 / 1, down 2 / 3 by the side of the foot hold, right when right of the line through the root along
 /// the facing (the inverted ChooseMove grid matrix, 0xDF05F6) (RE/24 CLIMB-13).
+/// `sub_B18140` 0xB18140 with the frame's forward and 1.8 m: the frame's up (its forward turned 90° toward world up)
+/// times 1.8, its horizontal part added to the root, but only when the forward points level or above (an overhang's
+/// frame); a frame whose forward points down (a wall leaning back, its up toward the wall) gives the root itself.
+fn upper_base(root: Vec3, up: Vec3, facing: Vec3) -> Vec3 {
+    let flat = Vec3::new(up.x, 0.0, up.z);
+    if flat.dot(facing) > 0.0 { root } else { root + flat * 1.8 }
+}
+
 fn vertical_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize) -> Option<ClimbReach> {
     let mv = if dir < 2 { Vec3::Y } else { Vec3::NEG_Y };
     let sign = if dir == 0 || dir == 2 { -1.0 } else { 1.0 };
@@ -1000,9 +997,8 @@ fn vertical_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorl
     let (f, h) = find(base).or_else(|| find(base + mv * 0.6))?;
     let (fn_, hn) = (f.wall_normal, h.wall_normal);
     let pose = climb_pose([h.point, h.point, f.point, f.point], [hn, hn, fn_, fn_], facing);
-    let b18140 = |root: Vec3, up: Vec3| root + Vec3::new(up.x, 0.0, up.z) * 1.8;
-    let start = b18140(root, d.frame.up) - facing * 0.15;
-    if !collision.capsule_cast_free(start, 1.8, 0.35, b18140(pose.root, pose.up) - start) {
+    let start = upper_base(root, d.frame.up, facing) - facing * 0.15;
+    if !collision.capsule_cast_free(start, 1.8, 0.35, upper_base(pose.root, pose.up, facing) - start) {
         return None;
     }
     let long = (((base.y - f.point.y).abs() - 0.8) / 1.3).clamp(0.0, 1.0) >= 0.5;
@@ -1232,11 +1228,18 @@ pub const LEDGE_GRAB_SIDE: [[[u32; 2]; 3]; 2] = [
 pub fn hang_boxes_free(collision: &crate::collision::CollisionWorld, root: Vec3, facing: Vec3, wall: bool) -> bool {
     let axes = [right_of(facing), facing, Vec3::Y];
     if wall {
-        collision.obb_free(root + Vec3::Y * 0.65, axes, Vec3::new(0.375, 0.25, 0.65))
+        wall_hang_box_free(collision, root, facing, Vec3::Y)
     } else {
         collision.obb_free(root - facing * 0.5 + Vec3::Y * 1.2, axes, Vec3::new(0.375, 0.25, 1.2))
             && collision.obb_free(root - facing * 0.25 + Vec3::Y * 0.8, axes, Vec3::new(0.375, 0.22, 0.6))
     }
+}
+
+/// `Human__WallHangBodyBoxFree` 0xB2DC80 at a pose: the box at root + 0.65·up ((1.1 + 0.2) / 2), half 0.375 / 0.25 / 0.65,
+/// its axes the pose's forward and up (`sub_B157B0` leans them with the body axis).
+pub fn wall_hang_box_free(collision: &crate::collision::CollisionWorld, root: Vec3, fwd: Vec3, up: Vec3) -> bool {
+    let right = fwd.cross(up).normalize_or(right_of(fwd));
+    collision.obb_free(root + up * 0.65, [right, fwd, up], Vec3::new(0.375, 0.25, 0.65))
 }
 
 /// IsGridMoveValid 0xDECD70: every moving side needs a foot hold and a hand hold two rows up, and the body must fit at
@@ -1245,7 +1248,7 @@ pub fn hang_boxes_free(collision: &crate::collision::CollisionWorld, root: Vec3,
 fn try_move_clear(grid: &HoldGrid, d: &HumanClimbData, collision: &crate::collision::CollisionWorld, m: (usize, Side, i32, i32), long: bool) -> Option<(usize, [Option<(Hold, Hold)>; 2])> {
     let (next, sides) = try_move(grid, d.pose, m)?;
     let side = if long { m.2.signum() } else { 0 };
-    body_boxes_free(collision, &move_pose(grid, d, m), side).then_some((next, sides))
+    body_boxes_free(collision, &move_pose(grid, d, m), side, false).then_some((next, sides))
 }
 
 /// `HumanClimb__ComputeRootFromMove` 0xDEC6E0: the target pose from the grid cells of all four limbs, the non-moving side's
@@ -1677,9 +1680,9 @@ pub fn update_climb(
             let e0 = LedgeEntry::at(h.pos, hn, body.feet, LedgeSubState::TransitionInFromClimb);
             let e0 = LedgeEntry { hand_l: h.pos, hand_r: h.pos, ..e0 };
             let fits = |hang: super::ledge::LedgeHangType| {
-                let root = super::ledge::hang_root(h.pos, h.pos, hn, hang);
+                let root = super::ledge::hang_root_at(h.pos, h.pos, hn, hang, true, &collision);
                 let off_floor = collision.floor_height_below(root + Vec3::Y * 0.05, 0.35).is_none();
-                off_floor && hang_boxes_free(&collision, root, hf, hang == super::ledge::LedgeHangType::Wall) && lateral_path_free(&collision, body.feet, facing, root, hf)
+                off_floor && super::ledge::hang_boxes_at(h.pos, h.pos, hn, hang, super::ledge::entry_feet(h.pos, hn, &collision), &collision) && lateral_path_free(&collision, body.feet, facing, root, hf, if hang == super::ledge::LedgeHangType::Wall { 1.1 } else { 2.4 })
             };
             let wall_ok = super::ledge::feet_supports(h.pos, hn, &collision) && fits(super::ledge::LedgeHangType::Wall);
             let hang = if wall_ok { Some(super::ledge::LedgeHangType::Wall) } else { fits(super::ledge::LedgeHangType::Free).then_some(super::ledge::LedgeHangType::Free) };

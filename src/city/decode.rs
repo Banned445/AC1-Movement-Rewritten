@@ -51,9 +51,8 @@ pub struct CityObject {
     pub collision: Vec<Triangle>,
     pub edges: Vec<GuidanceEdge>,
     pub haystack: Option<Aabb3>,
-    /// Posts among the object's ledge edges (`targets::pilotis_for_edges`), found against its own cell's geometry
-    /// on the loader thread.
-    pub pilotis: Vec<Vec3>,
+    /// The entity's small / medium object flags (`entity_size_flags`): bit 0 small, bit 1 medium.
+    pub size: u8,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -71,6 +70,12 @@ pub struct DecodedCell {
     pub materials: Vec<(u32, Arc<MaterialData>)>,
     /// Textures the cell needs that were not on the GPU when it was decoded.
     pub textures: Vec<(u32, bool, Arc<TextureData>)>,
+    /// The cell's local lights and particle effects (`presentation`).
+    pub lights: Vec<super::presentation::CityLight>,
+    pub effects: Vec<super::presentation::CityEffect>,
+    pub sounds: Vec<super::presentation::CitySound>,
+    /// The cell file's ambience sets.
+    pub ambience: Vec<super::presentation::AmbienceSet>,
     pub stats: CellStats,
 }
 
@@ -119,7 +124,7 @@ fn bind_pose_mesh(d: &[u8]) -> Option<StaticMesh> {
     let short = |v: &[u8], p: usize| i16::from_le_bytes([v[p], v[p + 1]]) as f32;
     let dir = |v: &[u8], p: usize| (Vec3::new(v[p] as f32, v[p + 1] as f32, v[p + 2] as f32) / 127.5 - Vec3::ONE).normalize_or_zero();
     let mut out = StaticMesh { positions: Vec::with_capacity(n), normals: Vec::with_capacity(n), tangents: Vec::with_capacity(n), uvs: Vec::with_capacity(n),
-        colors: Vec::with_capacity(n), sections: Vec::new() };
+        colors: Vec::with_capacity(n), blend: Vec::new(), sections: Vec::new() };
     for v in vertices.chunks_exact(stride) {
         let (nm, t) = (dir(v, 8), dir(v, 12));
         out.normals.push(nm);
@@ -133,6 +138,7 @@ fn bind_pose_mesh(d: &[u8]) -> Option<StaticMesh> {
             out.positions.push(Vec3::new(short(v, 0), short(v, 2), short(v, 4)) * scale);
             out.tangents.push(t.extend(short(v, 6).signum()));
             out.colors.push([v[16] as f32 / 255.0, v[17] as f32 / 255.0, v[18] as f32 / 255.0, v[19] as f32 / 255.0]);
+            out.blend.push([v[11], v[15]]);
         }
     }
     let tail = cm + 8 + size;
@@ -174,13 +180,21 @@ pub fn bodies(r: &Resource) -> Vec<&[u8]> {
 
 pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> {
     let c = &data.grid.cells[cell];
-    let mut out = DecodedCell { cell, objects: Vec::new(), materials: Vec::new(), textures: Vec::new(), stats: CellStats::default() };
     let Some((archive, file)) = data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else {
         return Err(format!("cell {cell}: datablock {:#x} not in the archives", c.datablock));
     };
     let a = data.archives.names.iter().position(|n| *n == archive).unwrap();
-    let entry = data.archives.find(a, &file).ok_or("cell file vanished")?;
+    decode_file(data, cell, a, &file)
+}
+
+/// The entities of one stored file (a grid cell or a mission DataBlock) as the streamer's objects; `cell` only labels
+/// the result.
+pub fn decode_file(data: &CityData, cell: usize, a: usize, file: &str) -> Result<DecodedCell, String> {
+    let mut out = DecodedCell { cell, objects: Vec::new(), materials: Vec::new(), textures: Vec::new(), lights: Vec::new(), effects: Vec::new(), sounds: Vec::new(), ambience: Vec::new(), stats: CellStats::default() };
+    let mut systems = HashMap::new();
+    let entry = data.archives.find(a, file).ok_or("cell file vanished")?;
     let resources = data.archives.file(a, entry)?;
+    out.ambience = super::presentation::cell_ambience(&resources);
     // Keep the archive order (TOC order) so object order, and with it slot order, is deterministic.
     let mut list: Vec<&Arc<Resource>> = resources.values().filter(|r| r.class_hash == crc32("Entity") || r.class_hash == crc32("EntityGroup")).collect();
     list.sort_by_key(|r| r.id);
@@ -193,7 +207,29 @@ pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> 
             // PORT: an entity its own Scene moves (`BlendPosClip`) is left out. Its authored placement is not where the
             // game keeps it, and the scene's positions are not decoded. Damascus has one with collision: the Bureau's
             // roof hatch `BA_Trap_Group_001` (live 2026-10-12: open in the game, the player falls through the entrance).
-            if !markers(body, "BlendPosClip").is_empty() { *out.stats.skipped.entry("scene-moved".into()).or_default() += 1; continue; }
+            // a mission DataBlock's entities at the origin are spawn templates (NPCs, weapons, carried props): the game
+            // places copies of them at run time, never the entity itself
+            if data.grid.cells.get(cell).is_some_and(|c| c.level == super::grid::DATABLOCK_LEVEL)
+                && placement(body).is_ok_and(|m| m.w_axis.truncate().length() < 1e-3) {
+                *out.stats.skipped.entry("spawn template".into()).or_default() += 1;
+                continue;
+            }
+            if !markers(body, "BlendPosClip").is_empty() {
+                *out.stats.skipped.entry("scene-moved".into()).or_default() += 1;
+                continue;
+            }
+            if let Ok(m) = placement(body) {
+                match super::presentation::body_effect(data, body, m, &mut systems) {
+                    Some(Ok(e)) => out.effects.push(e),
+                    Some(Err(e)) => { *out.stats.skipped.entry(e).or_default() += 1; }
+                    None => {}
+                }
+                let at = TO_BEVY.transform_point3(m.w_axis.truncate());
+                out.sounds.extend(super::presentation::body_sounds(body, at));
+                out.lights.extend(super::presentation::body_lights(body, at, |id| {
+                    resources.get(&id).map(|r| r.payload.clone()).or_else(|| data.archives.get(id).ok().map(|r| r.payload.clone()))
+                }));
+            }
             match decode_body(data, body, &name, &mut materials, &mut out.stats.skipped) {
                 Ok(Some(o)) => {
                     out.stats.triangles += o.collision.len();
@@ -206,22 +242,9 @@ pub fn decode_cell(data: &CityData, cell: usize) -> Result<DecodedCell, String> 
         }
     }
     out.stats.objects = out.objects.len();
-    // PORT: posts are looked for among the cell's own geometry (the game's candidates come from guidance queries at
-    // jump time, RE/04 §4.1); a post whose neighbourhood spans two cells is judged on its own cell.
-    if out.objects.iter().any(|o| o.edges.iter().any(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab)) {
-        let mut collision = crate::collision::CollisionWorld::default();
-        collision.enable_index(8.0);
-        collision.add_triangles(out.objects.iter().flat_map(|o| o.collision.iter().cloned()).collect());
-        let guidance = crate::guidance::GuidanceWorld { edges: out.objects.iter().flat_map(|o| o.edges.iter().cloned()).collect(), ..Default::default() };
-        for o in &mut out.objects {
-            if o.edges.iter().any(|e| e.subtype == crate::guidance::GuidanceSubType::LedgeGrab) {
-                o.pilotis = crate::player::targets::pilotis_for_edges(o.edges.iter(), &guidance, &collision);
-            }
-        }
-    }
     let resident = data.resident.lock().unwrap().clone();
     for (id, m) in materials {
-        for (tex, linear) in m.diffuse.map(|d| (d, false)).into_iter().chain(m.normal.map(|n| (n, true))) {
+        for (tex, linear) in m.maps() {
             if resident.contains(&tex) || out.textures.iter().any(|t| t.0 == tex) { continue; }
             match data.materials.texture(&data.archives, tex, linear, data.bc) {
                 Ok(t) => out.textures.push((tex, linear, t)),
@@ -244,7 +267,7 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     let mut o = CityObject { name: name.to_string(), transform, center: transform.w_axis.truncate(), radius: 0.0,
         bounds: Aabb3 { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) }, meshes: Vec::new(), lod: LodTable::default(),
         visual_bounds: Aabb3 { min: Vec3::ZERO, max: Vec3::ZERO },
-        collision: Vec::new(), edges: Vec::new(), haystack: None, pilotis: Vec::new() };
+        collision: Vec::new(), edges: Vec::new(), haystack: None, size: entity_size_flags(b) };
     // --- visual
     if let Some(&v) = visuals.first() {
         if b.get(v + 4) == Some(&1) {
@@ -260,7 +283,7 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     }
     // --- collision
     for &p in &rigid {
-        if word(b, p + 8)? != crc32("CollisionFilterInfo") { continue; }
+        if word(b, p + 8)? != crc32("CollisionFilterInfo") { *skipped.entry("rigid body without a collision filter".into()).or_default() += 1; continue; }
         // the owning component (`InertComponent` / `RigidBodyComponent`, 17 bytes before its RigidBody) carries the
         // component's active byte (`Physic` reader 0x4D7850): an inactive one is another state of the entity (a kiosk's
         // knocked-over stall behind its `InertSwitch`, a gate's other position) and has no collision while inactive
@@ -293,10 +316,16 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     // --- guidance
     for &g in &guidance {
         let Some(start) = g.checked_sub(4) else { continue };
-        let Ok(parsed) = parse_guidance(&b[start..]) else { continue };
+        let parsed = match parse_guidance(&b[start..]) {
+            Ok(p) => p,
+            Err(e) => { *skipped.entry(format!("guidance: {e}")).or_default() += 1; continue; }
+        };
         let p = NativePlacement { id: parsed.id, name: name.to_string(), transform: placement, guidance: parsed };
         for (active, mut edge) in p.world_edges() {
-            if !active { *skipped.entry(format!("guidance edge inactive ({:?})", edge.subtype)).or_default() += 1; continue; }
+            if !active {
+                *skipped.entry(format!("guidance edge inactive ({:?})", edge.subtype)).or_default() += 1;
+                continue;
+            }
             // movement probes expect n1 to be the lower face normal (0x66BB40)
             if edge.n1.y > edge.n0.y { std::mem::swap(&mut edge.n0, &mut edge.n1); }
             if p.guidance.check_world_orientation && !crate::native_map::filter_accepts(&p.guidance, edge.n0, edge.n1) { *skipped.entry(format!("guidance edge filtered ({:?})", edge.subtype)).or_default() += 1; continue; }
@@ -314,6 +343,77 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     if o.meshes.is_empty() && o.collision.is_empty() && o.edges.is_empty() { return Ok(None); }
     if !o.bounds.min.is_finite() { o.bounds = Aabb3 { min: o.center, max: o.center }; }
     Ok(Some(o))
+}
+
+/// A skinned Mesh of a city entity at its pose (RE/17 §3.4): the Mesh's bones (`MeshBone`: BoneID and inverse bind
+/// matrix) and per-vertex palette indices and weights (`ac_formats::parse_mesh`), the entity's Skeleton
+/// (`SkeletonComponent`) and the first key of the first Animation its `AnimComponent` lists. The vertices are stored in
+/// their bones' frames (a kiosk's stall drawn as stored lies folded under the street); each one is
+/// `Σ w · (G_bone · invBind_bone) · v`, G the bone's global transform from the skeleton's local transforms with the
+/// animation's keys over them. A kiosk's animations (standing, knocked over in four directions) all start standing.
+/// PORT: the props are drawn at that pose; the knocked-over states (`InertSwitch`, `BhvKiosk`) are not played.
+/// None when the mesh is not skinned.
+fn pose_skinned(data: &CityData, b: &[u8], mesh_id: u32, base: &StaticMesh) -> Option<StaticMesh> {
+    let r = data.archives.get(mesh_id).ok()?;
+    let m = crate::assets::ac_formats::parse_mesh(&r.payload)?;
+    if m.bones.is_empty() || m.positions.len() != base.positions.len() { return None; }
+    let refs = |class: &str| -> Vec<Arc<Resource>> {
+        let c = crc32(class);
+        let mut seen = std::collections::HashSet::new();
+        (0..b.len().saturating_sub(3)).filter_map(|p| word(b, p).ok())
+            .filter(|&id| id != 0 && seen.insert(id) && data.archives.contains(id))
+            .filter_map(|id| data.archives.get(id).ok().filter(|r| r.class_hash == c)).collect()
+    };
+    let skeleton = refs("Skeleton").first().map(|s| crate::assets::ac_formats::parse_skeleton(&s.payload)).unwrap_or_default();
+    let (rot, pos) = refs("Animation").first().and_then(|a| crate::assets::ac_anim::decode(&a.payload).ok())
+        .map(|a| crate::assets::ac_anim::bone_tracks(&a)).unwrap_or_default();
+    // skeleton order has parents first (`parse_skeleton` resolves them by index)
+    let mut global: Vec<Mat4> = Vec::with_capacity(skeleton.len());
+    for bone in &skeleton {
+        let rotation = rot.get(&bone.bone_id).and_then(|k| k.first()).map_or(bone.local_rot, |k| k.1);
+        let translation = pos.get(&bone.bone_id).and_then(|k| k.first()).map_or(bone.local_pos, |k| k.1);
+        let local = Mat4::from_rotation_translation(Quat::from_array(rotation).normalize(), Vec3::from(translation));
+        let g = bone.parent.and_then(|p| global.get(p).copied()).map_or(local, |p| p * local);
+        global.push(g);
+    }
+    let skin: Vec<Mat4> = m.bones.iter().map(|mb| {
+        let g = skeleton.iter().position(|s| s.bone_id == mb.bone_id).map_or(Mat4::IDENTITY, |j| global[j]);
+        g * Mat4::from_cols_array(&mb.inv_bind)
+    }).collect();
+    let mut out = base.clone();
+    for s in &m.submeshes {
+        for i in s.vstart as usize..(s.vstart + s.vcount) as usize {
+            let mut mat = Mat4::ZERO;
+            let mut total = 0.0;
+            for k in 0..4 {
+                let w = m.bone_w[i][k] as f32 / 255.0;
+                if w == 0.0 { continue; }
+                let Some(&bone) = s.palette.get(m.bone_idx[i][k] as usize).and_then(|&x| skin.get(x as usize)).as_ref() else { continue };
+                mat += bone * w;
+                total += w;
+            }
+            if total <= 0.0 { continue; }
+            let mat = mat * (1.0 / total);
+            out.positions[i] = mat.transform_point3(base.positions[i]);
+            out.normals[i] = mat.transform_vector3(base.normals[i]).normalize_or_zero();
+            let t = base.tangents[i];
+            out.tangents[i] = mat.transform_vector3(t.truncate()).normalize_or_zero().extend(t.w);
+        }
+    }
+    Some(out)
+}
+
+/// The small / medium object flags of an entity body (`Entity__Read` 0x450E90): after the component handles, one byte per
+/// bit of the 64-bit field at +96 (bits 0–8, 16–22, 25–27, a u32 for 30–34, then 35–39), a u16 (+170) and a u32 (+124),
+/// then two embedded objects, the first of class 0x4AEC3476. Counted back from that marker the bit 0 byte sits 38 bytes
+/// before it; bit 6 marks a small object, bit 7 a medium one (`RenderItem__SetupForEntity` 0xAA2880). 0 when the marker
+/// or valid bytes are missing. Damascus: 757 small and 515 medium of 14,543 entities.
+pub fn entity_size_flags(b: &[u8]) -> u8 {
+    let h = 0x4AEC_3476u32.to_le_bytes();
+    let Some(p) = b.windows(4).rposition(|w| w == h) else { return 0 };
+    let Some(f) = p.checked_sub(38).map(|s| &b[s..s + 9]) else { return 0 };
+    if f.iter().any(|&x| x > 1) { return 0; }
+    f[6] | f[7] << 1
 }
 
 /// An Entity or EntityGroup body's placement (Entity__Read 0x450E90 → 0x4D9C10): 16 floats after the id/class.
@@ -472,8 +572,11 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
             .find(|&id| id != 0 && data.archives.contains(id) && data.archives.get(id).is_ok_and(|m| m.class_hash == crc32("Mesh")))
             .ok_or("cloth SoftBody without a Mesh")?;
         (vec![mesh], LodTable::default())
+    } else if r.class_hash == crc32("ParticleSystem") || r.class_hash == crc32("OmniLight") {
+        // drawn by `presentation` (the effects and the lights)
+        return Ok(());
     } else {
-        return Err("unsupported drawable".into());
+        return Err(format!("unsupported drawable {:08x}", r.class_hash));
     };
     // MeshInstanceData (mesh id at +5) → the following CompiledMeshInstance's colour blob.
     let instances = markers(&b[v..], "MeshInstanceData").into_iter().map(|p| p + v).collect::<Vec<_>>();
@@ -489,6 +592,8 @@ fn visual(data: &CityData, b: &[u8], v: usize, drawable: u32, o: &mut CityObject
     for (slot, &id) in slots.iter().enumerate() {
         if id == 0 { continue; }
         let mesh = data.meshes.get(&data.archives, id)?;
+        // a skinned prop (a kiosk's stall …): its vertices are stored per bone; pose it
+        let mesh = match pose_skinned(data, b, id, &mesh) { Some(posed) => Arc::new(posed), None => mesh };
         let col = colors.get(&id).and_then(|blob| {
             let n = mesh.positions.len();
             (blob.len() == 16 + n * 4 && word(blob, 8).ok()? as usize == n * 4)
@@ -524,6 +629,25 @@ mod tests {
     use super::*;
 
     fn d(v: [(u32, f32); 5]) -> [LodDescriptor; 5] { v.map(|(mesh, distance)| LodDescriptor { mesh, distance, fade: 0.0 }) }
+
+    /// `Entity__Read`'s flag bytes, counted back from the trailing 0x4AEC3476 object: byte 6 small, byte 7 medium.
+    #[test]
+    fn entity_size_flags_read_the_flag_bytes() {
+        let mut b = vec![0u8; 8];
+        let mut flags = [0u8, 1, 1, 0, 1, 0, 1, 0, 0];
+        b.extend_from_slice(&flags);
+        b.extend_from_slice(&[0u8; 25]);
+        b.extend_from_slice(&0xC22E_FF46u32.to_le_bytes());
+        b.extend_from_slice(&0x4AEC_3476u32.to_le_bytes());
+        assert_eq!(entity_size_flags(&b), 1);
+        flags[6] = 0;
+        flags[7] = 1;
+        b[8..17].copy_from_slice(&flags);
+        assert_eq!(entity_size_flags(&b), 2);
+        b[9] = 7;
+        assert_eq!(entity_size_flags(&b), 0, "a byte that is no bool");
+        assert_eq!(entity_size_flags(&b[..20]), 0, "no marker");
+    }
 
     #[test]
     fn lod_table_follows_the_exe() {

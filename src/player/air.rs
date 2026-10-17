@@ -111,8 +111,8 @@ pub enum InAirEntry {
     /// No target found: the free-jump target (`Human__MakeFreeJumpTarget` 0xB13630 → 0xB1E7F0, `FREE_JUMP_AHEAD` along
     /// `dir`, `FREE_JUMP_DOWN` below), jumped at like any target (type 1) and ended by the ground contact.
     /// `ahead` = how far along `dir` the target lies (`FREE_JUMP_AHEAD`; the step off an edge, event 68, aims
-    /// 1 + 2·profile·speed m ahead, 0xD9D1F0).
-    FreeJump { from: Vec3, dir: Vec3, ahead: f32, speed_param: f32, foot_left: bool },
+    /// 1 + 2·profile·speed m ahead, 0xD9D1F0). `tap`: the tap jump's (vt28), whose fall at the target starts from rest.
+    FreeJump { from: Vec3, dir: Vec3, ahead: f32, speed_param: f32, foot_left: bool, tap: bool },
     /// A free-step jump (jump kind 1: the `freestep_*_to_air` takeoff) from a beam or a pilotis to a target
     /// (NarrowObject event 4 → `Human__SetupJumpToTarget` 0xB20200 with kind 1, 0xE4D950).
     FreeStepJump { from: Vec3, target: JumpTarget, foot_left: bool },
@@ -144,7 +144,7 @@ impl InAirEntry {
     pub fn starting_at(self, p: Vec3) -> Self {
         match self {
             InAirEntry::JumpToTarget { target, speed_param, foot_left, .. } => InAirEntry::JumpToTarget { from: p, target, speed_param, foot_left },
-            InAirEntry::FreeJump { dir, ahead, speed_param, foot_left, .. } => InAirEntry::FreeJump { from: p, dir, ahead, speed_param, foot_left },
+            InAirEntry::FreeJump { dir, ahead, speed_param, foot_left, tap, .. } => InAirEntry::FreeJump { from: p, dir, ahead, speed_param, foot_left, tap },
             InAirEntry::FreeStepJump { target, foot_left, .. } => InAirEntry::FreeStepJump { from: p, target, foot_left },
             InAirEntry::FreeStepFreeJump { dir, ahead, down, foot_left, .. } => InAirEntry::FreeStepFreeJump { from: p, dir, ahead, down, foot_left },
             InAirEntry::OnPlace { fwd, action, fall, .. } => InAirEntry::OnPlace { from: p, fwd, action, fall },
@@ -200,6 +200,19 @@ pub fn pull_back(from: Vec3, aim: Vec3, target_type: u32) -> Vec3 {
 /// The over-drop rule `sub_B1B8C0` (0xB1B9A8 / 0xB1BA76–0xB1BB42): a target more than `thr` below the start is aimed at
 /// `thr` down, pulled back horizontally by min(dist, 1.5)·k with k = clamp((dz − thr) / −30, 0, 2) (RE/24 AIR-20); the
 /// free fall then steers to the true target. Returns (aim, the fall's target).
+/// `sub_B1B8C0`'s threshold by target type and jump kind (a6): −5 m; a haystack (0x800) −3 m, and for the ground and
+/// free-step kinds (< 2) −30 m when the drop is 3 m or more (the Leap of Faith, +506 mode 2); the rebound (2) and the
+/// swing (3) keep −3 m with no faith mode (0xB1B9DF–0xB1BA19, RE/30).
+fn over_drop_threshold(type_flags: u32, dz: f32, kind: u32) -> f32 {
+    if type_flags != jump_blend::TARGET_HAYSTACK {
+        OVERDROP
+    } else if kind < 2 && dz <= -jump_blend::FAITH_MIN_DROP {
+        jump_blend::FAITH_DOWN
+    } else {
+        jump_blend::FAITH_MIN_DROP
+    }
+}
+
 fn over_drop(from: Vec3, target: Vec3, thr: f32) -> (Vec3, Option<Vec3>) {
     let dz = target.y - from.y;
     if dz >= -thr {
@@ -250,6 +263,8 @@ pub struct HumanInAirData {
     pub tail_v: Vec3,
     /// The let-go dive: the let-go's first item still playing (s left); the tail waits for it (0xE0F772).
     pub dive_wait: Option<f32>,
+    /// The let-go's first item (and its length) while `dive_wait` runs: its root motion moves the body (live RE/20 #43).
+    pub dive_item: Option<(ActionBlend, f32)>,
     /// The HollywoodMode layer (28) of the let-go dive: it collides with almost nothing (0xEEC622). PORT: the dive's
     /// step is set directly, without the capsule.
     pub hollywood: bool,
@@ -272,6 +287,9 @@ pub struct HumanInAirData {
     /// The jump is at the free-jump target (no target found): the ground contact ends it, as it does in the game
     /// (0xE05200 on the controller contact) long before the target 3 m down is reached.
     pub free_target: bool,
+    /// The free target is the tap jump's (vt28) or the free-step free jump's: at its end the fall starts from rest (see
+    /// the flight's end).
+    pub tap_free_jump: bool,
     /// A free-step arrival cancelled by a ceiling contact (`sub_E009F0`): the fall plays with a 0.3 s blend (RE/24 AIR-10).
     pub free_step_abort: bool,
     /// Ground loss: the drop sub-state's (type, side) (InAirData+944 +64 / +68) and the edge's outward normal.
@@ -302,6 +320,7 @@ impl HumanInAirData {
         self.arrival_w = None;
         self.side_setup = None;
         self.dive_wait = None;
+        self.dive_item = None;
         self.hollywood = false;
         self.hay_pass = false;
         self.apex_reached = false;
@@ -312,6 +331,7 @@ impl HumanInAirData {
         self.fall_action = None;
         self.fall_t = 0.0;
         self.free_target = false;
+        self.tap_free_jump = false;
         self.free_step_abort = false;
         self.drop = None;
         self.slope_slide = default();
@@ -335,11 +355,7 @@ impl HumanInAirData {
                 let mut aim = target.position;
                 let mut then_fall_to = None;
                 // haystack: −3 m, or −30 m when deeper (Leap of Faith)
-                let thr = if target.type_flags == jump_blend::TARGET_HAYSTACK {
-                    if target.position.y - from.y <= -jump_blend::FAITH_MIN_DROP { jump_blend::FAITH_DOWN } else { jump_blend::FAITH_MIN_DROP }
-                } else {
-                    OVERDROP
-                };
+                let thr = over_drop_threshold(target.type_flags, target.position.y - from.y, 0);
                 if target.straight.is_none() {
                     (aim, then_fall_to) = over_drop(from, target.position, thr);
                 } else if target.position.y < from.y - thr {
@@ -363,11 +379,7 @@ impl HumanInAirData {
                 // a haystack target (the impulsion jump's Leap of Faith, event 45): the haystack's over-drop limits and
                 // layer, as for every kind (`sub_B1B8C0` in `Human__SetupJumpToTarget` 0xB20468; InAir entry 0xE01E19)
                 self.hay_pass = target.type_flags == jump_blend::TARGET_HAYSTACK;
-                let thr = if target.type_flags == jump_blend::TARGET_HAYSTACK {
-                    if target.position.y - from.y <= -jump_blend::FAITH_MIN_DROP { jump_blend::FAITH_DOWN } else { jump_blend::FAITH_MIN_DROP }
-                } else {
-                    OVERDROP
-                };
+                let thr = over_drop_threshold(target.type_flags, target.position.y - from.y, 1);
                 let (aim, then_fall_to) = over_drop(from, target.position, thr);
                 self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 1);
             }
@@ -382,7 +394,8 @@ impl HumanInAirData {
                     Some(target) => {
                         self.target_flags = target.type_flags;
                         self.target = Some(target);
-                        let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
+                        let thr = over_drop_threshold(target.type_flags, target.position.y - from.y, 3);
+                        let (aim, then_fall_to) = over_drop(from, target.position, thr);
                         self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 3);
                     }
                     None => {
@@ -405,7 +418,8 @@ impl HumanInAirData {
                     Some(target) => {
                         self.target_flags = target.type_flags;
                         self.target = Some(target);
-                        let (aim, then_fall_to) = over_drop(from, target.position, OVERDROP);
+                        let thr = over_drop_threshold(target.type_flags, target.position.y - from.y, 2);
+                        let (aim, then_fall_to) = over_drop(from, target.position, thr);
                         self.mode = self.real_jump(from, aim, target.type_flags, then_fall_to, 2);
                     }
                     None => {
@@ -431,7 +445,7 @@ impl HumanInAirData {
                 let d = action.duration().max(0.1);
                 self.mode = AirMode::Jump { from, clip_end, aim: clip_end, duration: d, t: 0.0, then_fall_to: Some(clip_end), t_takeoff: 0.0, fwd };
             }
-            InAirEntry::FreeJump { from, dir, ahead, speed_param, foot_left } => {
+            InAirEntry::FreeJump { from, dir, ahead, speed_param, foot_left, tap } => {
                 self.start_y = from.y;
                 self.start = from;
                 self.apex_y = from.y;
@@ -448,6 +462,7 @@ impl HumanInAirData {
                 self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
                 self.free_target = true;
+                self.tap_free_jump = tap;
             }
             InAirEntry::FreeStepFreeJump { from, dir, ahead, down, foot_left } => {
                 self.start_y = from.y;
@@ -461,6 +476,9 @@ impl HumanInAirData {
                 self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 1);
                 self.free_target = true;
+                // the beam's free jump falls from rest at its target too (chain_beam 001 / 012 / 013 / 025: 0.04–1.07
+                // m/s after a 3.5–4.2 m/s flight)
+                self.tap_free_jump = true;
             }
             InAirEntry::LetGoDive { from, target, origin } => {
                 self.entry_velocity = Some(Vec3::ZERO);
@@ -477,8 +495,10 @@ impl HumanInAirData {
                 self.tail_v = Vec3::ZERO;
                 // the let-go (0x1120E17B wall / 0x1120E179 free) plays its first item before the dive
                 let id = if origin == FallOrigin::HangFree { LET_GO_FREE } else { super::climb::LOST_GRIP };
-                let d = [id, super::climb::LOST_GRIP].into_iter().map(|a| ActionBlend::new(a, 0, &[1.0]).duration()).find(|d| *d > 0.0).unwrap_or(0.3);
+                let item = [id, super::climb::LOST_GRIP].into_iter().map(|a| ActionBlend::new(a, 0, &[1.0])).find(|a| a.duration() > 0.0);
+                let d = item.map_or(0.3, |a| a.duration());
                 self.dive_wait = Some(d);
+                self.dive_item = item.map(|a| (a, d));
                 self.hollywood = true;
                 // the let-go record knows the haystack (0xDD7810)
                 self.hay_pass = true;
@@ -959,7 +979,19 @@ pub fn update_air(
                             let step = next - path(t);
                             let frac = (1.0 - (duration - t) / dt.max(1e-4)).clamp(0.0, 1.0);
                             air.tail_v = (step + step * frac) * 0.5;
-                            air.mode = AirMode::Fall { steer_to: if p == aim { None } else { Some(p) } };
+                            // no over-drop (the fall point at the aim's height: a free jump's own target, the aim only
+                            // pulled back 0.5 m along it; an over-drop's aim sits `OVERDROP` above its target)
+                            let free_end = (p.y - aim.y).abs() < 1e-4;
+                            if free_end && air.tap_free_jump {
+                                // the tap jump's free jump at its own target: the jump ends there and the fall starts
+                                // from the controller's velocity, which the flight's kinematic moves never set. Live, 30
+                                // lab recordings (freerun_east lines, chain_beam, beam_freerun): 0–1 m/s across, mostly
+                                // ≈ 0.4, after a 3.8 m/s flight, falling from rest, then the 4 m/s² drift decay. PORT:
+                                // that stale velocity is taken as 0. Event 68's step-off keeps its flight speed (live
+                                // landing times, `walking_and_running_off_an_edge_land_in_the_live_times`)
+                                body.velocity = Vec3::ZERO;
+                            }
+                            air.mode = AirMode::Fall { steer_to: if free_end { None } else { Some(p) } };
                         }
                         // a free-step arrival (case 1 / 0x10000) with a ceiling contact (a controller contact of class 8,
                         // `sub_4F8C40`(8), 0xE07F47–0xE07F59; the classes are `sub_71B840`'s) is cancelled into a fall
@@ -1021,8 +1053,19 @@ pub fn update_air(
                     // the target's height the plain fall carries on (the port's contacts may not end it there).
                     // the let-go's first item plays (no tail, 0xE0F772); when it ends the faith dive starts (0x23A949B5,
                     // blend 0.6·t) and the tail steers to the haystack
+                    // The item's root motion carries the body meanwhile (the controller velocity is the clip's step:
+                    // live RE/20 #43, `xx_h_hangwall_tr_fall` held 0.13 s, then (0.69 −0.69 −4.97) m/s to its end).
                     Some(_) if air.dive_wait.is_some() => {
-                        let w = air.dive_wait.unwrap_or(0.0) - dt;
+                        let w0 = air.dive_wait.unwrap_or(0.0);
+                        let w = w0 - dt;
+                        if let Some((item, d)) = air.dive_item {
+                            let fwd = body.forward();
+                            let ph = |left: f32| ((d - left.max(0.0)) / d.max(1e-4)).clamp(0.0, 1.0);
+                            let (a, b) = (item.disp(ph(w0)), item.disp(ph(w)));
+                            let step = to_world([b[0] - a[0], b[1] - a[1], b[2] - a[2]], fwd);
+                            body.velocity = step / dt.max(1e-4);
+                            h = Vec3::new(body.velocity.x, 0.0, body.velocity.z);
+                        }
                         if w > 0.0 {
                             air.dive_wait = Some(w);
                         } else {
@@ -1136,12 +1179,16 @@ pub fn update_air(
                     // fall from 6 m entered `Hay_Bale_01` through the top, InAir+336 empty). Layer 44 (an aimed jump)
                     // lets the flight through the static world, not through the haystack: its Dynamic box gives the
                     // contact. While the faith dive plays (the Leap of Faith, the let-go dive) the dive branch's ray
-                    // decides instead, and that one does need the known haystack (`hay_pass`).
+                    // decides instead, and that one does need the known haystack (`hay_pass`). The dive branch never
+                    // fills the contact normal that the +340 test reads (0xE058E2 reads frame +0x48; only the contact
+                    // branch writes it, 0xE0579C), so the entry is SideJump (`xx_h_air_to_haystack`): live (RE/20 #43,
+                    // 2026-10-17) the stale value was 0.0 in every let-go dive, +340 = 1, RequestHayStack from the tail
+                    // (0xE0FCDB) gave entry 4, the SideJump value.
                     let hit = if air.faith_dive() || air.hollywood {
                         air.hay_pass
                             .then(|| super::hay::dive_hit(body.feet - body.velocity * dt, body.feet, &guidance.haystacks))
                             .flatten()
-                            .map(|stack| (stack, super::hay::HayEntry::Top))
+                            .map(|stack| (stack, super::hay::HayEntry::SideJump))
                     } else {
                         super::hay::haystack_contacts(&body.proxy.manifold, &guidance.haystacks, &collision)
                             .next()
@@ -1402,6 +1449,14 @@ mod fall_tests {
         assert!((aim - Vec3::new(0.0, -OVERDROP, -6.0 + 1.5 * k)).length() < 1e-5, "{aim}");
         assert_eq!(fall, Some(Vec3::new(0.0, -20.0, -6.0)));
         assert_eq!(over_drop(from, roof, OVERDROP), (roof, None));
+        // 0xB1B9BC–0xB1BA19: a haystack 3 m down or more is the Leap of Faith (−30 m) for the ground and free-step
+        // kinds only; the rebound (2) and swing (3) jumps keep −3 m (RE/30)
+        let hay = jump_blend::TARGET_HAYSTACK;
+        assert_eq!(over_drop_threshold(hay, -6.0, 0), jump_blend::FAITH_DOWN);
+        assert_eq!(over_drop_threshold(hay, -2.0, 0), jump_blend::FAITH_MIN_DROP);
+        assert_eq!(over_drop_threshold(hay, -6.0, 2), jump_blend::FAITH_MIN_DROP);
+        assert_eq!(over_drop_threshold(hay, -6.0, 3), jump_blend::FAITH_MIN_DROP);
+        assert_eq!(over_drop_threshold(TARGET_FREESTEP, -6.0, 3), OVERDROP);
     }
 
     /// RE/24 AIR-1: the free jump's target lies 3 m down. On solid ground ahead the sweep hits and the jump flies the
@@ -1413,7 +1468,7 @@ mod fall_tests {
             let mut c = CollisionWorld::default();
             c.boxes.push(Aabb3 { min: Vec3::new(-5.0, -1.0, -floor_ahead), max: Vec3::new(5.0, 0.0, 5.0) });
             let mut air = HumanInAirData::default();
-            air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
+            air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true, tap: true });
             air.apply_down_variants(&c);
             air.flight.map(|f| f.id).unwrap()
         };
@@ -1427,7 +1482,7 @@ mod fall_tests {
         let mut air = HumanInAirData::default();
         let start = 0.0f32; // facing −Z
         let dir = Quat::from_rotation_y(-0.75) * Vec3::NEG_Z; // 43° to the right
-        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
+        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true, tap: true });
         air.begin_turn(start);
         let AirMode::Jump { t_takeoff, fwd, from, clip_end, .. } = air.mode else { panic!("not a jump") };
         assert!(t_takeoff > 0.1, "{t_takeoff}");
@@ -1468,7 +1523,7 @@ mod fall_tests {
     #[test]
     fn the_takeoff_item_holds_the_apex_record() {
         let mut air = HumanInAirData::default();
-        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
+        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true, tap: true });
         let takeoff = |air: &HumanInAirData| air.playing_word().is_some_and(|w| w & super::super::anim_gate::TAKEOFF != 0);
         assert!(takeoff(&air), "{:?}", air.playing_word());
         let AirMode::Jump { t_takeoff, .. } = &mut air.mode else { panic!() };

@@ -194,6 +194,27 @@ pub fn attach_blocked(attach: Vec3, f: Vec3, collision: &CollisionWorld) -> bool
     !collision.obb_free(attach + Vec3::Y * 0.95, [super::right_of(f), Vec3::Y, f], Vec3::new(0.45, 0.35, 0.45))
 }
 
+/// The ground entry's attach rung (`sub_E1F8E0` 0xE1F95D–0xE1F984): the nearest 0.5 m rung to the root's HeightInLadder,
+/// below the ladder's height − 1.95 m; a ladder buried more than 0.1 m starts at the rung 1 + trunc(2 × buried) at
+/// least (0xE1F99B: `1 − (int)(−2·b)`; live RE/25: the Bureau ladder, 0.67 m below the ground, attached at 1.0 m); high
+/// profile 0.5 m higher (0xE26AB5–0xE26AE2, RE/24 LADDER-5).
+pub fn entry_rung_height(len: f32, h_in: f32, high: bool, buried: f32) -> f32 {
+    let mut k = ((h_in.max(0.0).min(len - 1.95).max(0.0) + 0.25) * 2.0).trunc();
+    if buried > 0.1 {
+        k = k.max(1.0 + (2.0 * buried).trunc());
+    }
+    0.5 * k + if high { 0.5 } else { 0.0 }
+}
+
+/// The ground entry's attach point, the root target `StateEntry_Enter` computes (0xE26A73–0xE26AE2) before it tests
+/// `sub_E24FD0`'s box there (0xE26AFB): the attach rung 0.5 m out on the climber's side. Live (RE/29 #38): a ladder whose
+/// base lies 1.3 m under the roof it is walked onto from (17.54 −6.92) is entered from the front; the box at the base
+/// sat inside the roof and turned the port round it.
+pub fn ground_attach(base: Vec3, top: Vec3, n: Vec3, from: Vec3, high: bool, buried: f32) -> Vec3 {
+    let l = HumanLadderData { base, top, n, ..Default::default() };
+    l.root_at(entry_rung_height(l.len(), l.height_of(from), high, buried))
+}
+
 #[derive(Debug, Default)]
 pub struct HumanLadderData {
     pub base: Vec3,
@@ -217,6 +238,8 @@ pub struct HumanLadderData {
     to: Vec3,
     /// The root follows the action's displacement plus a linear correction to `to`.
     follow: bool,
+    /// The followed clip plays in the character's start frame (`fwd`, upright): the back-approach turn.
+    start_frame: bool,
     fwd: Vec3,
     pub heading: Vec3,
     /// The jump's push-off direction (horizontal), set when the jump starts.
@@ -321,6 +344,7 @@ impl HumanLadderData {
         self.from = from;
         self.to = to;
         self.follow = follow;
+        self.start_frame = false;
         self.rate = 1.0;
         self.seq = self.seq.wrapping_add(1);
     }
@@ -448,24 +472,21 @@ impl HumanLadderData {
             let k = a / std::f32::consts::FRAC_PI_2;
             let left = to_char.dot(super::right_of(-self.n)) < 0.0;
             let w = if left { [1.0 - k, k, 0.0] } else { [1.0 - k, 0.0, k] };
-            // the attach rung (`sub_E1F8E0` 0xE1F95D–0xE1F984): the nearest 0.5 m rung to the root's height, below the
-            // ladder's height − 1.95 m; high profile 0.5 m higher (0xE26AB5–0xE26AE2, RE/24 LADDER-5). PORT: the buried
-            // base (`sub_E25B20`) is not measured
-            let h_in = self.height_of(e.from).max(0.0);
-            let mut k = ((h_in.min(self.len() - 1.95).max(0.0) + 0.25) * 2.0).trunc();
-            // a ladder buried more than 0.1 m starts at the rung 1 + trunc(2 × buried) at least (0xE1F95D: `1 − (int)(−2·b)`;
-            // live RE/25: the Bureau ladder, 0.67 m below the ground, attached at 1.0 m)
-            if e.buried > 0.1 {
-                k = k.max(1.0 + (2.0 * e.buried).trunc());
-            }
-            self.height = 0.5 * k + if e.high { 0.5 } else { 0.0 };
+            // the attach rung (`entry_rung_height`, RE/24 LADDER-5)
+            self.height = entry_rung_height(self.len(), self.height_of(e.from), e.high, e.buried);
             let to = self.root_at(self.height);
             if let Some(left) = e.back_turn {
                 // the back-approach turn (+908 bit 2: 0x0A64400C / D, items a then b into the wait, single-weight blend;
                 // RE/24 LADDER-4), ending on the approach side (live RE/25 #68). PORT: the heading snaps (the game slerps
                 // at rate 1.6)
                 self.chain = true;
-                self.play(LadderPhase::Entry, blend(TURN[(!left) as usize], 0, &[]), e.from, to, false);
+                // the root follows the turn's clip in the character's start frame, with the linear correction onto the
+                // rung (live, the Bureau ladder: the root swings 0.5 m to the side and back over the turn's first 0.7 s).
+                // PORT: the game keeps the root's distance from the ladder through the turn, where the clip's forward
+                // path less the correction leaves a 0.4 m excursion halfway
+                self.fwd = Vec3::new(e.facing.x, 0.0, e.facing.z).normalize_or(-self.n);
+                self.play(LadderPhase::Entry, blend(TURN[(!left) as usize], 0, &[]), e.from, to, true);
+                self.start_frame = true;
                 return;
             }
             // the clip plays in the character's frame at the entry (start matrix +592, RE/24 LADDER-6)
@@ -672,7 +693,7 @@ pub enum LadderSide {
 ///    plays first (0xE27000), then the loop and the end in the new context (0xE20650 Climb, ClimbData+36 = 2;
 ///    0xE20900 Ledge). PORT: the start plays in the new context too, as the climb's reach does in the port.
 pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<LadderSide> {
-    use super::ledge::{hang_root, hang_type_at, LedgeEntry, LedgeHangType, LedgeSubState};
+    use super::ledge::{hang_type_at, LedgeEntry, LedgeHangType, LedgeSubState};
     let fwd = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let s = if right { super::right_of(fwd) } else { -super::right_of(fwd) };
     // 1. a ledge beside the ladder
@@ -689,9 +710,7 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
         let wall = hang == LedgeHangType::Wall;
         // the two hands found (`HumanLadder__FillLedge_SideHang` 0xE20120: LimbIK contacts 0 / 1 = the setup's records)
         let e = LedgeEntry { hand_l: hl, hand_r: hr, ..LedgeEntry::at(mid, wn, root, LedgeSubState::TransitionInFromClimb) };
-        let to = hang_root(e.hand_l, e.hand_r, wn, hang);
-        let hf = -Vec3::new(wn.x, 0.0, wn.z).normalize_or(fwd);
-        if super::climb::hang_boxes_free(collision, to, hf, wall) {
+        if super::ledge::hang_boxes_at(e.hand_l, e.hand_r, wn, hang, super::ledge::entry_feet((e.hand_l + e.hand_r) * 0.5, wn, collision), collision) {
             let id = TO_HANG_SIDE[!wall as usize][right as usize];
             let mv = super::ledge_moves::climb_to_hang_move(root, e.hand_l, e.hand_r, wn, id, hang, collision);
             return Some(LadderSide::Hang(LedgeEntry { entry_move: Some(mv), ..e }));
@@ -795,7 +814,7 @@ pub fn update_ladder(
             let dend = l.action.map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
             // the frame: the character's upright start frame for the ground entry (+592, RE/24 LADDER-6) and the revolve,
             // else the ladder frame (F × Z, F, Z) the root holds on the ladder (`sub_E21600`; RE/24 LADDER-17)
-            let (f, u) = if matches!(phase, LadderPhase::EnterGround | LadderPhase::Revolve(_)) { (l.fwd, Vec3::Y) } else { (-l.out(), l.axis()) };
+            let (f, u) = if matches!(phase, LadderPhase::EnterGround | LadderPhase::Revolve(_)) || l.start_frame { (l.fwd, Vec3::Y) } else { (-l.out(), l.axis()) };
             let r = f.cross(u).normalize_or(super::right_of(f));
             let w = |d: [f32; 3]| r * d[0] + f * d[1] + u * d[2];
             // the ground entry drives the correction by min(2s, 1) (`sub_E1EF50`; RE/24 LADDER-6), the others linearly
@@ -969,7 +988,13 @@ pub fn update_ladder(
                     }
                 }
                 let stepping = matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && !done;
-                let thick_top = *l.thick_top.get_or_insert_with(|| wall_top_behind(l.top, l.n, &guidance));
+                // the step's playback rate is chosen every frame (`HumanLadder__ChooseClimbAnim` 0xE24540): the stick
+                // released (input ≤ 0.0005) plays it at 1.0 (0xE24AD3), a low-profile stick at or below 0.5 at 0.5
+                // (0xE2490B), else 1.0. Live (RE/29 #61): with the stick let go the slow step finishes at twice the speed
+                if stepping {
+                    l.rate = if !stick || l.high || pad.band > 1 { 1.0 } else { 0.5 };
+                }
+                let thick_top =*l.thick_top.get_or_insert_with(|| wall_top_behind(l.top, l.n, &guidance));
                 // ReachedTop / ReachedBottom (`UpdateReachedTopBottom` 0xE1D490) on the continuous height while climbing,
                 // and the exits posted every frame (LadderState 0xEEBF87, events 2 / 3): mid-step too (RE/24 LADDER-9).
                 // The top margin: 1.63 m in low profile or with a wall top (0x20), else 1.95 m (LADDER-8)

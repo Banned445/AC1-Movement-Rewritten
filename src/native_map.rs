@@ -93,7 +93,6 @@ pub(crate) fn load(game: &Path) -> Result<ImportedMap, String> {
     let y = map.collision.floor_height_below(origin, 12.0).ok_or("native rooftop spawn has no collision support")?;
     map.spawn = Vec3::new(origin.x, y, origin.z);
     if !map.collision.capsule_fits(map.spawn) { return Err("native rooftop spawn is blocked".into()); }
-    map.guidance.jump_pilotis = Some(crate::player::targets::find_jump_pilotis(&map.guidance,&map.collision));
     Ok(map)
 }
 
@@ -134,7 +133,6 @@ pub(crate) fn load_village(game: &Path) -> Result<ImportedMap,String> {
     let y = map.collision.floor_height_below(origin,4.0).ok_or("village street has no native ground support")?;
     map.spawn = Vec3::new(origin.x,y,origin.z);
     if !map.collision.capsule_fits(map.spawn) { return Err("village street spawn is blocked".into()); }
-    map.guidance.jump_pilotis = Some(crate::player::targets::find_jump_pilotis(&map.guidance,&map.collision));
     info!("Masyaf village: {} source placements, {} collision triangles, {} authored edges",map.parts.len(),map.collision.triangles.len(),map.guidance.edges.len());
     Ok(map)
 }

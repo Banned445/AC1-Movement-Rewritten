@@ -84,14 +84,24 @@ vegetation are absent, and materials are not exact.
 props, vegetation, collision and the climbable edges. It streams like the game does: the city's grid cells load
 around you on background threads, objects switch between their level-of-detail meshes with distance, and the
 merged low-detail "fake" meshes the game ships draw the rest of the city on the horizon. You start at the north
-gate (the arrival from the Kingdom). NPCs, crowds, sounds, missions and particles are not included, the lighting is a
-fixed sun and haze, and materials use a standard PBR shader rather than the game's.
+gate (the arrival from the Kingdom). The city's mood comes from the World file too: the sun, the ambient light, the
+distance fog, the sky and the colour grading of the game's post effects, plus the lanterns' lights, the fires, smoke
+and other particle systems placed around the city, the ambient sounds of fountains, trees, kiosks and braziers, and the
+quarters' ambience (wind, district beds and their random calls). NPCs, crowds and missions are not included, and
+materials use a standard PBR shader rather than the game's.
+
+The game loads extra mission and memory-block DataBlocks depending on story progress (for example the props of an
+opened assassination). The port loads the city grid alone unless `AC_CITY_DATABLOCKS` names some of them; a save in
+Memory Block 2 during Tamir's investigation has `Memory Block 2`, `MB02 - Side Quest`, `M13_Tamir` and
+`M13_Tamir_Investigation`, and the opened assassinations add `M13_Tamir_MissionOpened`, `M33_Vizier_MissionOpened` or
+`M58_Jubair_MissionOpened`.
 
 To start on a native map from the command line:
 
 ```powershell
 $env:AC_NATIVE_MAP = "damascus"   # or "masyaf-village" / "masyaf-roofs"; unset to use the greybox
 $env:AC_CITY_SPAWN = "Souk"       # Damascus only, optional: Bureau, Academy, Palace or Souk
+$env:AC_CITY_DATABLOCKS = "M13_Tamir_MissionOpened"  # Damascus only, optional: mission / memory-block content to load, comma-separated
 $env:AC_LOD_FADE = "1"            # optional: cross-fade between LODs (the retail game switches them)
 cargo run --release
 ```
@@ -127,11 +137,17 @@ Set these environment variables before `cargo run --release`:
 | `AC_VIDEO=<out.mp4>` | With `AC_REPLAY`: pipes every replayed frame to ffmpeg. `AC_FFMPEG` sets the ffmpeg path, `AC_VIDEO_CRF` the quality |
 | `AC_WINDOW=<w>x<h>` | Window size. The default is 1600 x 900 |
 | `AC_NO_HUD=1` | Hides the debug HUD |
+| `AC_NO_GUIDANCE=1` | Starts with the guidance lines hidden (G shows them) |
 | `AC_DEMO_COURSE=1` | Adds a parkour course on the greybox's empty north side. Its scripted run is written as a recording by `cargo test --release demo_course_run -- --ignored --nocapture` (output in `target/demo-course/`) |
 | `AC_AUTOPILOT=roofs`, `climb` or `ledge` | Scripted input for that scenario |
 | `AC_SCREENSHOT=<file.png>` | Saves a screenshot and exits. `AC_SCREENSHOT_AT=<seconds>` sets when (default 3) |
 | `AC_GHOST=1` | Turns Ghost mode on after one second |
 | `AC_CITY_TOUR=<m/s>` | Flies across Damascus at that speed, to stress the streaming |
+| `AC_CITY_AT="x y z yaw"` | Starts Damascus at a game position (yaw in degrees), to compare a spot with the game |
+| `AC_SHOTS=t1,t2,…` | Freezes at each time and saves a screenshot per view (`AC_VIEWS=back,left,…`, `AC_SHOT_DIR`). `AC_SHOT_CAMS=<file>` places the cameras exactly instead, one line `name x y z qx qy qz qw` per view in game space |
+| `AC_CITY_OVERLAY=1` | Shows the F3 city counters from the start |
+| `AC_NO_SOUND=1` | Silences the sounds |
+| `AC_SND_LOG=<seconds>` | Logs the playing voices and the mix level at that interval |
 | `AC_NO_MODEL=1` | Runs without Altaïr's model, with the capsule |
 
 ## Tests

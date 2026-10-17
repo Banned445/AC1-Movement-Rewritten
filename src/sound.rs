@@ -6,7 +6,7 @@ use std::num::NonZero;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bevy::audio::{AddAudioSource, ChannelCount, Decodable, PlaybackSettings, Sample, SampleRate, Source, Volume};
+use bevy::audio::{AddAudioSource, AudioSink, AudioSinkPlayback, ChannelCount, Decodable, PlaybackSettings, Sample, SampleRate, Source, SpatialAudioSink, Volume};
 use bevy::prelude::*;
 
 use crate::anim::AnimPlayer;
@@ -59,6 +59,39 @@ impl Decodable for PcmClip {
     }
 }
 
+/// A voice's wanted gain and its bus; `mix_audio` sets the sink's volume.
+#[derive(Component, Clone, Copy)]
+pub struct MixVoice {
+    pub gain: f32,
+    pub bus: f32,
+}
+
+/// PORT: the sum of every voice's gain times its bus stays under this; past it every voice comes down together (fast
+/// down, slow back up). The DARE mixer's limits are not traced. Without it the city's beds, emitters and random calls
+/// with the player's own sounds summed to several times full scale while crossing the quarters, and clipped.
+const HEADROOM: f32 = 0.9;
+
+/// The mix: the voices' gains times their buses, scaled together to stay under `HEADROOM`, onto their sinks.
+pub fn mix_audio(time: Res<Time>, mut scale: Local<Option<f32>>,
+    mut voices: Query<(&MixVoice, Option<&mut SpatialAudioSink>, Option<&mut AudioSink>)>) {
+    let sum: f32 = voices.iter().map(|(v, ..)| v.gain * v.bus).sum();
+    let target = if sum > HEADROOM { HEADROOM / sum } else { 1.0 };
+    let s = scale.get_or_insert(target);
+    // down at once (no frame past the headroom), back up over about a second
+    if target < *s { *s = target; } else { *s += (target - *s) * time.delta_secs().min(1.0); }
+    let s = *s;
+    if std::env::var("AC_SND_LOG").is_ok() && (time.elapsed_secs() * 2.0).fract() < time.delta_secs() * 2.0 {
+        let n = voices.iter().count();
+        let sinks = voices.iter().filter(|(_, a, b)| a.is_some() || b.is_some()).count();
+        info!("mix: {n} voices ({sinks} with sinks), wanted {sum:.2}, scale {s:.2}, out {:.2}", sum * s);
+    }
+    for (v, spatial, flat) in &mut voices {
+        let vol = Volume::Linear(v.gain * v.bus * s);
+        if let Some(mut k) = spatial { k.set_volume(vol); }
+        if let Some(mut k) = flat { k.set_volume(vol); }
+    }
+}
+
 /// The bank (loaded on a thread at startup), the random state and the decoded resources.
 #[derive(Resource)]
 pub struct Sounds {
@@ -82,7 +115,8 @@ impl Plugin for SoundPlugin {
         app.add_audio_source::<PcmClip>()
             .init_resource::<Sounds>()
             .add_systems(Startup, start_loading)
-            .add_systems(Update, play_anim_sounds.after(crate::anim::apply_clip));
+            .add_systems(Update, play_anim_sounds.after(crate::anim::apply_clip))
+            .add_systems(PostUpdate, mix_audio);
     }
 }
 
@@ -160,6 +194,7 @@ fn play_anim_sounds(
                 // PORT: played at the listener (non-spatial); the play event's 3D parameters (+0x20..) are not applied
                 commands.spawn((
                     AudioPlayer::<PcmClip>(handle),
+                    MixVoice { gain: Volume::Decibels(v.gain_db).to_linear(), bus: 1.0 },
                     PlaybackSettings::DESPAWN.with_volume(Volume::Decibels(v.gain_db)).with_speed(v.speed),
                 ));
             }
