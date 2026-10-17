@@ -287,7 +287,8 @@ pub struct HumanInAirData {
     /// The jump is at the free-jump target (no target found): the ground contact ends it, as it does in the game
     /// (0xE05200 on the controller contact) long before the target 3 m down is reached.
     pub free_target: bool,
-    /// The free target is the tap jump's (vt28): at its end the fall starts from rest (see the flight's end).
+    /// The free target is the tap jump's (vt28) or the free-step free jump's: at its end the fall starts from rest (see
+    /// the flight's end).
     pub tap_free_jump: bool,
     /// A free-step arrival cancelled by a ceiling contact (`sub_E009F0`): the fall plays with a 0.3 s blend (RE/24 AIR-10).
     pub free_step_abort: bool,
@@ -475,6 +476,9 @@ impl HumanInAirData {
                 self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 1);
                 self.free_target = true;
+                // the beam's free jump falls from rest at its target too (chain_beam 001 / 012 / 013 / 025: 0.04–1.07
+                // m/s after a 3.5–4.2 m/s flight)
+                self.tap_free_jump = true;
             }
             InAirEntry::LetGoDive { from, target, origin } => {
                 self.entry_velocity = Some(Vec3::ZERO);
