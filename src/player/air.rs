@@ -263,6 +263,8 @@ pub struct HumanInAirData {
     pub tail_v: Vec3,
     /// The let-go dive: the let-go's first item still playing (s left); the tail waits for it (0xE0F772).
     pub dive_wait: Option<f32>,
+    /// The let-go's first item (and its length) while `dive_wait` runs: its root motion moves the body (live RE/20 #43).
+    pub dive_item: Option<(ActionBlend, f32)>,
     /// The HollywoodMode layer (28) of the let-go dive: it collides with almost nothing (0xEEC622). PORT: the dive's
     /// step is set directly, without the capsule.
     pub hollywood: bool,
@@ -315,6 +317,7 @@ impl HumanInAirData {
         self.arrival_w = None;
         self.side_setup = None;
         self.dive_wait = None;
+        self.dive_item = None;
         self.hollywood = false;
         self.hay_pass = false;
         self.apex_reached = false;
@@ -484,8 +487,10 @@ impl HumanInAirData {
                 self.tail_v = Vec3::ZERO;
                 // the let-go (0x1120E17B wall / 0x1120E179 free) plays its first item before the dive
                 let id = if origin == FallOrigin::HangFree { LET_GO_FREE } else { super::climb::LOST_GRIP };
-                let d = [id, super::climb::LOST_GRIP].into_iter().map(|a| ActionBlend::new(a, 0, &[1.0]).duration()).find(|d| *d > 0.0).unwrap_or(0.3);
+                let item = [id, super::climb::LOST_GRIP].into_iter().map(|a| ActionBlend::new(a, 0, &[1.0])).find(|a| a.duration() > 0.0);
+                let d = item.map_or(0.3, |a| a.duration());
                 self.dive_wait = Some(d);
+                self.dive_item = item.map(|a| (a, d));
                 self.hollywood = true;
                 // the let-go record knows the haystack (0xDD7810)
                 self.hay_pass = true;
@@ -1028,8 +1033,19 @@ pub fn update_air(
                     // the target's height the plain fall carries on (the port's contacts may not end it there).
                     // the let-go's first item plays (no tail, 0xE0F772); when it ends the faith dive starts (0x23A949B5,
                     // blend 0.6·t) and the tail steers to the haystack
+                    // The item's root motion carries the body meanwhile (the controller velocity is the clip's step:
+                    // live RE/20 #43, `xx_h_hangwall_tr_fall` held 0.13 s, then (0.69 −0.69 −4.97) m/s to its end).
                     Some(_) if air.dive_wait.is_some() => {
-                        let w = air.dive_wait.unwrap_or(0.0) - dt;
+                        let w0 = air.dive_wait.unwrap_or(0.0);
+                        let w = w0 - dt;
+                        if let Some((item, d)) = air.dive_item {
+                            let fwd = body.forward();
+                            let ph = |left: f32| ((d - left.max(0.0)) / d.max(1e-4)).clamp(0.0, 1.0);
+                            let (a, b) = (item.disp(ph(w0)), item.disp(ph(w)));
+                            let step = to_world([b[0] - a[0], b[1] - a[1], b[2] - a[2]], fwd);
+                            body.velocity = step / dt.max(1e-4);
+                            h = Vec3::new(body.velocity.x, 0.0, body.velocity.z);
+                        }
                         if w > 0.0 {
                             air.dive_wait = Some(w);
                         } else {
@@ -1143,12 +1159,16 @@ pub fn update_air(
                     // fall from 6 m entered `Hay_Bale_01` through the top, InAir+336 empty). Layer 44 (an aimed jump)
                     // lets the flight through the static world, not through the haystack: its Dynamic box gives the
                     // contact. While the faith dive plays (the Leap of Faith, the let-go dive) the dive branch's ray
-                    // decides instead, and that one does need the known haystack (`hay_pass`).
+                    // decides instead, and that one does need the known haystack (`hay_pass`). The dive branch never
+                    // fills the contact normal that the +340 test reads (0xE058E2 reads frame +0x48; only the contact
+                    // branch writes it, 0xE0579C), so the entry is SideJump (`xx_h_air_to_haystack`): live (RE/20 #43,
+                    // 2026-10-17) the stale value was 0.0 in every let-go dive, +340 = 1, RequestHayStack from the tail
+                    // (0xE0FCDB) gave entry 4, the SideJump value.
                     let hit = if air.faith_dive() || air.hollywood {
                         air.hay_pass
                             .then(|| super::hay::dive_hit(body.feet - body.velocity * dt, body.feet, &guidance.haystacks))
                             .flatten()
-                            .map(|stack| (stack, super::hay::HayEntry::Top))
+                            .map(|stack| (stack, super::hay::HayEntry::SideJump))
                     } else {
                         super::hay::haystack_contacts(&body.proxy.manifold, &guidance.haystacks, &collision)
                             .next()

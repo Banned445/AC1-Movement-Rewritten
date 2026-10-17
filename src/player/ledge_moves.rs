@@ -1375,13 +1375,19 @@ pub fn try_side_to_ladder(
         if p.y < base.y - 0.5 || p.y > top.y + 0.5 || ln.dot(-facing).abs() <= std::f32::consts::FRAC_1_SQRT_2 {
             continue;
         }
-        let q = Vec3::new(base.x, p.y.clamp(base.y, top.y), base.z);
+        // the point on the ladder's axis at that height (a leaning ladder's line moves with the height; live RE/20 #38:
+        // the return onto the 5° ladder at 22.71 24.89 stood where the climb had, 0.25 m out)
+        let k = ((p.y - base.y) / (top.y - base.y).max(1e-4)).clamp(0.0, 1.0);
+        let q = base + (top - base) * k;
         if Vec2::new(p.x - q.x, p.z - q.z).length() > 0.6 {
             continue;
         }
-        // the climb side is the hanger's (the ladder frame is signed toward the climber, RE/24 LADDER-3; live RE/25: from
-        // the Bureau roof-edge hang the game climbs on the hang's side, 0.5 m out, still facing the wall)
-        let ln = if ln.dot(Vec3::new(root.x - q.x, 0.0, root.z - q.z)) < 0.0 { -ln } else { ln };
+        // the climb side is the hanger's (the ladder frame is signed toward the climber, RE/24 LADDER-3), still facing the
+        // wall: the ladder normal against the hang's facing. Live RE/25: from the Bureau roof-edge hang the game climbs on
+        // the hang's side, 0.5 m out; live RE/20 #38 (2026-10-17, the ladder at 22.71 24.89): from a side hang whose root
+        // sat 0.08 m behind the ladder's line it climbs back on the front, facing the wall (the root's side would put the
+        // climber inside the wall)
+        let ln = if ln.dot(facing) > 0.0 { -ln } else { ln };
         let to = q + ln * super::ladder::ATTACH_OUT;
         let id = FROM_LEDGE_SIDE[free as usize][right as usize];
         let seq = [single(id, 0), None, None, None];
@@ -2365,6 +2371,26 @@ mod tests {
     }
     use crate::collision::Aabb3;
     use crate::guidance::{GuidanceEdge, GuidanceSubType};
+
+    /// Live RE/20 #38 (2026-10-17): the side move from a wall hang onto a ladder beside it climbs on the ladder's front,
+    /// facing the wall, even when the hang's root sits behind the ladder's line (the root's side put the climber into the
+    /// wall); the root goes onto the leaning ladder's axis at that height, 0.5 m out.
+    #[test]
+    fn the_side_move_to_a_leaning_ladder_lands_on_its_front_axis() {
+        let mut g = GuidanceWorld::default();
+        // the wall's face at z 0 (out = -Z); a ladder leaning onto it: base 0.6 m out, top 0.2 m out
+        let (base, top) = (Vec3::new(0.6, 0.0, -0.6), Vec3::new(0.6, 4.6, -0.2));
+        g.edges.push(GuidanceEdge { p0: base, p1: top, n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::Ladder });
+        // the hang's root 0.08 m behind the ladder's line at the search height (1.5 m: line z -0.47)
+        let root = Vec3::new(0.0, 2.0, -0.39);
+        let found = [false, true].into_iter().find_map(|r| try_side_to_ladder(r, Vec3::NEG_Z, root, LedgeHangType::Wall, &g));
+        let (mv, e) = found.expect("the ladder beside the hang");
+        assert!(e.n.dot(Vec3::NEG_Z) > 0.99, "climbed from the front: {:?}", e.n);
+        assert!(mv.facing_to.dot(Vec3::Z) > 0.99, "facing the wall: {:?}", mv.facing_to);
+        let k = 1.5 / 4.6;
+        let want = base + (top - base) * k + Vec3::NEG_Z * super::super::ladder::ATTACH_OUT;
+        assert!((mv.to - want).length() < 1e-3, "on the leaning axis, 0.5 m out: {} vs {}", mv.to, want);
+    }
 
     /// A 3 m wall (face z 0, normal -Z) with a ledge at 2.6 m, x -5..5, and optionally a crate at leg height beside the
     /// hang (x 0.6..1.4, 0.5..1.6 m up, against the wall).
