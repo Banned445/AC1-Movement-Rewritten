@@ -271,6 +271,38 @@ impl Plugin for IkPlugin {
     }
 }
 
+/// Headless runs (`AC_LAB_IK`, the lab replays): a joint rig without meshes for `player` from the pose skeleton, so the
+/// animation step's pose can be copied onto it (`anim::apply_clip`) and the limb IK solve it as the windowed game does
+/// (plan_bone_positions phase 3). `systems` runs the animation, the copy and the IK in that order.
+pub fn add_headless_rig(world: &mut World, player: Entity) -> bool {
+    let Some(skel) = world.get_resource::<crate::bone_pose::PoseSkeleton>().cloned() else { return false };
+    if skel.bone_ids.is_empty() {
+        return false;
+    }
+    let root = world.spawn(Transform::default()).id();
+    let joints = skel.rest.iter().map(|t| world.spawn(*t).id()).collect();
+    world.entity_mut(player).insert(Rig { root, joints, rest: skel.rest.clone(), bone_ids: skel.bone_ids.clone(), parents: skel.parents.clone() });
+    true
+}
+
+/// The headless rig's systems after the animation step: the pose onto the joints, then the limb IK.
+pub fn headless_ik_systems() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+    (crate::anim::apply_clip, add_limb_ik, solve_limbs).chain().into_configs()
+}
+
+/// The solved bone positions in the player's space (feet at the origin, facing −Z, before heading and tilt): the rig's
+/// joints under its root, as `solve_limbs` composes them.
+pub fn rig_model_positions(world: &World, rig: &Rig) -> Vec<Vec3> {
+    let tr = |e: Entity| world.get::<Transform>(e).copied().unwrap_or_default();
+    let root = Iso { rot: Quat::IDENTITY, pos: Vec3::ZERO }.mul(&tr(rig.root));
+    let mut global: Vec<Iso> = Vec::with_capacity(rig.joints.len());
+    for (i, e) in rig.joints.iter().enumerate() {
+        let parent = rig.parents[i].map(|p| global[p]).unwrap_or(root);
+        global.push(parent.mul(&tr(*e)));
+    }
+    global.iter().map(|g| g.pos).collect()
+}
+
 fn add_limb_ik(mut commands: Commands, q: Query<Entity, (With<Rig>, Without<LimbIk>)>) {
     for e in &q {
         commands.entity(e).insert(LimbIk::default());

@@ -4219,9 +4219,14 @@ pub(crate) fn lab_trace_row(i: usize, t: f32, ctx: ActorContextId, clip: &str, r
     let mut row = format!("{i},{t:.5},{ctx:?},{clip},{:.4},{:.4},{:.4},{:.4}", rel.x, -rel.z, rel.y, Vec2::new(vel.x, vel.z).length());
     let pose = world.get::<BonePose>(player);
     let skel = world.get_resource::<PoseSkeleton>();
+    // with the headless rig (`AC_LAB_IK`) the bones after the limb IK, else the animation's pose
+    let solved = world.get::<crate::model::Rig>(player).filter(|_| pose.is_some_and(|p| p.seq > 0)).map(|r| (r.bone_ids.clone(), crate::ik::rig_model_positions(world, r)));
     for bone in [HEAD, SPINE, LEFT_HAND, RIGHT_HAND, LEFT_FOOT, RIGHT_FOOT] {
         // the player's space faces -Z with +X to the right
-        let m = pose.zip(skel).and_then(|(p, k)| p.model_pos(k, bone)).unwrap_or(Vec3::ZERO);
+        let m = match &solved {
+            Some((ids, pos)) => ids.iter().position(|b| *b == bone).map(|i| pos[i]),
+            None => pose.zip(skel).and_then(|(p, k)| p.model_pos(k, bone)),
+        }.unwrap_or(Vec3::ZERO);
         row.push_str(&format!(",{:.4},{:.4},{:.4}", -m.z, m.x, m.y));
     }
     row.push('\n');

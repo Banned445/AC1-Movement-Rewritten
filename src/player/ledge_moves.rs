@@ -1787,7 +1787,9 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
         table: None,
         root_time,
         end_free,
-        end_wall: false,
+        // the wall reception (SubState 6) is a wall hang: LedgeData +104 reads 0 through it and after (live RE/20 #72,
+        // the running jump's wall reception); the hang-type rays are not asked again at its end
+        end_wall: matches!(arr, LedgeArrival::Surface { free: false }),
         end_stand,
         hand_l,
         hand_r,

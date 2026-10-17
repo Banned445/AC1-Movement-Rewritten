@@ -89,11 +89,19 @@ impl CitySim {
             .add_systems(Update, (super::update_city, crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,
                 crate::player::air::update_air, crate::player::ledge::update_ledge, crate::player::climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk,
                 crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, super::hold_player).chain());
-        app.add_systems(Update, crate::anim::headless_animation_systems().after(super::hold_player));
+        let lab_ik = std::env::var_os("AC_LAB_IK").is_some();
+        if lab_ik {
+            app.add_systems(Update, (crate::anim::headless_animation_systems(), crate::ik::headless_ik_systems()).chain().after(super::hold_player));
+        } else {
+            app.add_systems(Update, crate::anim::headless_animation_systems().after(super::hold_player));
+        }
         let animated = crate::bone_pose::add_headless_animation(&mut app);
         let player = app.world_mut().spawn((crate::player::player_components(prepared.spawn, prepared.heading), Transform::default())).id();
         if animated {
             app.world_mut().entity_mut(player).insert(crate::anim::AnimPlayer::default());
+            if lab_ik {
+                crate::ik::add_headless_rig(app.world_mut(), player);
+            }
         }
         app.world_mut().run_system_once_with(super::spawn, prepared).unwrap();
         app.update();
@@ -125,6 +133,9 @@ impl CitySim {
         let player = self.app.world_mut().spawn((crate::player::player_components(feet, heading), Transform::default())).id();
         if animated {
             self.app.world_mut().entity_mut(player).insert(crate::anim::AnimPlayer::default());
+            if std::env::var_os("AC_LAB_IK").is_some() {
+                crate::ik::add_headless_rig(self.app.world_mut(), player);
+            }
         }
         self.player = player;
         self.app.insert_resource(crate::map_menu::neutral_pad());
