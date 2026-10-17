@@ -32,6 +32,20 @@ const LOD_VERTEX_BUDGET: usize = 400_000;
 const PHYSICS_TRIANGLE_BUDGET: usize = 40_000;
 /// PORT: objects past this camera distance draw without casting shadows.
 const SHADOW_DISTANCE: f32 = 90.0;
+/// The small / medium objects' cull distances (`Renderer__VisibilityTest` 0xAC5CE0, renderer +728 / +732) and their
+/// shadows' (+736 / +740), measured from the camera to the object's box without the LOD's view scale. Read live on the
+/// owner's install (RE/30): the settings' 50 / 15 / 70 / 30 m divided by the graphics options' small / medium
+/// modifiers 4.0 / 2.0 (`Renderer__SetupCullDistances` 0xAC6E90). PORT: those two options are taken as read.
+const SMALL_CULL: (f32, f32) = (12.5, 3.75);
+const MEDIUM_CULL: (f32, f32) = (35.0, 15.0);
+
+/// Whether an object with these size flags (`decode::entity_size_flags`) draws, and casts a shadow, at camera distance
+/// `raw` (no view scale).
+fn size_cull(size: u8, raw: f32) -> (bool, bool) {
+    let lim = if size & 1 != 0 { Some(SMALL_CULL) } else if size & 2 != 0 { Some(MEDIUM_CULL) } else { None };
+    lim.map_or((true, true), |(draw, shadow)| (raw <= draw, raw <= shadow))
+}
+
 /// PORT: the cross-fade's blend factor is kept in this many steps (each step is a shared material) instead of the
 /// exe's 255.
 const FADE_LEVELS: usize = 16;
@@ -429,8 +443,9 @@ impl CityState {
             for (k, o) in objects.iter().enumerate() {
                 if o.o.meshes.is_empty() { continue; }
                 let b = &o.o.visual_bounds;
-                let d = camera.distance(camera.clamp(b.min, b.max)) * lod_scale;
-                let want = o.o.lod.pick(d).map(|m| m as usize).filter(|&m| m < o.o.meshes.len());
+                let raw = camera.distance(camera.clamp(b.min, b.max));
+                let d = raw * lod_scale;
+                let want = o.o.lod.pick(d).map(|m| m as usize).filter(|&m| m < o.o.meshes.len()).filter(|_| size_cull(o.o.size, raw).0);
                 let fade = want.filter(|_| self.lod_fade).and(o.o.lod.fade(d)).map(|(m, a)| (m as usize, fade_level(a)))
                     .filter(|&(m, _)| m < o.o.meshes.len() && Some(m) != want);
                 if want != o.shown || fade != o.fade.as_ref().map(|f| (f.mesh, f.level)) { changes.push((d, c, k, want, fade)); }
@@ -441,6 +456,8 @@ impl CityState {
         for (d, c, k, want, fade) in changes {
             let Cell::Loaded { objects, .. } = &mut self.cells[c] else { continue };
             let o = &mut objects[k];
+            let b = &o.o.visual_bounds;
+            let shadow = d <= SHADOW_DISTANCE && size_cull(o.o.size, camera.distance(camera.clamp(b.min, b.max))).1;
             let transform = Transform::from_matrix(o.o.transform);
             if want != o.shown {
                 // the LOD that was fading in becomes the drawn one: keep its entities, give them the opaque materials
@@ -455,13 +472,13 @@ impl CityState {
                         let Some(m) = self.materials.get(&id) else { ctx.commands.entity(e).despawn(); continue };
                         let mut e = ctx.commands.entity(e);
                         m.handle.insert(&mut e);
-                        if d <= SHADOW_DISTANCE { e.remove::<NotShadowCaster>(); }
+                        if shadow { e.remove::<NotShadowCaster>(); }
                         o.entities.push(e.id());
                     }
                 } else if let Some(m) = want {
                     let lod = &o.o.meshes[m];
                     let handles: Vec<_> = lod.mesh.sections.iter().map(|s| self.materials.get(&s.material).map(|m| m.handle.clone())).collect();
-                    o.entities = spawn_lod(lod, &handles, transform, d <= SHADOW_DISTANCE, ctx).into_iter().map(|(e, _)| e).collect();
+                    o.entities = spawn_lod(lod, &handles, transform, shadow, ctx).into_iter().map(|(e, _)| e).collect();
                 }
             }
             if o.shown != want { continue; }

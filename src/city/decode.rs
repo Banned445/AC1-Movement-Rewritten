@@ -51,6 +51,8 @@ pub struct CityObject {
     pub collision: Vec<Triangle>,
     pub edges: Vec<GuidanceEdge>,
     pub haystack: Option<Aabb3>,
+    /// The entity's small / medium object flags (`entity_size_flags`): bit 0 small, bit 1 medium.
+    pub size: u8,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -265,7 +267,7 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     let mut o = CityObject { name: name.to_string(), transform, center: transform.w_axis.truncate(), radius: 0.0,
         bounds: Aabb3 { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) }, meshes: Vec::new(), lod: LodTable::default(),
         visual_bounds: Aabb3 { min: Vec3::ZERO, max: Vec3::ZERO },
-        collision: Vec::new(), edges: Vec::new(), haystack: None };
+        collision: Vec::new(), edges: Vec::new(), haystack: None, size: entity_size_flags(b) };
     // --- visual
     if let Some(&v) = visuals.first() {
         if b.get(v + 4) == Some(&1) {
@@ -399,6 +401,19 @@ fn pose_skinned(data: &CityData, b: &[u8], mesh_id: u32, base: &StaticMesh) -> O
         }
     }
     Some(out)
+}
+
+/// The small / medium object flags of an entity body (`Entity__Read` 0x450E90): after the component handles, one byte per
+/// bit of the 64-bit field at +96 (bits 0–8, 16–22, 25–27, a u32 for 30–34, then 35–39), a u16 (+170) and a u32 (+124),
+/// then two embedded objects, the first of class 0x4AEC3476. Counted back from that marker the bit 0 byte sits 38 bytes
+/// before it; bit 6 marks a small object, bit 7 a medium one (`RenderItem__SetupForEntity` 0xAA2880). 0 when the marker
+/// or valid bytes are missing. Damascus: 757 small and 515 medium of 14,543 entities.
+pub fn entity_size_flags(b: &[u8]) -> u8 {
+    let h = 0x4AEC_3476u32.to_le_bytes();
+    let Some(p) = b.windows(4).rposition(|w| w == h) else { return 0 };
+    let Some(f) = p.checked_sub(38).map(|s| &b[s..s + 9]) else { return 0 };
+    if f.iter().any(|&x| x > 1) { return 0; }
+    f[6] | f[7] << 1
 }
 
 /// An Entity or EntityGroup body's placement (Entity__Read 0x450E90 → 0x4D9C10): 16 floats after the id/class.
@@ -614,6 +629,25 @@ mod tests {
     use super::*;
 
     fn d(v: [(u32, f32); 5]) -> [LodDescriptor; 5] { v.map(|(mesh, distance)| LodDescriptor { mesh, distance, fade: 0.0 }) }
+
+    /// `Entity__Read`'s flag bytes, counted back from the trailing 0x4AEC3476 object: byte 6 small, byte 7 medium.
+    #[test]
+    fn entity_size_flags_read_the_flag_bytes() {
+        let mut b = vec![0u8; 8];
+        let mut flags = [0u8, 1, 1, 0, 1, 0, 1, 0, 0];
+        b.extend_from_slice(&flags);
+        b.extend_from_slice(&[0u8; 25]);
+        b.extend_from_slice(&0xC22E_FF46u32.to_le_bytes());
+        b.extend_from_slice(&0x4AEC_3476u32.to_le_bytes());
+        assert_eq!(entity_size_flags(&b), 1);
+        flags[6] = 0;
+        flags[7] = 1;
+        b[8..17].copy_from_slice(&flags);
+        assert_eq!(entity_size_flags(&b), 2);
+        b[9] = 7;
+        assert_eq!(entity_size_flags(&b), 0, "a byte that is no bool");
+        assert_eq!(entity_size_flags(&b[..20]), 0, "no marker");
+    }
 
     #[test]
     fn lod_table_follows_the_exe() {
