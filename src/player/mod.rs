@@ -136,8 +136,10 @@ pub struct LimbTargets {
     /// The ladder's rail goals for the left / right hand, set outside the contact tags (effectors 8 / 13, weight 1,
     /// blended in and out over 0.1 s; `sub_E20DC0`, RE/24 LADDER-20).
     pub rails: [Option<Vec3>; 2],
-    /// The feet are left inside what they stand in: the HayStack context (the lab's haystack waits keep the animated
-    /// feet 0.13 m below the hay's top). Turns off the port's foot lift onto the surface (`ik::ground_foot_target`).
+    /// The port's foot lift onto the surface under a foot (`ik::ground_foot_target`, a stand-in for the landings) is off:
+    /// it runs only on the ground, in the air and on beams. The lab's bone ranking (headless IK) showed it lifting the
+    /// feet in the haystack (0.13 m), the wall-hang look-arounds (up to 0.6 m), the ladder climb and the wall run's step
+    /// into the hang, where the game leaves the animated feet.
     pub no_ground_fix: bool,
 }
 
@@ -349,7 +351,7 @@ pub fn release_limbs(mut q: Query<(&Locomotion, &mut LimbTargets), With<Player>>
         if loco.current != ActorContextId::Ledge {
             limbs.suspended = false;
         }
-        limbs.no_ground_fix = loco.current == ActorContextId::HayStack;
+        limbs.no_ground_fix = !matches!(loco.current, ActorContextId::Ground | ActorContextId::InAir | ActorContextId::NarrowObject);
         // leaving the ladder's main state releases both rails (`sub_E21160`)
         if loco.current != ActorContextId::Ladder {
             limbs.rails = [None; 2];
