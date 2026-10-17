@@ -14,9 +14,12 @@
 //!
 //! - **The base set is the player's rank** (RE/24 CENSUS-9): DataPC.forge's stored files "Rank 0" … "Rank 9" each hold
 //!   a rank object (class 0x76A91F10) with its `AssassinAbilitySet` embedded at +16 (class hash 0xBA317DB0), serialized
-//!   as `MaxSpeed` (u32) then one byte per flag in reflection order (the 34 bits, `HighProfile`, `AllActions`, +0x15).
-//!   Every rank allows every movement ability with `MaxSpeed` Sprint; the ranks differ in combat (Rank 0: no Fight,
-//!   weapon, assassinations, counter or combo kills). Mission clips (`AbilitySetClip`) push further sets: no missions.
+//!   as `MaxSpeed` (u32) then one byte per flag (bits 32, 33, then 0 … 31), `HighProfile`, `AllActions`, +0x15.
+//!   Live (RE/20 #71, 2026-10-17): the player's `BhvAssassinData` +0x290 stack has as its base the set inside the
+//!   save's `AltairRankDetails` (made when the profile is continued), "Rank 1" in the test save (0x37FA9BFBF). Ranks
+//!   0 … 3 lack the air grab (Grasp); every rank allows the other movement abilities at Sprint. Zones push further sets
+//!   (the Bureau interior: 0x250000019, Jump / Walling / Climb and bits 28, 30, 33); mission clips (`AbilitySetClip`)
+//!   too: neither is loaded.
 //!
 //! The port loads the rank set from the install (`AC_RANK`, default 9; everything allowed without the install);
 //! `AC_ABILITIES=<hex>` sets the flags and `AC_MAX_SPEED=<0..4>` the speed for tests.
@@ -92,7 +95,9 @@ pub fn parse_ability_set(d: &[u8]) -> Option<AbilitySet> {
     }
     let max_speed = u32_at(4)?.min(4) as u8;
     let bytes = d.get(8..8 + FLAG_COUNT + 2)?;
-    let flags = bytes[..FLAG_COUNT].iter().enumerate().fold(0u64, |f, (i, b)| f | ((*b != 0) as u64) << i);
+    // the first two serialized flags are bits 32 / 33, then bits 0 … 31: live (RE/20 #71, 2026-10-17) the test save's
+    // base set is "Rank 1" read this way (0x37FA9BFBF), Grasp off; byte i as bit i gave every rank Grasp
+    let flags = bytes[..FLAG_COUNT].iter().enumerate().fold(0u64, |f, (i, b)| f | ((*b != 0) as u64) << ((i + 32) % FLAG_COUNT));
     Some(AbilitySet { flags, max_speed, high_profile: bytes[FLAG_COUNT] != 0, all_actions: bytes[FLAG_COUNT + 1] != 0 })
 }
 
@@ -136,7 +141,9 @@ mod tests {
         assert_eq!(none.clamp_speed(0.9, false), 0.0);
     }
 
-    /// RE/24 CENSUS-9: every rank's set allows every movement ability at Sprint; Rank 0 lacks the combat ones.
+    /// RE/24 CENSUS-9 corrected by live RE/20 #71 (2026-10-17): the save's base set is the rank's set, "Rank 1" =
+    /// 0x37FA9BFBF in the running game; ranks 0 … 3 lack the air grab (Grasp), every rank allows the other movement
+    /// abilities at Sprint, Rank 0 lacks the combat ones.
     #[test]
     fn every_rank_allows_the_movement_abilities() {
         let dir = crate::assets::game_dir();
@@ -146,13 +153,15 @@ mod tests {
         };
         for rank in 0..=9 {
             let s = load_rank_set(&dir, rank).expect("rank set");
-            for a in [Ability::Jump, Ability::Crouch, Ability::PassOver, Ability::Walling, Ability::Climb, Ability::Ladder, Ability::Grasp, Ability::LeapOfFaith, Ability::LookDown] {
+            for a in [Ability::Jump, Ability::Crouch, Ability::PassOver, Ability::Walling, Ability::Climb, Ability::Ladder, Ability::LeapOfFaith, Ability::LookDown] {
                 assert!(s.allows(a), "rank {rank}: {a:?}");
             }
+            assert_eq!(s.allows(Ability::Grasp), rank >= 4, "rank {rank}: the air grab");
             assert!(s.max_speed == 4 && s.high_profile && s.all_actions, "rank {rank}: {s:?}");
         }
-        // Fight (12) and the stealth assassination (9) only come later
-        assert_eq!(r0.flags & (1 << 12 | 1 << 9), 0, "{:#x}", r0.flags);
+        // Rank 0 lacks the most (the combat ones among them; their bit names are not verified)
+        assert_eq!(r0.flags, 0x3_7FA0_B83F, "{:#x}", r0.flags);
         assert_eq!(load_rank_set(&dir, 9).unwrap().flags, (1u64 << 34) - 1);
+        assert_eq!(load_rank_set(&dir, 1).unwrap().flags, 0x3_7FA9_BFBF, "the live base set of the test save");
     }
 }
