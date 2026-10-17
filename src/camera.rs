@@ -68,7 +68,7 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         // CameraSettings+32 = 0.8 rad, smoothed toward by 0xC5E170 (ω 10); constant for this camera.
-        // (hypothesis): the value is the vertical field of view.
+        // The vertical field of view (live RE/20 #25: the bones projected with 0.8 rad vertical land on the screenshot).
         Projection::Perspective(PerspectiveProjection { fov: S.fov, ..default() }),
         MainCamera,
         Transform::from_xyz(0.0, 3.0, 6.0),
@@ -1184,13 +1184,15 @@ impl FirstPerson {
         self.active != was
     }
 
-    /// Starting: the view keeps the previous camera's heading.
-    /// PORT (hypothesis): the yaw comes from the camera it replaces and the pitch starts level.
-    pub fn activate(&mut self, yaw: f32) {
+    /// Starting: the view keeps the previous camera's heading and looks along the line from the previous camera's eye
+    /// through the head, its pitch clamped to the limits (live RE/20 #30, 2026-10-17: yaw = the LowHigh camera's yaw;
+    /// pitch +40.0° / −39.6° for an eye-to-head line of +40.0° / −39.4°, −75.0° for −76.7°; not level).
+    pub fn activate(&mut self, yaw: f32, pitch: f32) {
+        let pitch = pitch.clamp(FIRST_PERSON.pitch[0], FIRST_PERSON.pitch[1]);
         self.yaw = yaw;
         self.yaw_target = yaw;
-        self.pitch = 0.0;
-        self.pitch_target = 0.0;
+        self.pitch = pitch;
+        self.pitch_target = pitch;
         self.yaw_vel = 0.0;
         self.pitch_vel = 0.0;
         self.r6v_prev = Vec2::ZERO;
@@ -1226,8 +1228,8 @@ impl FirstPerson {
 // ---------------------------------------------------------------------------------------------------------------
 
 /// The camera switcher's blend into a newly active camera (BlendCamera update 0x71A350): the eye goes from where the
-/// view was toward the new camera's eye by w = curve(t / blend-in) (0x719A30). (hypothesis): the cosine curve
-/// (type 1); BlendCameraSettings' curve type is not decoded. The view direction is turned with the same weight.
+/// view was toward the new camera's eye by w = curve(t / blend-in) (0x719A30). The cosine curve (type 1): live RE/20
+/// #20, BlendCameraSettings +0xB0 = 1 in and out of first person. The view direction is turned with the same weight.
 #[derive(Clone, Copy)]
 struct SwitchBlend {
     from_eye: Vec3,
@@ -1365,8 +1367,11 @@ fn follow(
         };
         let blend_in = match want {
             Shown::FirstPerson => {
-                let yaw = match prev { Handover::Yaw(y) => y, Handover::Eye(e) => angles_of(e - head_point(&rigs, &joints, p.translation)).0 };
-                st.fp.activate(yaw);
+                let head = head_point(&rigs, &joints, p.translation);
+                // the pitch of the line from the shown camera's eye through the head (positive: the eye above, looking down)
+                let pitch = angles_of(c.translation - head).1;
+                let yaw = match prev { Handover::Yaw(y) => y, Handover::Eye(e) => angles_of(e - head).0 };
+                st.fp.activate(yaw, pitch);
                 FIRST_PERSON.blend_in
             }
             w => {
@@ -1508,7 +1513,8 @@ impl ShakeState {
         if self.t > 1.0 { self.intensity = 0.0; return (Vec3::ZERO, Quat::IDENTITY); }
         let pitch = self.pitch(self.t);
         if !APPLY_FALL_SHAKE { return (Vec3::ZERO, Quat::IDENTITY); }
-        // (hypothesis): a positive ShakePitch tilts the view up, about the camera's own right axis
+        // a positive ShakePitch tilts the view up, about the camera's own right axis (live RE/20 #19: the switcher's
+        // camera ⊗ shake at 0x4BF3C0, the shake a rotation about local x by ShakePitch; up in 99 of 99 frames)
         (Vec3::ZERO, Quat::from_rotation_x(pitch.to_radians()))
     }
 }
@@ -1771,7 +1777,7 @@ mod tests {
     #[test]
     fn first_person_looks_from_the_head_and_clamps_the_pitch() {
         let mut fp = FirstPerson::default();
-        fp.activate(0.0);
+        fp.activate(0.0, 0.0);
         let head = Vec3::new(1.0, 1.7, 2.0);
         let v = fp.update(&input(1.0 / 60.0), head);
         assert_eq!(v.eye, head);
@@ -1782,6 +1788,25 @@ mod tests {
         inp.stick = Vec2::new(0.0, -1.0);
         for _ in 0..180 { fp.update(&inp, head); }
         assert!((fp.pitch - FIRST_PERSON.pitch[1]).abs() < 0.01, "{}", fp.pitch);
+    }
+
+    /// Live RE/20 #30 (2026-10-17): first person starts on the line from the previous camera's eye through the head,
+    /// the pitch clamped to ±75°.
+    #[test]
+    fn first_person_starts_on_the_line_from_the_previous_eye_through_the_head() {
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let start = |eye: Vec3| {
+            let mut fp = FirstPerson::default();
+            let (yaw, pitch, _) = angles_of(eye - head);
+            fp.activate(yaw, pitch);
+            fp.pitch
+        };
+        // an eye 2.4 m behind and 2.0 m above the head: looking down 39.8°
+        assert!((start(head + Vec3::new(0.0, 2.0, -2.4)).to_degrees() - 39.81).abs() < 0.05);
+        // an eye below the head looks up
+        assert!(start(head + Vec3::new(0.0, -1.4, -1.6)) < 0.0);
+        // nearly overhead: clamped to the 75° limit
+        assert!((start(head + Vec3::new(0.0, 3.4, -0.8)) - FIRST_PERSON.pitch[1]).abs() < 1e-6);
     }
 
     #[test]
