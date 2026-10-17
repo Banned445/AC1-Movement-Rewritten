@@ -1939,6 +1939,87 @@ pub const TO_WALL: [u32; 2] = [0x01C3_2562, 0x01C3_2563];
 pub const TO_FREE: [u32; 4] = [0x01C3_14BD, 0x01C3_14BE, 0x01C3_217A, 0x01C3_217C];
 
 /// Ledge stick direction as the exe numbers it (QuantizeStickDirection 0xDD1920): 0 up, 1 down, 2 left, 3 right.
+/// `Human__LateralPathFree` 0xB2A410: the hang-type switch's path from the current pose (root `a`, facing `fa`, body
+/// height `ha`: 1.1 wall / 2.4 free, `sub_DCE2F0`) to the new one (`b`, `fb`, `hb`), `s` the move's side (−1 left, +1
+/// right). Each pose's base is its root (`sub_B18140`, upright), pulled 0.25 m back along its facing for a body taller
+/// than 2 m (0xB2A602 / 0xB2A621); the bottoms are levelled to the lower one and the boxes span up to the higher top.
+/// The path turns at a corner: with the old base behind the new pose's plane (or on it) the old base projected onto the
+/// plane through the new base square to the new side axis (0xB2AF42), else onto the new pose's plane, along its normal
+/// when the facings agree and along the old side axis when they oppose (0xB2A7BB / 0xB2A7DE). Per leg: a clear ray
+/// (layer 21 for the player, 5 for others) between the mid heights (0xB2AA33 / 0xB2AD0D, the corner's interpolated by the leg lengths), and a box
+/// 0.1 m half-thick, half the leg long and the bodies' span high (`sub_B1B750`) whose contacts only count between the
+/// bottom line's and the top line's planes (`sub_B27A30`). PORT: the box test is the box shrunk 2 cm in height (the
+/// floor under the bottoms and a ceiling at the tops do not count).
+#[allow(clippy::too_many_arguments)]
+pub fn lateral_path_free(a: Vec3, fa: Vec3, ha: f32, b: Vec3, fb: Vec3, hb: f32, s: f32, collision: &CollisionWorld) -> bool {
+    let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
+    let (fa, fb) = (flat(fa), flat(fb));
+    let side_a = fa.cross(Vec3::Y * s);
+    let side_b = fb.cross(-Vec3::Y * s);
+    let mut pa = a;
+    let mut pb = b;
+    if ha > 2.0 {
+        pa -= fa * 0.25;
+    }
+    if hb > 2.0 {
+        pb -= fb * 0.25;
+    }
+    let bottom = pa.y.min(pb.y);
+    let top = (pa.y + ha).max(pb.y + hb);
+    let half_h = (top - bottom) * 0.5;
+    let (ba, bb) = (Vec3::new(pa.x, bottom, pa.z), Vec3::new(pb.x, bottom, pb.z));
+    // project `p` along `dir` onto the plane through `q` with normal `n`
+    let along = |p: Vec3, q: Vec3, n: Vec3, dir: Vec3| {
+        let dn = dir.dot(n);
+        if dn.abs() < 1e-5 { p } else { p + dir * ((q - p).dot(n) / dn) }
+    };
+    let behind = (pb - pa).dot(fb) >= 0.0;
+    let side_bn = side_b.normalize_or_zero();
+    let corner = if behind {
+        along(ba, bb, side_bn, side_bn)
+    } else if fb.dot(fa) > 0.0 {
+        along(ba, bb, fb, fb)
+    } else {
+        along(ba, bb, fb, side_a.normalize_or_zero())
+    };
+    let (mid_a, mid_b) = (pa + Vec3::Y * (ha * 0.5), pb + Vec3::Y * (hb * 0.5));
+    let (l1, l2) = ((corner - ba).length(), (bb - corner).length());
+    let k = if l1 + l2 > 1e-5 { l1 / (l1 + l2) } else { 0.0 };
+    let mid_c = Vec3::new(corner.x, mid_a.y + (mid_b.y - mid_a.y) * k, corner.z);
+    let ray_clear = |from: Vec3, to: Vec3| {
+        let v = to - from;
+        let len = v.length();
+        len < 1e-3 || collision.ray_distance(from, v / len, len, crate::layers::MAIN_CHARACTER) >= len - 1e-4
+    };
+    let box_clear = |p: Vec3, q: Vec3| {
+        let v = q - p;
+        let len = v.length();
+        if len < 1e-3 {
+            return true;
+        }
+        let along = v / len;
+        let across = along.cross(Vec3::Y).normalize_or_zero();
+        let up = across.cross(along).normalize_or_zero();
+        let centre = (p + q) * 0.5 + Vec3::Y * half_h;
+        collision.obb_free(centre, [across, along, up], Vec3::new(0.1, len * 0.5, (half_h - 0.02).max(0.01)))
+    };
+    ray_clear(mid_a, mid_c) && box_clear(ba, corner) && ray_clear(mid_c, mid_b) && box_clear(corner, bb)
+}
+
+/// The checks `HumanLedge__TrySwitchHangType` 0xDE1060 runs before it switches: the new pose's body boxes
+/// (`Human__WallHangBodyBoxFree` 0xB2DC80 / `Human__FreeHangBodyBoxesFree` 0xB2DD50, 0xDE174E / 0xDE1598) and the path
+/// from the current pose (`lateral_path_free`, 0xDE1802 / 0xDE1644); either failing leaves the hang type as it is.
+pub fn switch_allowed(mv: &LedgeMove, cur: LedgeHangType, right: bool, collision: &CollisionWorld) -> bool {
+    let to_wall = mv.end_wall;
+    if !super::climb::hang_boxes_free(collision, mv.to, mv.facing_to, to_wall) {
+        return false;
+    }
+    // `sub_DCE2F0`: 2.4 for any type but the wall hang (0)
+    let ha = if cur == LedgeHangType::Wall { 1.1 } else { 2.4 };
+    let hb = if to_wall { 1.1 } else { 2.4 };
+    lateral_path_free(mv.from, mv.facing_from, ha, mv.to, mv.facing_to, hb, if right { 1.0 } else { -1.0 }, collision)
+}
+
 pub fn switch_move(dir: u8, to_wall: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: Vec3, collision: &CollisionWorld) -> LedgeMove {
     let id = if to_wall { TO_WALL[(dir != 2) as usize] } else { TO_FREE[match dir { 2 => 0, 3 => 1, 0 => 2, _ => 3 }] };
     let a = single(id, 0);
@@ -2207,6 +2288,20 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Human__LateralPathFree` 0xB2A410: the path from one hang root to the next along the wall is free in the open; a
+    /// post between them (inside the bodies' span) blocks it; the floor under the bottoms does not.
+    #[test]
+    fn the_hang_switch_path_is_blocked_by_a_post_between_the_roots() {
+        use crate::collision::Aabb3;
+        let fwd = Vec3::NEG_Z;
+        let (a, b) = (Vec3::new(0.0, 2.0, 0.5), Vec3::new(1.0, 2.0, 0.5));
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(-5.0, 1.0, 0.0), max: Vec3::new(5.0, 2.0, 1.0) });
+        assert!(lateral_path_free(a, fwd, 1.1, b, fwd, 1.1, 1.0, &c), "the floor under the bottoms does not count");
+        c.boxes.push(Aabb3 { min: Vec3::new(0.45, 2.0, 0.4), max: Vec3::new(0.55, 4.0, 0.6) });
+        assert!(!lateral_path_free(a, fwd, 1.1, b, fwd, 1.1, 1.0, &c), "a post between the roots");
+    }
 
     /// RE/24 CLIMB-10: the jump up to an overhang weighs the depth only (a sideways offset changes nothing), plays the
     /// impulse in place and moves the root linearly over the swingback.

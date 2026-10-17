@@ -440,7 +440,7 @@ fn corner_switch(d: &HumanLedgeData, rows: &ledge_moves::EdgeRows, right_dir: bo
     let nt = needs_switch(d.hang_type, h.point, h.wall_normal, collision)?;
     let mut mv = ledge_moves::switch_move(if right_dir { 3 } else { 2 }, nt == LedgeHangType::Wall, feet, h.point, h.point, h.wall_normal, collision);
     mv.facing_from = facing;
-    Some(mv)
+    ledge_moves::switch_allowed(&mv, d.hang_type, right_dir, collision).then_some(mv)
 }
 
 /// Both hands hold Pole edges (the swing bars; contact kinds +1792 / +1796 == 3, `SyncLimbContacts` 0xDD0390).
@@ -1412,8 +1412,12 @@ pub fn update_ledge(
                     // both hands go onto it and the foot rays start there; +133 is not touched (RE/24 LEDGE-9). PORT: the
                     // decision uses the switch's rays, not the step clip's end-frame foot (0xDD1DC0).
                     let switch = if d.alt_flag { None } else { needs_switch(d.hang_type, t, n, &collision) };
-                    if let Some(nt) = switch {
-                        let mv = ledge_moves::switch_move(if right_dir { 3 } else { 2 }, nt == LedgeHangType::Wall, body.feet, t, t, n, &collision);
+                    let switch = switch.and_then(|nt| {
+                        let mut mv = ledge_moves::switch_move(if right_dir { 3 } else { 2 }, nt == LedgeHangType::Wall, body.feet, t, t, n, &collision);
+                        mv.facing_from = facing;
+                        ledge_moves::switch_allowed(&mv, d.hang_type, right_dir, &collision).then_some((nt, mv))
+                    });
+                    if let Some((nt, mv)) = switch {
                         start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
                         continue;
                     }
