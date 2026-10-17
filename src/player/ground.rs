@@ -1668,7 +1668,7 @@ pub fn update_ground(
                 jump_log("free-run target jump", body.feet, Some(&target));
                 match g.event45(body.feet, body.forward(), ImpulsionJump::Target(target), free_run_ready) {
                     Event45::Run => {
-                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot != 0 };
+                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, leading_foot, g.blend.foot) };
                         switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
                     }
@@ -1788,7 +1788,7 @@ pub fn update_ground(
                 // the takeoff foot (`StartRunJumpToTarget` 0xD837A0: the playing item's word bits 2–3, 1 = the footl
                 // takeoff): the foot opposite the locomotion's (live RE/25: three free-run take-offs, the game always
                 // on the other foot from the port's former "same foot" reading)
-                Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
+                Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, leading_foot, g.blend.foot) },
                 // vt28: free jump without a target, along the direction the candidates were searched in (IHuman vt68
                 // gets the query's own direction pointer, 0xEE842D / 0xEE81CE; live RE/25 freerun_east: the stick's
                 // (0.999, −0.038) while the body still faced 12° to the right)
@@ -1809,7 +1809,7 @@ pub fn update_ground(
                 if r.sq() < 0.01 && moving && ab.allows(Ability::Jump) && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
                     if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision) {
                         jump_log("edge jump", body.feet, Some(&target));
-                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: g.blend.foot != 0 };
+                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, leading_foot, g.blend.foot) };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
                     }
@@ -2349,6 +2349,17 @@ fn step_off_entry(feet: Vec3, facing: Vec3, r: &super::jump_candidates::EdgeRepo
 }
 
 /// `AC_JUMP_LOG=1`: which of the ground's jump paths fired, from where, at what target.
+/// The takeoff foot of a ground target jump (`HumanGround__StartRunJumpToTarget` 0xD837A0): in the Movement sub-state
+/// (HG data +176 = 0) it hands `Human__SetupJumpToTarget` foot 0, which takes `Human__GetLeadingFoot` 0xB18850 on the
+/// pose (0xB20435: the left foot ahead → the `footl` takeoff); in the others the playing item's word bits 2–3. PORT:
+/// the item word stands as the foot opposite the locomotion's (live RE/25), also without a pose.
+fn run_jump_foot_left(sub_state: HumanGroundSubState, leading_foot: Option<usize>, blend_foot: usize) -> bool {
+    match (sub_state, leading_foot) {
+        (HumanGroundSubState::Movement, Some(lead)) => lead == 0,
+        _ => blend_foot != 0,
+    }
+}
+
 fn jump_log(what: &str, feet: Vec3, target: Option<&JumpTarget>) {
     if std::env::var_os("AC_JUMP_LOG").is_some() {
         eprintln!("jump: {what} from {feet:.2} -> {:?}", target.map(|t| (t.type_flags, t.position)));
