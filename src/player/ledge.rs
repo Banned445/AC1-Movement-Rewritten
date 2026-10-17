@@ -1360,7 +1360,6 @@ pub fn update_ledge(
                     // (`HumanLedge__PullupSwitchFreeToWall` 0xDD4160), and the next push up is the wall pull-up
                     if d.hang_type == LedgeHangType::Free && d.pending_vstep.is_none() {
                         let (a, b) = feet_on_wall(hand_mid(d), n, &collision);
-                        let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
                         if a && b && hang_boxes_at(d.hand_l, d.hand_r, n, LedgeHangType::Wall, feet_record(hand_mid(d), n, &collision), &collision) {
                             start_move(d, ledge_moves::pullup_switch_to_wall_move(body.feet, d.hand_l, d.hand_r, n, &collision), "switch to wall hang (pull-up)");
                             continue;

@@ -1486,7 +1486,10 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
         seq: step,
         durations: if d[0] > 0.0 { d } else { [0.4, 0.0, 0.0, 0.0] },
         from: knee,
-        to: mid - n * PULLUP_IN,
+        // `hangknee_tr_freestep_entry` carries no root motion: the root holds at the knee point and the free step's
+        // `freestep_entry_tr_l_wait` moves it 0.3 m onto the top (live RE/25 crate_probe: 0.30 m, all in the second item)
+        to: knee,
+        follow_disp: false,
         end_stand: true,
         ..base
     };
@@ -1530,7 +1533,9 @@ pub fn knee_catch_moves(action: u32, from: Vec3, edge: Vec3, n: Vec3) -> (LedgeM
         seq: step,
         durations: if d[0] > 0.0 { d } else { [0.4, 0.0, 0.0, 0.0] },
         from: knee,
-        to: edge - n * PULLUP_IN,
+        // no root motion in the stand-up item (see `climb_out_moves`)
+        to: knee,
+        follow_disp: false,
         end_stand: true,
         ..base
     };
@@ -1700,7 +1705,11 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
                     // moves it (`StateMovement_Update` 0xDE38F0)
                     ([item(j.reception, 0, &w), item(j.reception, 1, &w), None, None], from, h == LedgeHangType::Free, false)
                 }
-                HangEnd::StandFromKnee => ([item(j.reception, 0, &w), item(j.reception, 1, &w), item(ACT_KNEE_TO_FREESTEP[0], 0, &[1.0]), None], top, false, true),
+                // the knee reception ends at the knee point (the hands' edge 0.1 m in, as the climb-out's and the knee
+                // catch's, 0xDF1CBB); `hangknee_tr_freestep_entry` adds no root motion and the free step's
+                // `freestep_entry_tr_l_wait` moves 0.3 m onto the top (live RE/25 crate_probe 001: the root holds at the
+                // knee through the stand-up item)
+                HangEnd::StandFromKnee => ([item(j.reception, 0, &w), item(j.reception, 1, &w), item(ACT_KNEE_TO_FREESTEP[0], 0, &[1.0]), None], mid + facing * 0.1, false, true),
                 // PORT: the reception's root (FROMANIM) is corrected onto the pull-up's stand point; where the game's
                 // free-step stay leaves the root is not traced. Its exit transitions (low / high wait 0x69C24BB2 /
                 // 0x0D9971F9, jog 0x0D9971FB) are chosen by the animation graph; the port hands back to Ground.

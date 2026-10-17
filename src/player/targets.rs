@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use super::ledge::{hang_root, LedgeHangType};
 use crate::collision::CollisionWorld;
-use crate::guidance::{GuidanceSubType, GuidanceWorld};
+use crate::guidance::GuidanceWorld;
 use super::jump_candidates::{self, Candidate, Query};
 
 #[derive(Clone, Copy, Debug)]

@@ -16,7 +16,6 @@ use super::{right_of, switch_context, ActorContextId, Body, HumanDataBundle, Loc
 use crate::collision::CollisionWorld;
 use crate::guidance::GuidanceWorld;
 use crate::input::PadInput;
-use crate::tuning::PULLUP_IN;
 
 /// HumanWalling block actions (matched by clip name; the exe requests some through runtime ids 68 / 69).
 pub const ENTRY_A: u32 = 0x00D8_2C5C; // xx_h_wallingfront_entry_footl_a (id 68, 0xDA2C30)
@@ -474,14 +473,14 @@ fn pullup_exit(id: u32, b: f32, root: Vec3, c: &LedgeCandidate) -> LedgeEntry {
         let stand_id = ledge_moves::ACT_KNEE_TO_FREESTEP[(id == STEP1_TO_KNEE) as usize];
         let seq = [single(stand_id, 0), None, None, None];
         let d = seq.map(|a| a.map(|a| a.duration()).unwrap_or(0.0));
-        let top = c.point + into * PULLUP_IN;
         let stand = LedgeMove {
             kind: MoveKind::Pullup,
             seq,
             durations: if d[0] > 0.0 { d } else { [0.4, 0.0, 0.0, 0.0] },
             t: 0.0,
             from: knee,
-            to: Vec3::new(top.x, c.point.y, top.z),
+            // no root motion in `hangknee_tr_freestep_entry` (see `ledge_moves::climb_out_moves`)
+            to: knee,
             follow_disp: false,
             end_stand: true,
             ..mv
