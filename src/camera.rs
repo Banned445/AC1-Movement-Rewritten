@@ -521,6 +521,8 @@ pub struct CamInput {
     pub fall_drop: Option<f32>,
     /// ActorState 67.
     pub reset: bool,
+    /// R3 / C pressed this frame on the shown LowHigh camera (0x693A60).
+    pub recentre: bool,
 }
 
 /// What a newly active camera takes from the one before it (0x6910C0).
@@ -606,6 +608,8 @@ pub struct NativeCamera {
     climb_yaw_vel: f32,
     recentre_e_vel: f32,
     recentre_yaw_vel: f32,
+    /// The R3 reset (0x692220): progress, start yaw offset from behind (+0x818), start e (+0x81C), span.
+    pad_reset: Option<(f32, f32, f32, f32)>,
 }
 
 impl Default for NativeCamera {
@@ -660,6 +664,7 @@ impl Default for NativeCamera {
             climb_yaw_vel: 0.0,
             recentre_e_vel: 0.0,
             recentre_yaw_vel: 0.0,
+            pad_reset: None,
         }
     }
 }
@@ -799,6 +804,7 @@ impl NativeCamera {
         self.climb_top_recentre(inp, world, dt);
         self.climb_lead_and_recentre(inp, dt);
         self.orbit_input(inp, dt);
+        self.pad_reset(inp, dt);
         self.raw_eye(inp, world, speed, dt);
         // +292 = 0x690610: the eye lag, none while the mouse drives
         self.eye = if inp.mouse_mode {
@@ -820,6 +826,27 @@ impl NativeCamera {
         smooth_cd_vec(&mut self.offset, want, &mut self.offset_vel, omega, dt);
         // +128 = 0x690A40: the look-at point
         CamView { eye: self.eye, look_at: self.target + self.look + self.offset }
+    }
+
+    /// R3 / C on the LowHigh camera (0x693A60, when +0x830 is clear) starts the reset 0x692220: the yaw goes from its
+    /// offset to behind the heading (+0x818) and e to the settings' default (+0x81C → +0x820 = settings +0x1F4) with the
+    /// weight sin(t·π/2), t += 3.5 (+0x8FC) · dt · π / max(|yaw offset|, |Δe|) (0x693336–0x6933D0). Live (RE/20 #18,
+    /// 2026-10-17): 106° off, the view was behind Altaïr and at the default pitch 0.16 s after the press.
+    fn pad_reset(&mut self, inp: &CamInput, dt: f32) {
+        if inp.recentre && self.profile.lowhigh {
+            let yaw_off = wrap(self.yaw - game_heading(inp.forward));
+            let span = yaw_off.abs().max((self.profile.e_default - self.e).abs());
+            self.pad_reset = (span > 0.0).then_some((0.0, yaw_off, self.e, span));
+        }
+        if let Some((t, yaw_off, e0, span)) = &mut self.pad_reset {
+            *t = (*t + PAD_RESET_SPEED * PI * dt / *span).min(1.0);
+            let w = (*t * std::f32::consts::FRAC_PI_2).sin();
+            self.yaw = wrap(game_heading(inp.forward) + *yaw_off * (1.0 - w));
+            self.e = *e0 + (self.profile.e_default - *e0) * w;
+            if *t >= 1.0 {
+                self.pad_reset = None;
+            }
+        }
     }
 
     /// PresentationEvent / FallEvent handlers (0xC5E820 / 0xC5E980) from this frame's state.
@@ -1115,6 +1142,9 @@ pub const FIRST_PERSON: FirstPersonSettings = FirstPersonSettings {
     omega_pitch: 50.0,
 };
 
+/// The R3 reset's speed (LowHighProfileCamera +0x8FC = 3.5, read live; from the camera's settings).
+const PAD_RESET_SPEED: f32 = 3.5;
+
 /// The head bone the first-person TargetHeadBoneMonitor (Camera Switcher 0x3C7DF4E9) tracks.
 const FP_HEAD_BONE: u32 = 0x07C1_59A2;
 
@@ -1269,6 +1299,8 @@ struct FollowState {
     /// PORT: a placement's distance is ignored (the camera's e sets it).
     written: Option<(f32, f32, f32)>,
     shake: ShakeState,
+    /// R3 last frame (the reset starts on the press).
+    r3_prev: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1348,9 +1380,15 @@ fn follow(
         beam: matches!(ctx, Some(C::NarrowObject)),
         fall_drop,
         reset: std::mem::take(&mut events.reset),
+        recentre: false,
     };
     // the first-person activator (0xCD3360): Head toggles it while standing still
     let buttons = if menu.open { [false; 16] } else { pad.as_ref().map_or([false; 16], |p| p.buttons) };
+    // R3 / C: the LowHigh camera's reset. PORT: the game skips it while +0x830 is set (seen for 0.45 s after leaving
+    // first person); the port skips it while a camera switch blends
+    let mut inp = inp;
+    inp.recentre = buttons[15] && !st.r3_prev && st.shown == Shown::LowHigh && st.blend.is_none();
+    st.r3_prev = buttons[15];
     st.fp.activator(&FpInput { buttons, move_stick, root: p.translation, on_ground: matches!(ctx, Some(C::Ground)) });
     // ActorState 62 (StandOnLedge) while the look-down at an edge runs
     let look_down = matches!(ctx, Some(C::Ground)) && data.is_some_and(|d| d.ground.look_down.is_some());
@@ -1555,6 +1593,30 @@ mod tests {
         assert!((p - (-0.698_132 + 2.094_395 * 0.535f32.powf(1.45))).abs() < 1e-4);
         assert!(v.eye.z > 0.0 && v.eye.y > S.target_height, "behind and above: {:?}", v.eye);
         assert!((v.eye - Vec3::Y * S.target_height).length() - 3.5 < 1e-3);
+    }
+
+    /// Live RE/20 #18 (2026-10-17): R3 on the LowHigh camera resets it behind the heading at the default elevation,
+    /// 106° in about 0.17 s (3.5·π rad/s on the larger of the two spans, eased by sin(t·π/2)).
+    #[test]
+    fn r3_resets_the_lowhigh_camera_behind_the_heading() {
+        let dt = 1.0 / 120.0;
+        let mut cam = NativeCamera::default();
+        cam.update(&input(dt), &Open);
+        let behind = cam.heading;
+        cam.yaw = wrap(behind + 106f32.to_radians());
+        cam.e = 0.8;
+        let mut inp = input(dt);
+        inp.recentre = true;
+        cam.update(&inp, &Open);
+        assert!(cam.pad_reset.is_some(), "the press starts the reset");
+        let mut t = dt;
+        while cam.pad_reset.is_some() && t < 1.0 {
+            cam.update(&input(dt), &Open);
+            t += dt;
+        }
+        let want = 106f32.to_radians() / (PAD_RESET_SPEED * PI);
+        assert!((t - want).abs() < 2.0 * dt, "done after {t:.3} s, want {want:.3}");
+        assert!(wrap(cam.yaw - behind).abs() < 1e-3 && (cam.e - S.e_default).abs() < 1e-4, "{} {}", cam.yaw, cam.e);
     }
 
     #[test]
