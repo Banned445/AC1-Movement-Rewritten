@@ -171,8 +171,8 @@ pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32),
         // off the rim)
         let beyond = x + n * 0.25;
         for s in &guidance.haystacks {
-            if beyond.x >= s.min.x && beyond.x <= s.max.x && beyond.z >= s.min.z && beyond.z <= s.max.z {
-                drop = drop.min((x.y - s.max.y).max(0.0));
+            if s.over(beyond, 0.0) {
+                drop = drop.min((x.y - s.bounds.max.y).max(0.0));
             }
         }
         if drop < min_drop {

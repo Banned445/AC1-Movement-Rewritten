@@ -958,11 +958,8 @@ pub fn update_air(
                     }
                     if air.target_flags == jump_blend::TARGET_HAYSTACK && then_fall_to.is_none() {
                         // PORT: the game requests the haystack on every arrival at the target (its owner entity); the
-                        // port finds the stack by its box widened 0.3 m (no game source, RE/24 AIR-36)
-                        if let Some(stack) = guidance.haystacks.iter().find(|s| {
-                            let p = body.feet;
-                            p.x >= s.min.x - 0.3 && p.x <= s.max.x + 0.3 && p.z >= s.min.z - 0.3 && p.z <= s.max.z + 0.3
-                        }) {
+                        // port finds the stack by its collision footprint widened 0.3 m (no game source, RE/24 AIR-36)
+                        if let Some(stack) = guidance.haystacks.iter().find(|s| s.over(body.feet, 0.3)) {
                             // arrival on a haystack target (0xE07D00 clears InAir+340 → RequestHayStack 0xE01AF0 →
                             // 0xE00E30: entry Top, the faith landing, for every target arrival)
                             hay_on = Some(super::hay::HayStackEntry { stack: *stack, kind: super::hay::HayEntry::Top, from: body.feet, speed: body.velocity.length() });
@@ -1041,7 +1038,25 @@ pub fn update_air(
                 }
             }
             AirMode::Fall { steer_to } => {
-                body.velocity.y -= GRAVITY * dt;
+                // The fall action's root motion (RE/32 §2): the actions the contexts hand the fall (Data+416: the
+                // rebound's `rebound_footr_tr_fall` 0xE3934A, the ladder releases, the lost grip, the vault's fall) are
+                // FROMANIM items, so their DISPLACEMENT moves the character, both axes, until the action is done; then
+                // `UpdateJumpMotion` plays action 33 `jump_falling01` (FROMPHYSICS, 0xE0F47A–0xE0F522) and gravity carries
+                // on from the clip's last step (live RE/20 #43; lab `climb_01`: the rebound falls 1.94 m in 0.31 s at the
+                // clip's 7 m/s and 0.6 m off the wall). Not with a steered tail (the let-go's own branch, `dive_wait`).
+                let anim_v = steer_to.is_none().then_some(air.fall_action).flatten().and_then(|a| {
+                    let d = a.duration();
+                    (d > 1e-4 && air.fall_t < d).then(|| {
+                        let (p0, p1) = (air.fall_t / d, ((air.fall_t + dt) / d).min(1.0));
+                        let (a0, a1) = (a.disp(p0), a.disp(p1));
+                        to_world([a1[0] - a0[0], a1[1] - a0[1], a1[2] - a0[2]], body.forward()) / dt.max(1e-4)
+                    })
+                });
+                if let Some(v) = anim_v {
+                    body.velocity = v;
+                } else {
+                    body.velocity.y -= GRAVITY * dt;
+                }
                 let mut h = Vec3::new(body.velocity.x, 0.0, body.velocity.z);
                 match steer_to {
                     // the over-drop tail (Data+506, `UpdateJumpMotion` 0xE0F92D–0xE0FB43, RE/24 AIR-4), in m / frame:
@@ -1103,6 +1118,7 @@ pub fn update_air(
                             h = (Vec3::new(p.x - body.feet.x, 0.0, p.z - body.feet.z) / t_left).clamp_length_max(FREEFALL_MAX_HORIZONTAL);
                         }
                     }
+                    None if anim_v.is_some() => {}
                     None => {
                         // Non-target drift 0xE0F643–0xE0F707, constants 0x19BA434/438. PORT: the game drifts only while
                         // `AnimComponent__GetSlotMotionMode`(0) == 1 and no BounceOffHuman deadline runs (`sub_DFEEE0`,

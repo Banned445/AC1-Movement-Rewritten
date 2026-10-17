@@ -24,7 +24,9 @@ use crate::{assets::{forge::{crc32, Resource}, static_mesh::{parse_static_mesh, 
 pub const TO_BEVY: Mat4 = Mat4::from_cols(Vec4::X, Vec4::new(0.0, 0.0, -1.0, 0.0), Vec4::Y, Vec4::W);
 pub fn to_bevy(p: Vec3) -> Vec3 { Vec3::new(p.x, p.z, -p.y) }
 
-/// PORT: entity names left out, after AC1-rs's list (RE/15 §3): mission/debug helpers and markers.
+/// PORT: entity names left out, after AC1-rs's list (RE/15 §3): mission/debug helpers and markers. In Damascus that is
+/// 28 `GP_MARK_*` (a marker mesh each, no collision, no guidance) and 8 empty `PositionHelper`s (plan W4, 2026-10-17):
+/// nothing the player touches.
 const EXCLUDED: [&str; 4] = ["GP_MARK", "PositionHelper", "PillarDust", "OutOfBound"];
 
 pub struct LodMesh {
@@ -50,7 +52,7 @@ pub struct CityObject {
     pub visual_bounds: Aabb3,
     pub collision: Vec<Triangle>,
     pub edges: Vec<GuidanceEdge>,
-    pub haystack: Option<Aabb3>,
+    pub haystack: Option<crate::collision::HayStack>,
     /// The entity's small / medium object flags (`entity_size_flags`): bit 0 small, bit 1 medium.
     pub size: u8,
 }
@@ -336,9 +338,7 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     for t in &o.collision { grow(&mut o.bounds, t.bounds.min); grow(&mut o.bounds, t.bounds.max); }
     for e in &o.edges { grow(&mut o.bounds, e.p0); grow(&mut o.bounds, e.p1); }
     if !markers(b, "BhvHayStack").is_empty() {
-        // PORT: the haystack volume is the hay mesh's bounds; BhvHayStack's own fields are not decoded.
-        let visual = o.meshes.first().map(|m| mesh_bounds(&m.mesh, o.transform));
-        o.haystack = visual.or(Some(o.bounds)).filter(|b| b.min.is_finite());
+        o.haystack = haystack_of(&o);
     }
     if o.meshes.is_empty() && o.collision.is_empty() && o.edges.is_empty() { return Ok(None); }
     if !o.bounds.min.is_finite() { o.bounds = Aabb3 { min: o.center, max: o.center }; }
@@ -704,4 +704,31 @@ mod tests {
         let t = LodTable::build(&d([(1, 10.0), (0, 20.0), (0, 40.0), (0, 80.0), (0, 160.0)]), 1);
         assert_eq!(t.fade(9.5), None);
     }
+}
+
+/// The haystack as the game's queries see it (`collision::HayStack`): the entity's origin, and its collision's box in
+/// the entity's frame (Damascus's `Hay_Bale_*` collision is a 12-triangle box). Without collision, the hay mesh's
+/// bounds (none of Damascus's 46 lacks it).
+fn haystack_of(o: &CityObject) -> Option<crate::collision::HayStack> {
+    let origin = o.transform.w_axis.truncate();
+    let mut axes = [o.transform.x_axis.truncate().normalize_or_zero(), o.transform.y_axis.truncate().normalize_or_zero(), o.transform.z_axis.truncate().normalize_or_zero()];
+    // the entity's frame is the game's (Z up): put its up axis second, as `HayStack` reads it (Bevy Y up)
+    let up = (0..3).max_by(|&i, &j| axes[i].y.abs().total_cmp(&axes[j].y.abs())).unwrap();
+    axes.swap(1, up);
+    if o.collision.is_empty() || axes.iter().any(|a| *a == Vec3::ZERO) {
+        let b = o.meshes.first().map(|m| mesh_bounds(&m.mesh, o.transform)).unwrap_or(o.bounds);
+        return b.min.is_finite().then(|| crate::collision::HayStack { origin, ..crate::collision::HayStack::from_box(b) });
+    }
+    let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    let (mut wlo, mut whi) = (lo, hi);
+    for v in o.collision.iter().flat_map(|t| t.vertices) {
+        let d = v - origin;
+        let l = Vec3::new(d.dot(axes[0]), d.dot(axes[1]), d.dot(axes[2]));
+        lo = lo.min(l);
+        hi = hi.max(l);
+        wlo = wlo.min(v);
+        whi = whi.max(v);
+    }
+    let c = (lo + hi) * 0.5;
+    Some(crate::collision::HayStack { origin, centre: origin + axes[0] * c.x + axes[1] * c.y + axes[2] * c.z, axes, half: (hi - lo) * 0.5, bounds: Aabb3 { min: wlo, max: whi } })
 }

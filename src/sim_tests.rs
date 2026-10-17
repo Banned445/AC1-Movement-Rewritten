@@ -1700,8 +1700,13 @@ fn wall_run_without_a_ledge_drops_back() {
     use crate::player::walling::WallingSubState;
     let mut s = wall_run_at(82.0);
     assert!(s.run_until(1.0, |s| s.data().walling.sub_state == WallingSubState::VerticalEnd), "no vertical end");
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "never left the wall: {:?}", s.loco().current);
+    let off = s.body().feet;
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
     assert!(s.body().feet.y.abs() < 0.05);
+    // `rebound_footr_tr_fall` is FROMANIM: its root motion carries the fall back off the wall (0.8 m in its 0.47 s,
+    // 3 m down; live lab `climb_01`: 0.6 m back over a 1.9 m drop), not a fall from rest straight down
+    assert!(off.z - s.body().feet.z > 0.4, "fell straight down: left the wall at {off:?}, landed at {:?}", s.body().feet);
 }
 
 #[test]
@@ -4100,6 +4105,9 @@ pub(crate) struct LabTrace {
     pub heading: f32,
     /// The foot of the wait the recording starts in (the first ground wait action's last `_footl` / `_footr`): 0 = left.
     pub wait_foot: Option<usize>,
+    /// The game's velocity at the start (Bevy axes) when the recording starts just after the lab's teleport (the
+    /// player arrives moving, in the air); zero otherwise.
+    pub velocity: Vec3,
 }
 
 /// A lab frame onto the pad. Unlike the port's own recordings (whose press ages are the pad's), a recorded press only
@@ -4122,6 +4130,11 @@ impl LabTrace {
         if let (Some(foot), Some(mut d)) = (self.wait_foot, world.get_mut::<HumanDataBundle>(player)) {
             d.ground.set_wait_foot(foot);
         }
+        if self.velocity != Vec3::ZERO {
+            if let Some(mut b) = world.get_mut::<Body>(player) {
+                b.velocity = self.velocity;
+            }
+        }
     }
 }
 
@@ -4138,9 +4151,19 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
     let (c_x, c_y, c_z) = (col("x"), col("y"), col("z"));
     let (c_dx, c_dy, c_dz, c_mag) = (col("mdx"), col("mdy"), col("mdz"), col("mmag"));
     let (c_lx, c_ly) = (col("lx"), col("ly"));
-    let rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).filter(|r: &Vec<&str>| r.len() >= head.len()).collect();
+    let mut rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).filter(|r: &Vec<&str>| r.len() >= head.len()).collect();
     assert!(!rows.is_empty(), "empty trace");
     let f = |r: &Vec<&str>, c: usize| r[c].parse::<f32>().unwrap_or(0.0);
+    // the lab's teleport can land a frame or two after the recording starts: the replay starts after it (the same
+    // frames `compare.py` drops), moving as the game was
+    let skip = lab_teleport_skip(&rows.iter().take(20).map(|r| Vec3::new(f(r, c_x), f(r, c_y), f(r, c_z))).collect::<Vec<_>>());
+    rows.drain(..skip);
+    let velocity = if skip > 0 {
+        let (c_vx, c_vy, c_vz) = (col("vx"), col("vy"), col("vz"));
+        Vec3::new(f(&rows[0], c_vx), f(&rows[0], c_vz), -f(&rows[0], c_vy))
+    } else {
+        Vec3::ZERO
+    };
     // game forward (row 1, Z-up) -> Bevy (x, z, -y); Body::forward = (-sin h, 0, -cos h)
     let (bx, bz) = (f(&rows[0], c_fx), -f(&rows[0], c_fy));
     let heading = (-bx).atan2(-bz);
@@ -4204,7 +4227,13 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
             }
         })
         .collect();
-    LabTrace { frames, start, heading, wait_foot }
+    LabTrace { frames, start, heading, wait_foot, velocity }
+}
+
+/// The frames before a teleport among a recording's first ones (a jump of more than 5 m between two frames): the count
+/// to drop, 0 when there is none. `compare.py` drops the same.
+pub(crate) fn lab_teleport_skip(positions: &[Vec3]) -> usize {
+    positions.windows(2).rposition(|w| w[0].distance(w[1]) > 5.0).map_or(0, |i| i + 1)
 }
 
 /// `port_trace.csv`'s columns.

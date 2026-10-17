@@ -140,6 +140,10 @@ pub struct HumanGroundData {
     /// HG+1500 while standing: the profile of the wait playing (`HumanGround__IdleWait_Enter` 0xD94580 takes the
     /// wanted one, HG+1504 = `high_profile`).
     pub wait_high: bool,
+    /// HG+1500 through the FreeRun sub-state: `FreeRun_Enter` 0xD8B9D0 leaves it as the wait left it, and the FreeRun
+    /// update (0xDAAE38) refreshes only HG+1504, so the run start out of it (`HumanGround__FreeRunStartMove` 0xD99A50)
+    /// picks its item by the wait's profile.
+    pub free_run_high: bool,
     /// HG+1524: the stance-change wait plays (RE/24 GROUND-14); `stance_timer` is its time still to play (HG+736).
     pub stance_change: bool,
     pub stance_timer: f32,
@@ -689,6 +693,33 @@ impl HumanGroundData {
         self.tr = Some(t);
     }
 
+    /// FreeRun → Move (`HumanGround__FreeRunStartMove` 0xD99A50, from the FreeRun update 0xDAAE84 once HG+520 has run
+    /// out, 0.2 s after `FreeRun_Enter`, with the wanted move mode HG+1496 = 2): the start item of HG+1500 (the wait's
+    /// profile, `free_run_high`) and the leading foot as `PlayStartMove`, the same 0.2 s blend, but weighted all on its
+    /// fourth clip, `xx_h_impultionstraight_foot?_to_sprint_impultion` ([0, 0, 0, 1], 0xD99D48), and Movement entered in
+    /// mode 6 (`TransitionSetupDataToMovement` 6, layout 7: s := 1.0, HG+1500 := 1, `Movement_EnterBody` 0xD92E1D).
+    /// Live (RE/26 §6.7, freerun_east): the low start's action with the sprint impulsion's root speeds, 1.10 → 5.84 m/s.
+    /// Its other branch (Data+284 set in the low profile: the social crouch request, not produced here) is not ported.
+    pub fn play_free_run_start(&mut self) {
+        self.reset_move_entry();
+        let foot = (self.blend.foot != 0) as usize;
+        let id = START_MOVE[self.free_run_high as usize][foot];
+        if jump_blend::action_items(id).is_none() {
+            return;
+        }
+        let w: &[f32] = &[0.0, 0.0, 0.0, 1.0];
+        self.speed_param = 1.0;
+        self.blend.speed_param = 1.0;
+        if !GAME_GROUND_TREE {
+            self.play_oneshot(ActionBlend::new(id, 0, w));
+            return;
+        }
+        let seq = self.next_tr_seq();
+        let mut t = super::ground_tree::MoveTransition::new(ActionBlend::new(id, 0, w), 7, 1 - foot, None, seq);
+        t.blend_in = Some(crate::assets::ac_actions::ActBlend { kind: 1, disp_src: 2, time: 0.2, ..crate::assets::ac_actions::ActBlend::DEFAULT });
+        self.tr = Some(t);
+    }
+
     /// RunTurn → Move (`HumanGround__PlayRunTurnExitMove` 0xD8F2B0), s := 0.5. Still turned (more than 120 deg): the
     /// heading is turned round (the skid-turn clip turned the skeleton, not the root) and the turn's own exit plays
     /// (legacy 96 / 97); otherwise the run stop's exit (93 after the left-foot turn, 92 after the right) with a 0.2 s
@@ -1025,6 +1056,7 @@ pub fn update_ground(
                     g.pose_seq=g.pose_seq.wrapping_add(1);
                     let mut extra=super::ground_extras::ExtraAction::free_run(g.blend.foot,g.pose_seq);
                     extra.action.item=1;g.extra=Some(extra);g.crouch=None;body.proxy.height=None;
+                    g.free_run_high=g.wait_high;
                 } else if let Some(delta)=delta {
                     body.proxy.height=Some(1.0);g.crouch=Some(crouch);
                     let d=super::right_of(body.forward())*delta.x+body.forward()*delta.z;
@@ -1056,6 +1088,8 @@ pub fn update_ground(
                 g.pose_seq=g.pose_seq.wrapping_add(1);
                 g.extra=Some(super::ground_extras::ExtraAction::free_run(g.blend.foot,g.pose_seq));
                 g.speed_param=0.0;g.blend.speed_param=0.0;
+                // HG+1500 stays the wait's through FreeRun (0xD8B9D0 does not touch it)
+                g.free_run_high=g.wait_high;
             }
             if g.crouch_requested && !pad.high_profile {g.extra=None;}
             if let Some(mut extra)=g.extra {
@@ -1096,7 +1130,13 @@ pub fn update_ground(
                 let (out,delta)=extra.advance(dt,pad.magnitude>0.35,request,g.blend.foot);
                 let delta=delta*k;
                 match out {
-                    super::ground_extras::ExtraResult::Inactive=>{g.extra=None;},
+                    super::ground_extras::ExtraResult::Inactive=>{
+                        g.extra=None;
+                        // the FreeRun's own run start (0xDAAE7D–0xDAAE97): FreeRun_Exit, `FreeRunStartMove`, Movement
+                        if extra.mode==super::ground_extras::ExtraMode::FreeRun && GAME_GROUND_TREE {
+                            g.play_free_run_start();
+                        }
+                    },
                     super::ground_extras::ExtraResult::Jump{action,fall}=>{
                         pad.consume_jump();
                         let entry=if let Some(target)=extra.target {
@@ -2578,5 +2618,23 @@ mod reanalysis_tests {
         g.blend.lean = 0.3;
         g.play_start_move();
         assert_eq!((g.blend.slowdown, g.blend.settle, g.blend.lean), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn the_free_run_start_rides_the_sprint_impulsion() {
+        // `HumanGround__FreeRunStartMove` 0xD99A50: the start item of the wait's profile (HG+1500, low here), all its
+        // weight on the sprint impulsion clip, s = 1.0 and layout 7 (live: freerun courses, 1.10 → 5.84 m/s)
+        if jump_blend::action_items(START_MOVE[0][1]).is_none() {
+            return;
+        }
+        let mut g = HumanGroundData { high_profile: true, free_run_high: false, ..Default::default() };
+        g.blend.foot = 1;
+        g.blend.slowdown = 0.7;
+        g.play_free_run_start();
+        let t = g.tr.expect("the start transition");
+        assert_eq!(t.action.id, START_MOVE[0][1]);
+        assert_eq!(t.action.weights(), &[0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(t.layout, 7);
+        assert_eq!((g.speed_param, g.blend.speed_param, g.blend.slowdown), (1.0, 1.0, 0.0));
     }
 }

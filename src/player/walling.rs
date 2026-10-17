@@ -560,16 +560,16 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
             let (hl, hr) = (a.point, b.point);
             let mid = (hl + hr) * 0.5;
             let n = Vec3::new(a.wall_normal.x, 0.0, a.wall_normal.z).normalize_or(c.normal);
-            if !super::ledge::feet_supports(mid, n, collision) {
-                continue;
-            }
+            let Some(feet) = super::ledge::feet_supports_point(mid, n, collision) else { continue };
             // clips 251 / 430 cm × 000 / 050 cm: v = min((height − h) / 1.5h, 1) (0xE39069, WALL-7); o = the foot support's
             // offset from the hands on the hands' level, min(d, 0.75) / 0.75 when it points back toward the character, else
             // 0 (0xE38F9D…0xE3903B, WALL-8). PORT: LedgeData+112 = o is not carried into the hang.
             let v = ((c.height - H) / (1.5 * H)).clamp(0.0, 1.0);
             let o = foot_offset(mid, n, f, collision);
             let w = [(1.0 - v) * (1.0 - o), v * (1.0 - o), (1.0 - v) * o, v * o];
-            let to = hang_root(hl, hr, n, LedgeHangType::Wall);
+            // the hang's pose from the hands and the foot supports (`sub_B157B0` 0xE38F2B, the entries' higher hand), the
+            // root interpolated to it (0xE391D9): a wall that steps in under the edge leans the body axis
+            let to = super::ledge::wall_hang_root(hl, hr, n, Some(feet), true);
             let c = LedgeCandidate { normal: n, ..c };
             // the hands are the pair it found (0xE391FB / 0xE3920C: `sub_E55CB0`(0 / 1) with its two points): on short
             // pieces both on the piece's middle, so the hang starts with its hands together (live RE/25 climb survey

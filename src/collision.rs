@@ -37,6 +37,69 @@ pub struct Aabb3 {
     pub max: Vec3,
 }
 
+/// A haystack (an entity with `BhvHayStack`) as the game's queries see it: the entity's origin, which the searches
+/// read (`Human__sub_E15AA0` 0xE15E6D: origin + 1.6 m is the top; the entries' root interpolation goes to it), and
+/// its collision box (the RigidBodyComponent's shape, 0xC177D702), which the contacts and the dive ray hit
+/// (`HumanInAir__CheckHayStackEntry` 0xE05490) and whose footprint the hop out leaves (`Guard_HopOut` 0xE434E0:
+/// the shape's local box placed by the body's transform). Not the hay mesh: the drawn bales and cart reach about
+/// twice as wide as the collision (plan W1, RE/17 §4).
+#[derive(Clone, Copy, Debug)]
+pub struct HayStack {
+    pub origin: Vec3,
+    /// The collision box: centre, unit axes (the entity's), half extents.
+    pub centre: Vec3,
+    pub axes: [Vec3; 3],
+    pub half: Vec3,
+    /// The collision box's world bounds.
+    pub bounds: Aabb3,
+}
+
+impl HayStack {
+    /// An axis-aligned stack standing on its base centre (the greybox's).
+    pub fn from_box(b: Aabb3) -> Self {
+        let centre = (b.min + b.max) * 0.5;
+        Self { origin: Vec3::new(centre.x, b.min.y, centre.z), centre, axes: [Vec3::X, Vec3::Y, Vec3::Z], half: (b.max - b.min) * 0.5, bounds: b }
+    }
+    /// The top the searches report: the origin + 1.6 m (0xE15E87).
+    pub fn top(&self) -> Vec3 {
+        self.origin + Vec3::Y * 1.6
+    }
+    fn local(&self, p: Vec3) -> Vec3 {
+        let d = p - self.centre;
+        Vec3::new(d.dot(self.axes[0]), d.dot(self.axes[1]), d.dot(self.axes[2]))
+    }
+    /// `p` over the footprint (the box seen from above), widened by `margin`.
+    pub fn over(&self, p: Vec3, margin: f32) -> bool {
+        let l = self.local(p);
+        l.x.abs() <= self.half.x + margin && l.z.abs() <= self.half.z + margin
+    }
+    /// `p` inside the box widened by `margin`.
+    pub fn contains(&self, p: Vec3, margin: f32) -> bool {
+        let l = self.local(p);
+        l.abs().cmple(self.half + Vec3::splat(margin)).all()
+    }
+    /// The segment `from` → `from + d` meets the box.
+    pub fn segment_hits(&self, from: Vec3, d: Vec3) -> bool {
+        let (o, v) = (self.local(from), Vec3::new(d.dot(self.axes[0]), d.dot(self.axes[1]), d.dot(self.axes[2])));
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        (0..3).all(|k| {
+            if v[k].abs() < 1e-8 {
+                return o[k].abs() <= self.half[k];
+            }
+            let (a, b) = ((-self.half[k] - o[k]) / v[k], (self.half[k] - o[k]) / v[k]);
+            lo = lo.max(a.min(b));
+            hi = hi.min(a.max(b));
+            lo <= hi
+        })
+    }
+    /// Where the flat ray from `from` along `dir` leaves the footprint (at `from`'s height).
+    pub fn footprint_exit(&self, from: Vec3, dir: Vec3) -> Vec3 {
+        let (o, v) = (self.local(from), Vec3::new(dir.dot(self.axes[0]), 0.0, dir.dot(self.axes[2])));
+        let t = |k: usize| if v[k].abs() > 1e-5 { (self.half[k] * v[k].signum() - o[k]) / v[k] } else { f32::INFINITY };
+        from + dir * t(0).min(t(2)).max(0.0)
+    }
+}
+
 #[derive(Resource)]
 pub struct CollisionWorld {
     pub boxes: Vec<Aabb3>,
@@ -727,6 +790,7 @@ impl CollisionWorld {
     pub fn obb_free_except(&self, centre: Vec3, axes: [Vec3; 3], half: Vec3, skip: impl Fn(&Aabb3) -> bool) -> bool {
         let world = [Vec3::X, Vec3::Y, Vec3::Z];
         let extent = Self::box_extent(axes, half);
+        // `skip` leaves out boxes and triangles whose bounds it accepts (the query's ignored entity)
         !self.boxes.iter().filter(|b| !skip(b)).any(|b| {
             let (bc, bh) = ((b.min + b.max) * 0.5, (b.max - b.min) * 0.5);
             let d = bc - centre;
@@ -745,7 +809,7 @@ impl CollisionWorld {
                 let rb = bh.x * l.x.abs() + bh.y * l.y.abs() + bh.z * l.z.abs();
                 d.dot(*l).abs() <= ra + rb
             })
-        }) && !self.triangles_in_bounds(centre - extent, centre + extent).any(|t| t.intersects_box(centre, axes, half))
+        }) && !self.triangles_in_bounds(centre - extent, centre + extent).any(|t| !skip(&t.bounds) && t.intersects_box(centre, axes, half))
     }
 
     /// `Human__BoxQueryEmpty` 0xB2D2A0 with a contact out: the solid point inside an oriented box (centre, unit
