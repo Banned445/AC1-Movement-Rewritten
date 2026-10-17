@@ -70,7 +70,16 @@ pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collis
 /// `want` = the wanted direction.
 pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
     let cands = jump_candidates::query(feet, want, q, guidance, collision);
-    let t = jump_candidates::select(&cands, feet, facing, want, 1, behind_far).and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));
+    let sel = jump_candidates::select(&cands, feet, facing, want, 1, behind_far);
+    let t = sel.and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));
+    if std::env::var_os("AC_JUMP_LOG").is_some() {
+        // game axes (x, y, z) = (x, -z, y), as the lab's probes print them
+        let g = |v: Vec3| format!("({:.3} {:.3} {:.3})", v.x, -v.z, v.y);
+        eprintln!("query kind {} pos={} dir={} facing={} -> {:?}", q.kind, g(feet), g(want), g(facing), sel);
+        for c in &cands {
+            eprintln!("  cand {} n={} t={} s={} f={:#x}", g(c.pos), g(c.wall), c.ty, c.sub, c.flags);
+        }
+    }
     super::target_debug::record(|| format!("jump (query kind {})", q.kind), feet, want, &cands, t.as_ref());
     t
 }

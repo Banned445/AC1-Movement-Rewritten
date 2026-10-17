@@ -1700,8 +1700,13 @@ fn wall_run_without_a_ledge_drops_back() {
     use crate::player::walling::WallingSubState;
     let mut s = wall_run_at(82.0);
     assert!(s.run_until(1.0, |s| s.data().walling.sub_state == WallingSubState::VerticalEnd), "no vertical end");
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "never left the wall: {:?}", s.loco().current);
+    let off = s.body().feet;
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
     assert!(s.body().feet.y.abs() < 0.05);
+    // `rebound_footr_tr_fall` is FROMANIM: its root motion carries the fall back off the wall (0.8 m in its 0.47 s,
+    // 3 m down; live lab `climb_01`: 0.6 m back over a 1.9 m drop), not a fall from rest straight down
+    assert!(off.z - s.body().feet.z > 0.4, "fell straight down: left the wall at {off:?}, landed at {:?}", s.body().feet);
 }
 
 #[test]
