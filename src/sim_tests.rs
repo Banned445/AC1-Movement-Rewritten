@@ -798,7 +798,7 @@ fn climbing_under_wall_k_bay_never_puts_the_body_inside_it() {
     let worst = std::cell::Cell::new(None);
     let left = s.run_until(15.0, |s| {
         let d = &s.data().climb;
-        if s.loco().current == ActorContextId::Climb && d.moving.is_none() && !climb::body_boxes_free(&collision, &d.frame, 0) {
+        if s.loco().current == ActorContextId::Climb && d.moving.is_none() && !climb::body_boxes_free(&collision, &d.frame, 0, false) {
             if worst.get().is_none() { worst.set(Some((d.last_action, d.frame.root))); }
         }
         s.loco().current == ActorContextId::Ledge

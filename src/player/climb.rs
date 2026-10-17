@@ -844,11 +844,12 @@ pub const CLIMB_TO_HANG: [[u32; 10]; 2] = [
 
 /// `Human__ClimbBodyBoxesFree` 0xB2DF90 at a climb pose (S = F × U): a box at root + 0.5·U (half extents 0.375 / 0.25 /
 /// 0.5 along S / F / U) and one at root + 1.4·U (0.15 / 0.15 / 0.4) hold nothing. A sideways LONG move (`side` ±1)
-/// widens the first box to 0.575 and moves it 0.05·side against S.
-pub(crate) fn body_boxes_free(collision: &crate::collision::CollisionWorld, pose: &ClimbPose, side: i32) -> bool {
+/// widens the first box to 0.575 and moves it 0.05·side against S; `wide` (the ledge's move round the far corner onto
+/// climb holds, 0xDD4A6E) widens it to 0.875 and moves it 0.25·side.
+pub(crate) fn body_boxes_free(collision: &crate::collision::CollisionWorld, pose: &ClimbPose, side: i32, wide: bool) -> bool {
     let s = pose.forward.cross(pose.up).normalize_or_zero();
     let axes = [s, pose.forward, pose.up];
-    let (half_s, shift) = if side != 0 { (0.575, -0.05 * side as f32) } else { (0.375, 0.0) };
+    let (half_s, shift) = if wide { (0.875, -0.25 * side as f32) } else if side != 0 { (0.575, -0.05 * side as f32) } else { (0.375, 0.0) };
     collision.obb_free(pose.root + pose.up * 0.5 + s * shift, axes, Vec3::new(half_s, 0.25, 0.5))
         && collision.obb_free(pose.root + pose.up * 1.4, axes, Vec3::new(0.15, 0.15, 0.4))
 }
@@ -866,7 +867,7 @@ fn lateral_path_free(collision: &crate::collision::CollisionWorld, from: Vec3, f
 fn corner_climb(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize, near: bool) -> Option<(Hold, Hold, ClimbPose, u32)> {
     let (f, h) = side_column_holds(g, d, facing, dir, near)?;
     let pose = climb_pose([h.pos, h.pos, f.pos, f.pos], [h.normal, h.normal, f.normal, f.normal], -f.normal);
-    if !body_boxes_free(collision, &pose, 0) {
+    if !body_boxes_free(collision, &pose, 0, false) {
         return None;
     }
     if !near && !lateral_path_free(collision, root, facing, pose.root, -pose.normal(), 1.8) {
@@ -1247,7 +1248,7 @@ pub fn wall_hang_box_free(collision: &crate::collision::CollisionWorld, root: Ve
 fn try_move_clear(grid: &HoldGrid, d: &HumanClimbData, collision: &crate::collision::CollisionWorld, m: (usize, Side, i32, i32), long: bool) -> Option<(usize, [Option<(Hold, Hold)>; 2])> {
     let (next, sides) = try_move(grid, d.pose, m)?;
     let side = if long { m.2.signum() } else { 0 };
-    body_boxes_free(collision, &move_pose(grid, d, m), side).then_some((next, sides))
+    body_boxes_free(collision, &move_pose(grid, d, m), side, false).then_some((next, sides))
 }
 
 /// `HumanClimb__ComputeRootFromMove` 0xDEC6E0: the target pose from the grid cells of all four limbs, the non-moving side's

@@ -1276,8 +1276,16 @@ pub fn update_ledge(
                     rows.step = None;
                 }
                 // TryTransitionToClimb 0xDD46A0: both rows → the climb pose of those holds (both hands on the hands row,
-                // both feet on the feet row). PORT: its body boxes (0xB2DF90) are not tested.
-                if let (Some(feet_row), Some(hands_row)) = (rows.feet, rows.hands) {
+                // both feet on the feet row), its body boxes free (`Human__ClimbBodyBoxesFree` 0xB2DF90 at 0xDD4750)
+                let climb_fits = |f: &crate::guidance::GuidanceHit, h: &crate::guidance::GuidanceHit| {
+                    let pose = super::climb::climb_pose([h.point, h.point, f.point, f.point], [h.wall_normal, h.wall_normal, f.wall_normal, f.wall_normal], facing);
+                    super::climb::body_boxes_free(&collision, &pose, 0, false)
+                };
+                let pair = match (rows.feet, rows.hands) {
+                    (Some(f), Some(h)) if climb_fits(&f, &h) => (Some(f), Some(h)),
+                    _ => (None, None),
+                };
+                if let (Some(feet_row), Some(hands_row)) = pair {
                     let entry = ClimbEntry {
                         entry_type: ClimbEntryType::FromLedge,
                         pose_2m: None, end_action: None,
@@ -1452,11 +1460,11 @@ pub fn update_ledge(
                 }
                 // TrySideMoveToClimbHolds 0xDD48B0 on a row source, the bands in order (none during a closing step)
                 let (alt, hang_type, feet) = (d.alt_flag, d.hang_type, body.feet);
-                let climb_holds = |rows: &ledge_moves::EdgeRows, bands: &[usize]| {
-                    if alt { None } else { bands.iter().find_map(|&b| ledge_moves::side_move_to_climb_holds(rows, b, right_dir, hang_type, feet)) }
+                let climb_holds = |rows: &ledge_moves::EdgeRows, bands: &[usize], source: usize| {
+                    if alt { None } else { bands.iter().find_map(|&b| ledge_moves::side_move_to_climb_holds(rows, b, right_dir, hang_type, feet, facing, source, &collision)) }
                 };
                 // climb holds down, then level (16 / 8 on ProbeLateral's rows)
-                if let Some(e) = climb_holds(&rows, &[2, 1]) {
+                if let Some(e) = climb_holds(&rows, &[2, 1], 0) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
@@ -1490,14 +1498,14 @@ pub fn update_ledge(
                     continue;
                 }
                 // climb holds up (4)
-                if let Some(e) = climb_holds(&rows, &[0]) {
+                if let Some(e) = climb_holds(&rows, &[0], 0) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
                 // the near corner: FindCornerEdges(dir, 1) 0xDD0600 → climb holds 16 / 8 / 4 round it, TryTurnCorner(dir,
                 // 1) 0xDD3BB0
                 let near = ledge_moves::corner_rows(true, right_dir, d.hand_l, d.hand_r, n, &report);
-                if let Some(e) = climb_holds(&near, &[2, 1, 0]) {
+                if let Some(e) = climb_holds(&near, &[2, 1, 0], 1) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
@@ -1532,7 +1540,7 @@ pub fn update_ledge(
                 }
                 // the far corner: FindCornerEdges(dir, 0) → climb holds round it, TryTurnCorner(dir, 0)
                 let far = ledge_moves::corner_rows(false, right_dir, d.hand_l, d.hand_r, n, &report);
-                if let Some(e) = climb_holds(&far, &[2, 1, 0]) {
+                if let Some(e) = climb_holds(&far, &[2, 1, 0], 2) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }

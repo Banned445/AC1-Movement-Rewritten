@@ -477,11 +477,23 @@ pub fn probe_lateral(mover: Vec3, other: Vec3, n: Vec3, dv: Vec3, closing: bool,
 /// `HumanLedge__TrySideMoveToClimbHolds` 0xDD48B0 on a row source (ProbeLateral's or a corner's): `band` 0 up (flag 4:
 /// feet row 2, hands row 4), 1 level (8: rows 1 / 3), 2 down (16: rows 0 / 2). Both hands go to the hand row's hit and
 /// both feet to the feet row's (climb pose 0), then the transition `LEDGE_SIDE_TO_CLIMB` plays. Not during a closing
-/// step (+133). PORT: the clearance tests (`Human__ClimbBodyBoxesFree` 0xB2DF90, `Human__LateralPathFree` 0xB2A410,
-/// 1.8 m) are not modelled.
-pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang: LedgeHangType, feet: Vec3) -> Option<super::climb::ClimbEntry> {
+/// step (+133). Clearance: the climb pose's body boxes (`Human__ClimbBodyBoxesFree` 0xB2DF90, wide for the far corner's
+/// rows, `source` 2: 0xDD4A6E) and the path from the hang (its height 1.1 wall / 2.4 free, `sub_DCE2F0`) to the pose,
+/// 1.8 m tall (`Human__LateralPathFree` 0xB2A410, 0xDD4AE8 / 0xDD4B8D). `source`: 0 ProbeLateral's rows, 1 the near
+/// corner's, 2 the far corner's.
+#[allow(clippy::too_many_arguments)]
+pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang: LedgeHangType, feet: Vec3, facing: Vec3, source: usize, collision: &CollisionWorld) -> Option<super::climb::ClimbEntry> {
     let (fi, hi) = [(2usize, 4usize), (1, 3), (0, 2)][band];
     let (foot, hand) = (rows[fi]?, rows[hi]?);
+    let (hn, fnn) = (hand.wall_normal, foot.wall_normal);
+    let pose = super::climb::climb_pose([hand.point, hand.point, foot.point, foot.point], [hn, hn, fnn, fnn], facing);
+    if !super::climb::body_boxes_free(collision, &pose, 0, source == 2) {
+        return None;
+    }
+    let ha = if hang == LedgeHangType::Wall { 1.1 } else { 2.4 };
+    if !lateral_path_free(feet, facing, ha, pose.root, pose.forward, 1.8, if right { 1.0 } else { -1.0 }, collision) {
+        return None;
+    }
     Some(super::climb::ClimbEntry {
         entry_type: super::climb::ClimbEntryType::FromLedge,
         pose_2m: None, end_action: None,
@@ -1190,9 +1202,7 @@ pub fn try_jump_up_to_climb(
 /// while the root is interpolated to the pose over its length (0xDDA120 → sub_711130); then Climb (0xDE0870 →
 /// 0xDDFBF0, when the second action is the climb one) or the wall hang (0xDDA3D0).
 ///
-/// Both hand records on the upper hit, the climb and the hang alike (`TryFreeHangDropToClimb` 0xDDF711 / 0xDDF847);
-/// PORT: clearance = capsule test at
-/// the target.
+/// Both hand records on the upper hit, the climb and the hang alike (`TryFreeHangDropToClimb` 0xDDF711 / 0xDDF847).
 pub fn try_free_hang_drop(
     hand_l: Vec3,
     hand_r: Vec3,
@@ -1241,7 +1251,16 @@ pub fn try_free_hang_drop(
         // the wall-hang feet (sub_B16130) sit about 1.1 m below the hands (the wall-hang root offset)
         (FREE_DROP_TO_HANG, to, hl, hr, to.y, None)
     };
-    if !collision.capsule_fits(to + Vec3::Y * 0.05 + nn * 0.1) {
+    // the clearance (0xDDF6D6 / the hang's 0xB2DC80): the climb pose's body boxes, or the wall hang's box
+    let clear = match (&climb, lower) {
+        (Some(_), Some(lower)) => {
+            let ln = lower.wall_normal;
+            let pose = super::climb::climb_pose([upper.point, upper.point, lower.point, lower.point], [nn, nn, ln, ln], new_facing);
+            super::climb::body_boxes_free(collision, &pose, 0, false)
+        }
+        _ => super::ledge::hang_boxes_at(hl, hr, nn, LedgeHangType::Wall, super::ledge::entry_feet(hl, nn, collision), collision),
+    };
+    if !clear {
         return None;
     }
     let v = (base.y - if climb.is_some() { 2.0 } else { 1.6 } - feet_z).clamp(0.0, 1.0);
