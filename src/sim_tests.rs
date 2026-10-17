@@ -1233,6 +1233,24 @@ fn letting_go_above_a_haystack_dives_into_it() {
     assert_eq!(s.data().air.target.map(|t| t.type_flags), Some(crate::player::jump_blend::TARGET_HAYSTACK), "the let-go record's haystack");
     assert!(s.data().air.dive_wait.is_some());
     assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::HayStack), "never dove in: {:?} {:?}", s.loco().current, s.body().feet);
+    // the dive branch enters as SideJump, `xx_h_air_to_haystack` (live RE/20 #43: HayStack entry 4 after every let-go dive)
+    assert_eq!(s.data().hay.kind, crate::player::hay::HayEntry::SideJump);
+}
+
+/// RE/20 #43 (live 2026-10-17): the let-go's first item moves the body by its own root motion before the dive (the game
+/// held 0.13 s, then fell at the clip's 4.97 m/s), not by gravity from rest.
+#[test]
+fn the_let_go_before_the_dive_moves_by_its_clip() {
+    let mut s = hang_at(Vec3::new(33.0, 9.5, 23.6), Vec3::X);
+    s.press_hand();
+    assert!(s.run_until(0.3, |s| s.loco().current == ActorContextId::InAir), "no let-go");
+    let (item, d) = s.data().air.dive_item.expect("the let-go item");
+    let y0 = s.body().feet.y;
+    assert!(s.run_until(d + 0.1, |s| s.data().air.dive_wait.is_none()), "the let-go never ended");
+    let want = item.disp(1.0)[2];
+    assert!(want < -0.5, "the let-go clip moves down: {want}");
+    let got = s.body().feet.y - y0;
+    assert!((got - want).abs() < 0.08, "fell {got:.3} m over the let-go, its clip {want:.3} m");
 }
 
 #[test]
