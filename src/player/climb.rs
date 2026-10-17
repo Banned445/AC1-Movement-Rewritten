@@ -963,10 +963,17 @@ fn side_ladder(g: &GuidanceWorld, root: Vec3, facing: Vec3, dir: usize) -> Optio
 /// 1.2 m up or down, then 0.4 m to the leading hand's side and to the other (box 0.2 across, 0.5 deep, 0.4 up and down —
 /// 0.3 after the first foot hit; 45°; nearest a point 0.2 m out), each with a hand hold 1.2 m above it (0.375 across,
 /// 0.5 deep, 0.3). Both feet on the foot hold, both hands on the hand hold; clearance: a capsule (r 0.35, 1.8 m) from
-/// `sub_B18140`(root) + 0.15 m out, swept to `sub_B18140`(new root): it ends at the target (0xDF0509; `sub_B18140` 0xB18140
-/// adds the horizontal part of the pose's 1.8 m up axis, nothing on an upright root). Long when (|dz| − 0.8) / 1.3 ≥ 0.5;
+/// `upper_base`(root) + 0.15 m out, swept to `upper_base`(new root): it ends at the target (0xDF0509). Long when (|dz| − 0.8) / 1.3 ≥ 0.5;
 /// the entry's dir: up 0 / 1, down 2 / 3 by the side of the foot hold, right when right of the line through the root along
 /// the facing (the inverted ChooseMove grid matrix, 0xDF05F6) (RE/24 CLIMB-13).
+/// `sub_B18140` 0xB18140 with the frame's forward and 1.8 m: the frame's up (its forward turned 90° toward world up)
+/// times 1.8, its horizontal part added to the root, but only when the forward points level or above (an overhang's
+/// frame); a frame whose forward points down (a wall leaning back, its up toward the wall) gives the root itself.
+fn upper_base(root: Vec3, up: Vec3, facing: Vec3) -> Vec3 {
+    let flat = Vec3::new(up.x, 0.0, up.z);
+    if flat.dot(facing) > 0.0 { root } else { root + flat * 1.8 }
+}
+
 fn vertical_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorld, d: &HumanClimbData, root: Vec3, facing: Vec3, dir: usize) -> Option<ClimbReach> {
     let mv = if dir < 2 { Vec3::Y } else { Vec3::NEG_Y };
     let sign = if dir == 0 || dir == 2 { -1.0 } else { 1.0 };
@@ -989,9 +996,8 @@ fn vertical_reach(g: &GuidanceWorld, collision: &crate::collision::CollisionWorl
     let (f, h) = find(base).or_else(|| find(base + mv * 0.6))?;
     let (fn_, hn) = (f.wall_normal, h.wall_normal);
     let pose = climb_pose([h.point, h.point, f.point, f.point], [hn, hn, fn_, fn_], facing);
-    let b18140 = |root: Vec3, up: Vec3| root + Vec3::new(up.x, 0.0, up.z) * 1.8;
-    let start = b18140(root, d.frame.up) - facing * 0.15;
-    if !collision.capsule_cast_free(start, 1.8, 0.35, b18140(pose.root, pose.up) - start) {
+    let start = upper_base(root, d.frame.up, facing) - facing * 0.15;
+    if !collision.capsule_cast_free(start, 1.8, 0.35, upper_base(pose.root, pose.up, facing) - start) {
         return None;
     }
     let long = (((base.y - f.point.y).abs() - 0.8) / 1.3).clamp(0.0, 1.0) >= 0.5;
