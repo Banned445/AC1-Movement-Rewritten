@@ -301,6 +301,11 @@ pub struct HumanLedgeData {
     /// The hang type has been evaluated for this hang (it then changes only through moves: switches,
     /// corners, jumps — 0xDE1060).
     pub hang_set: bool,
+    /// The wall hang's foot records (LedgeData +1552 / +1568, the feet's limb targets `sub_E56D50`(2 / 3)): written when a
+    /// hang starts or switches to the wall (`TrySwitchHangType` 0xDE1850, `RePoseHandsFromBones` 0xDE1E73,
+    /// `FreeHangFeetFindWall` 0xDE0F6F), kept through the hand steps, whose root reads them (`ComputeRootFromHandTargets`
+    /// 0xDD6A48). `None`: upright.
+    pub feet: Option<Vec3>,
     /// The entry was an air catch (long or not): the grab lasts the catch action, set once the hang type is known.
     pub catch: Option<bool>,
     /// The catch action chosen by the air search (`air_catches::ledge_search`, RE/19 §2), and whether it is a free
@@ -579,6 +584,68 @@ pub fn hang_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType) -> Ve
         }
         LedgeHangType::Free => {
             Vec3::new(mid.x, hand_l.y.max(hand_r.y) - FREE_HANG_DROP, mid.z) + n * FREE_HANG_OUT
+        }
+    }
+}
+
+/// The foot records of a wall hang at `mid` (`HumanLedge__ProbeFootSupport` 0xDE0A60 keeps the ray's hit point and
+/// normal, LedgeData +1552 / +1568): `feet_on_wall`'s two rays, their hit points' midpoint (one foot shares the other's
+/// support when it misses). PORT: the entries that search the feet with `Human__FindWallHangFeetSupports` 0xB16130 use
+/// these rays' points too.
+pub fn feet_record(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let r = right_of(facing);
+    let start = mid - Vec3::Y - facing * 0.5;
+    let hit = |o: Vec3| {
+        let d = collision.sphere_free_distance(o, facing, 0.01, 1.2);
+        (d < 1.2 - 1e-3).then(|| o + facing * (d + 0.01))
+    };
+    match (hit(start - r * 0.1), hit(start + r * 0.1)) {
+        (Some(a), Some(b)) => Some((a + b) * 0.5),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The wall hang's root from its hand and foot records (`sub_B157B0`, and its copy in `ComputeRootFromHandTargets`
+/// 0xDD69C8–0xDD6B91): the body axis runs from the feet (projected into the vertical plane through the hands' midpoint,
+/// square to the wall) up to the hands; the root is the hands' midpoint at the chosen hand's height − 1.1 m along that
+/// axis − 0.5 m along the forward square to it (out of the wall). `higher`: the entries (`sub_B157B0`, 0xB15A5A) and the
+/// lateral steps (dir 2 / 3, 0xDD6B14) take the higher hand, the vertical steps the lower. A wall flush under the edge
+/// gives the upright axis, 1.1 m down and 0.5 m out; live (RE/29): on the inset wall at (56.07 13.16) the root sits
+/// 0.31 m from the edge. No foot record: upright.
+pub fn wall_hang_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, feet: Option<Vec3>, higher: bool) -> Vec3 {
+    let mid = (hand_l + hand_r) * 0.5;
+    let y = if higher { hand_l.y.max(hand_r.y) } else { hand_l.y.min(hand_r.y) };
+    let out = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let side = out.cross(Vec3::Y).normalize_or_zero();
+    let axis = feet
+        .map(|f| {
+            let p = f - side * (f - mid).dot(side);
+            (mid - p).normalize_or_zero()
+        })
+        .filter(|a| a.length_squared() > 0.5)
+        .unwrap_or(Vec3::Y);
+    let fwd = side.cross(axis).normalize_or_zero();
+    Vec3::new(mid.x, y, mid.z) - axis * WALL_HANG_DROP - fwd * WALL_HANG_OUT
+}
+
+/// A hand step's root (`ComputeRootFromHandTargets` 0xDD6730): the free pose, or the wall pose from the held foot
+/// records; `lateral` steps (dir 2 / 3) read the higher hand, the vertical ones the lower.
+fn step_root(d: &HumanLedgeData, n: Vec3, lateral: bool) -> Vec3 {
+    match d.hang_type {
+        LedgeHangType::Free => hang_root(d.hand_l, d.hand_r, n, d.hang_type),
+        _ => wall_hang_root(d.hand_l, d.hand_r, n, d.feet, lateral),
+    }
+}
+
+/// The hang root with the wall hang's foot records read from the collision at the hands (`wall_hang_root`); the free
+/// hang as `hang_root`.
+pub fn hang_root_at(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, higher: bool, collision: &CollisionWorld) -> Vec3 {
+    match hang {
+        LedgeHangType::Free => hang_root(hand_l, hand_r, n, hang),
+        _ => {
+            let mid = (hand_l + hand_r) * 0.5;
+            wall_hang_root(hand_l, hand_r, n, feet_record(mid, n, collision), higher)
         }
     }
 }
@@ -899,6 +966,7 @@ pub fn update_ledge(
                 };
                 d.hang_set = true;
                 d.mv = None;
+                d.feet = feet_record(hand_mid(d), d.normal, &collision);
                 d.sub_state = LedgeSubState::Movement;
                 // the Entry state's end (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0, RE/24 LEDGE-22): the entries in the
                 // Entry state (+76 = 0: walling's hangs, the climb's jump up, the swing back's second part) re-pose the
@@ -973,11 +1041,13 @@ pub fn update_ledge(
 
         // ---------------------------------------------------------------- running move
         let mut move_done = false;
+        if d.moves.first().is_some_and(|m| m.to.is_nan()) {
+            // deferred target (entry): the hang root for the current hands, the foot records probed at them
+            d.feet = feet_record(hand_mid(d), n, &collision);
+            let to = if d.hang_type == LedgeHangType::Free { hang_root(d.hand_l, d.hand_r, n, d.hang_type) } else { wall_hang_root(d.hand_l, d.hand_r, n, d.feet, true) };
+            d.moves[0].to = to;
+        }
         if let Some(m) = d.moves.first_mut() {
-            if m.to.is_nan() {
-                // deferred target (entry): the hang root for the current hands
-                m.to = hang_root(d.hand_l, d.hand_r, n, d.hang_type);
-            }
             let (p, _) = m.advance(dt);
             body.feet = p;
             if m.done() {
@@ -1120,7 +1190,7 @@ pub fn update_ledge(
             d.pending_vstep = None;
             d.last_hand = second;
             d.alt_flag = false;
-            let to = hang_root(d.hand_l, d.hand_r, n, d.hang_type);
+            let to = step_root(d, n, false);
             d.vstep = Some((second == 1, true));
             // the step lasts its action (`StartHandStep` 0xDDE0C0 interpolates over `sub_501CB0`(0), RE/24 LEDGE-21)
             let wi = (d.hang_type != LedgeHangType::Wall) as usize;
@@ -1204,7 +1274,7 @@ pub fn update_ledge(
                     // (min − 1.1) and waits for the second. The halfway root left the reaching arm 0.4 m short of its hold
                     // (bug-1791711547). Its distance from the wall is the type's: a step from the straight jump's wall-free
                     // reception (root 0.5 m out) brings it under the hands
-                    let mid_root = hang_root(d.hand_l, d.hand_r, n, d.hang_type);
+                    let mid_root = step_root(d, n, false);
                     d.vstep = Some((first_left, false));
                     let wi = (d.hang_type != LedgeHangType::Wall) as usize;
                     let first_time = action_time(ACT_VSTEP[wi][vstep_index(sign < 0.0, false, first_left)]);
@@ -1242,7 +1312,7 @@ pub fn update_ledge(
                         let (a, b) = feet_on_wall(hand_mid(d), n, &collision);
                         let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
                         if a && b && super::climb::hang_boxes_free(&collision, hang_root(d.hand_l, d.hand_r, n, LedgeHangType::Wall), facing, true) {
-                            start_move(d, ledge_moves::pullup_switch_to_wall_move(body.feet, d.hand_l, d.hand_r, n), "switch to wall hang (pull-up)");
+                            start_move(d, ledge_moves::pullup_switch_to_wall_move(body.feet, d.hand_l, d.hand_r, n, &collision), "switch to wall hang (pull-up)");
                             continue;
                         }
                     }
@@ -1293,7 +1363,7 @@ pub fn update_ledge(
                         // the WallFree type (+104 = 2; never held in v1.02, see `LedgeHangType::WallFree`) does not pull up:
                         // `Pullup_Start` 0xDDC2E3 plays `hangwallfree_tr_hangwall` into the wall hang (+104 := 0)
                         if d.hang_type == LedgeHangType::WallFree {
-                            start_move(d, ledge_moves::wallfree_to_wall_move(body.feet, d.hand_l, d.hand_r, n), "wall-free to wall hang");
+                            start_move(d, ledge_moves::wallfree_to_wall_move(body.feet, d.hand_l, d.hand_r, n, &collision), "wall-free to wall hang");
                             continue;
                         }
                         let (mv, rest) = ledge_moves::pullup_move(d.hang_type, one_hand, body.feet, d.hand_l, d.hand_r, n, top_feet);
@@ -1350,7 +1420,7 @@ pub fn update_ledge(
                     if move_right_hand { d.hand_r = t } else { d.hand_l = t }
                     d.last_hand = move_right_hand as usize;
                     d.alt_flag = !d.alt_flag;
-                    let to = hang_root(d.hand_l, d.hand_r, n, d.hang_type);
+                    let to = step_root(d, n, true);
                     // after the toggle: alt_flag set = this was the lead hand's reach (open), clear = closing step; the step
                     // lasts its action (RE/24 LEDGE-21: the free hang's closing step is 0.533 s, not the wall's 0.6 s)
                     let wi = (d.hang_type != LedgeHangType::Wall) as usize;
@@ -1484,6 +1554,31 @@ mod tests {
     /// RE/24 LEDGE-10: past a corner the turn fails when the new face needs the other hang type; `TrySwitchHangType`
     /// with the corner variant switches onto that face instead. A wall hang (face z 0) whose corner face (x 0, normal +X)
     /// is an overhang slab with nothing below switches to a free hang turned onto it.
+    /// `sub_B157B0` / 0xDD69C8: the wall hang's body axis runs from the foot records up to the hands. A wall flush under
+    /// the edge keeps the upright root (1.1 m down, 0.5 m out); feet on a wall inset under the edge (RE/29: the inset wall
+    /// at 56.07 13.16) lean the body, and the root comes in toward the wall. The entries and lateral steps take the
+    /// higher hand, the vertical steps the lower.
+    #[test]
+    fn a_wall_hang_leans_from_its_foot_records() {
+        let n = Vec3::NEG_Z;
+        let (hl, hr) = (Vec3::new(-0.3, 3.0, 0.0), Vec3::new(0.3, 3.2, 0.0));
+        let upright = wall_hang_root(hl, hr, n, None, false);
+        assert!(upright.distance(hang_root(hl, hr, n, LedgeHangType::Wall)) < 1e-5, "{upright}");
+        let flush = wall_hang_root(hl, hr, n, Some(Vec3::new(0.0, 2.1, 0.0)), false);
+        assert!(flush.distance(upright) < 1e-5, "{flush}");
+        assert!((wall_hang_root(hl, hr, n, None, true).y - (3.2 - 1.1)).abs() < 1e-5);
+        // feet on a wall 0.3 m further in (+Z is into the wall here)
+        let inset = wall_hang_root(hl, hr, n, Some(Vec3::new(0.0, 2.1, 0.3)), false);
+        assert!(-inset.z < 0.45 && -inset.z > 0.15, "root {inset} should lean toward the inset wall");
+        // the rays find a box wall flush under the edge: the upright root
+        let mut c = CollisionWorld::default();
+        c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, 0.0), max: Vec3::new(2.0, 3.1, 1.0) });
+        let feet = feet_record((hl + hr) * 0.5, n, &c).expect("feet on the wall");
+        assert!(feet.z.abs() < 0.02, "{feet}");
+        let got = wall_hang_root(hl, hr, n, Some(feet), false);
+        assert!(got.distance(upright) < 0.02, "{got} {upright} feet {feet}");
+    }
+
     #[test]
     fn a_corner_onto_an_overhang_switches_a_wall_hang_to_a_free_hang() {
         let mut c = CollisionWorld::default();

@@ -684,7 +684,7 @@ pub enum LadderSide {
 ///    plays first (0xE27000), then the loop and the end in the new context (0xE20650 Climb, ClimbData+36 = 2;
 ///    0xE20900 Ledge). PORT: the start plays in the new context too, as the climb's reach does in the port.
 pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<LadderSide> {
-    use super::ledge::{hang_root, hang_type_at, LedgeEntry, LedgeHangType, LedgeSubState};
+    use super::ledge::{hang_type_at, LedgeEntry, LedgeHangType, LedgeSubState};
     let fwd = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let s = if right { super::right_of(fwd) } else { -super::right_of(fwd) };
     // 1. a ledge beside the ladder
@@ -701,7 +701,7 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
         let wall = hang == LedgeHangType::Wall;
         // the two hands found (`HumanLadder__FillLedge_SideHang` 0xE20120: LimbIK contacts 0 / 1 = the setup's records)
         let e = LedgeEntry { hand_l: hl, hand_r: hr, ..LedgeEntry::at(mid, wn, root, LedgeSubState::TransitionInFromClimb) };
-        let to = hang_root(e.hand_l, e.hand_r, wn, hang);
+        let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, wn, hang, true, collision);
         let hf = -Vec3::new(wn.x, 0.0, wn.z).normalize_or(fwd);
         if super::climb::hang_boxes_free(collision, to, hf, wall) {
             let id = TO_HANG_SIDE[!wall as usize][right as usize];

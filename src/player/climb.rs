@@ -817,7 +817,7 @@ fn side_ledge_grab(g: &GuidanceWorld, collision: &crate::collision::CollisionWor
     let e = LedgeEntry::at(g.fit_hands(h.point, n), n, root, LedgeSubState::TransitionInFromClimb);
     let wall = side_grab_feet(h.point, n, collision);
     let hang = if wall { super::ledge::LedgeHangType::Wall } else { super::ledge::LedgeHangType::Free };
-    let to = super::ledge::hang_root(e.hand_l, e.hand_r, n, hang);
+    let to = super::ledge::hang_root_at(e.hand_l, e.hand_r, n, hang, true, collision);
     if !hang_boxes_free(collision, to, hf, wall) || !lateral_path_free(collision, root, facing, to, hf) {
         return None;
     }
@@ -1677,7 +1677,7 @@ pub fn update_climb(
             let e0 = LedgeEntry::at(h.pos, hn, body.feet, LedgeSubState::TransitionInFromClimb);
             let e0 = LedgeEntry { hand_l: h.pos, hand_r: h.pos, ..e0 };
             let fits = |hang: super::ledge::LedgeHangType| {
-                let root = super::ledge::hang_root(h.pos, h.pos, hn, hang);
+                let root = super::ledge::hang_root_at(h.pos, h.pos, hn, hang, true, &collision);
                 let off_floor = collision.floor_height_below(root + Vec3::Y * 0.05, 0.35).is_none();
                 off_floor && hang_boxes_free(&collision, root, hf, hang == super::ledge::LedgeHangType::Wall) && lateral_path_free(&collision, body.feet, facing, root, hf)
             };
