@@ -1662,3 +1662,64 @@ fn probe_breakable_stalls() {
         eprintln!("STALL {d:6.1} m  {n}  at {:.2} {:.2} {:.2}", p.x, p.y, p.z);
     }
 }
+
+/// Draw sharing census (2026-10-18): over the cells wanted at `LAB_AT` (game axes, default the demo course start), the
+/// drawn sections at the camera's distance from each object (no size cull), and how many distinct meshes they would
+/// need when placements of the same mesh share it — with and without the placements' baked vertex colours.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_draw_sharing() {
+    use std::collections::{HashMap, HashSet};
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let v: Vec<f32> = std::env::var("LAB_AT").ok().map(|s| s.split(',').map(|x| x.trim().parse().unwrap()).collect()).unwrap_or(vec![51.2, 6.0, 11.8]);
+    let at = Vec3::new(v[0], v[2], -v[1]);
+    let mask = super::stream::content_mask(&w.data);
+    let cells = super::stream::wanted_cells(&w.data, &mask, at, None);
+    let (mut sections, mut objects, mut coloured, mut vertices) = (0usize, 0usize, 0usize, 0usize);
+    let mut by_mesh: HashMap<(u32, usize), usize> = HashMap::new();
+    let mut by_colour: HashSet<(u32, usize, u64)> = HashSet::new();
+    let mut per_cell_material: HashSet<(usize, u32)> = HashSet::new();
+    for &c in &cells {
+        let Ok(d) = super::decode::decode_cell(&w.data, c) else { continue };
+        for o in &d.objects {
+            let b = &o.visual_bounds;
+            let dist = at.distance(at.clamp(b.min, b.max));
+            let Some(m) = o.lod.pick(dist).map(|m| m as usize).filter(|&m| m < o.meshes.len()) else { continue };
+            objects += 1;
+            let lod = &o.meshes[m];
+            coloured += lod.colors.is_some() as usize;
+            let hash = lod.colors.as_ref().map_or(0, |c| { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); c.hash(&mut h); h.finish() });
+            for (k, s) in lod.mesh.sections.iter().enumerate() {
+                sections += 1;
+                vertices += s.indices.len();
+                *by_mesh.entry((lod.id, k)).or_default() += 1;
+                by_colour.insert((lod.id, k, hash));
+                per_cell_material.insert((c, s.material));
+            }
+        }
+    }
+    // objects whose drawn mesh never changes while their cell can be loaded (same LOD from 0 to 200 m, no size cull)
+    let (mut fixed_objects, mut fixed_sections, mut all_sections, mut fixed_cm) = (0usize, 0usize, 0usize, HashSet::new());
+    for &c in &cells {
+        let Ok(d) = super::decode::decode_cell(&w.data, c) else { continue };
+        for o in &d.objects {
+            if o.meshes.is_empty() { continue; }
+            let first = o.lod.pick(0.0);
+            let n = first.and_then(|m| o.meshes.get(m as usize)).map_or(0, |l| l.mesh.sections.len());
+            all_sections += n;
+            if o.size & 3 == 0 && first.is_some() && (0..=400).all(|k| o.lod.pick(k as f32 * 0.5) == first) {
+                fixed_objects += 1;
+                fixed_sections += n;
+                for s in &o.meshes[first.unwrap() as usize].mesh.sections { fixed_cm.insert((c, s.material)); }
+            }
+        }
+    }
+    eprintln!("fixed-LOD objects {fixed_objects}: {fixed_sections} of {all_sections} LOD0 sections, merged into {} (cell, material) meshes", fixed_cm.len());
+    let shared = by_mesh.values().filter(|&&n| n > 1).count();
+    let in_shared: usize = by_mesh.values().filter(|&&n| n > 1).sum();
+    eprintln!("cells {} objects drawn {objects} (with baked colours {coloured}) sections {sections} indices {vertices}", cells.len());
+    eprintln!("distinct (mesh, section) {} — {shared} used more than once, covering {in_shared} sections", by_mesh.len());
+    eprintln!("distinct (mesh, section, colours) {}", by_colour.len());
+    eprintln!("distinct (cell, material) {}", per_cell_material.len());
+}

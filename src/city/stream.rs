@@ -9,6 +9,14 @@
 //! finest cell hides its fake spans; unloading shows them (`GridPartition__OnCellLoaded` 0x68B620 /
 //! `FakeEntities__SetCellLoaded` 0x5E4AB0).
 //! PORT: decoding runs on loader threads and the plan is refreshed every 0.25 s instead of every frame.
+//! PORT (draw batching, not a game rule): the shown sections of a cell's objects are merged per material into batch
+//! meshes, baked in world space on builder threads and rebuilt when one of their objects switches LOD; the old batch
+//! draws until the new one is ready. Nearly every placement carries its own baked vertex colours, so placements of the
+//! same mesh cannot share one GPU mesh (instancing); merging them is the static-batching form of the same saving.
+//! Off by default (`AC_CITY_BATCH=1` turns it on): measured on the demo course (2026-10-18) it cut the drawn entities
+//! from about 6 000 to 2 300 but saved only 0.15 ms per frame standing still, and the rebuilds' uploads made the
+//! moving route slower (8.4 ms per frame against 7.6). Bevy's GPU-driven batching already draws the per-section
+//! entities in few calls, so their number is not what the frame waits on. The LOD cross-fade never batches.
 //! PORT: movement only sees objects within `PHYSICS_RADIUS` (40 m) of the player (their triangles, guidance edges, haystacks
 //! and posts enter the shared CollisionWorld / GuidanceWorld in stable slots). Every movement query reaches far less
 //! than that radius, so their answers are those of the whole city; this replaces Havok's broadphase and the guidance
@@ -26,8 +34,17 @@ use crate::{collision::CollisionWorld, guidance::{GuidanceEdge, GuidanceSubType,
 const VIEW_WEIGHT: f32 = 0.6;
 pub const PHYSICS_RADIUS: f32 = 40.0;
 pub const PHYSICS_MARGIN: f32 = 12.0;
-/// PORT: per-frame budget of mesh vertices built for LOD switches (spreads the cost of entering a district).
-const LOD_VERTEX_BUDGET: usize = 400_000;
+/// PORT: per-frame budget of mesh vertices built for LOD switches, nearest first (spreads the cost of entering a
+/// district: each built mesh is uploaded by the render world the next frame). 400 000 let one frame upload 80 000
+/// vertices and take 9–12 ms in the render world's asset preparation (2026-10-18, `AC_RENDER_PROFILE`); 15 000 keeps
+/// that near 1 ms. `AC_LOD_BUDGET=<vertices>` overrides it.
+const LOD_VERTEX_BUDGET: usize = 15_000;
+/// PORT: per-frame budget of batch vertices sent to the builder threads (each rebuilt batch is uploaded whole).
+const BATCH_VERTEX_BUDGET: usize = 120_000;
+/// PORT: the objects of a cell are batched in runs of this many (in the cell's order), which bounds a batch's rebuild.
+const BATCH_OBJECTS: usize = 48;
+/// PORT: at most this many texture bytes are uploaded per frame when integrating cells (one cell always goes through).
+const TEXTURE_BYTE_BUDGET: usize = 6 << 20;
 /// PORT: per-frame budget of collision triangles moved into the physics window.
 const PHYSICS_TRIANGLE_BUDGET: usize = 40_000;
 /// PORT: objects past this camera distance draw without casting shadows.
@@ -99,6 +116,60 @@ impl Drop for Loader {
     }
 }
 
+/// One batch to (re)build: every member section baked into world space.
+struct BatchJob {
+    key: BatchKey,
+    id: u64,
+    layered: bool,
+    /// (mesh, placement colours, section, the drawn transform's matrix)
+    parts: Vec<(Arc<crate::assets::static_mesh::StaticMesh>, Option<Arc<Vec<[u8; 4]>>>, usize, Mat4)>,
+}
+
+/// Builder threads bake batch meshes off the main thread.
+struct Builder {
+    jobs: mpsc::Sender<BatchJob>,
+    results: Mutex<mpsc::Receiver<(BatchKey, u64, Mesh)>>,
+}
+
+impl Builder {
+    fn new(threads: usize) -> Self {
+        let (jobs, rx) = mpsc::channel::<BatchJob>();
+        let rx = Arc::new(Mutex::new(rx));
+        let (tx, results) = mpsc::channel();
+        for _ in 0..threads {
+            let (rx, tx) = (rx.clone(), tx.clone());
+            std::thread::spawn(move || loop {
+                let job = { let Ok(job) = rx.lock().unwrap().recv() else { return }; job };
+                if tx.send((job.key, job.id, batch_mesh(&job.parts, job.layered))).is_err() { return; }
+            });
+        }
+        Self { jobs, results: Mutex::new(results) }
+    }
+}
+
+/// A batch: the shown sections of one material among a run of a cell's objects, with one shadow setting.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct BatchKey {
+    cell: usize,
+    run: u32,
+    material: u32,
+    shadow: bool,
+}
+
+struct Batch {
+    /// (object index in the cell, mesh, section)
+    members: Vec<(u32, u8, u16)>,
+    entity: Option<Entity>,
+    /// Members changed since the drawn mesh was built.
+    dirty: bool,
+    /// A rebuild is on a builder thread.
+    building: bool,
+    /// Tells this batch from an earlier one of the same key (a cell can unload and load again while a job runs).
+    id: u64,
+    /// Camera distance of the nearest member when it last changed (rebuild order).
+    near: f32,
+}
+
 struct Physics {
     triangles: Vec<u32>,
     edges: Vec<usize>,
@@ -108,6 +179,8 @@ struct Obj {
     o: CityObject,
     shown: Option<usize>,
     entities: Vec<Entity>,
+    /// The batches the shown sections are in (instead of `entities`).
+    batches: Vec<BatchKey>,
     /// The next LOD drawn on top of `shown` while the distance is inside the fade width.
     fade: Option<FadeIn>,
     physics: Option<Physics>,
@@ -177,6 +250,14 @@ pub struct CityStats {
     pub errors: usize,
     /// Last frame's streaming time per phase (ms): integrate, plan, LOD, physics, refresh.
     pub phase_ms: [f32; 5],
+    /// Last frame's streaming work: cells integrated, texture bytes uploaded, LOD vertices built, collision triangles
+    /// moved into the physics window.
+    pub work: [usize; 4],
+    /// Drawn mesh entities (per-section entities and batches).
+    pub entities: usize,
+    /// Batches, and those waiting for or on a builder thread.
+    pub batches: usize,
+    pub batches_pending: usize,
 }
 
 pub struct CityState {
@@ -191,6 +272,15 @@ pub struct CityState {
     edge_free: Vec<usize>,
     haystacks_dirty: bool,
     plan_timer: f32,
+    /// This frame's `CityStats::work`.
+    work: [usize; 4],
+    /// Draw batching (`AC_CITY_BATCH=1`, off by default).
+    pub batch: bool,
+    /// `LOD_VERTEX_BUDGET` or `AC_LOD_BUDGET`.
+    lod_budget: usize,
+    batches: HashMap<BatchKey, Batch>,
+    builder: Builder,
+    next_batch: u64,
     pub stats: CityStats,
     /// (seconds, frames, worst frame) for AC_CITY_LOG
     pub log: (f32, u32, f32),
@@ -239,7 +329,9 @@ impl CityState {
         let n = data.grid.cells.len();
         Self { loader: Loader::new(data.clone(), threads), data, cells: (0..n).map(|_| Cell::Unloaded).collect(), has_content,
             materials: HashMap::new(), textures: HashMap::new(), fake_spans: HashMap::new(), edge_free: Vec::new(),
-            haystacks_dirty: true, plan_timer: 0.0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None,
+            haystacks_dirty: true, plan_timer: 0.0, work: [0; 4],
+            batch: std::env::var("AC_CITY_BATCH").is_ok_and(|v| v == "1"),
+            lod_budget: std::env::var("AC_LOD_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(LOD_VERTEX_BUDGET), batches: HashMap::new(), builder: Builder::new(threads.min(3)), next_batch: 0, stats: CityStats::default(), log: (0.0, 0, 0.0), tour: None, hold: None,
             lod_fade: std::env::var("AC_LOD_FADE").is_ok_and(|v| v == "1"), effects_out: Vec::new(), effects_unloaded: Vec::new(),
             sounds_out: Vec::new(), sounds_unloaded: Vec::new(), ambience_out: Vec::new() }
     }
@@ -259,6 +351,7 @@ impl CityState {
     /// Per frame: take finished cells, plan loads/unloads, switch LODs, move objects in and out of the physics window.
     pub fn update(&mut self, player: Vec3, camera: Vec3, view: Vec3, lod_scale: f32, dt: f32, ctx: &mut Ctx) {
         let mut phase = [0.0f32; 5];
+        self.work = [0; 4];
         let mut clock = std::time::Instant::now();
         let mut lap = |k: usize, phase: &mut [f32; 5]| { phase[k] = clock.elapsed().as_secs_f32() * 1000.0; clock = std::time::Instant::now(); };
         // finished decodes (bounded so a burst does not stall a frame)
@@ -271,7 +364,7 @@ impl CityState {
                 Ok(_) => {}
                 Err(e) => { warn!("city cell {cell}: {e}"); self.stats.errors += 1; self.cells[cell] = Cell::Unloaded; }
             }
-            if started.elapsed().as_secs_f32() > 0.004 { break; }
+            if started.elapsed().as_secs_f32() > 0.004 || self.work[1] > TEXTURE_BYTE_BUDGET { break; }
         }
         lap(0, &mut phase);
         self.plan_timer -= dt;
@@ -285,7 +378,7 @@ impl CityState {
         let waiting = (0..self.cells.len()).any(|c| self.has_content[c] && !self.is_loaded(c) && self.data.grid.cell_in_box(&self.data.grid.cells[c], p, near));
         self.hold = if waiting { Some(self.hold.unwrap_or(player)) } else { None };
         lap(1, &mut phase);
-        self.update_lods(camera, lod_scale, ctx, LOD_VERTEX_BUDGET);
+        self.update_lods(camera, lod_scale, ctx, self.lod_budget);
         lap(2, &mut phase);
         self.update_physics(player, ctx, PHYSICS_TRIANGLE_BUDGET);
         lap(3, &mut phase);
@@ -293,12 +386,17 @@ impl CityState {
         lap(4, &mut phase);
         self.count();
         self.stats.phase_ms = phase;
+        self.stats.work = self.work;
     }
 
     /// The first frame: every LOD and the whole physics window at once (no budgets).
     pub fn prime(&mut self, player: Vec3, camera: Vec3, ctx: &mut Ctx) {
         self.update_physics(player, ctx, usize::MAX);
         self.update_lods(camera, 1.0, ctx, usize::MAX);
+        // the first frame waits for its batches
+        let pending = self.batches.values().filter(|b| b.building).count();
+        let results: Vec<_> = { let rx = self.builder.results.lock().unwrap(); (0..pending).filter_map(|_| rx.recv().ok()).collect() };
+        for (key, id, mesh) in results { self.apply_batch(key, id, mesh, ctx); }
         self.refresh(ctx);
         self.count();
     }
@@ -329,8 +427,10 @@ impl CityState {
     }
 
     pub fn integrate(&mut self, d: DecodedCell, ctx: &mut Ctx) {
+        self.work[0] += 1;
         for (id, linear, t) in &d.textures {
             if self.textures.contains_key(id) { continue; }
+            self.work[1] += t.data.len();
             let h = ctx.images.add(image(t, *linear));
             self.textures.insert(*id, (h, 0));
             self.data.resident.lock().unwrap().insert(*id);
@@ -344,7 +444,7 @@ impl CityState {
             self.materials.get_mut(id).unwrap().refs += 1;
             used.push(*id);
         }
-        let objects = d.objects.into_iter().map(|o| Obj { o, shown: None, entities: Vec::new(), fade: None, physics: None }).collect();
+        let objects = d.objects.into_iter().map(|o| Obj { o, shown: None, entities: Vec::new(), batches: Vec::new(), fade: None, physics: None }).collect();
         let extras = super::presentation::spawn_lights(&d.lights, ctx.commands);
         self.effects_out.extend(d.effects.into_iter().map(|e| (d.cell, e)));
         self.sounds_out.extend(d.sounds.into_iter().map(|e| (d.cell, e)));
@@ -417,6 +517,10 @@ impl CityState {
         for e in extras { ctx.commands.entity(e).despawn(); }
         self.effects_unloaded.push(c);
         self.sounds_unloaded.push(c);
+        let gone: Vec<BatchKey> = self.batches.keys().filter(|k| k.cell == c).copied().collect();
+        for k in gone {
+            if let Some(e) = self.batches.remove(&k).and_then(|b| b.entity) { ctx.commands.entity(e).despawn(); }
+        }
         for mut o in objects {
             for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
             for (e, _) in o.fade.take().into_iter().flat_map(|f| f.sections) { ctx.commands.entity(e).despawn(); }
@@ -436,6 +540,8 @@ impl CityState {
     /// PORT (with `lod_fade`): Bevy has no per-draw stencil reference, so the fading LOD also blends where the picked one
     /// did not draw; the blend factor is kept in `FADE_LEVELS` steps.
     fn update_lods(&mut self, camera: Vec3, lod_scale: f32, ctx: &mut Ctx, budget: usize) {
+        let batched = self.batch && !self.lod_fade;
+        self.take_batches(ctx);
         // (distance, cell, object, wanted mesh, wanted fade) for every object whose drawn meshes must change
         let mut changes = Vec::new();
         for (c, cell) in self.cells.iter().enumerate() {
@@ -448,7 +554,9 @@ impl CityState {
                 let want = o.o.lod.pick(d).map(|m| m as usize).filter(|&m| m < o.o.meshes.len()).filter(|_| size_cull(o.o.size, raw).0);
                 let fade = want.filter(|_| self.lod_fade).and(o.o.lod.fade(d)).map(|(m, a)| (m as usize, fade_level(a)))
                     .filter(|&(m, _)| m < o.o.meshes.len() && Some(m) != want);
-                if want != o.shown || fade != o.fade.as_ref().map(|f| (f.mesh, f.level)) { changes.push((d, c, k, want, fade)); }
+                // drawn the other way (batched or per section) than the mode now asks
+                let mode = if batched { !o.entities.is_empty() } else { !o.batches.is_empty() };
+                if want != o.shown || mode || fade != o.fade.as_ref().map(|f| (f.mesh, f.level)) { changes.push((d, c, k, want, fade)); }
             }
         }
         changes.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -459,12 +567,46 @@ impl CityState {
             let b = &o.o.visual_bounds;
             let shadow = d <= SHADOW_DISTANCE && size_cull(o.o.size, camera.distance(camera.clamp(b.min, b.max))).1;
             let transform = Transform::from_matrix(o.o.transform);
+            if batched {
+                // into the batches, which are rebuilt below within the batch budget
+                for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
+                for (e, _) in o.fade.take().into_iter().flat_map(|f| f.sections) { ctx.commands.entity(e).despawn(); }
+                for key in o.batches.drain(..) {
+                    let Some(b) = self.batches.get_mut(&key) else { continue };
+                    b.members.retain(|&(obj, _, _)| obj != k as u32);
+                    b.dirty = true;
+                    b.near = b.near.min(d);
+                }
+                o.shown = want;
+                let Some(m) = want else { continue };
+                let run = (k / BATCH_OBJECTS) as u32;
+                for (si, section) in o.o.meshes[m].mesh.sections.iter().enumerate() {
+                    if !self.materials.contains_key(&section.material) { continue; }
+                    let key = BatchKey { cell: c, run, material: section.material, shadow };
+                    let next = &mut self.next_batch;
+                    let b = self.batches.entry(key).or_insert_with(|| {
+                        *next += 1;
+                        Batch { members: Vec::new(), entity: None, dirty: true, building: false, id: *next, near: d }
+                    });
+                    b.members.push((k as u32, m as u8, si as u16));
+                    b.dirty = true;
+                    b.near = b.near.min(d);
+                    if !o.batches.contains(&key) { o.batches.push(key); }
+                }
+                continue;
+            }
+            let rebatched = !o.batches.is_empty();
+            for key in o.batches.drain(..) {
+                if let Some(b) = self.batches.get_mut(&key) { b.members.retain(|&(obj, _, _)| obj != k as u32); b.dirty = true; }
+            }
+            if rebatched { o.shown = None; }
             if want != o.shown {
                 // the LOD that was fading in becomes the drawn one: keep its entities, give them the opaque materials
                 let promote = want.is_some() && o.fade.as_ref().is_some_and(|f| Some(f.mesh) == want && f.complete);
                 let cost = if promote { 0 } else { want.map_or(0, |m| o.o.meshes[m].mesh.positions.len()) };
                 if cost > budget && want.is_some() { continue; }
                 budget = budget.saturating_sub(cost);
+                self.work[2] += cost;
                 for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
                 o.shown = want;
                 if promote {
@@ -504,6 +646,68 @@ impl CityState {
                 }
             }
         }
+        if batched { self.rebuild_batches(ctx, if budget == usize::MAX { usize::MAX } else { BATCH_VERTEX_BUDGET }); }
+    }
+
+    /// Send the changed batches to the builder threads, nearest first, within `budget` vertices (one always goes); an
+    /// emptied batch is removed at once.
+    fn rebuild_batches(&mut self, ctx: &mut Ctx, budget: usize) {
+        let mut dirty: Vec<(f32, BatchKey)> = self.batches.iter().filter(|(_, b)| b.dirty && !b.building).map(|(k, b)| (b.near, *k)).collect();
+        dirty.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut left = budget;
+        for (_, key) in dirty {
+            let b = self.batches.get_mut(&key).unwrap();
+            if b.members.is_empty() {
+                if let Some(e) = b.entity { ctx.commands.entity(e).despawn(); }
+                self.batches.remove(&key);
+                continue;
+            }
+            let Cell::Loaded { objects, .. } = &self.cells[key.cell] else { continue };
+            let mut parts = Vec::with_capacity(b.members.len());
+            let mut vertices = 0;
+            b.members.sort_unstable();
+            for &(obj, m, si) in &b.members {
+                let o = &objects[obj as usize];
+                let lod = &o.o.meshes[m as usize];
+                vertices += lod.mesh.sections[si as usize].indices.len();
+                parts.push((lod.mesh.clone(), lod.colors.clone(), si as usize, Transform::from_matrix(o.o.transform).to_matrix()));
+            }
+            if vertices > left && left < budget { break; }
+            left = left.saturating_sub(vertices);
+            self.work[2] += vertices;
+            b.dirty = false;
+            b.building = true;
+            b.near = f32::INFINITY;
+            let layered = self.materials.get(&key.material).is_some_and(|m| m.handle.layered());
+            let _ = self.builder.jobs.send(BatchJob { key, id: b.id, layered, parts });
+        }
+    }
+
+    /// Take the finished batch meshes (about `BATCH_VERTEX_BUDGET` vertices per frame) and draw them.
+    fn take_batches(&mut self, ctx: &mut Ctx) {
+        let mut taken = 0;
+        while taken < BATCH_VERTEX_BUDGET {
+            let next = self.builder.results.lock().unwrap().try_recv();
+            let Ok((key, id, mesh)) = next else { break };
+            taken += mesh.count_vertices();
+            self.apply_batch(key, id, mesh, ctx);
+        }
+    }
+
+    fn apply_batch(&mut self, key: BatchKey, id: u64, mesh: Mesh, ctx: &mut Ctx) {
+        let Some(b) = self.batches.get_mut(&key).filter(|b| b.id == id) else { return };
+        b.building = false;
+        let Some(material) = self.materials.get(&key.material) else { return };
+        let handle = ctx.meshes.add(mesh);
+        match b.entity {
+            Some(e) => { ctx.commands.entity(e).insert(Mesh3d(handle)); }
+            None => {
+                let mut e = ctx.commands.spawn((crate::map_menu::MapEntity, Mesh3d(handle), Transform::IDENTITY));
+                material.handle.insert(&mut e);
+                if !key.shadow { e.insert(NotShadowCaster); }
+                b.entity = Some(e.id());
+            }
+        }
     }
 
     fn update_physics(&mut self, player: Vec3, ctx: &mut Ctx, budget: usize) {
@@ -527,6 +731,7 @@ impl CityState {
             let o = &mut objects[k];
             if o.o.collision.len() > budget && budget < limit { break; }
             budget = budget.saturating_sub(o.o.collision.len());
+            self.work[3] += o.o.collision.len();
             let triangles = ctx.collision.add_triangles(o.o.collision.clone());
             let mut edges = Vec::with_capacity(o.o.edges.len());
             for e in &o.o.edges {
@@ -543,7 +748,8 @@ impl CityState {
     fn remove_physics(&mut self, p: Physics, ctx: &mut Ctx) { remove_physics(&mut self.edge_free, p, ctx); }
 
     fn count(&mut self) {
-        let mut s = CityStats { materials: self.materials.len(), textures: self.textures.len(), errors: self.stats.errors, phase_ms: self.stats.phase_ms, ..default() };
+        let mut s = CityStats { materials: self.materials.len(), textures: self.textures.len(), errors: self.stats.errors, phase_ms: self.stats.phase_ms,
+            work: self.stats.work, ..default() };
         for cell in &self.cells {
             match cell {
                 Cell::Loading => s.loading += 1,
@@ -553,6 +759,7 @@ impl CityState {
                     s.objects += objects.len();
                     for o in objects {
                         s.drawn += o.shown.is_some() as usize;
+                        s.entities += o.entities.len() + o.fade.as_ref().map_or(0, |f| f.sections.len());
                         s.fading += o.fade.is_some() as usize;
                         if let Some(p) = &o.physics { s.physics_objects += 1; s.physics_triangles += p.triangles.len(); s.physics_edges += p.edges.len(); }
                     }
@@ -560,6 +767,9 @@ impl CityState {
                 Cell::Unloaded => {}
             }
         }
+        s.batches = self.batches.len();
+        s.batches_pending = self.batches.values().filter(|b| b.dirty || b.building).count();
+        s.entities += self.batches.values().filter(|b| b.entity.is_some()).count();
         self.stats = s;
     }
 
@@ -700,6 +910,44 @@ pub(crate) fn section_mesh(m: &crate::assets::static_mesh::StaticMesh, colors: O
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
     if blended { mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, weights); }
+    mesh.insert_indices(Indices::U32(idx));
+    mesh
+}
+
+/// One batch mesh: each part's section in world space (the drawn transform applied as Bevy's mesh shaders apply it:
+/// normals by the inverse transpose, tangents by the matrix with the determinant's sign on w), in the parts' order.
+/// `layered`: the parts' blend weights ride in UV_1 (zero for a part without them, which the shader reads the same).
+fn batch_mesh(parts: &[(Arc<crate::assets::static_mesh::StaticMesh>, Option<Arc<Vec<[u8; 4]>>>, usize, Mat4)], layered: bool) -> Mesh {
+    let (mut pos, mut nor, mut tan, mut uv, mut col, mut idx, mut weights) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (m, colors, section, matrix) in parts {
+        let linear = Mat3::from_mat4(*matrix);
+        let normal_matrix = linear.inverse().transpose();
+        let sign = if linear.determinant() < 0.0 { -1.0 } else { 1.0 };
+        let blended = layered && m.blend.len() == m.positions.len();
+        let mut map = vec![u32::MAX; m.positions.len()];
+        for &i in &m.sections[*section].indices {
+            let i = i as usize;
+            if map[i] == u32::MAX {
+                map[i] = pos.len() as u32;
+                pos.push(matrix.transform_point3(m.positions[i]).to_array());
+                let n = m.normals[i];
+                nor.push(if n == Vec3::ZERO { n } else { (normal_matrix * n).normalize() }.to_array());
+                let t = m.tangents[i];
+                tan.push(if t == Vec4::ZERO { t } else { (linear * t.truncate()).normalize().extend(t.w * sign) }.to_array());
+                uv.push(m.uvs[i].to_array());
+                col.push(match colors { Some(c) => c[i].map(|b| b as f32 / 255.0), None => m.colors[i] });
+                if layered { weights.push(if blended { [m.blend[i][0] as f32 / 255.0, m.blend[i][1] as f32 / 255.0] } else { [0.0; 2] }); }
+            }
+            idx.push(map[i]);
+        }
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nor);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, tan);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    if layered && weights.iter().any(|w| *w != [0.0; 2]) { mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, weights); }
     mesh.insert_indices(Indices::U32(idx));
     mesh
 }
