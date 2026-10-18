@@ -724,7 +724,9 @@ fn probe_jump_candidates_at() {
     let spawn = std::env::var("LAB_SPAWN").map(|s| format!("PlayerSpawner_DEBUG_{s}")).unwrap_or("PlayerSpawner_DEBUG_Bureau".into());
     let Some(mut s) = CitySim::new(&spawn) else { return };
     s.place(pos, dir);
-    s.run(1.0);
+    // the cells around the probe point streamed in first (a far probe point met no collision otherwise)
+    s.settle_streaming(60.0, Some(pos));
+    s.place(pos, dir);
     let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
     let q = Query { kind, mode: 0, long: false, beams: true, exclude: 0 };
     let cands = query(pos, dir, &q, s.guidance(), s.collision());
@@ -1599,4 +1601,28 @@ fn probe_wall_support_at() {
         eprintln!("  ray hit at {dist:.3} normal {:.2} layer {layer}", g3(hn));
     }
     eprintln!("support {:?}", crate::player::ledge::wall_support_point(origin, n, 0.0, 0.0, b, c).map(g3));
+}
+
+/// Live check (2026-10-18): the port's floor heights on a grid around `LAB_AT` (game axes), `LAB_STEP` m apart, from
+/// 4 m above, to compare with where the game stands.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_floor_grid() {
+    let v: Vec<f32> = std::env::var("LAB_AT").ok().map(|s| s.split(',').map(|x| x.trim().parse().unwrap()).collect()).unwrap_or_default();
+    if v.len() != 3 { return; }
+    let step: f32 = std::env::var("LAB_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(0.5);
+    let at = Vec3::new(v[0], v[2], -v[1]);
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.teleport(at);
+    s.settle_streaming(60.0, Some(at));
+    let c = s.collision();
+    for j in (-3..=3).rev() {
+        let mut line = String::new();
+        for i in -3..=3 {
+            let p = Vec3::new(at.x + i as f32 * step, at.y + 4.0, at.z - j as f32 * step);
+            let d = c.ray_distance(p, Vec3::NEG_Y, 12.0, crate::layers::MAIN_CHARACTER);
+            line += &if d < 12.0 { format!("{:7.2}", p.y - d) } else { "   none".into() };
+        }
+        eprintln!("y {:+.1}: {line}", j as f32 * step);
+    }
 }

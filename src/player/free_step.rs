@@ -164,7 +164,10 @@ pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32),
         if n == Vec3::ZERO || n.dot(f) < 0.0 {
             continue;
         }
-        let mut drop = super::jump_candidates::measure_drop(x, if along_normal { n } else { f }, 10.0, 0.02, collision);
+        // `Human__FindDropEdgeAhead` passes the actor's feet (a2 at 0xB1C41A), so the lip ray and the line from 1 m above
+        // the feet run first (live 2026-10-18, freerun_north's third landing: the lower roof's lip 0.17 m under the
+        // landing roof measures −0.064 m in the game, 10 m without them)
+        let mut drop = super::jump_candidates::measure_drop_from(Some(pos), x, if along_normal { n } else { f }, 10.0, 0.02, collision, None);
         // PORT: a haystack is solid to the game's drop rays (Damascus's `Hay_Bale_*` collision, the controller touches
         // it, event 122); the port's haystacks sit on the Dynamic layer the drop rays leave out, so its top ends the drop
         // here (live 2026-10-09: free-running onto a cart's rim drops into the haystack from the stay, it does not jump
@@ -179,6 +182,10 @@ pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32),
             continue;
         }
         let d = (x - rear).length_squared();
+        if std::env::var_os("AC_JUMP_LOG").is_some() {
+            let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+            eprintln!("  drop edge {:.3} -> {:.3} n {:.2} at {:.3} (along {a:.2}) drop {drop:.2}", g3(e.p0), g3(e.p1), g3(n), g3(x));
+        }
         if best.is_none_or(|b| d < b.0) {
             best = Some((d, x, drop));
         }
@@ -320,6 +327,10 @@ pub fn update(
     if !fs.entered {
         fs.entered = true;
         fs.edge = stay_edge(fs.e.point, fs.e.normal, fs.e.small_box, guidance, collision);
+        if std::env::var_os("AC_JUMP_LOG").is_some() {
+            let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+            eprintln!("stay enter at {:.3} normal {:.2}: beam piece {:?}", g3(fs.e.point), g3(fs.e.normal), fs.edge.map(|(a, b)| (g3(a), g3(b))));
+        }
     }
     let a = fs.e.action;
     let dur = a.duration().max(1e-4);
