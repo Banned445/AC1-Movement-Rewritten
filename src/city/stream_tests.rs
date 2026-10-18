@@ -724,7 +724,9 @@ fn probe_jump_candidates_at() {
     let spawn = std::env::var("LAB_SPAWN").map(|s| format!("PlayerSpawner_DEBUG_{s}")).unwrap_or("PlayerSpawner_DEBUG_Bureau".into());
     let Some(mut s) = CitySim::new(&spawn) else { return };
     s.place(pos, dir);
-    s.run(1.0);
+    // the cells around the probe point streamed in first (a far probe point met no collision otherwise)
+    s.settle_streaming(60.0, Some(pos));
+    s.place(pos, dir);
     let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
     let q = Query { kind, mode: 0, long: false, beams: true, exclude: 0 };
     let cands = query(pos, dir, &q, s.guidance(), s.collision());
@@ -1575,4 +1577,149 @@ fn probe_damascus_material_census() {
         }
     }
     eprintln!("MATERIALS {with} of {all} collision triangles have a sound material");
+}
+
+/// Live check A3 (2026-10-18): the port's `Guidance__FindWallSupport` at a game call's origin and direction
+/// (`LAB_ORIGIN`, `LAB_INTO`, game axes), with the box 0.175 / 0.3 / 0.3, step 0.07: the ray's hit and the surface
+/// pieces, to compare with the game's result.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_wall_support_at() {
+    let v3 = |k: &str| std::env::var(k).ok().map(|s| { let v: Vec<f32> = s.split(',').map(|x| x.trim().parse().unwrap()).collect(); Vec3::new(v[0], v[2], -v[1]) });
+    let (Some(origin), Some(into)) = (v3("LAB_ORIGIN"), v3("LAB_INTO")) else { return };
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Souk") else { return };
+    s.place(origin + Vec3::new(0.0, 0.0, 0.0), into);
+    s.settle_streaming(60.0, Some(origin));
+    let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+    let b = crate::player::ledge::SupportBox { across: 0.175, depth: 0.3, height: 0.3, step: 0.07 };
+    let n = -Vec3::new(into.x, 0.0, into.z).normalize_or_zero();
+    let c = s.collision();
+    let start = origin + into.normalize() * -0.3;
+    let d = c.sphere_free_distance(start, into.normalize(), 0.01, 0.6);
+    eprintln!("ray from {:.3} along {:.3}: {d:.3} of 0.6", g3(start), g3(into));
+    if let Some((dist, hn, layer)) = c.ray_hit_layer(start, into.normalize(), 0.6, crate::layers::CHARACTER) {
+        eprintln!("  ray hit at {dist:.3} normal {:.2} layer {layer}", g3(hn));
+    }
+    eprintln!("support {:?}", crate::player::ledge::wall_support_point(origin, n, 0.0, 0.0, b, c).map(g3));
+}
+
+/// Live check (2026-10-18): the port's floor heights on a grid around `LAB_AT` (game axes), `LAB_STEP` m apart, from
+/// 4 m above, to compare with where the game stands.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_floor_grid() {
+    let v: Vec<f32> = std::env::var("LAB_AT").ok().map(|s| s.split(',').map(|x| x.trim().parse().unwrap()).collect()).unwrap_or_default();
+    if v.len() != 3 { return; }
+    let step: f32 = std::env::var("LAB_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(0.5);
+    let at = Vec3::new(v[0], v[2], -v[1]);
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Bureau") else { return };
+    s.teleport(at);
+    s.settle_streaming(60.0, Some(at));
+    let c = s.collision();
+    for j in (-3..=3).rev() {
+        let mut line = String::new();
+        for i in -3..=3 {
+            let p = Vec3::new(at.x + i as f32 * step, at.y + 4.0, at.z - j as f32 * step);
+            let d = c.ray_distance(p, Vec3::NEG_Y, 12.0, crate::layers::MAIN_CHARACTER);
+            line += &if d < 12.0 { format!("{:7.2}", p.y - d) } else { "   none".into() };
+        }
+        eprintln!("y {:+.1}: {line}", j as f32 * step);
+    }
+}
+
+/// Live check B1 (2026-10-18): the breakable stalls (`BhvKiosk` entities) within `LAB_RADIUS` (default 60) m of
+/// `LAB_AT` (game axes, default the Bureau spawner): name and position, to drive into in the running game.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_breakable_stalls() {
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let v: Vec<f32> = std::env::var("LAB_AT").ok().map(|s| s.split(',').map(|x| x.trim().parse().unwrap()).collect()).unwrap_or(vec![46.39, 6.13, 4.14]);
+    let radius: f32 = std::env::var("LAB_RADIUS").ok().and_then(|s| s.parse().ok()).unwrap_or(60.0);
+    let at = Vec2::new(v[0], v[1]);
+    let mut found = Vec::new();
+    for cell in 0..w.data.grid.cells.len() {
+        if w.data.grid.cells[cell].datablock == 0 { continue; }
+        let c = &w.data.grid.cells[cell];
+        let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+        let Some(a) = w.data.archives.names.iter().position(|n| *n == archive) else { continue };
+        let Some(entry) = w.data.archives.find(a, &file) else { continue };
+        let Ok(resources) = w.data.archives.file(a, entry) else { continue };
+        for r in resources.values() {
+            for body in super::decode::bodies(r) {
+                if super::decode::markers(body, "BhvKiosk").is_empty() { continue; }
+                let Ok(m) = super::decode::placement(body) else { continue };
+                let p = m.w_axis.truncate();
+                if Vec2::new(p.x, p.y).distance(at) < radius {
+                    found.push((Vec2::new(p.x, p.y).distance(at), r.name.clone(), p));
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    found.dedup_by(|a, b| a.2.distance(b.2) < 0.01);
+    for (d, n, p) in found.iter().take(20) {
+        eprintln!("STALL {d:6.1} m  {n}  at {:.2} {:.2} {:.2}", p.x, p.y, p.z);
+    }
+}
+
+/// Draw sharing census (2026-10-18): over the cells wanted at `LAB_AT` (game axes, default the demo course start), the
+/// drawn sections at the camera's distance from each object (no size cull), and how many distinct meshes they would
+/// need when placements of the same mesh share it — with and without the placements' baked vertex colours.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_draw_sharing() {
+    use std::collections::{HashMap, HashSet};
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let v: Vec<f32> = std::env::var("LAB_AT").ok().map(|s| s.split(',').map(|x| x.trim().parse().unwrap()).collect()).unwrap_or(vec![51.2, 6.0, 11.8]);
+    let at = Vec3::new(v[0], v[2], -v[1]);
+    let mask = super::stream::content_mask(&w.data);
+    let cells = super::stream::wanted_cells(&w.data, &mask, at, None);
+    let (mut sections, mut objects, mut coloured, mut vertices) = (0usize, 0usize, 0usize, 0usize);
+    let mut by_mesh: HashMap<(u32, usize), usize> = HashMap::new();
+    let mut by_colour: HashSet<(u32, usize, u64)> = HashSet::new();
+    let mut per_cell_material: HashSet<(usize, u32)> = HashSet::new();
+    for &c in &cells {
+        let Ok(d) = super::decode::decode_cell(&w.data, c) else { continue };
+        for o in &d.objects {
+            let b = &o.visual_bounds;
+            let dist = at.distance(at.clamp(b.min, b.max));
+            let Some(m) = o.lod.pick(dist).map(|m| m as usize).filter(|&m| m < o.meshes.len()) else { continue };
+            objects += 1;
+            let lod = &o.meshes[m];
+            coloured += lod.colors.is_some() as usize;
+            let hash = lod.colors.as_ref().map_or(0, |c| { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); c.hash(&mut h); h.finish() });
+            for (k, s) in lod.mesh.sections.iter().enumerate() {
+                sections += 1;
+                vertices += s.indices.len();
+                *by_mesh.entry((lod.id, k)).or_default() += 1;
+                by_colour.insert((lod.id, k, hash));
+                per_cell_material.insert((c, s.material));
+            }
+        }
+    }
+    // objects whose drawn mesh never changes while their cell can be loaded (same LOD from 0 to 200 m, no size cull)
+    let (mut fixed_objects, mut fixed_sections, mut all_sections, mut fixed_cm) = (0usize, 0usize, 0usize, HashSet::new());
+    for &c in &cells {
+        let Ok(d) = super::decode::decode_cell(&w.data, c) else { continue };
+        for o in &d.objects {
+            if o.meshes.is_empty() { continue; }
+            let first = o.lod.pick(0.0);
+            let n = first.and_then(|m| o.meshes.get(m as usize)).map_or(0, |l| l.mesh.sections.len());
+            all_sections += n;
+            if o.size & 3 == 0 && first.is_some() && (0..=400).all(|k| o.lod.pick(k as f32 * 0.5) == first) {
+                fixed_objects += 1;
+                fixed_sections += n;
+                for s in &o.meshes[first.unwrap() as usize].mesh.sections { fixed_cm.insert((c, s.material)); }
+            }
+        }
+    }
+    eprintln!("fixed-LOD objects {fixed_objects}: {fixed_sections} of {all_sections} LOD0 sections, merged into {} (cell, material) meshes", fixed_cm.len());
+    let shared = by_mesh.values().filter(|&&n| n > 1).count();
+    let in_shared: usize = by_mesh.values().filter(|&&n| n > 1).sum();
+    eprintln!("cells {} objects drawn {objects} (with baked colours {coloured}) sections {sections} indices {vertices}", cells.len());
+    eprintln!("distinct (mesh, section) {} — {shared} used more than once, covering {in_shared} sections", by_mesh.len());
+    eprintln!("distinct (mesh, section, colours) {}", by_colour.len());
+    eprintln!("distinct (cell, material) {}", per_cell_material.len());
 }

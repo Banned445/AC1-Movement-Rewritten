@@ -643,7 +643,17 @@ pub fn try_side_jump(
     let start = base + side * 0.9;
     for dz in [0.0f32, 0.6, -0.6] {
         let hs = start + Vec3::Y * dz;
-        let Some(found) = guidance.step_search(hs, hs - Vec3::Y * 1.2, side, facing, 1.6, 0.35, Vec2::new(0.3, 0.3), true, true) else { continue };
+        let found = guidance.step_search(hs, hs - Vec3::Y * 1.2, side, facing, 1.6, 0.35, Vec2::new(0.3, 0.3), true, true);
+        // `AC_SIDEJUMP_LOG=1`: each pass in game axes (x, −z, y), as the live probes at 0xDDDB55 / 0xDDDF85 print them
+        if std::env::var_os("AC_SIDEJUMP_LOG").is_some() {
+            let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+            let what = found.as_ref().map(|f| {
+                let ty = if f.feet.is_some() { 0 } else if foot_support_below(f.hand_centre, f.hands.point, f.hands.wall_normal, collision) { 1 } else { 2 };
+                format!("hands {:.3} box centre {:.3} feet {:?} type {ty}", g3(f.hands.point), g3(f.hand_centre), f.feet.map(|x| g3(x.point)))
+            });
+            eprintln!("side jump pass dz {dz}: root {:.3} start {:.3} -> {}", g3(root), g3(hs), what.unwrap_or_else(|| "none".into()));
+        }
+        let Some(found) = found else { continue };
         let hit = found.hands;
         let nn = hit.wall_normal;
         // both hand slots (+928 / +1008) on the hand hit, both foot slots on the foot hit (`TrySideJumpToLedge`
@@ -657,6 +667,7 @@ pub fn try_side_jump(
             let (fl, fr) = (f.point, f.point);
             let target = super::climb::climb_root_at(hl, hr, fl, fr, nn);
             if !side_jump_clear(root, target, n, 0, collision) {
+                if std::env::var_os("AC_SIDEJUMP_LOG").is_some() { eprintln!("  capsule blocked (type 0)"); }
                 continue;
             }
             let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][long as usize * 4 + 2 + right as usize];
@@ -708,6 +719,7 @@ pub fn try_side_jump(
         let to = hang_root_at(hl, hr, nn, new_hang, true, collision);
         let ty = if new_hang == LedgeHangType::Wall { 1 } else { 2 };
         if !side_jump_clear(root, to, n, ty, collision) {
+            if std::env::var_os("AC_SIDEJUMP_LOG").is_some() { eprintln!("  capsule blocked (type {ty})"); }
             continue;
         }
         let entry = LEDGE_JUMP_TABLE[(hang == LedgeHangType::Free) as usize][(ty * 2 + long as usize) * 4 + 2 + right as usize];

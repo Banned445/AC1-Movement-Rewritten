@@ -25,7 +25,7 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_hud).add_systems(Update, (update_hud, update_fps));
+        app.add_systems(Startup, spawn_hud).add_systems(Update, (update_hud, update_fps, log_frame_times));
     }
 }
 
@@ -174,4 +174,62 @@ fn update_hud(
         landing,
         help
     );
+}
+
+/// `AC_FPS_LOG=<file>`: every half second of real time, the frame count, the mean and worst frame time (ms) and the
+/// player's feet (game axes), appended to the file: where the frame rate drops along a route. Every frame over 14 ms
+/// also writes a `spike` line with the city streaming's phase times and work of that frame and the one before
+/// (`CityStats::phase_ms` / `work`).
+#[derive(Default)]
+struct FrameLog {
+    /// The city stats read on the previous frame.
+    prev: Option<([f32; 5], [usize; 4])>,
+    file: Option<std::fs::File>,
+    t: f32,
+    frames: u32,
+    elapsed: f32,
+    worst: f32,
+    last: Option<std::time::Instant>,
+}
+
+/// Wall-clock frame times (a replay fixes the real-time clock's step, so `Time<Real>` would read 1/60 s).
+fn log_frame_times(mut log: Local<FrameLog>, q: Query<&Body, With<Player>>, city: Res<crate::city::stream::City>) {
+    use std::io::Write;
+    if log.file.is_none() {
+        let Some(path) = std::env::var_os("AC_FPS_LOG") else { return };
+        log.file = std::fs::File::create(path).ok();
+        if let Some(f) = log.file.as_mut() {
+            let _ = writeln!(f, "t frames mean_ms worst_ms x y z entities");
+        }
+    }
+    let now = std::time::Instant::now();
+    let dt = log.last.map_or(0.0, |l| (now - l).as_secs_f32());
+    log.last = Some(now);
+    log.t += dt;
+    log.frames += 1;
+    log.elapsed += dt;
+    log.worst = log.worst.max(dt);
+    let stats = city.0.as_ref().map(|c| (c.stats.phase_ms, c.stats.work, c.stats.entities));
+    if dt > 0.014 && log.t > 2.0 {
+        let p = q.iter().next().map(|b| b.feet).unwrap_or(Vec3::ZERO);
+        let fmt = |s: Option<([f32; 5], [usize; 4])>| s.map_or(String::from("-"), |(ph, w)| format!("phases {:.1} {:.1} {:.1} {:.1} {:.1} work {} {}kB {}v {}t",
+            ph[0], ph[1], ph[2], ph[3], ph[4], w[0], w[1] / 1024, w[2], w[3]));
+        let line = format!("spike {:.2} {:.1}ms at {:.2} {:.2} {:.2} | prev {} | this {}", log.t, 1000.0 * dt, p.x, -p.z, p.y,
+            fmt(log.prev), fmt(stats.map(|s| (s.0, s.1))));
+        if let Some(f) = log.file.as_mut() {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+    log.prev = stats.map(|s| (s.0, s.1));
+    if log.elapsed >= 0.5 {
+        let p = q.iter().next().map(|b| b.feet).unwrap_or(Vec3::ZERO);
+        let line = format!("{:.2} {} {:.2} {:.2} {:.2} {:.2} {:.2} {}", log.t, log.frames, 1000.0 * log.elapsed / log.frames as f32, 1000.0 * log.worst, p.x, -p.z, p.y,
+            stats.map_or(0, |s| s.2));
+        if let Some(f) = log.file.as_mut() {
+            let _ = writeln!(f, "{line}");
+        }
+        log.frames = 0;
+        log.elapsed = 0.0;
+        log.worst = 0.0;
+    }
 }

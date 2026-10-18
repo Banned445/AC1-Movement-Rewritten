@@ -164,7 +164,10 @@ pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32),
         if n == Vec3::ZERO || n.dot(f) < 0.0 {
             continue;
         }
-        let mut drop = super::jump_candidates::measure_drop(x, if along_normal { n } else { f }, 10.0, 0.02, collision);
+        // `Human__FindDropEdgeAhead` passes the actor's feet (a2 at 0xB1C41A), so the lip ray and the line from 1 m above
+        // the feet run first (live 2026-10-18, freerun_north's third landing: the lower roof's lip 0.17 m under the
+        // landing roof measures −0.064 m in the game, 10 m without them)
+        let mut drop = super::jump_candidates::measure_drop_from(Some(pos), x, if along_normal { n } else { f }, 10.0, 0.02, collision, None);
         // PORT: a haystack is solid to the game's drop rays (Damascus's `Hay_Bale_*` collision, the controller touches
         // it, event 122); the port's haystacks sit on the Dynamic layer the drop rays leave out, so its top ends the drop
         // here (live 2026-10-09: free-running onto a cart's rim drops into the haystack from the stay, it does not jump
@@ -179,6 +182,10 @@ pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32),
             continue;
         }
         let d = (x - rear).length_squared();
+        if std::env::var_os("AC_JUMP_LOG").is_some() {
+            let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+            eprintln!("  drop edge {:.3} -> {:.3} n {:.2} at {:.3} (along {a:.2}) drop {drop:.2}", g3(e.p0), g3(e.p1), g3(n), g3(x));
+        }
         if best.is_none_or(|b| d < b.0) {
             best = Some((d, x, drop));
         }
@@ -291,6 +298,18 @@ pub fn ground_mode(high: bool, moving: bool, stick: Vec3, forward: Vec3, legs: b
     }
 }
 
+/// The actions the stay's wall run may start from (`sub_E4C5C0`, NarrowObject StateMovement vtable 0x1702C7C slot 16): the
+/// 50 cm free-step receptions, the knee hangs' and the beam auto-climbs' free-step entries and the collide step-up's.
+const WALL_RUN_STAY_ACTIONS: [u32; 9] = [0x010D_E1FE, 0x010D_F150, 0x01F0_79B4, 0x248E_9730, 0x248E_9731, 0x3919_3BBB, 0x6DA7_646F, 0x6EFC_142F, 0x012B_33F1];
+
+/// The wall run's state gate (`sub_E4C630`, slot 17, the first test of `StateMovement_GuardWallRun` 0xE503D0): the
+/// playing action is one of `WALL_RUN_STAY_ACTIONS` (or none) and at least half played (`sub_501DF0`). Live 2026-10-18
+/// (freestep50_walkon): the guard refuses from the stay's first frame until the reception reaches 0.5, then the wall
+/// test passes 0.47 m further on.
+fn wall_run_ready(action: u32, phase: f32) -> bool {
+    (action == u32::MAX || WALL_RUN_STAY_ACTIONS.contains(&action)) && phase >= 0.5
+}
+
 /// One update of the stay (the interpreter's requests first, then `StateMovement_Update`). Switches context itself.
 #[allow(clippy::too_many_arguments)]
 pub fn update(
@@ -308,6 +327,10 @@ pub fn update(
     if !fs.entered {
         fs.entered = true;
         fs.edge = stay_edge(fs.e.point, fs.e.normal, fs.e.small_box, guidance, collision);
+        if std::env::var_os("AC_JUMP_LOG").is_some() {
+            let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+            eprintln!("stay enter at {:.3} normal {:.2}: beam piece {:?}", g3(fs.e.point), g3(fs.e.normal), fs.edge.map(|(a, b)| (g3(a), g3(b))));
+        }
     }
     let a = fs.e.action;
     let dur = a.duration().max(1e-4);
@@ -349,7 +372,7 @@ pub fn update(
     // ------------------------------------------------ the wall run (event 15), first in the interpreter (0xEE94B0)
     // high profile, Legs held, the stick past 0.35 within 60° of the facing, the Walling ability; the guard is the wall
     // test 1.5 · h ahead (`StateMovement_GuardWallRun` 0xE503D0 → `Human__WallingWallTest` 0xE18390), the fill 0xB263B0
-    if high && moving && pad.legs_held && pad.stick_facing_angle.abs() < WALL_RUN_ANGLE && ab.allows(Ability::Walling) {
+    if high && moving && pad.legs_held && pad.stick_facing_angle.abs() < WALL_RUN_ANGLE && ab.allows(Ability::Walling) && wall_run_ready(a.id, phase) {
         if let Some((contact, normal, slope)) = super::walling::wall_ahead(body.feet, forward, collision) {
             pad.consume_jump();
             let from = body.feet;

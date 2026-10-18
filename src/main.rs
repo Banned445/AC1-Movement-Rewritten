@@ -39,6 +39,7 @@ mod map_menu;
 mod wind;
 mod sound;
 mod particles;
+mod render_profile;
 
 use bevy::prelude::*;
 
@@ -74,6 +75,8 @@ fn main() {
                     let (w, h) = v.split_once('x')?;
                     Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
                 }).unwrap_or((1600, 900)).into(),
+                // `AC_NO_VSYNC=1`: present immediately (frame-time measurements, `AC_FPS_LOG`)
+                present_mode: if std::env::var_os("AC_NO_VSYNC").is_some() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync },
                 ..default()
             }),
             ..default()
@@ -98,6 +101,6 @@ fn main() {
             city::CityPlugin,
         ))
         // a tuple takes at most 15 plugins
-        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin, sound::SoundPlugin, particles::ParticlesPlugin, player::air_catches::CatchDebugPlugin, player::target_debug::TargetDebugPlugin))
+        .add_plugins((debug_fly::DebugFlyPlugin, test_areas::TestAreasPlugin, sound::SoundPlugin, particles::ParticlesPlugin, player::air_catches::CatchDebugPlugin, player::target_debug::TargetDebugPlugin, render_profile::RenderProfilePlugin))
         .run();
 }

@@ -1070,6 +1070,11 @@ pub fn update_ledge(
                 } else if !matches!(mv.kind, ledge_moves::MoveKind::SwitchHang { .. }) {
                     d.alt_flag = alternation_from_spacing(d.hand_l, d.hand_r);
                 }
+                // `AC_LEDGE_LOG=1`: the hands and +133 at each hang settle (game axes)
+                if std::env::var_os("AC_LEDGE_LOG").is_some() {
+                    let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+                    eprintln!("hang settle after {:?}: hands {:.3} {:.3} (move {:.3} {:.3}) alt {}", mv.kind, g3(d.hand_l), g3(d.hand_r), g3(mv.hand_l), g3(mv.hand_r), d.alt_flag);
+                }
             } else {
                 d.mv = Some(mv);
             }
