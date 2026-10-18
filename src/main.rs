@@ -74,6 +74,8 @@ fn main() {
                     let (w, h) = v.split_once('x')?;
                     Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
                 }).unwrap_or((1600, 900)).into(),
+                // `AC_NO_VSYNC=1`: present immediately (frame-time measurements, `AC_FPS_LOG`)
+                present_mode: if std::env::var_os("AC_NO_VSYNC").is_some() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync },
                 ..default()
             }),
             ..default()

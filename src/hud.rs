@@ -25,7 +25,7 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_hud).add_systems(Update, (update_hud, update_fps));
+        app.add_systems(Startup, spawn_hud).add_systems(Update, (update_hud, update_fps, log_frame_times));
     }
 }
 
@@ -174,4 +174,45 @@ fn update_hud(
         landing,
         help
     );
+}
+
+/// `AC_FPS_LOG=<file>`: every half second of real time, the frame count, the mean and worst frame time (ms) and the
+/// player's feet (game axes), appended to the file: where the frame rate drops along a route.
+#[derive(Default)]
+struct FrameLog {
+    file: Option<std::fs::File>,
+    t: f32,
+    frames: u32,
+    elapsed: f32,
+    worst: f32,
+    last: Option<std::time::Instant>,
+}
+
+/// Wall-clock frame times (a replay fixes the real-time clock's step, so `Time<Real>` would read 1/60 s).
+fn log_frame_times(mut log: Local<FrameLog>, q: Query<&Body, With<Player>>) {
+    use std::io::Write;
+    if log.file.is_none() {
+        let Some(path) = std::env::var_os("AC_FPS_LOG") else { return };
+        log.file = std::fs::File::create(path).ok();
+        if let Some(f) = log.file.as_mut() {
+            let _ = writeln!(f, "t frames mean_ms worst_ms x y z");
+        }
+    }
+    let now = std::time::Instant::now();
+    let dt = log.last.map_or(0.0, |l| (now - l).as_secs_f32());
+    log.last = Some(now);
+    log.t += dt;
+    log.frames += 1;
+    log.elapsed += dt;
+    log.worst = log.worst.max(dt);
+    if log.elapsed >= 0.5 {
+        let p = q.iter().next().map(|b| b.feet).unwrap_or(Vec3::ZERO);
+        let line = format!("{:.2} {} {:.2} {:.2} {:.2} {:.2} {:.2}", log.t, log.frames, 1000.0 * log.elapsed / log.frames as f32, 1000.0 * log.worst, p.x, -p.z, p.y);
+        if let Some(f) = log.file.as_mut() {
+            let _ = writeln!(f, "{line}");
+        }
+        log.frames = 0;
+        log.elapsed = 0.0;
+        log.worst = 0.0;
+    }
 }

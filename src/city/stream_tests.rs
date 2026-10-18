@@ -1626,3 +1626,39 @@ fn probe_floor_grid() {
         eprintln!("y {:+.1}: {line}", j as f32 * step);
     }
 }
+
+/// Live check B1 (2026-10-18): the breakable stalls (`BhvKiosk` entities) within `LAB_RADIUS` (default 60) m of
+/// `LAB_AT` (game axes, default the Bureau spawner): name and position, to drive into in the running game.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_breakable_stalls() {
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let v: Vec<f32> = std::env::var("LAB_AT").ok().map(|s| s.split(',').map(|x| x.trim().parse().unwrap()).collect()).unwrap_or(vec![46.39, 6.13, 4.14]);
+    let radius: f32 = std::env::var("LAB_RADIUS").ok().and_then(|s| s.parse().ok()).unwrap_or(60.0);
+    let at = Vec2::new(v[0], v[1]);
+    let mut found = Vec::new();
+    for cell in 0..w.data.grid.cells.len() {
+        if w.data.grid.cells[cell].datablock == 0 { continue; }
+        let c = &w.data.grid.cells[cell];
+        let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+        let Some(a) = w.data.archives.names.iter().position(|n| *n == archive) else { continue };
+        let Some(entry) = w.data.archives.find(a, &file) else { continue };
+        let Ok(resources) = w.data.archives.file(a, entry) else { continue };
+        for r in resources.values() {
+            for body in super::decode::bodies(r) {
+                if super::decode::markers(body, "BhvKiosk").is_empty() { continue; }
+                let Ok(m) = super::decode::placement(body) else { continue };
+                let p = m.w_axis.truncate();
+                if Vec2::new(p.x, p.y).distance(at) < radius {
+                    found.push((Vec2::new(p.x, p.y).distance(at), r.name.clone(), p));
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    found.dedup_by(|a, b| a.2.distance(b.2) < 0.01);
+    for (d, n, p) in found.iter().take(20) {
+        eprintln!("STALL {d:6.1} m  {n}  at {:.2} {:.2} {:.2}", p.x, p.y, p.z);
+    }
+}
