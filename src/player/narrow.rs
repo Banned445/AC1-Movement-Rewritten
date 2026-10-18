@@ -1351,28 +1351,11 @@ fn beam_along(n: &HumanNarrowObjectData, root: Vec3, dir: Vec3, facing: Vec3, an
     edge.is_some_and(|e| (e - root).dot(d).abs() < 0.4)
 }
 
-/// Beam event 16 (0xF70A60 / 0xF70CD0 → 0xB2E860): foot and hand probes 1.2 m apart,
-/// forward then to either side; the handler uses the ordinary climb start (0xF70D00 → 0xB26080).
+/// Beam event 16 (0xF70A60 / 0xF70CD0 → 0xB2E860): the ground's climb start search (`ground::climb_start_entry`, the
+/// same function: the report box, the three passes, the pose's room and the path rays); the handler uses the ordinary
+/// climb start (0xF70D00 → 0xB26080).
 fn climb_from_beam(feet: Vec3, facing: Vec3, foot_right: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<super::climb::ClimbEntry> {
-    for (origin, forward) in [(feet + facing * 0.95, facing), (feet + facing * 0.8, super::right_of(facing)), (feet + facing * 0.8, -super::right_of(facing))] {
-        let right = super::right_of(forward);
-        for height in [0.0, 0.6, -0.6] {
-            let centre = origin + Vec3::Y * height;
-            let foot = guidance.probe_box(centre, right, forward, Vec3::Y, Vec3::new(0.25, 0.75, 0.3), centre,
-                45f32.to_radians(), 0.1, 1 << GuidanceSubType::LedgeGrab as u32);
-            let Some(foot) = foot else { continue };
-            let centre = foot.point + Vec3::Y * 1.2;
-            let Some(hand) = guidance.probe_box(centre, right, forward, Vec3::Y, Vec3::splat(0.3), centre,
-                45f32.to_radians(), 0.1, 1 << GuidanceSubType::LedgeGrab as u32) else { continue };
-            let root = super::climb::climb_root_at(hand.point, hand.point, foot.point, foot.point, hand.wall_normal);
-            // PORT: capsule casts stand in for the native pose/path helpers 0xB2E160 / 0xB15ED0.
-            if !collision.capsule_cast_free(feet + Vec3::Y * 0.02, 1.8, 0.35, root - feet) { continue; }
-            return Some(super::climb::ClimbEntry { entry_type: super::climb::ClimbEntryType::FromGround,
-                hand_l: hand.point, hand_r: hand.point, foot_l: foot.point, foot_r: foot.point,
-                normal: hand.wall_normal, from_feet: feet, foot_right, action: None, pose_2m: None, end_action: None });
-        }
-    }
-    None
+    super::ground::climb_start_entry(feet, facing, foot_right, guidance, collision)
 }
 
 pub fn update_narrow(

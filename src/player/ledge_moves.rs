@@ -516,8 +516,8 @@ pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang:
 /// - `step` (+848, the hand step): up 0.1–0.8 m above, down 0.1–0.8 m below, the edge held cut out (capsule r 0.2 at
 ///   the hands) and a ±30° wedge about the facing (up) or its opposite (down).
 ///
-/// PORT: when the hands are within 0.1 m in height the game picks the height by the last vertical hand (+1844); the
-/// port keeps the lower / higher one.
+/// The height (0xDD8F80–0xDD904D): hands 0.1 m or more apart → the lower hand going up, the higher going down; closer
+/// than that, the hand that did not move last (+1844 = `last_hand`: 1, the right moved → the left hand's height).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VerticalRows {
     pub feet: Option<crate::guidance::GuidanceHit>,
@@ -525,11 +525,17 @@ pub struct VerticalRows {
     pub step: Option<crate::guidance::GuidanceHit>,
 }
 
-pub fn vertical_rows(hand_l: Vec3, hand_r: Vec3, n: Vec3, up: bool, guidance: &GuidanceWorld) -> VerticalRows {
+pub fn vertical_rows(hand_l: Vec3, hand_r: Vec3, n: Vec3, up: bool, last_hand: usize, guidance: &GuidanceWorld) -> VerticalRows {
     use crate::guidance::Wedge;
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mut mid = (hand_l + hand_r) * 0.5;
-    mid.y = if up { hand_l.y.min(hand_r.y) } else { hand_l.y.max(hand_r.y) };
+    mid.y = if (hand_l.y - hand_r.y).abs() < 0.1 {
+        if last_hand != 0 { hand_l.y } else { hand_r.y }
+    } else if up {
+        hand_l.y.min(hand_r.y)
+    } else {
+        hand_l.y.max(hand_r.y)
+    };
     let top = hand_l.y.max(hand_r.y);
     let window = if up { (top - 1.0, top + 2.0) } else { (top - 2.0, top) };
     let wedge = |cut_up: f32| Some(Wedge { angle: 0.523_598_8, cut_up });
@@ -558,14 +564,25 @@ pub fn try_corner(
     let nn = hit.wall_normal;
     // TryTurnCorner never changes the hang type (+104 is not written): a free hang turns as a free hang (pose
     // `sub_B15AD0`); a wall hang needs foot holds on the new wall (`Human__FindWallHangFeetSupports` 0xB16130, pose
-    // `sub_B157B0`). Both hand targets are the corner row point (0xDD3C17..0xDD3CE1). PORT: the body boxes and
-    // `LateralPathFree` (2.4 / 1.1 m) are the capsule test at the target (RE/24 LEDGE-11).
-    if hang == LedgeHangType::Wall && !super::ledge::feet_supports(hit.point, nn, collision) {
+    // `sub_B157B0`). Both hand targets are the corner row point (0xDD3C17..0xDD3CE1). Then the new pose's body boxes
+    // (`Human__WallHangBodyBoxFree` 0xB2DC80 at 0xDD3EAE / `Human__FreeHangBodyBoxesFree` 0xB2DD50 at 0xDD3FB7) and the
+    // path from the current pose (`Human__LateralPathFree` 0xB2A410 at 0xDD3F5A / 0xDD4058: the current height
+    // `sub_DCE2F0`, the new 1.1 m wall / 2.4 m free, the side −1 for a left turn); RE/24 LEDGE-11.
+    let (hl, hr) = (hit.point, hit.point);
+    let feet = match hang {
+        LedgeHangType::Wall => Some(super::ledge::feet_supports_point(hit.point, nn, collision)?),
+        _ => None,
+    };
+    let facing_to = -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero();
+    let to = match hang {
+        LedgeHangType::Wall => super::ledge::wall_hang_pose(hl, hr, nn, feet, true).0,
+        _ => hang_root(hl, hr, nn, hang),
+    };
+    if !super::ledge::hang_boxes_at(hl, hr, nn, hang, feet, collision) {
         return None;
     }
-    let (hl, hr) = (hit.point, hit.point);
-    let to = hang_root_at(hl, hr, nn, hang, true, collision);
-    if !collision.capsule_fits(to + Vec3::Y * 0.05) {
+    let h = if hang == LedgeHangType::Wall { 1.1 } else { 2.4 };
+    if !lateral_path_free(root, facing, h, to, facing_to, h, if right { 1.0 } else { -1.0 }, collision) {
         return None;
     }
     let col = (right as usize) * 2 + (!inner) as usize;
@@ -581,7 +598,7 @@ pub fn try_corner(
         from: root,
         to,
         facing_from: facing,
-        facing_to: -Vec3::new(nn.x, 0.0, nn.z).normalize_or_zero(),
+        facing_to,
         follow_disp: false,
         lead: 0.0,
         table: None,
@@ -880,7 +897,8 @@ pub const SECOND_HAND_LOOPS: [u32; 6] = [0x4912_2886, 0x4912_288E, 0x4912_28E2, 
 /// with X+3 (`_3_e`) as its entry transition.
 ///
 /// The table jump already ends with X+1. PORT: that part now ends in a one-hand hang under the catching hand, and the
-/// returned move reaches with the second hand over X+2. X+3 is the idle's entry transition (not played by the port).
+/// returned move reaches with the second hand over X+2, then plays X+3 in place: the game plays it as the free-hang
+/// idle's entry transition, and every X+3 item is locked (word 0x0FE0), so no move starts before it ends either way.
 pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, _collision: &CollisionWorld) -> (LedgeMove, Option<LedgeMove>) {
     let Some(lp) = mv.seq[1].map(|a| a.id) else { return (mv, None) };
     let Some(k) = SECOND_HAND_LOOPS.iter().position(|x| *x == lp) else { return (mv, None) };
@@ -893,7 +911,7 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, _collision:
     let (hl, hr) = if right_reaches { (first, second) } else { (second, first) };
     let to = hang_root(hl, hr, n, LedgeHangType::Free);
     mv.to = one_root;
-    let seq = [single(lp + 2, 0), None, None, None];
+    let seq = [single(lp + 2, 0), single(lp + 3, 0), None, None];
     let d = seq_durations(&seq);
     let tail = LedgeMove {
         seq,
@@ -905,7 +923,8 @@ pub fn second_hand_grab(mut mv: LedgeMove, guidance: &GuidanceWorld, _collision:
         follow_disp: false,
         lead: 0.0,
         table: None,
-        root_time: None,
+        // the root reaches the two-hand pose over X+2; X+3 plays in place
+        root_time: (d[0] > 0.0).then_some(d[0]),
         end_free: true,
         hand_l: hl,
         hand_r: hr,
@@ -1383,14 +1402,19 @@ pub fn try_side_jump_to_ladder(
 /// the root is interpolated over it to the ladder point − 0.5 m into the wall (sub_711130), the four limbs snap to
 /// rungs (sub_B18600), and flag 1860|0x10 switches to the Ladder context when the move ends.
 ///
+/// The clearance (0xDD5145): `Human__LateralPathFree` from the hang (its height `sub_DCE2F0`) to the ladder root, 1.8 m
+/// tall, on the move's side.
+///
 /// PORT: the probe is the horizontal distance to the ladder line (≤ 0.6 m) with the probe height inside the ladder
-/// ± 0.5 m; no clearance sweep; the rung snap is left to the ladder wait.
+/// ± 0.5 m (the game's `Guidance__ProbeBox` half extents 0.6 / 0.5 / 0.5, mask 8); the rung snap is left to the
+/// ladder wait.
 pub fn try_side_to_ladder(
     right: bool,
     n: Vec3,
     root: Vec3,
     hang: LedgeHangType,
     guidance: &GuidanceWorld,
+    collision: &CollisionWorld,
 ) -> Option<(LedgeMove, super::ladder::LadderEntry)> {
     use super::ladder::{LadderEntry, FROM_LEDGE_SIDE};
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
@@ -1420,6 +1444,10 @@ pub fn try_side_to_ladder(
         // climber inside the wall)
         let ln = if ln.dot(facing) > 0.0 { -ln } else { ln };
         let to = q + ln * super::ladder::ATTACH_OUT;
+        let ha = if hang == LedgeHangType::Wall { 1.1 } else { 2.4 };
+        if !lateral_path_free(root, facing, ha, to, -ln, 1.8, if right { 1.0 } else { -1.0 }, collision) {
+            continue;
+        }
         let id = FROM_LEDGE_SIDE[free as usize][right as usize];
         let seq = [single(id, 0), None, None, None];
         let durations = seq_durations(&seq);
@@ -2416,7 +2444,7 @@ mod tests {
         g.edges.push(GuidanceEdge { p0: base, p1: top, n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::Ladder });
         // the hang's root 0.08 m behind the ladder's line at the search height (1.5 m: line z -0.47)
         let root = Vec3::new(0.0, 2.0, -0.39);
-        let found = [false, true].into_iter().find_map(|r| try_side_to_ladder(r, Vec3::NEG_Z, root, LedgeHangType::Wall, &g));
+        let found = [false, true].into_iter().find_map(|r| try_side_to_ladder(r, Vec3::NEG_Z, root, LedgeHangType::Wall, &g, &CollisionWorld::default()));
         let (mv, e) = found.expect("the ladder beside the hang");
         assert!(e.n.dot(Vec3::NEG_Z) > 0.99, "climbed from the front: {:?}", e.n);
         assert!(mv.facing_to.dot(Vec3::Z) > 0.99, "facing the wall: {:?}", mv.facing_to);

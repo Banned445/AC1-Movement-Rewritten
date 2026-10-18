@@ -1723,3 +1723,27 @@ fn probe_draw_sharing() {
     eprintln!("distinct (mesh, section, colours) {}", by_colour.len());
     eprintln!("distinct (cell, material) {}", per_cell_material.len());
 }
+
+/// Kiosk axis check (2026-10-18): near `LAB_AT` (game axes, default Kiosk_Grain_020), each object with Kiosk guidance:
+/// its entity matrix's rows (game axes) against the directions of its Kiosk pieces.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_kiosk_axes() {
+    use crate::guidance::GuidanceSubType;
+    let game = crate::assets::find_game_dir().unwrap();
+    let w = super::open(&game, &super::DAMASCUS, false).unwrap();
+    let v: Vec<f32> = std::env::var("LAB_AT").ok().map(|s| s.split(',').map(|x| x.trim().parse().unwrap()).collect()).unwrap_or(vec![98.35, 11.82, 4.0]);
+    let at = Vec3::new(v[0], v[2], -v[1]);
+    let mask = super::stream::content_mask(&w.data);
+    let g = |v: Vec3| format!("({:.3} {:.3} {:.3})", v.x, -v.z, v.y);
+    for c in super::stream::wanted_cells(&w.data, &mask, at, None) {
+        let Ok(d) = super::decode::decode_cell(&w.data, c) else { continue };
+        for o in &d.objects {
+            let kiosk: Vec<_> = o.edges.iter().filter(|e| e.subtype == GuidanceSubType::Kiosk).collect();
+            if kiosk.is_empty() || o.bounds.min.distance(at).min(o.bounds.max.distance(at)) > 30.0 { continue; }
+            let m = o.transform;
+            eprintln!("{} at {}: x {} y {} z {}", o.name, g(m.w_axis.truncate()), g(m.x_axis.truncate().normalize()), g(m.y_axis.truncate().normalize()), g(m.z_axis.truncate().normalize()));
+            for e in kiosk { eprintln!("   kiosk piece {} -> {} dir {}", g(e.p0), g(e.p1), g((e.p1 - e.p0).normalize())); }
+        }
+    }
+}

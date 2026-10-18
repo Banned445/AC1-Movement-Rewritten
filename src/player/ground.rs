@@ -88,8 +88,9 @@ pub struct HumanGroundData {
     pub blend: MoveBlend,
     /// LedgeStop sub-state (38): the edge it stopped at.
     pub ledge_stop: Option<LedgeStop>,
-    /// PORT: no new ledge stop until the stick lets go or turns away from this edge normal (the game's event 69
-    /// sender is not traced).
+    /// PORT: no new ledge stop until the stick lets go or turns away from this edge normal. The sender of event 69 is
+    /// the interpreter (0xEE8899 → `HumanGround__DoLedgeStop` vt748 0xDBCAD0, RE/02 §9.1), every frame its edge test
+    /// holds; whether a held stick stops again after the stop ends is a live check (M5).
     pub ledge_stop_lock: Option<Vec3>,
     /// ObstacleCollision (sub-state 5, event 42): the collide / lean on an obstacle (`collide`).
     pub collide: Option<super::collide::Collide>,
@@ -434,7 +435,11 @@ impl HumanGroundData {
     /// Live (lab): from the impulsion wait 0.27 s of impulsion then `freestep_front_front_*_to_air`; from a walk start or
     /// a free-step exit 0.05-0.09 s; from the running locomotion `run_front_*_to_air`. PORT: HG+616 is taken as the
     /// impulsion's start phase (`sub_724500`'s node call is not decoded; the timings fit it).
-    pub fn event45(&mut self, feet: Vec3, forward: Vec3, jump: ImpulsionJump, free_run: bool) -> Event45 {
+    pub fn event45(&mut self, feet: Vec3, forward: Vec3, jump: ImpulsionJump, free_run: Option<ActionBlend>, leading: Option<usize>) -> Event45 {
+        // `free_run`: the FreeRun sub-state's playing item (its wait, `ground_extras::FREERUN_WAIT`): the port starts the
+        // run start in the frame the wait hands over, so the item event 45 reads in the game is passed in
+        let free_run_item = free_run;
+        let free_run = free_run.is_some();
         let target_pos = match jump {
             ImpulsionJump::Target(t) => t.position,
             ImpulsionJump::Free { dir } => feet + Vec3::new(dir.x, 0.0, dir.z).normalize_or(forward) * FREE_JUMP_AHEAD - Vec3::Y * crate::tuning::FREE_JUMP_DOWN,
@@ -474,10 +479,22 @@ impl HumanGroundData {
                 None => return Event45::Run,
             }
         };
-        // the foot: Movement's `sub_D9BE90` takes `Human__GetLeadingFoot` == 1 -> footl (0xD9BF5A), FreeRun's `sub_DA27C0`
-        // the playing item's word bits 2-3 == 1 -> footl (0xDA285E). PORT: from the locomotion's foot (live: 028 and
-        // freerun_north take footl from Movement with foot 1, the standing starts footr with foot 1)
-        let left = if free_run { self.blend.foot == 0 } else { self.blend.foot != 0 };
+        // the foot: Movement's `sub_D9BE90` takes `Human__GetLeadingFoot` == 1 -> footl (0xD9BF5A), FreeRun's
+        // `HumanGround__PlayImpulsionJumpDirectional` 0xDA2830 the playing item's word bits 2-3 == 1 -> footl
+        // (0xDA285E, 0x040C793D; else 0x04A943DE). The playing item is the transition or one-shot in front, else the
+        // locomotion's: item 0 (`footl`, word 0x0FC9) ends right ahead → footr, item 1 (0x0FC6) left ahead → footl
+        // (live 2026-10-18, RE/33 B1: the impulsion before the stall). Without a pose, Movement takes the locomotion's
+        // foot (live: 028 and freerun_north take footl from Movement with foot 1).
+        let left = if free_run {
+            let word = match (free_run_item, item) {
+                (Some(b), _) => super::anim_gate::word(&b),
+                (None, Some((b, _))) => super::anim_gate::word(&b),
+                (None, None) => super::anim_gate::item_word(super::move_blend::ACT_GROUND_LOCOMOTION, self.blend.foot),
+            };
+            word.is_some_and(|w| (w >> 2) & 3 == 1)
+        } else {
+            leading.map_or(self.blend.foot != 0, |f| f == 0)
+        };
         let id = jump_blend::IMPULSION_JUMP[(!left) as usize];
         let Some(n) = jump_blend::action_items(id).and_then(|i| i.first().map(|c| c.len())) else { return Event45::Run };
         let b = ActionBlend::new(id, 0, &w[..n.min(10)]);
@@ -509,8 +526,10 @@ impl HumanGroundData {
     /// `HumanGround__RunStop_Enter` 0xD98E30: the stop of the foot `PickLocomotionFoot` 0xD86760 reads off the playing
     /// item's word (the locomotion's, or the transition in front of it; RE/24 GROUND-7). Weights: with the locomotion
     /// (or the skid-turn exits, legacy 96 / 97) playing [0, 1 − f, f] by the speed; with another action
-    /// [1 − v, v, 0], v = clamp((t − 0.33) / 0.67) of its normalised time (GROUND-8). PORT: the stop table
-    /// dword_1A2C074 is filled at runtime; parallel feet (2) take the right-foot stop.
+    /// [1 − v, v, 0], v = clamp((t − 0.33) / 0.67) of its normalised time (GROUND-8). The stop table dword_1A2C074
+    /// (`HumanGround__InitAnimTables` 0xDB6F4E) holds legacy 86 / 87 for feet 0 / 1; its parallel-feet slot (2) stays −1
+    /// (0xDB6E6A), so `Anim__PlayAction`(−1) plays no stop. The locomotion's items never report parallel feet (words
+    /// 0x0FC9 / 0x0FC6); PORT: behind a transition that does, the right-foot stop plays.
     pub fn start_run_stop(&mut self) {
         let word = match self.tr {
             Some(t) => super::anim_gate::word(&t.action),
@@ -995,11 +1014,7 @@ pub fn update_ground(
                 // pose (0xB20435; live 2026-10-18, freestep50_walkon: the impulsion's word has no foot bits and the
                 // game takes off `freestep_front_front_050cm_footl` on the pose's leading foot); without a pose the
                 // locomotion's foot (PORT)
-                let foot_left = match super::anim_gate::word(&os.blend).map(|w| (w >> 2) & 3) {
-                    Some(1) => true,
-                    Some(2) => false,
-                    _ => leading_foot.map_or(g.blend.foot != 0, |f| f == 0),
-                };
+                let foot_left = super::takeoff_foot_left(super::anim_gate::word(&os.blend), leading_foot, g.blend.foot != 0);
                 let entry = match jump {
                     ImpulsionJump::Target(target) => {
                         jump_log("impulsion jump takeoff", body.feet, Some(&target));
@@ -1079,7 +1094,8 @@ pub fn update_ground(
 
         // FreeRun (state 36) able to take event 45 this frame: its guard `sub_D85690` (game time past HG+520, 0.2 s
         // after the FreeRun start); the stick moving leaves it for Movement in the same frame
-        let mut free_run_ready = false;
+        // the FreeRun wait's playing item once event 45 may take it (0.2 s in), for event 45's takeoff foot
+        let mut free_run_ready: Option<ActionBlend> = None;
         if GAME_GROUND_EXTRAS {
             g.legs_released_ago = if pad.legs_held { 0.0 } else { g.legs_released_ago+dt };
             // Event43: high profile, stationary, Legs held; native 0xEE8B93 checks button capture.
@@ -1127,7 +1143,7 @@ pub fn update_ground(
                         continue;
                     }
                 }
-                free_run_ready = extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed+dt>=0.2;
+                free_run_ready = (extra.mode==super::ground_extras::ExtraMode::FreeRun && extra.elapsed+dt>=0.2).then_some(extra.action);
                 let k=crate::anim::root_weight(anim,extra.action.id);
                 let (out,delta)=extra.advance(dt,pad.magnitude>0.35,request,g.blend.foot);
                 let delta=delta*k;
@@ -1492,13 +1508,10 @@ pub fn update_ground(
         // k of the turn band grows every frame, before the clip-flag test (`HumanGround__UpdateHeading` 0xD95290)
         g.turn_k = (g.turn_k + PLAYER_TURN_BAND_RATE * dt).min(1.0);
         if moving && !g.oneshot.is_some_and(|o| super::anim_gate::anim_turns(&o.blend)) && !g.tr.is_some_and(|t| super::anim_gate::anim_turns(&t.action)) {
-            let mut d = angle_diff(want_heading, body.heading);
-            // PORT: near 180 deg the shorter way flips sign with tiny stick changes, so the character turned back
-            // and forth (jitter when reversing). Keep the side a turn already started on. (RotateTowards 0xD94F30 turns
-            // the shorter way unless HG+1776 forces a side; who sets HG+1776 for the player is not traced.)
-            if d.abs() > 170f32.to_radians() && g.turn_sign != 0.0 && d.signum() != g.turn_sign {
-                d += g.turn_sign * std::f32::consts::TAU;
-            }
+            let d = angle_diff(want_heading, body.heading);
+            // `RotateTowards` 0xD94F30 turns the shorter way unless HG+1776 forces a side; HG+1776 is written only by
+            // `HumanGround__ctor` (0 at 0xDB2DA3) and read by `UpdateMoveBlend` 0xDA1A7D / `UpdateHeading`, so the
+            // player always turns the shorter way (2026-10-18; the port kept a started side near 180° before).
             // the player's rates are set every frame by the interpreter (IHumanGround vt952 / vt956 → HG+1752 / +1756,
             // 0xEE6D3F–0xEE6D91): 1.5 / 4.0 rad/s, with Legs held 0.975 / 2.6 (0.375 / 3.0 in the vt1196 state, not
             // reached by the port); `RotateTowards` 0xD94F30 picks between them by the angle band 10° / 60° × k
@@ -1663,7 +1676,7 @@ pub fn update_ground(
         if pad.hand_just_pressed() && ab.allows(Ability::Climb) {
             // leading foot (Human__GetLeadingFoot 0xB18850): the playing locomotion item, footl = left ahead
             // the climb start's foot variant: `Human__GetLeadingFoot` ≠ 1 (0xB261A8); PORT without a pose: the blend's foot
-            if let Some(entry) = climb_start_entry(body.feet, forward, leading_foot.map_or(g.blend.foot != 0, |f| f == 1), &guidance) {
+            if let Some(entry) = climb_start_entry(body.feet, forward, leading_foot.map_or(g.blend.foot != 0, |f| f == 1), &guidance, &collision) {
                 pad.consume_hand();
                 switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(entry));
                 continue;
@@ -1708,7 +1721,7 @@ pub fn update_ground(
         if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
             if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir_snap, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
                 jump_log("free-run target jump", body.feet, Some(&target));
-                match g.event45(body.feet, body.forward(), ImpulsionJump::Target(target), free_run_ready) {
+                match g.event45(body.feet, body.forward(), ImpulsionJump::Target(target), free_run_ready, leading_foot) {
                     Event45::Run => {
                         let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, leading_foot, g.blend.foot) };
                         switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
@@ -1818,7 +1831,7 @@ pub fn update_ground(
                 Some(t) => ImpulsionJump::Target(t),
                 None => ImpulsionJump::Free { dir: want },
             };
-            match g.event45(body.feet, forward, jump, free_run_ready) {
+            match g.event45(body.feet, forward, jump, free_run_ready, leading_foot) {
                 Event45::Run => {}
                 Event45::Impulsion => {
                     body.velocity = Vec3::ZERO;
@@ -1869,9 +1882,10 @@ pub fn update_ground(
                 };
                 if r.drop >= 0.53 && g.step_up.is_none() && room {
                     // the takeoff foot is the one opposite the leading foot: `sub_B27180`(…, 2 − (GetLeadingFoot() != 1))
-                    // 0xD9D4B9, so a left foot ahead takes off on `footr` (RE/24 AIR-28). PORT: the leading foot is the
-                    // locomotion's (MoveBlend foot 0 = left ahead), not the bone test of 0xB18850
-                    if let Some(entry) = step_off_entry(body.feet, flat_fwd, &r, g.high_profile, g.speed_param, g.blend.foot != 0) {
+                    // 0xD9D4B9, so a left foot ahead takes off on `footr` (RE/24 AIR-28). The leading foot is the bone
+                    // test of 0xB18850 on the pose; without a pose the locomotion's (MoveBlend foot 0 = left ahead)
+                    let takeoff_left = leading_foot.map_or(g.blend.foot != 0, |f| f != 0);
+                    if let Some(entry) = step_off_entry(body.feet, flat_fwd, &r, g.high_profile, g.speed_param, takeoff_left) {
                         jump_log("step off (event 68)", body.feet, None);
                         switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
@@ -1968,8 +1982,8 @@ pub fn update_ground(
             let speed = speed * crate::anim::root_weight(anim, super::move_blend::ACT_GROUND_LOCOMOTION);
             (forward * speed * dt, speed)
         };
-        // PORT: after a ledge stop, still pushing into the same edge holds the character at it (the game re-sends
-        // event 69 from its untraced sender; the port does not loop stop / step back)
+        // PORT: after a ledge stop, still pushing into the same edge holds the character at it (the interpreter
+        // re-sends event 69 while its edge test holds, 0xEE8899; the port does not loop stop / step back)
         // The interpreter's own edge stop (see the halt above) holds the walk at the edge without a clip.
         let held = g.oneshot.is_none()
             && g.tr.is_none()
@@ -2025,7 +2039,7 @@ pub fn update_ground(
         }
         if let Some(ls) = g.ledge_stop {
             // PORT: the stop clip's root motion may not carry the feet past the edge (the game places the edge
-            // report so the clip ends on it; its sender is not traced)
+            // report the interpreter hands event 69, 0xEE8899, so the clip ends on it)
             let past = (r.position - ls.point).dot(ls.normal) + LEDGE_STOP_MARGIN;
             if past > 0.0 {
                 r.position -= Vec3::new(ls.normal.x, 0.0, ls.normal.z) * past;
@@ -2176,17 +2190,33 @@ pub fn ground_loss(feet: Vec3, velocity: Vec3, guidance: &GuidanceWorld, collisi
 /// box 0.95 m ahead facing forward, then 0.8 m ahead facing 90° left and 90° right (a side wall), each at the feet's
 /// height + 0, +0.6, −0.6 m: a feet hold (box half extents 0.25 / 0.75 / 0.3, the reference 0.2 m back, 45°, mask 50),
 /// then a hand hold 1.2 m above it (0.25 / 0.3 / 0.3). Both hands on the hand hold, both feet on the feet hold.
-/// PORT: the pose's validity (`sub_B2E160`) and the path tests of the side passes (`sub_B15ED0`) are not modelled.
-fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &GuidanceWorld) -> Option<ClimbEntry> {
+/// Then (0xB2E860): the climb pose from the holds (`Human__ComputeClimbPoseFromHolds` 0xB1CC20) must have room
+/// (`climb_pose_room`, `sub_B2E160`); on the side passes the way 1.2 m back from the side wall must be clear
+/// (`sub_B15ED0` from the root to the root − 1.2·facing at 0.2 and 1.2 m up), and from there (the root on the front
+/// pass) the rays to the feet and hand holds 0.1 m out from them (`sub_B15ED0`).
+pub(super) fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<ClimbEntry> {
     let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let report = guidance.report(feet, forward, Vec3::new(-0.75, 0.0, -0.9), Vec3::new(0.75, 1.2, 2.1), false);
     let right = super::right_of(forward);
     let mask = crate::guidance::MASK_CLIMB_HOLDS;
-    for (ahead, facing) in [(0.95f32, forward), (0.8, -right), (0.8, right)] {
+    for (pass, (ahead, facing)) in [(0.95f32, forward), (0.8, -right), (0.8, right)].into_iter().enumerate() {
         for k in [0.0f32, 0.6, -0.6] {
             let c = feet + forward * ahead + Vec3::Y * k;
             let Some(foot) = report.probe_facing(c, facing, Vec3::new(0.25, 0.75, 0.3), 0.2, 0.785_398_2, mask) else { continue };
             let Some(hand) = report.probe_facing(foot.point + Vec3::Y * 1.2, facing, Vec3::new(0.25, 0.3, 0.3), 0.2, 0.785_398_2, mask) else { continue };
+            let pose = super::climb::climb_pose([hand.point, hand.point, foot.point, foot.point],
+                [hand.wall_normal, hand.wall_normal, foot.wall_normal, foot.wall_normal], facing);
+            if !climb_pose_room(pose.root, pose.forward, pose.up, collision) {
+                continue;
+            }
+            let back = feet - facing * 1.2;
+            if pass != 0 && !two_rays_clear(feet, back + Vec3::Y * 0.2, back + Vec3::Y * 1.2, collision) {
+                continue;
+            }
+            let from = if pass != 0 { back } else { feet };
+            if !two_rays_clear(from, foot.point + foot.wall_normal * 0.1, hand.point + hand.wall_normal * 0.1, collision) {
+                continue;
+            }
             return Some(ClimbEntry {
                 entry_type: ClimbEntryType::FromGround,
                 pose_2m: None, end_action: None,
@@ -2202,6 +2232,26 @@ fn climb_start_entry(feet: Vec3, forward: Vec3, foot_right: bool, guidance: &Gui
         }
     }
     None
+}
+
+/// `sub_B2E160`: room for a climb pose (root, forward F, up U): two boxes along U and F (`Human__BoxQueryEmpty`), the
+/// body at the root + 0.3·U (half extents 0.375 across, 0.25 along F, 0.7 along U) and the head at the root + 1.4·U
+/// (0.15 / 0.15 / 0.4).
+fn climb_pose_room(root: Vec3, forward: Vec3, up: Vec3, collision: &CollisionWorld) -> bool {
+    let right = forward.cross(up).normalize_or(super::right_of(forward));
+    let axes = [right, forward, up];
+    collision.obb_free(root + up * 0.3, axes, Vec3::new(0.375, 0.25, 0.7)) && collision.obb_free(root + up * 1.4, axes, Vec3::new(0.15, 0.15, 0.4))
+}
+
+/// `sub_B15ED0`: from 0.2 m above `from` to `low` and from 1.2 m above it to `high`, both rays clear (`Human__RayClear`,
+/// the main character's layer).
+fn two_rays_clear(from: Vec3, low: Vec3, high: Vec3, collision: &CollisionWorld) -> bool {
+    let clear = |a: Vec3, b: Vec3| {
+        let d = b - a;
+        let len = d.length();
+        len < 1e-4 || collision.ray_distance(a, d / len, len, crate::layers::MAIN_CHARACTER) >= len
+    };
+    clear(from + Vec3::Y * 0.2, low) && clear(from + Vec3::Y * 1.2, high)
 }
 
 /// The beam's obstacle hand target (`sub_F7DB30`, from event 17 on a beam: 0xEE9AF0 → 0xF7EF90 → 0xF70E50 →
@@ -2474,14 +2524,14 @@ mod reanalysis_tests {
             .find(|b| !super::super::anim_gate::locked(b))
             .expect("an unlocked start item");
         let mut g = HumanGroundData::default();
-        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), false), Event45::Run, "the locomotion");
+        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None), Event45::Run, "the locomotion");
         for (t, want) in [(0.3f32, Event45::Impulsion), (0.8, Event45::Run)] {
             let mut g = HumanGroundData::default();
             g.play_oneshot(start);
             if let Some(os) = g.oneshot.as_mut() {
                 os.t = t * os.duration;
             }
-            assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), false), want, "t {t}");
+            assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None), want, "t {t}");
             if want == Event45::Impulsion {
                 let os = g.oneshot.unwrap();
                 assert!(jump_blend::IMPULSION_JUMP.contains(&os.blend.id));
@@ -2492,7 +2542,7 @@ mod reanalysis_tests {
         // FreeRun: from the start, the target 45 degrees to the right blends front and right half and half
         let mut g = HumanGroundData::default();
         let right = JumpTarget { position: Vec3::new(2.0, 0.0, -2.0), ..target };
-        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(right), true), Event45::Impulsion);
+        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(right), Some(ActionBlend::new(super::super::ground_extras::FREERUN_WAIT[0], 0, &[1.0])), None), Event45::Impulsion);
         let os = g.oneshot.unwrap();
         let w = os.blend.weights();
         assert!(os.t == 0.0 && (w[0] - 0.5).abs() < 1e-3 && (w[4] - 0.5).abs() < 1e-3, "{w:?}");

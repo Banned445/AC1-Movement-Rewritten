@@ -404,8 +404,12 @@ impl CityState {
     fn refresh(&mut self, ctx: &mut Ctx) {
         if self.haystacks_dirty {
             self.haystacks_dirty = false;
-            ctx.guidance.haystacks = self.cells.iter().filter_map(|c| match c { Cell::Loaded { objects, .. } => Some(objects), _ => None })
-                .flatten().filter(|o| o.physics.is_some()).filter_map(|o| o.o.haystack).collect();
+            let live = || self.cells.iter().filter_map(|c| match c { Cell::Loaded { objects, .. } => Some(objects), _ => None })
+                .flatten().filter(|o| o.physics.is_some());
+            ctx.guidance.haystacks = live().filter_map(|o| o.o.haystack).collect();
+            // the kiosks' owners: the entity's forward row (Bevy space: the matrix's Y axis), the Kiosk context's axis
+            ctx.guidance.kiosks = live().filter(|o| kiosk_owner(&o.o))
+                .map(|o| (o.o.bounds, Vec3::new(o.o.transform.y_axis.x, 0.0, o.o.transform.y_axis.z).normalize_or_zero())).collect();
         }
     }
 
@@ -524,7 +528,7 @@ impl CityState {
         for mut o in objects {
             for e in o.entities.drain(..) { ctx.commands.entity(e).despawn(); }
             for (e, _) in o.fade.take().into_iter().flat_map(|f| f.sections) { ctx.commands.entity(e).despawn(); }
-            if let Some(p) = o.physics.take() { self.remove_physics(p, ctx); self.haystacks_dirty |= o.o.haystack.is_some(); }
+            if let Some(p) = o.physics.take() { self.remove_physics(p, ctx); self.haystacks_dirty |= o.o.haystack.is_some() || kiosk_owner(&o.o); }
         }
         for m in materials { self.release_material(m, ctx); }
         for &e in self.fake_spans.get(&c).into_iter().flatten() { ctx.commands.entity(e).insert(Visibility::Inherited); }
@@ -720,7 +724,7 @@ impl CityState {
                 if o.physics.is_none() && d < PHYSICS_RADIUS && (!o.o.collision.is_empty() || !o.o.edges.is_empty()) { add.push((d, c, k)); }
                 else if o.physics.is_some() && d > PHYSICS_RADIUS + PHYSICS_MARGIN {
                     let p = o.physics.take().unwrap();
-                    self.haystacks_dirty |= o.o.haystack.is_some();
+                    self.haystacks_dirty |= o.o.haystack.is_some() || kiosk_owner(&o.o);
                     remove_physics(&mut self.edge_free, p, ctx);
                 }
             }
@@ -741,7 +745,7 @@ impl CityState {
                 }
             }
             o.physics = Some(Physics { triangles, edges });
-            self.haystacks_dirty |= o.o.haystack.is_some();
+            self.haystacks_dirty |= o.o.haystack.is_some() || kiosk_owner(&o.o);
         }
     }
 
@@ -836,6 +840,11 @@ pub fn wanted_cells(data: &CityData, has_content: &[bool], focus: Vec3, view: Op
     }).collect();
     v.sort_by(|a, b| a.0.total_cmp(&b.0));
     v.into_iter().map(|d| d.1).collect()
+}
+
+/// An object whose guidance holds Kiosk pieces (its forward is the Kiosk context's axis).
+fn kiosk_owner(o: &CityObject) -> bool {
+    o.edges.iter().any(|e| e.subtype == GuidanceSubType::Kiosk)
 }
 
 fn remove_physics(edge_free: &mut Vec<usize>, p: Physics, ctx: &mut Ctx) {

@@ -477,8 +477,9 @@ impl HumanLadderData {
             let to = self.root_at(self.height);
             if let Some(left) = e.back_turn {
                 // the back-approach turn (+908 bit 2: 0x0A64400C / D, items a then b into the wait, single-weight blend;
-                // RE/24 LADDER-4), ending on the approach side (live RE/25 #68). PORT: the heading snaps (the game slerps
-                // at rate 1.6)
+                // RE/24 LADDER-4), ending on the approach side (live RE/25 #68). `HumanLadder__StateEntry_Update`
+                // 0xE252C8 drives it with `HumanLadder__DriveRootFromClip` 0xE1EF50 as the ground entry, but the rotation
+                // slerps by min(1.6·t, 1) (dword_169E164) instead of min(2·t, 1); the root's correction keeps 2.
                 self.chain = true;
                 // the root follows the turn's clip in the character's start frame, with the linear correction onto the
                 // rung (live, the Bureau ladder: the root swings 0.5 m to the side and back over the turn's first 0.7 s).
@@ -817,8 +818,9 @@ pub fn update_ladder(
             let (f, u) = if matches!(phase, LadderPhase::EnterGround | LadderPhase::Revolve(_)) || l.start_frame { (l.fwd, Vec3::Y) } else { (-l.out(), l.axis()) };
             let r = f.cross(u).normalize_or(super::right_of(f));
             let w = |d: [f32; 3]| r * d[0] + f * d[1] + u * d[2];
-            // the ground entry drives the correction by min(2s, 1) (`sub_E1EF50`; RE/24 LADDER-6), the others linearly
-            let c = if phase == LadderPhase::EnterGround { (2.0 * k).min(1.0) } else { k };
+            // the ground entry and the back-approach turn drive the correction by min(2s, 1)
+            // (`HumanLadder__DriveRootFromClip` 0xE1EF50 a5 = 2.0; RE/24 LADDER-6), the others linearly
+            let c = if phase == LadderPhase::EnterGround || l.start_frame { (2.0 * k).min(1.0) } else { k };
             l.from + w(d) + (l.to - (l.from + w(dend))) * c
         } else {
             l.from.lerp(l.to, k)
@@ -841,6 +843,14 @@ pub fn update_ladder(
                 let (h0, h1) = (super::heading_of(l.fwd), super::heading_of(-l.n));
                 let d = (h1 - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
                 body.heading = h0 + d * (2.0 * k).min(1.0);
+            }
+            if l.start_frame && phase == LadderPhase::Entry {
+                // the back-approach turn (0xE252C8): the start frame turned by the clip's root yaw, slerped onto the
+                // ladder's facing by min(1.6·t, 1) (`DriveRootFromClip` a6 = 1.6, RE/24 LADDER-4)
+                let h0 = super::heading_of(l.fwd) + l.action.map_or(0.0, |a| a.yaw(k));
+                let h1 = super::heading_of(-l.n);
+                let d = (h1 - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                body.heading = h0 + d * (1.6 * k).min(1.0);
             }
             if let (LadderPhase::Revolve(0), Some(a)) = (phase, l.action) {
                 // the clip's root yaw turns the body half round
