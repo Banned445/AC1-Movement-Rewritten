@@ -291,6 +291,18 @@ pub fn ground_mode(high: bool, moving: bool, stick: Vec3, forward: Vec3, legs: b
     }
 }
 
+/// The actions the stay's wall run may start from (`sub_E4C5C0`, NarrowObject StateMovement vtable 0x1702C7C slot 16): the
+/// 50 cm free-step receptions, the knee hangs' and the beam auto-climbs' free-step entries and the collide step-up's.
+const WALL_RUN_STAY_ACTIONS: [u32; 9] = [0x010D_E1FE, 0x010D_F150, 0x01F0_79B4, 0x248E_9730, 0x248E_9731, 0x3919_3BBB, 0x6DA7_646F, 0x6EFC_142F, 0x012B_33F1];
+
+/// The wall run's state gate (`sub_E4C630`, slot 17, the first test of `StateMovement_GuardWallRun` 0xE503D0): the
+/// playing action is one of `WALL_RUN_STAY_ACTIONS` (or none) and at least half played (`sub_501DF0`). Live 2026-10-18
+/// (freestep50_walkon): the guard refuses from the stay's first frame until the reception reaches 0.5, then the wall
+/// test passes 0.47 m further on.
+fn wall_run_ready(action: u32, phase: f32) -> bool {
+    (action == u32::MAX || WALL_RUN_STAY_ACTIONS.contains(&action)) && phase >= 0.5
+}
+
 /// One update of the stay (the interpreter's requests first, then `StateMovement_Update`). Switches context itself.
 #[allow(clippy::too_many_arguments)]
 pub fn update(
@@ -349,7 +361,7 @@ pub fn update(
     // ------------------------------------------------ the wall run (event 15), first in the interpreter (0xEE94B0)
     // high profile, Legs held, the stick past 0.35 within 60° of the facing, the Walling ability; the guard is the wall
     // test 1.5 · h ahead (`StateMovement_GuardWallRun` 0xE503D0 → `Human__WallingWallTest` 0xE18390), the fill 0xB263B0
-    if high && moving && pad.legs_held && pad.stick_facing_angle.abs() < WALL_RUN_ANGLE && ab.allows(Ability::Walling) {
+    if high && moving && pad.legs_held && pad.stick_facing_angle.abs() < WALL_RUN_ANGLE && ab.allows(Ability::Walling) && wall_run_ready(a.id, phase) {
         if let Some((contact, normal, slope)) = super::walling::wall_ahead(body.feet, forward, collision) {
             pad.consume_jump();
             let from = body.feet;

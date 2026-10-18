@@ -991,12 +991,14 @@ pub fn update_ground(
             let jump = g.impulsion_jump.take();
             if let (Some(os), Some(jump)) = (os, jump) {
                 g.oneshot = None;
-                // the item's foot bits as `Human__SetupJumpToTarget`'s a7: 0 -> `Human__GetLeadingFoot` (0xB20435;
-                // PORT: the locomotion's foot, as the impulsion's own choice reads it)
+                // the item's foot bits as `Human__SetupJumpToTarget`'s a7: 0 -> `Human__GetLeadingFoot` 0xB18850 on the
+                // pose (0xB20435; live 2026-10-18, freestep50_walkon: the impulsion's word has no foot bits and the
+                // game takes off `freestep_front_front_050cm_footl` on the pose's leading foot); without a pose the
+                // locomotion's foot (PORT)
                 let foot_left = match super::anim_gate::word(&os.blend).map(|w| (w >> 2) & 3) {
                     Some(1) => true,
                     Some(2) => false,
-                    _ => g.blend.foot != 0,
+                    _ => leading_foot.map_or(g.blend.foot != 0, |f| f == 0),
                 };
                 let entry = match jump {
                     ImpulsionJump::Target(target) => {

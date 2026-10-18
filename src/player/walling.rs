@@ -369,6 +369,17 @@ fn find_ledge(g: &GuidanceWorld, origin: Vec3, root: Vec3, facing: Vec3, width: 
     } else {
         out.sort_by(|a, b| a.point.y.total_cmp(&b.point.y));
     }
+    // `AC_WALL_LOG=1`: the search in game axes (x, −z, y): the root, the edges kept by the depth filter, the candidates
+    if std::env::var_os("AC_WALL_LOG").is_some() {
+        let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+        eprintln!("wall ledge search root {:.3} box w {width} h {height} d {depth} r {radius}", g3(root));
+        for e in &world.edges {
+            eprintln!("  kept edge {:.3} -> {:.3}", g3(e.p0), g3(e.p1));
+        }
+        for c in &out {
+            eprintln!("  cand {:.3} h {:.3}", g3(c.point), c.height);
+        }
+    }
     out
 }
 
