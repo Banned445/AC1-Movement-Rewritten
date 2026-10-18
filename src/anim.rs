@@ -1550,6 +1550,22 @@ fn sample_layers(lib: &AnimLibrary, skel: &PoseSkeleton, layers: &[(String, f32)
     }
 }
 
+/// A bone's position at the end of an action's first item, in animation space (x right, y forward, z up, feet at the
+/// origin; the displacement track is not a bone): the game's `sub_4FEE50`(bone, action, 0, 1.0, identity), as
+/// `HumanLedge__QuickWallTestForStep` 0xDD1E59 reads the step clip's moving foot.
+pub fn action_end_bone(lib: &AnimLibrary, skel: &PoseSkeleton, action: u32, bone: u32) -> Option<Vec3> {
+    let idx = skel.index(bone)?;
+    let items = lib.action_items(action)?;
+    let mut locals = Vec::new();
+    sample_layers(lib, skel, &items.first()?.layers, 1.0, &mut locals);
+    let mut model: Vec<(Quat, Vec3)> = Vec::with_capacity(locals.len());
+    for (i, &(r, t)) in locals.iter().enumerate() {
+        let (pr, pt) = skel.parents.get(i).copied().flatten().map(|p| model[p]).unwrap_or((Quat::IDENTITY, Vec3::ZERO));
+        model.push((pr * r, pt + pr * t));
+    }
+    model.get(idx).map(|m| m.1)
+}
+
 /// The animation step: advances each player's actions and samples the pose into its `BonePose` (the renderer copies
 /// it in `apply_clip`; the simulation reads it the next frame, `bone_pose`).
 pub fn animate_pose(

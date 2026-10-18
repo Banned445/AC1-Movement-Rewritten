@@ -319,6 +319,17 @@ pub fn update_hay(
                 let extra = if h.kind == HayEntry::Top { 0.2 } else { 0.0 };
                 let dur = h.action.map(|a| a.duration()).unwrap_or(0.5) + extra;
                 if h.t >= dur.max(h.interp) {
+                    // `HumanHayStack__ChooseWait` 0xE416B0: with HumanData +871 set (the player's, 1 from
+                    // `BhvAssassin__SetupPlayerHuman` 0xAF2A7F) the wait faces the haystack entity's X row, flattened
+                    // (0xE416F0–0xE41795, `sub_52BD40` at once); else IHumanHayStack vt144's direction. Lab hay43 let-go /
+                    // faith landing: whatever the entry's heading, the wait faces (0.724, 0.690)
+                    if let Some(stack) = h.stack {
+                        let x = Vec3::new(stack.axes[0].x, 0.0, stack.axes[0].z).normalize_or_zero();
+                        if x != Vec3::ZERO {
+                            h.face = Some(x);
+                            body.heading = super::heading_of(x);
+                        }
+                    }
                     h.phase = HayPhase::Waiting;
                     h.action = single(HAYSTACK_WAIT);
                     h.t = 0.0;
@@ -326,13 +337,13 @@ pub fn update_hay(
                 }
             }
             HayPhase::Waiting => {
-                // PORT: `ChooseWait` 0xE416B0 faces the stack's axis (data +871) or IHumanHayStack vt144's direction; the
-                // port's haystack boxes carry no axis, so the wait keeps the entry's heading (RE/24 NARROW-20)
                 body.feet = h.to;
                 // the interpreter's haystack state (`sub_EE08E0` from 0xEEE4E0, RE/24 NARROW-19): the stick released in
                 // the high wait → event 1, the low wait (0xE44020 / 0xE44080); the stick past 0.35 → the pass-over to a
-                // pass-over candidate (event 2) if there is one, else the hop out (event 3, `Guard_HopOut`). PORT: the
-                // event 0 back to the high wait has no sender found
+                // pass-over candidate (event 2) if there is one, else the hop out (event 3, `Guard_HopOut`). Event 0 (back
+                // to the high wait, `sub_E41B60`) is IHumanHayStack vt108 / vt112 (0xE43FB0 / 0xE44010, vtable 0x17022E4);
+                // the player's interpreter calls only vt116 / vt120 (event 1) and vt144, so the player never sends it
+                // (the lab's haystack waits never return to the high wait)
                 if pad.magnitude <= 0.35 && !h.low {
                     h.low = true;
                     h.action = single(HAYSTACK_LOW_WAIT).or(h.action);

@@ -855,8 +855,9 @@ impl HumanGroundData {
             }
             TreeState::Pivot | TreeState::RunStop | TreeState::RollEnding => self.enter_wait(ended, high),
             // the other one-shots (climb / ledge / hay exits, lean exits …): the item's authored transition into the
-            // locomotion with the default layout, PORT s ≥ 0.25 / 0.5 (TransitionSetupDataToMovement modes 3 / 4, the
-            // exits' own setups are not traced), or into the wait
+            // locomotion with the default layout, or into the wait. Their setups enter Idle at s = 0 (climb mode 1, hay
+            // 0 / 1); the step into Move takes the start's s ≥ 0.25 / 0.5 (`PlayStartMove` 0xD98990; the port goes
+            // through the exit's authored transition instead of the start, **hypothesis** that the speed is the same)
             // (the ledge stop's end action hands back to Movement when it ends, `Locomotion_Update` 0xDAF2D0)
             TreeState::Other if self.ledge_stop.is_none_or(|l| l.ending) && self.collide.is_none() && self.look_down.is_none() => {
                 if stick {
@@ -897,8 +898,13 @@ impl HumanGroundData {
         };
         // `Movement_EnterBody` 0xD92C40 sets the speed parameter HG+1512 for every entry mode: 0 for the plain entries
         // and the landings (modes 0/1/2/7/9/10/11/13), 0.25 for 3, 0.5 for 4/5/12 (RE/24 GROUND-5). The landing sets
-        // the profile's speed when it hands over to Move (`LandingToMove_Layout6` 0xD990A0). PORT: every port entry
-        // into the ground is one of the 0 modes (the 0.25 / 0.5 exits are not routed through entry modes).
+        // the profile's speed when it hands over to Move (`LandingToMove_Layout6` 0xD990A0). The senders of the other
+        // modes set them after this reset: the free-step stay (0xE51914: 0 / 1 / 3 / 4 / 6, `enter_from_free_step`),
+        // the pass-over (`HumanLedge__SetupPassOverToGround` 0xDCFA40: 12, `enter_roll_ending`), the roll ending's exit
+        // (`PlayRollEndingExitMove` 0xD8B780: 4), the beam step-off (`sub_F74BD0`: 3 walking, else 4) and the
+        // NarrowObject edge (`HumanNarrowObject__SetupToGround` 0xE4D400: 0 / 1 / 3 / 5). The climb exits
+        // (`HumanClimb__FillGround_FromClimb` 0xDE9C60: 1) and the haystack exits (`sub_E402B0`: 0 / 1) are 0-speed
+        // modes, as here.
         self.speed_param = 0.0;
         self.blend.speed_param = 0.0;
         if landing.is_none() {
@@ -1251,8 +1257,9 @@ pub fn update_ground(
         // stop, sub-state 38; the obstacle collision, 5): they leave by their own rules. A transition into the wait is
         // Idle's: the same gate leaves it for the start.
         // The landing states (21, 22) and the skid turn (24) have no such gate: they leave when the action completes
-        // (`sub_501760`). That includes the free-step reception (PORT: the game continues it in NarrowObject); its
-        // authored exits (`freestep_entry_tr_*`, entered with a cut) start from its last frame.
+        // (`sub_501760`). The free-step reception and the knee stand-ups play in NarrowObject's free-step stay
+        // (`free_step.rs`, SubState 6), which hands over to the Ground when the action is done (`CheckSupportAndFall`
+        // 0xE51190); their authored exits (`freestep_entry_tr_*`, entered with a cut) start from its last frame.
         let gated = !GAME_GROUND_TREE || g.owner == TreeState::Other;
         if mv_speed > 0.0
             && gated

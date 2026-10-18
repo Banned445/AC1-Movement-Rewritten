@@ -54,8 +54,14 @@ pub fn find_jump_target(
 
 /// The swing jump's target (the interpreter's ledge state, event 7, 0xEECEC6–0xEED063): the candidate query along the
 /// facing and the scorer; the Leap of Faith search (vt76) only when the query found no candidates at all (with
-/// candidates but none chosen the interpreter goes straight to the free jump). PORT: the query is the tap jump's (the
-/// game picks types 128, then 1), and the Leap of Faith looks along the facing (the game: the camera-relative stick).
+/// candidates but none chosen the interpreter goes straight to the free jump). The interpreter runs two selections over
+/// the same candidates, mode 1 and mode 128 (only mode 128 with the empty hand held, `sub_6D0F50`(3) at 0xEECEF2), and
+/// hands on a pair (IHumanLedge vt96 0xDE43D0) or one target (vt100 0xDCEB00 = vt96 with an empty second, type
+/// 0x80000000); `HumanLedge__SetupSwingJump` 0xDCD0B0 passes the second as `Human__SetupJumpToTarget`'s chained target.
+/// The scorer reads its mode only as `a5 == 2` (0xE97584) and both calls pass the same actor and a zero wanted direction,
+/// so both selections return the same candidate and type: the chain is the target itself, and one selection is the
+/// game's result. PORT: the query is the tap jump's, and the Leap of Faith looks along the facing (the game: the
+/// camera-relative stick).
 pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
     let cands = jump_candidates::query(feet, fwd, &Query::TAP, guidance, collision);
     if cands.is_empty() {

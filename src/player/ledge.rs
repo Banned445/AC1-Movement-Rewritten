@@ -318,6 +318,9 @@ pub struct HumanLedgeData {
     /// wait 0x0106F2E9 behind it (0xE09055) on a free hang (+104 = 1, 0xE08EE9 / 0xE08C2D); it lasts until the next move.
     /// The `step_seq` it was set at.
     pub wallfree_wait: Option<u32>,
+    /// The jitter source of the quick wall test (`HumanLedge__QuickWallTestForStep` 0xDD1F67). PORT: the game draws from
+    /// the shared LCG (`dword_1A1FC3C` + 4); the port keeps its own state.
+    pub quick_rng: u32,
 }
 
 impl HumanLedgeData {
@@ -599,6 +602,50 @@ fn needs_switch(cur: LedgeHangType, mid: Vec3, n: Vec3, collision: &CollisionWor
     }
 }
 
+/// `HumanLedge__QuickWallTestForStep` 0xDD1DC0: does the step clip's moving foot, at the clip's end, find the wall?
+/// The step's hand and clip are `PickVerticalHandAndAnim` 0xDCB3E0 / `PickShimmyHandAndAnim` 0xDCB520 (the foot on the
+/// hand's side); the foot bone is sampled at the end (`sub_4FEE50`, phase 1.0) and placed in the frame
+/// `ComputeRootFromHandTargets` 0xDD6730 left at +0x6A0 / +0x6B0 / +0x6C0 (x across = forward × up, y = forward into the
+/// wall, z = up; the origin is the hang's root at the hands' midpoint: a wall hang's 1.1 m below the lower hand for a
+/// vertical step, the higher for a lateral one, and 0.5 m out; a free hang's 2.4 m below the higher hand).
+/// From there a `Guidance__FindWallSupport` 0x11718B0 box (half 0.25 across, 0.75 deep, 0.15 high, step 0.07) with a
+/// random ±0.15 m offset across and up (0xDD1F67–0xDD200F: the first draw is the height, the second across).
+/// None without the install's clips (the switch's own rays then decide alone).
+#[allow(clippy::too_many_arguments)]
+fn quick_wall_test(d: &mut HumanLedgeData, action: u32, left_foot: bool, lateral: bool, n: Vec3, lib: Option<&crate::anim::AnimLibrary>, skel: Option<&crate::bone_pose::PoseSkeleton>, collision: &CollisionWorld) -> Option<bool> {
+    let bone = if left_foot { crate::bone_pose::LEFT_FOOT } else { crate::bone_pose::RIGHT_FOOT };
+    let foot = crate::anim::action_end_bone(lib?, skel?, action, bone)?;
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let mid = (d.hand_l + d.hand_r) * 0.5;
+    let (lo, hi) = (d.hand_l.y.min(d.hand_r.y), d.hand_l.y.max(d.hand_r.y));
+    // `ComputeRootFromHandTargets` 0xDD6730: +0x6A0 = +0x670 after its height is set (free: the higher hand − 2.4 m;
+    // wall: − 1.1 m, then 0.5 m out along −forward). PORT: the game's frame is the last root computation's, whose step
+    // picked the lower or higher hand; the port uses this step's (equal for level hands)
+    let origin = match d.hang_type {
+        LedgeHangType::Wall => Vec3::new(mid.x, if lateral { hi } else { lo } - WALL_HANG_DROP, mid.z) - facing * 0.5,
+        _ => Vec3::new(mid.x, hi - FREE_HANG_DROP, mid.z),
+    };
+    let point = origin + right_of(facing) * foot.x + facing * foot.y + Vec3::Y * foot.z;
+    let mut draw = || {
+        d.quick_rng = d.quick_rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (d.quick_rng & 0x0FFF_FFFF) as f32 * 3.725_290_3e-9 * 0.3 - 0.15
+    };
+    let up = draw();
+    let across = draw();
+    const QUICK: SupportBox = SupportBox { across: 0.25, depth: 0.75, height: 0.15, step: 0.07 };
+    Some(wall_support(point, n, across, up, QUICK, collision))
+}
+
+/// The gate in front of `TrySwitchHangType` (`Movement_ChooseAction` 0xDE2D8C–0xDE2DB5 vertical, 0xDE2BED–0xDE2C11
+/// lateral): the switch is tried only when the quick test disagrees with the hang (a free hang whose step foot finds the
+/// wall, a wall hang whose step foot does not); +104 ≠ 0 (free and wall-free) reads as free.
+fn switch_gate(cur: LedgeHangType, quick: Option<bool>) -> bool {
+    match quick {
+        None => true,
+        Some(found) => found == (cur != LedgeHangType::Wall),
+    }
+}
+
 /// Root (feet) for a hang (ComputeRootFromHandTargets 0xDD6730): only type 1 is the free pose (0xDD6899), the holds'
 /// midpoint 2.4 m below the higher one (`Human__FreeHangPoseFromHolds` 0xB15AD0); types 0 and 2 take the wall branch.
 /// The entries and every step hang here, at the distance from the wall of their type; only the straight jump's hang
@@ -764,6 +811,7 @@ pub fn update_ledge(
     guidance: Res<GuidanceWorld>,
     abilities: Option<Res<super::abilities::AbilitySet>>,
     skeleton: Option<Res<crate::bone_pose::PoseSkeleton>>,
+    lib: Option<Res<crate::anim::AnimLibrary>>,
     mut q: Query<(&mut Locomotion, &mut Body, &mut HumanDataBundle, &mut LimbTargets, Option<&crate::bone_pose::BonePose>), With<Player>>,
 ) {
     let dt = time.delta_secs().min(1.0 / 20.0);
@@ -1317,10 +1365,13 @@ pub fn update_ledge(
                 }
                 // TrySwitchHangType 0xDE1060 (vertical) comes right after the climb transition, before the free-hang drop
                 // and the hand step (0xDE2D77..0xDE2E12, RE/24 LEDGE-10): both hand targets are the step row point, the
-                // foot rays start there (LEDGE-9). PORT: the game decides with the step clip's end-frame moving foot (+ a
-                // ±0.15 m jitter, `QuickWallTestForStep` 0xDD1DC0); the port uses the switch's own rays.
+                // foot rays start there (LEDGE-9). It is tried only when `QuickWallTestForStep` 0xDD1DC0 (the step clip's
+                // end-frame moving foot) disagrees with the hang (`switch_gate`); the switch's rays then decide.
                 if let Some(h) = rows.step {
-                    if let Some(nt) = needs_switch(d.hang_type, h.point, n, &collision) {
+                    let first_left = d.last_hand == 1;
+                    let wi = (d.hang_type != LedgeHangType::Wall) as usize;
+                    let quick = quick_wall_test(d, ACT_VSTEP[wi][vstep_index(sign < 0.0, false, first_left)], first_left, false, n, lib.as_deref(), skeleton.as_deref(), &collision);
+                    if let Some(nt) = needs_switch(d.hang_type, h.point, n, &collision).filter(|_| switch_gate(d.hang_type, quick)) {
                         let mv = ledge_moves::switch_move(if sign > 0.0 { 0 } else { 1 }, nt == LedgeHangType::Wall, body.feet, h.point, h.point, n, &collision);
                         start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
                         continue;
@@ -1379,7 +1430,13 @@ pub fn update_ledge(
                     // the pull-up (event 0) only when nothing else is possible up: `HumanLedge__CanPullup` 0xDE2270 needs
                     // +1862, which `Movement_ChooseAction` clears first (0xDE2A2C) and sets only when the climb transition,
                     // the hang switch, the free-hang drop, the hand step, the jump up and the wall jump up all failed (0xDE2E12;
-                    // RE/24 LEDGE-2). PORT: the game sends it from the next frame's interpreter pass; the port pulls up at once.
+                    // RE/24 LEDGE-2). The interpreter runs before the contexts (`GoAssassinActionInterpreter__Update`
+                    // 0xEEE700 → the ledge state 0xEECC78 sends event 0 while the stick is up), so its CanHandleEvent(0)
+                    // reads the +1862 that the previous frame's ChooseAction set: the game pulls up (and switches, below)
+                    // one frame after the first blocked frame (lab `beam_pullup` 2026-10-13_210349/006: stick up at row
+                    // 1445, the pull-up item at 1446). PORT (held back, RE/31c M3 group 2): the port still pulls up at
+                    // once. The frame of delay made climb_13 / climb10_lowhold diverge earlier: their walling entries
+                    // reach the hang 2 frames / 0.09 s late, and the instant pull-up hides that. Port it with that fix.
                     d.blocked_up = true;
                     // a free hang (+104 = 1) with no pending step whose two foot rays find the wall and whose wall-hang body
                     // box is free (`HumanLedge__FreeHangFeetFindWall` 0xDE0E30) is accepted before the room test, flag 0x20
@@ -1482,9 +1539,16 @@ pub fn update_ledge(
                 // StartHandStep 0xDDE0C0: the shimmy step onto row 3's target
                 if let Some(t) = target {
                     // `TrySwitchHangType` 0xDE1060 (lateral): the lead hand's ProbeLateral target, refused on a closing step;
-                    // both hands go onto it and the foot rays start there; +133 is not touched (RE/24 LEDGE-9). PORT: the
-                    // decision uses the switch's rays, not the step clip's end-frame foot (0xDD1DC0).
-                    let switch = if d.alt_flag { None } else { needs_switch(d.hang_type, t, n, &collision) };
+                    // both hands go onto it and the foot rays start there; +133 is not touched (RE/24 LEDGE-9). Tried only when
+                    // the quick test of the open step's clip (0xDE2BF9; the left step moves the left hand and foot,
+                    // `PickShimmyHandAndAnim` 0xDCB520) disagrees with the hang (`switch_gate`).
+                    let switch = if d.alt_flag {
+                        None
+                    } else {
+                        let wi = (d.hang_type != LedgeHangType::Wall) as usize;
+                        let quick = quick_wall_test(d, ACT_SHIMMY[wi][shimmy_index(right_dir, true)], !right_dir, true, n, lib.as_deref(), skeleton.as_deref(), &collision);
+                        needs_switch(d.hang_type, t, n, &collision).filter(|_| switch_gate(d.hang_type, quick))
+                    };
                     let switch = switch.and_then(|nt| {
                         let mut mv = ledge_moves::switch_move(if right_dir { 3 } else { 2 }, nt == LedgeHangType::Wall, body.feet, t, t, n, &collision);
                         mv.facing_from = facing;

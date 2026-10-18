@@ -149,7 +149,9 @@ pub fn update(p: &mut HandPassOver, dt: f32, feet: &mut Vec3, guidance: &Guidanc
             PassOverOut::Stay
         }
         PassOverPhase::Vault => {
-            // PORT: the release point (sub_5017B0) is taken as the action's end
+            // the release point: `StateHandPassOver_Update` 0xDE0720 (Ground), `PassOverWantsPullDown` 0xDD2BD0 and
+            // `PassOverWantsInAir` 0xDCC0E0 all wait for `AnimSlot__IsActionDone` 0x5017B0 (the slot's running state +40
+            // bit 0) in stage 1; the vault actions have one item (0x09A0A7E3 / 0x09A0A7E4), so it is the vault's end
             if p.t < p.action.duration() {
                 return PassOverOut::Stay;
             }

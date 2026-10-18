@@ -196,7 +196,12 @@ pub fn update_kiosk(
                 }
             }
             if k.t >= dur {
-                // PORT: the InAir set-up's fields 9 / 3 (`sub_E3DE20`) are not decoded: a plain fall
+                // `sub_E3DE20` (from `HumanKiosk__LateralExit_Update` 0xE3E3F0): TransitionSetupDataToInAir kind 1
+                // (InAirData +880 = 1, +896 = 1, zero velocity; `Apply` 0xC7D270 copies only these for kind 1, its
+                // +128 = 9 / +132 = 3 belong to the kind-2 trajectory block it skips). Kind 1 enters InAir sub-state 5
+                // (0xE01EB5: +0x2BD), the RagFall (`sub_F6DE30` enables the ragdoll, `sub_F6E540` → RagdollGround on
+                // contact), as `HumanLedge__LetGoToInAir` 0xDD1550 does. PORT (S): no articulated ragdoll in the port,
+                // so the RagFall is a plain fall from rest
                 let here = body.feet;
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(InAirEntry::Fall { from: here, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 }));
             }
