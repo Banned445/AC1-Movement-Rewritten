@@ -1576,3 +1576,27 @@ fn probe_damascus_material_census() {
     }
     eprintln!("MATERIALS {with} of {all} collision triangles have a sound material");
 }
+
+/// Live check A3 (2026-10-18): the port's `Guidance__FindWallSupport` at a game call's origin and direction
+/// (`LAB_ORIGIN`, `LAB_INTO`, game axes), with the box 0.175 / 0.3 / 0.3, step 0.07: the ray's hit and the surface
+/// pieces, to compare with the game's result.
+#[test]
+#[ignore = "live-analysis probe; requires the local game install"]
+fn probe_wall_support_at() {
+    let v3 = |k: &str| std::env::var(k).ok().map(|s| { let v: Vec<f32> = s.split(',').map(|x| x.trim().parse().unwrap()).collect(); Vec3::new(v[0], v[2], -v[1]) });
+    let (Some(origin), Some(into)) = (v3("LAB_ORIGIN"), v3("LAB_INTO")) else { return };
+    let Some(mut s) = CitySim::new("PlayerSpawner_DEBUG_Souk") else { return };
+    s.place(origin + Vec3::new(0.0, 0.0, 0.0), into);
+    s.settle_streaming(60.0, Some(origin));
+    let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+    let b = crate::player::ledge::SupportBox { across: 0.175, depth: 0.3, height: 0.3, step: 0.07 };
+    let n = -Vec3::new(into.x, 0.0, into.z).normalize_or_zero();
+    let c = s.collision();
+    let start = origin + into.normalize() * -0.3;
+    let d = c.sphere_free_distance(start, into.normalize(), 0.01, 0.6);
+    eprintln!("ray from {:.3} along {:.3}: {d:.3} of 0.6", g3(start), g3(into));
+    if let Some((dist, hn, layer)) = c.ray_hit_layer(start, into.normalize(), 0.6, crate::layers::CHARACTER) {
+        eprintln!("  ray hit at {dist:.3} normal {:.2} layer {layer}", g3(hn));
+    }
+    eprintln!("support {:?}", crate::player::ledge::wall_support_point(origin, n, 0.0, 0.0, b, c).map(g3));
+}
