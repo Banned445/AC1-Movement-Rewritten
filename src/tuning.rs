@@ -1,8 +1,7 @@
 //! Movement constants recovered from AssassinsCreed_Dx9.exe (v1.02 b86610).
 //!
 //! Every value cites the function it was read from (see RE/*.md). Values the game takes from
-//! animation root motion (not yet decoded) are marked PLACEHOLDER and must be replaced once
-//! RE/09 (animation format) exists.
+//! animation root motion come from the install's clips (`jump_clips.rs`, RE/09); none is a placeholder.
 //!
 //! Coordinate note: the game is Z-up, Bevy is Y-up. "Height" below means game Z = Bevy Y.
 

@@ -170,8 +170,9 @@ pub fn jump_off_wall_dir(stick: Option<Vec3>, away: Vec3) -> Option<Vec3> {
 /// Its target (0xEEC89F): the guidance search along `dir`, else the free-jump target (vt68 -> 0xB1E7F0, 8 m along it,
 /// 3 m down). PORT: the Leap of Faith search in between (vt76) is not modelled for these jumps.
 /// The jump off a wall hang or a climb (event 2 → the rebound, then `HumanLedge__ReboundEndJump` 0xDD0A40 /
-/// `HumanClimb__ReboundEndJump` 0xDEAE30: jump kind 2 after turning away from the wall, RE/24 AIR-5). PORT: the leading
-/// foot is the left (the game reads the playing item's word).
+/// `HumanClimb__ReboundEndJump` 0xDEAE30: jump kind 2 after turning away from the wall, RE/24 AIR-5). The takeoff foot
+/// is the rebound item's word bits 2–3 (0xDD0AC6 / 0xDEAE7A); the climb's only rebound, `rebound_footl` (0x0025), takes
+/// off on the left, and the ledge sets it from its rebound at the end (`takeoff_foot_left`).
 pub fn jump_off_wall_entry(from: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> super::air::InAirEntry {
     super::air::InAirEntry::ReboundJump { from, target: find_jump_target(from, dir, guidance, collision), dir, foot_left: true }
 }

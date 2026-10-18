@@ -114,6 +114,17 @@ pub fn right_of(forward: Vec3) -> Vec3 {
     Vec3::new(-forward.z, 0.0, forward.x)
 }
 
+/// The takeoff foot `Human__SetupJumpToTarget` 0xB20200 plays for its foot argument (a7), from a playing item's word
+/// bits 2–3 (`ACTFeetPosition`): 1 → `footl`, 2 → `footr`, anything else → `Human__GetLeadingFoot` 0xB18850 on the
+/// pose (0xB20435; `leading`: 0 left ahead, 1 right). Without a word or a pose, `fallback`.
+pub fn takeoff_foot_left(word: Option<u16>, leading: Option<usize>, fallback: bool) -> bool {
+    match word.map(|w| (w >> 2) & 3) {
+        Some(1) => true,
+        Some(2) => false,
+        _ => leading.map_or(fallback, |f| f == 0),
+    }
+}
+
 /// IK targets for the four limbs (the game's limb-IK component at Human+1328: 0 L hand, 1 R hand,
 /// 2 L foot, 3 R foot). `None` = limb free (plays animation only).
 #[derive(Component, Debug, Default, Clone, Copy)]
@@ -381,8 +392,8 @@ fn spawn_player(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // PLACEHOLDER body: capsule + a "nose" so facing is visible. Replaced by Altaïr's Mesh/Skeleton
-    // once those .forge resources are decoded (stage 3).
+    // PORT: the stand-in body without an install (a capsule and a "nose" so the facing is visible); with the install
+    // Altaïr's mesh and skeleton replace it (`model.rs`).
     let body_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.93, 0.93, 0.95), ..default() });
     let sash_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.65, 0.08, 0.08), ..default() });
     commands

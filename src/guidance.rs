@@ -49,6 +49,9 @@ pub struct GuidanceWorld {
     pub edges: Vec<GuidanceEdge>,
     /// Haystacks (EntityDescriptorObject_HayStack): Leap of Faith / jump targets of type 0x800, not solid.
     pub haystacks: Vec<crate::collision::HayStack>,
+    /// The kiosks' owner entities (bounds, Bevy space, and the entity's forward row, flattened): the Kiosk context's
+    /// axis (`kiosk::kiosk_axis`). Empty on maps without entities (the greybox), which fall back to the pieces.
+    pub kiosks: Vec<(crate::collision::Aabb3, Vec3)>,
     /// PORT (speed): `ledge_report_depth`'s depth-filtered pieces per edge (`DepthCache`).
     pub(crate) depth_cache: std::sync::Mutex<DepthCache>,
 }

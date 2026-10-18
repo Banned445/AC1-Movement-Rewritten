@@ -56,7 +56,7 @@ impl KioskSide {
 pub struct KioskEntry {
     pub from: Vec3,
     pub target: Vec3,
-    /// The kiosk's axis (the entity's forward). PORT: taken along its Kiosk guidance piece.
+    /// The kiosk's axis (the entity's forward row, `kiosk_axis`).
     pub axis: Vec3,
     /// The jump's direction.
     pub dir: Vec3,
@@ -83,8 +83,18 @@ pub fn entry_side(axis: Vec3, dir: Vec3, facing: Vec3) -> KioskSide {
     }
 }
 
-/// The kiosk's axis at a target point: its nearest Kiosk guidance piece.
+/// The kiosk's axis at a target point: the forward row of the kiosk entity that holds it (0xE08672 reads the entity's
+/// matrix; Damascus's stalls run it along the front bar, while two of their three Kiosk pieces run across it: live
+/// 2026-10-18, RE/33 B1, a jump along the bar onto a side piece enters `kiosk_side_freestep`). Without an owner (the
+/// greybox), the nearest Kiosk piece's direction.
 pub fn kiosk_axis(p: Vec3, guidance: &GuidanceWorld) -> Option<Vec3> {
+    let owner = guidance.kiosks.iter()
+        .filter(|(b, _)| p.cmpge(b.min - Vec3::splat(0.5)).all() && p.cmple(b.max + Vec3::splat(0.5)).all())
+        .min_by(|a, b| p.distance((a.0.min + a.0.max) * 0.5).total_cmp(&p.distance((b.0.min + b.0.max) * 0.5)))
+        .map(|(_, f)| *f);
+    if owner.is_some() {
+        return owner;
+    }
     guidance
         .edges
         .iter()

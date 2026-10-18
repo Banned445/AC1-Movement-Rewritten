@@ -1,14 +1,14 @@
-//! Ledge context (`HumanLedge`, ActorContextID 9) â€” RE/03 Â§7.
+//! Ledge context (`HumanLedge`, ActorContextID 9) — RE/03 §7.
 //!
 //! - Hangs by two hand contacts on guidance edges. Wall hang: root 1.1 m below the hands and 0.5 m
 //!   out from the wall; free hang: root 2.4 m below (0xDD6730). Hang type re-evaluated after each
 //!   step (TrySwitchHangType 0xDE1060).
 //! - All movement is discrete: pick new hand targets, then interpolate the root over the move's
-//!   animation length (PLACEHOLDER durations until clips are decoded). SubState HandPlacement (3)
+//!   animation length (the clips' durations, `jump_clips.rs`; PORT fallbacks only for a clip the table lacks). SubState HandPlacement (3)
 //!   while a step runs, Movement (1) otherwise.
 //! - Shimmy (ProbeLateral 0xDD9640 / StartHandStep 0xDDE0C0): alternating hands, the lead reaching the farthest point
 //!   of a box beyond it, the trailing hand closing to 0.15 m of it; free-space sphere
-//!   sweep; step = min(d âˆ’ 0.4, 1.0 âˆ’ spacing); blocked if d âˆ’ 0.15 < 0.7; min step 0.15; chain ends
+//!   sweep; step = min(d − 0.4, 1.0 − spacing); blocked if d − 0.15 < 0.7; min step 0.15; chain ends
 //!   handled implicitly (no edge further on â†’ no step).
 //! - Up/down: transition to Climb when wall holds exist (TryTransitionToClimb 0xDD46A0), else
 //!   hand step to an edge 0.1-0.8 m away (sub_DD8F70), else (up, wall hang) the swing back into a free hang
@@ -31,7 +31,7 @@ use crate::guidance::GuidanceWorld;
 use crate::input::PadInput;
 use crate::tuning::*;
 
-/// `HumanLedgeData::LedgeSubState` (values from the exe, desc 0x1994E38) â€” subset used here.
+/// `HumanLedgeData::LedgeSubState` (values from the exe, desc 0x1994E38) — subset used here.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LedgeSubState {
@@ -244,7 +244,7 @@ enum After {
     StandOnTop,
 }
 
-/// Runtime data of the Ledge context (subset of reflected HumanLedgeData, RE/07 / RE/03 Â§2.3).
+/// Runtime data of the Ledge context (subset of reflected HumanLedgeData, RE/07 / RE/03 §2.3).
 #[derive(Debug, Default)]
 pub struct HumanLedgeData {
     /// HandPassOver (SubState 12): the pass-over vault (`passover`).
@@ -706,7 +706,8 @@ pub fn hang_root_at(hand_l: Vec3, hand_r: Vec3, n: Vec3, hang: LedgeHangType, hi
 /// (`StartHandStep` 0xDDE0C0 needs it). The pending second hand's target, the row's or its own point, is tested the same.
 /// Live (2026-10-13, wall 23): the hold 0.155 m above the walling free hang is found, then dropped here, and the game
 /// hangs on. PORT: the wall hangs' box (`Human__WallHangBodyBoxFree` 0xB2DC80, its root moved by the hold's lean,
-/// 0xDD9591–0xDD9617) is not tested.
+/// 0xDD9591–0xDD9617) is not tested: live 2026-10-18 (RE/33 A4, RE/20 #74) over four climb courses it refused once and
+/// the hang climbed up as the port does without it.
 fn step_fits(d: &HumanLedgeData, hand: usize, target: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
     if d.hang_type != LedgeHangType::Free {
         return true;
@@ -988,14 +989,22 @@ pub fn update_ledge(
             }
             if done && mv.kind == ledge_moves::MoveKind::Rebound {
                 // `HumanLedge__ReboundEndJump` 0xDD0A40: the rebound done → face away from the wall and jump (`sub_B27180`
-                // kind 2, the `xx_h_rebound_*_to_air` takeoff, RE/24 AIR-5), presentation event 67. PORT: the left foot
-                // leads (the game reads the playing item's word).
+                // kind 2, the `xx_h_rebound_*_to_air` takeoff, RE/24 AIR-5), presentation event 67. The takeoff foot is
+                // the playing item's word bits 2–3 (0xDD0AC6: `rebound_footl` 0x0025 → 1, footl; `rebound_footr`
+                // 0x0029 → 2, footr), 0 → the pose's leading foot (`sub_B27180` → `Human__SetupJumpToTarget` a7).
                 d.mv = None;
                 limbs.hands = None;
                 limbs.feet = None;
                 body.heading = super::heading_of(mv.normal);
+                let word = mv.seq[0].as_ref().and_then(super::anim_gate::word);
+                let leading = skeleton.as_deref().zip(pose).filter(|(_, p)| p.seq > 0).and_then(|(s, p)| p.leading_foot(s));
                 if let Some(entry) = d.jump_off.take() {
-                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry.starting_at(body.feet)));
+                    let entry = match entry.starting_at(body.feet) {
+                        InAirEntry::ReboundJump { from, target, dir, foot_left } => InAirEntry::ReboundJump { from, target, dir,
+                            foot_left: super::takeoff_foot_left(word, leading, foot_left) },
+                        e => e,
+                    };
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                 }
                 continue;
             }
@@ -1237,7 +1246,7 @@ pub fn update_ledge(
                 LedgeDir::Up => true,
                 LedgeDir::Down => false,
             };
-            let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, up, &report);
+            let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, up, d.last_hand, &report);
             let first_p = if second == 0 { d.hand_r } else { d.hand_l };
             // the step row's point nearest the hands' midpoint line, else the first hand's own point (0xDD94A6): the hands
             // end together (RE/24 LEDGE-5)
@@ -1274,7 +1283,7 @@ pub fn update_ledge(
             LedgeDir::Up | LedgeDir::Down => {
                 let sign = if dir == LedgeDir::Up { 1.0 } else { -1.0 };
                 // sub_DD8F70: the feet, hands and hand-step rows for this direction
-                let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, dir == LedgeDir::Up, &report);
+                let rows = ledge_moves::vertical_rows(d.hand_l, d.hand_r, n, dir == LedgeDir::Up, d.last_hand, &report);
                 // the step row is dropped where the body would not fit (`step_fits`); the hand not moved last steps
                 let mut rows = rows;
                 if rows.step.is_some_and(|h| !step_fits(d, if d.last_hand == 1 { 0 } else { 1 }, h.point, n, &collision)) {
@@ -1419,13 +1428,10 @@ pub fn update_ledge(
                         let top_feet = standable.then(|| Vec3::new(top.x, mid.y, top.z));
                         // HumanLedge__PullupNeedsOneHand 0xDD1120: from the hands' midpoint (higher hand) 0.15 m in, the
                         // drop beyond the top 0.35 m to either side (Human__MeasureDropBeyondEdge 0xB19620: offset 0.35,
-                        // search 0.5 down); more than 0.2 m on a side → the one-hand pull-up. PORT: no solid within 0.2 m
-                        // below that point (point tests; the game sweeps a tilted capsule).
+                        // search 0.5 down, the point itself as the feet: 0xDD126D / 0xDD129C); more than 0.2 m on a
+                        // side → the one-hand pull-up
                         let p = Vec3::new(mid.x, d.hand_l.y.max(d.hand_r.y), mid.z) - n * 0.15;
-                        let drops = |side: Vec3| {
-                            let q = p + side * 0.35;
-                            ![0.05f32, 0.1, 0.15, 0.2].iter().any(|dy| collision.point_inside(q - Vec3::Y * *dy))
-                        };
+                        let drops = |side: Vec3| super::jump_candidates::measure_drop_from(Some(p), p, side, 0.5, 0.35, &collision, None) > 0.2;
                         let one_hand = drops(right) || drops(-right);
                         // the WallFree type (+104 = 2; never held in v1.02, see `LedgeHangType::WallFree`) does not pull up:
                         // `Pullup_Start` 0xDDC2E3 plays `hangwallfree_tr_hangwall` into the wall hang (+104 := 0)
@@ -1458,7 +1464,7 @@ pub fn update_ledge(
                 let (rows, target) = ledge_moves::probe_lateral(mover, other, n, dv, d.alt_flag, d.hang_type, &report, &collision);
                 // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side, skipped during a closing
                 // step (+133 set, RE/03 §7.6e; live RE/25: the shimmy closes the trailing hand before the ladder move)
-                if let Some((mv, e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance).filter(|_| !d.alt_flag) {
+                if let Some((mv, e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision).filter(|_| !d.alt_flag) {
                     start_move(d, mv, "side to ladder");
                     d.then_ladder = Some(e);
                     continue;

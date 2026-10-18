@@ -1742,17 +1742,28 @@ pub fn update_climb(
         // no grid move: going up with the hands on a top edge → climb out (TryReachLedgeAbove 0xDF1730). Only from the
         // level poses (the pose record's "uneven" field must be 0: poses 0 / 3); 2m (pose 3) picks the 2m clip. The test
         // is room above the edge for the kneeling body (`Human__KneeCatchRoomOnTop` 0xB2E240), not a floor: thin wall tops
-        // climb out, a wall 0.3–1.8 m above the top within 0.3 m refuses (RE/24 CLIMB-5). PORT: the target is the hands'
-        // midpoint on the top edge; the game takes the grid's row-4 cells, else a box probe from the root + 0.8 up + 0.5
-        // forward with the reference 1.5 m up (0xDF19BD).
+        // climb out, a wall 0.3–1.8 m above the top within 0.3 m refuses (RE/24 CLIMB-5). The target: the pose's two hand
+        // cells projected (0xDF1895–0xDF195E; PORT: the hands' midpoint on the top edge), and when there is none or the
+        // room test fails there, a box probe (0xDF19BD / 0xDF1B8F: centre the root + 0.8 m up + 0.5 m forward, half
+        // extents 0.25 / 0.5 / 0.8, the reference 1.5 m above the centre, walls within 45°, mask 50, pieces shortened
+        // 0.1 m) and the room test again at its hit
         if matches!(dir, 0 | 1 | 6 | 7) && matches!(d.pose, 0 | 3) {
             let mid = (d.hand_l + d.hand_r) * 0.5;
             let on_top_edge = guidance.on_edge(mid, n, 0.15).is_some();
-            if on_top_edge && super::ledge_moves::knee_room_on_top(mid, -n, &collision) {
-                let (knee, stand) = super::ledge_moves::climb_out_moves(d.pose == 3, body.feet, d.hand_l, d.hand_r, n);
+            let target = if on_top_edge && super::ledge_moves::knee_room_on_top(mid, -n, &collision) {
+                Some((d.hand_l, d.hand_r, n))
+            } else {
+                let centre = body.feet + Vec3::Y * 0.8 + facing * 0.5;
+                guidance.probe_box(centre, right_of(facing), facing, Vec3::Y, Vec3::new(0.25, 0.5, 0.8), centre + Vec3::Y * 1.5,
+                    std::f32::consts::FRAC_PI_4, 0.1, crate::guidance::MASK_CLIMB_HOLDS)
+                    .filter(|h| super::ledge_moves::knee_room_on_top(h.point, -h.wall_normal, &collision))
+                    .map(|h| (h.point, h.point, h.wall_normal))
+            };
+            if let Some((hand_l, hand_r, n)) = target {
+                let (knee, stand) = super::ledge_moves::climb_out_moves(d.pose == 3, body.feet, hand_l, hand_r, n);
                 let entry = LedgeEntry {
-                    hand_l: d.hand_l,
-                    hand_r: d.hand_r,
+                    hand_l,
+                    hand_r,
                     normal: n,
                     from_feet: body.feet,
                     sub_state: LedgeSubState::Pullup,

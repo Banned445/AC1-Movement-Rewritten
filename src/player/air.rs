@@ -1124,8 +1124,9 @@ pub fn update_air(
                         // `AnimComponent__GetSlotMotionMode`(0) == 1 and no BounceOffHuman deadline runs (`sub_DFEEE0`,
                         // HumanInAir+0x1A8). Mode 1 is written only by the physics blend at Human+0x830 in its states 2 / 3
                         // (`HumanPhysicsBlend__SetPhysicsDriven` 0xB31530; drowning requests state 2), its init writes 0
-                        // (RE/24 AIR-21). Hypothesis: a normal fall runs in mode 0 and skips this decay; LIVE #14 decides,
-                        // until then the port decays.
+                        // (RE/24 AIR-21). Hypothesis: a normal fall runs in mode 0 and skips this decay; the port decays.
+                        // Live 2026-10-18 (RE/33 A8, RE/20 #14): no normal play enters a plain fall above the cap (fast
+                        // take-offs are free-run targets or free jumps, whose falls start from rest), so the two agree.
                         // 0x4F8C40: decay only without controller contacts. PORT: use the proxy manifold
                         // as the native contact-list adapter.
                         // PORT: a fall entered faster than the cap (a free jump at sprint speed, 6.3 m/s) decays onto it
