@@ -611,11 +611,20 @@ pub fn update_walling(
         if loco.just_switched {
             loco.just_switched = false;
             if loco.switched_this_frame {
+                // the entry's action was played in this frame, and the frame's animation update advances it by this
+                // frame's dt (the logic itself waits for the next frame): lab climb10_lowhold 008 (2026-10-17_014441)
+                // plays entry_a from row 53 and entry_b from row 67, when entry_a's dt sum from row 53 on reaches its
+                // 0.1333 s
+                let w = &mut data.walling;
+                w.t = (w.t + dt).min(w.duration());
                 continue;
             }
         }
         let w = &mut data.walling;
-        w.t = (w.t + dt).min(w.duration());
+        let raw = w.t + dt;
+        w.t = raw.min(w.duration());
+        // the time past the item's end: the next item starts with it (the animation slot moves on within the frame)
+        let over = (raw - w.duration()).max(0.0);
         // `RootInterp__Advance` 0x7113F0 with a4 = 1 (0xDA2D92): the root is a move-to request to the character controller
         // (`CharacterController__RequestMoveTo` 0x710B40: velocity = (target − position) / dt, RE/01 §7.2), integrated
         // with collision, so a lip the capsule meets holds the root back (live RE/26 §6: wall 00's entry stops 0.09 m out
@@ -701,6 +710,7 @@ pub fn update_walling(
             WallingSubState::EntryA => {
                 let a = single(ENTRY_B, 0);
                 data.walling.play(WallingSubState::EntryB, a, None, feet, None);
+                data.walling.t = over.min(data.walling.duration());
             }
             WallingSubState::EntryB => {
                 // (command ≠ 0 would play entry_footl_tr_fall 0xFF7CA1 and leave; only AI walls send it)
@@ -712,10 +722,16 @@ pub fn update_walling(
                     body.tilt = Quat::IDENTITY;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                     data.ledge.repose_at_entry_end = hang;
+                    // the exit's action starts with the time past the walling item's end (the Ledge, earlier in the
+                    // chain, advances it from the next frame on)
+                    if let Some(m) = data.ledge.mv.as_mut() {
+                        m.t = over.min(m.duration());
+                    }
                     continue;
                 }
                 let a = single(STEP1, 0);
                 data.walling.play(WallingSubState::Vertical, a, None, feet, None);
+                data.walling.t = over.min(data.walling.duration());
             }
             WallingSubState::Vertical => {
                 if let Some(e) = probe_vertical(&guidance, feet, facing, &collision) {
@@ -725,10 +741,16 @@ pub fn update_walling(
                     body.tilt = Quat::IDENTITY;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                     data.ledge.repose_at_entry_end = hang;
+                    // the exit's action starts with the time past the walling item's end (the Ledge, earlier in the
+                    // chain, advances it from the next frame on)
+                    if let Some(m) = data.ledge.mv.as_mut() {
+                        m.t = over.min(m.duration());
+                    }
                     continue;
                 }
                 let (a, b) = (single(VERTICAL_END, 0), single(VERTICAL_END, 1));
                 data.walling.play(WallingSubState::VerticalEnd, a, b, feet, None);
+                data.walling.t = over.min(data.walling.duration());
             }
             WallingSubState::VerticalEnd => {
                 // the rebound clip done (sub_501760) → `rebound_footr_tr_fall` and leave (flag +0x32): falling back off

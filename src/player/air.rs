@@ -42,7 +42,8 @@ pub struct Landing {
     /// Total drop from the jump/fall start (m).
     pub total_drop: f32,
     pub roll: bool,
-    /// The action the Ground context plays on entry (landing 0xE05940 or free-step reception 0xE07D00);
+    /// The action the Ground context plays on entry (the landing, 0xE05940; the free-step reception of 0xE07D00 plays
+    /// in NarrowObject's free-step stay instead, `free_step.rs`);
     /// its root motion moves the character until it ends.
     pub action: Option<ActionBlend>,
     /// Seconds of `action` already played on entry.
@@ -897,11 +898,13 @@ pub fn update_air(
                             // reception (SubState 6) whatever the jump type; no holds → the swing (SubState 8) for a
                             // free-hang jump (0x80), else no arrival (the air catch takes over)
                             LedgeArrival::Surface { free } => {
-                                if super::ledge::reception_feet(mid, normal, &collision) {
+                                if let Some(foot) = super::ledge::reception_first_foot(mid, normal, &collision) {
                                     let arrival = LedgeArrival::Surface { free: false };
-                                    // the fall height (`GetFallHeight` 0xE07FB0) and the jump origin (Data+64) pick min / max
+                                    // the fall height (`GetFallHeight` 0xE07FB0) and the jump origin (Data+64) pick min / max;
+                                    // the lean is the wall-hang pose's (`sub_B157B0` 0xE09444 → 0xE094D1)
                                     let fall = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
-                                    let w = ledge_moves::wall_reception_weights(fall, air.start, mid, 0.0);
+                                    let lean = super::ledge::reception_lean(e.hand_l, e.hand_r, normal, Some(foot));
+                                    let w = ledge_moves::wall_reception_weights(fall, air.start, mid, lean);
                                     let mut m = ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, w, &collision);
                                     if free {
                                         ledge_moves::use_free_jump_wall_reception(&mut m, w);
@@ -1359,7 +1362,14 @@ pub fn update_air(
 
         if let Some(e) = climb_on {
             // the climb catch (type 1): the catch action plays as the climb's entry while the root goes to the holds'
-            // pose. PORT: the game enters the Ledge context (SubState 13, catch type 1) first.
+            // pose. The game runs that root interpolation in the Ledge context: SubState 13 enters the Grasp state
+            // (`HumanLedge__EnterCommon` 0xDE286F → +2825), whose update (`StateGrasp_Update` 0xDDFDB0) advances the
+            // catch's root interpolation and, at its end (`Grasp_ClimbReady` 0xDCDDB0), switches to Climb
+            // (`SwitchToClimb_AfterCatch` 0xDCE860, fill 0xDCB670: ClimbData +36 = 1) with the catch still playing; the
+            // Grasp state takes no input (generic events 11 / 12 / 13 only). PORT: the root path, its length and the
+            // input are the same; only the context reported over the interpolation differs (lab
+            // `freerun_east_depth` 037: Ledge for 0.26 s). The Climb taking over a running action at its phase belongs
+            // to the animation runtime (M4).
             air.mode = AirMode::Idle;
             body.velocity = Vec3::ZERO;
             switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));

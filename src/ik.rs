@@ -578,8 +578,10 @@ fn ground_socket(c: &crate::collision::CollisionWorld, ankle: Vec3, knee: Vec3, 
 /// 0x432570, from 0.5 m above the ankle, 1 m down, boxes and mesh faces) is cast again only when its 0.3-0.5 s timer has
 /// run out after a hit (an expiry on the game clock `qword_1A1E7B0`, so it also runs out while moving: `solve_limbs`
 /// counts it down every frame); in between the cached hit plane is used under the ankle's current x / z. The target is the hit
-/// plus the ankle's animated height; refused when the knee would be less than 0.15 m above it. PORT: the ray's filter
-/// (dword_1934170) is not decoded; every static surface counts.
+/// plus the ankle's animated height; refused when the knee would be less than 0.15 m above it. The ray's filter is
+/// its collision layer: `FootIK__RayDown` sets layer 2 (Dynamic, `sub_4FB6E0`(2) at 0x4325DA) and leaves out the
+/// character's own entity (`sub_4E9EE0`), layer 8 only without an entity; dword_1934170 (0xFF00FF00), passed by
+/// `FootIK__FindGroundSocket` 0x43297E, is a by-value argument RayDown never reads.
 fn cached_socket(c: &crate::collision::CollisionWorld, cache: &mut Option<(Vec3, Vec3, f32)>, rng: &mut u32, ankle: Vec3, knee: Vec3, ankle_height: f32) -> Option<f32> {
     let h = match cache.as_mut().filter(|e| e.2 > 0.0) {
         Some((p, n, _)) => {
@@ -591,7 +593,7 @@ fn cached_socket(c: &crate::collision::CollisionWorld, cache: &mut Option<(Vec3,
         }
         None => {
             let start = ankle + Vec3::Y * 0.5;
-            let Some((d, n)) = c.ray_hit(start, Vec3::NEG_Y, 1.0, 0) else {
+            let Some((d, n)) = c.ray_hit(start, Vec3::NEG_Y, 1.0, crate::layers::DYNAMIC) else {
                 *cache = None;
                 return None;
             };

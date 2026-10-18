@@ -117,6 +117,10 @@ pub enum LadderPhase {
     /// The revolve (MvtAnimState 6, Main sub-state 7): item a, then b, then the far side (`HumanLadder__EndRevolve`
     /// 0xE21EF0).
     Revolve(usize),
+    /// The side jump's start (`HumanLadder__SideJump_Enter` 0xE27000, state `HumanLadder__StateSideJump_Update`
+    /// 0xE21D60): the takeoff plays in place (a FROMAI item the state does not move), then the new context
+    /// (`HumanLadderData::side_jump`).
+    SideJump,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -248,6 +252,8 @@ pub struct HumanLadderData {
     pub jump_back: Vec3,
     /// The jump off's target, searched at the press (`sub_E22050` copies it to +800; RE/24 LADDER-12).
     pub jump_target: Option<Option<super::targets::JumpTarget>>,
+    /// The side jump waiting for its takeoff to end (`LadderPhase::SideJump`).
+    pub side_jump: Option<LadderSide>,
     /// Playback rate of the running action: 0.5 for a low-profile climb with the stick in the walk band (0xE24540).
     pub rate: f32,
     /// The entry action's items play in order (`LadderEntry::chain`).
@@ -673,13 +679,15 @@ pub fn find_ladder(feet: Vec3, head: Option<Vec3>, stick: Vec3, forward: Vec3, g
 /// table), exits. The player's input is the interpreter's ladder state (0xEEB570, RE/05 §4.2): the stick climbs, the
 /// empty-hand button drops (QuickDrop), high profile + Legs jumps off (`wait_tr_rebound`).
 /// What the ladder's sideways move (event 4) found.
+#[derive(Clone, Copy, Debug)]
 pub enum LadderSide {
     /// `sub_E1FC80`: a ledge beside the ladder → the Ledge context (SubState 9, fill `sub_E20120`).
     Hang(super::ledge::LedgeEntry),
     /// `sub_E228E0` type 0: climb holds → the Climb context with the reach (the start, the loop, the end).
     Climb(super::climb::ClimbEntry, super::climb::ClimbReach),
-    /// `sub_E228E0` types 1 / 2: a hang reached by the side jump → the Ledge context.
-    Jump(super::ledge::LedgeEntry),
+    /// `sub_E228E0` types 1 / 2: a hang reached by the side jump → the Ledge context, after the takeoff (the action
+    /// id) in the Ladder.
+    Jump(super::ledge::LedgeEntry, u32),
 }
 
 /// The ladder's sideways move (IHumanLadder slots 14 / 15, event 4, `HumanLadder__MainA_HandleEvent` 0xE27610; sent
@@ -750,12 +758,18 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
                         *a = blend(*id, 0, &[]).unwrap_or(*a);
                     }
                 }
+                // the takeoff (item 0) plays in the Ladder (`LadderPhase::SideJump`); `HumanLadder__FillLedge_SideJump`
+                // 0xE20900 then plays the landing and moves the root linearly (`sub_711130` mode 0, 0xE20B2C) from where
+                // it stands to the hang's pose (`sub_B157B0` / `Human__FreeHangPoseFromHolds`) over the landing's
+                // blended duration; the then item holds it there (LedgeData +312 / +320 = the ids, SubState 14). Lab
+                // `ladder38_side` / `a6_ladder_side_shimmy`: the root still through the takeoff, then a constant speed
+                let takeoff = mv.seq[0].map(|a| a.id).unwrap_or(ids[0]);
+                mv.seq = [mv.seq[1], mv.seq[2], mv.seq[3], None];
                 mv.durations = super::ledge_moves::seq_durations(&mv.seq);
-                // PORT: the ladder's side jump keeps the clips' displacement plus a linear correction; its root path
-                // (the ladder side of 0xE228E0's jump) is undecoded, the climb reach's (CLIMB-11) is not assumed
-                mv.follow_disp = mv.durations.iter().sum::<f32>() > 0.0;
+                mv.follow_disp = false;
+                mv.table = None;
                 mv.lead = 0.0;
-                mv.root_time = None;
+                mv.root_time = Some(mv.durations[0]);
                 LadderSide::Jump(LedgeEntry {
                     hand_l: mv.hand_l,
                     hand_r: mv.hand_r,
@@ -765,7 +779,7 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
                     entry_move: Some(mv),
                     entry_rest: [None, None],
                     catch: None,
-                })
+                }, takeoff)
             }
         });
     }
@@ -1047,19 +1061,15 @@ pub fn update_ladder(
                     // no steep removal; RE/24 GUIDE-2)
                     if let Some(side) = side_move(right, body.feet, l.n, &guidance.ledge_report(body.feet, 4.0, false), &collision) {
                         match side {
-                            LadderSide::Hang(e) | LadderSide::Jump(e) => {
+                            LadderSide::Hang(e) => {
                                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                             }
-                            LadderSide::Climb(e, r) => {
-                                let feet = body.feet;
-                                switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
-                                // the start plays in place, then the loop to the holds' pose and the end (the climb's reach)
-                                let c = &mut data.climb;
-                                c.move_action = Some(r.ids[0]);
-                                c.move_seq += 1;
-                                c.moving = Some(super::RootInterp::new(feet, feet, super::climb::move_time(Some(r.ids[0]))));
-                                c.reach = Some(r);
-                                c.last_action = "ladder side jump to climb holds";
+                            // the side jump: its takeoff in place first (`HumanLadder__ToSideJumpState` 0xE277F0 →
+                            // `SideJump_Enter` 0xE27000: table qword_1A2ED80 [type][far][side], the IK released)
+                            LadderSide::Jump(_, id) | LadderSide::Climb(_, super::climb::ClimbReach { ids: [id, _, _], .. }) => {
+                                let p = body.feet;
+                                l.play(LadderPhase::SideJump, blend(id, 0, &[]), p, p, false);
+                                l.side_jump = Some(side);
                             }
                         }
                         continue;
@@ -1152,6 +1162,37 @@ pub fn update_ladder(
                     }
                     body.grounded = true;
                     leave = Some(TransitionSetup::ToMovement { landing: None });
+                }
+            }
+            LadderPhase::SideJump => {
+                if done {
+                    // `HumanLadder__StateSideJump_Update` 0xE21D60: the takeoff done (`sub_501760`), type 0 → the Climb
+                    // context (`HumanLadder__FillClimb_SideJump` 0xE20650: the landing, the root linear to the holds'
+                    // climb pose over its blended duration, ClimbData +36 = 2), types 1 / 2 → the Ledge
+                    // (`HumanLadder__FillLedge_SideJump` 0xE20900)
+                    match l.side_jump.take() {
+                        Some(LadderSide::Jump(mut e, _)) => {
+                            if let Some(mv) = e.entry_move.as_mut() {
+                                mv.from = body.feet;
+                            }
+                            e.from_feet = body.feet;
+                            leave = Some(TransitionSetup::ToLedge(e));
+                        }
+                        Some(LadderSide::Climb(e, r)) => {
+                            let feet = body.feet;
+                            switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
+                            // the start has played: a zero-length start, so the climb's reach goes on to its loop (the
+                            // root to the holds' pose over the loop's length, `StartReachLoop` 0xDEEE60) at once
+                            let c = &mut data.climb;
+                            c.move_action = Some(r.ids[0]);
+                            c.move_seq += 1;
+                            c.moving = Some(super::RootInterp::new(feet, feet, 0.0));
+                            c.reach = Some(r);
+                            c.last_action = "ladder side jump to climb holds";
+                            continue;
+                        }
+                        _ => l.wait(),
+                    }
                 }
             }
             LadderPhase::Jump => {
