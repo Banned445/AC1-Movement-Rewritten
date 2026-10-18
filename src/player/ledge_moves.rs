@@ -269,6 +269,23 @@ impl LedgeMove {
         None
     }
 
+    /// The item playing is the sequence's last one.
+    pub fn on_last_item(&self) -> bool {
+        let last = self.seq.iter().rposition(|a| a.is_some());
+        let mut t0 = 0.0;
+        for (i, a) in self.seq.iter().enumerate() {
+            if a.is_none() {
+                continue;
+            }
+            let d = self.durations[i];
+            if self.t < t0 + d || Some(i) == last {
+                return Some(i) == last;
+            }
+            t0 += d;
+        }
+        false
+    }
+
     /// The playing action and its normalised time over the items of it in the sequence (`sub_501DF0` 0x501DF0: the
     /// playing action's normalised time, RE/24 ANIM-12).
     pub fn action_time(&self) -> Option<(u32, f32)> {
@@ -1718,6 +1735,11 @@ pub fn use_free_jump_wall_reception(m: &mut LedgeMove, w: [f32; 6]) {
         m.seq = seq;
         m.durations = durations;
     }
+    // the action enters with the 0.1666 s type-4 blend (`PlayLedgeReception` 0xE02BA0, a12 = 0.1666), and its items run
+    // after it: lab edge410_freerun / hang_reception_feet / hangtype72_reception pull up 0.424 s after the reception
+    // starts, the blend plus item a at the lean's weights (0.2548 s at −37°); the full receptions last about 0.71 s.
+    // PORT: item a is stretched over the blend (the animation runtime's blend model is M4)
+    m.durations[0] += 0.1666;
     m.lead = 0.0;
     m.root_time = Some(0.1666);
 }
@@ -1738,7 +1760,7 @@ pub enum LedgeArrival {
 /// `sub_E02790` (from 0xE094D1, RE/24 AIR-8): the wall reception's six weights. The max set (slots 3–5) when the fall
 /// height is above 2.5 m or the jump started more than 6 m from the hold (squared distance > 36), else the min set
 /// (0–2); within the set the pose's lean a (its up about the lateral axis, from `sub_B157B0`): a ≥ 0 → [1 − w, w, 0],
-/// w = min(a / 30°, 1); a < 0 → [1 − w, 0, w], w = min(−a / 45°, 1). PORT: the port's wall-hang pose is upright (a = 0).
+/// w = min(a / 30°, 1); a < 0 → [1 − w, 0, w], w = min(−a / 45°, 1) (a: `ledge::reception_lean`).
 pub fn wall_reception_weights(fall_height: f32, origin: Vec3, hold: Vec3, lean: f32) -> [f32; 6] {
     let k = if fall_height > 2.5 || origin.distance_squared(hold) > 36.0 { 3 } else { 0 };
     let mut w = [0.0f32; 6];
@@ -2239,18 +2261,16 @@ pub fn pulldown(p: Vec3, n: Vec3, from: Vec3, wait: bool, guidance: &GuidanceWor
     pulldown_with(p, n, from, PULLDOWN_ORIENT[wait as usize], PULLDOWN_DESCENT, guidance, collision)
 }
 
-/// The pull-down reception's angle blend (`HumanLedge__PullDown_Update` 0xDDF0AA): the signed angle of the line from
-/// the foot support up to the hands, from vertical (positive with the hands further out than the wall at the feet);
-/// a ≥ 0 → straight / `30_out` by a / 30°, a < 0 → straight / `45_in` by −a / 45° (both clamped to 1). Weights
-/// [straight, 30_out, 45_in]. PORT: the foot support is the wall 1 m below the hands (the hang-type probe's height).
-pub fn pulldown_wall_weights(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> [f32; 3] {
-    let out = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
-    let origin = mid - Vec3::Y + out * 0.5;
-    let Some((d, _)) = collision.ray_hit(origin, -out, 1.2, 0) else {
+/// The pull-down reception's angle blend (`HumanLedge__PullDown_Update` 0xDDEF99–0xDDF0AA): the wall-hang pose
+/// (`sub_B157B0` 0xDDF02B) from the hands and the first foot support of `Human__FindWallHangFeetSupports` 0xB16130 (the
+/// second when only it is found: the pose reads only its a8), its body axis against world up signed about
+/// forward × up (`ledge::reception_lean`, as the jump's wall reception); a ≥ 0 → straight / `30_out` by a / 30°,
+/// a < 0 → straight / `45_in` by −a / 45° (both clamped to 1). Weights [straight, 30_out, 45_in].
+pub fn pulldown_wall_weights(hl: Vec3, hr: Vec3, n: Vec3, collision: &CollisionWorld) -> [f32; 3] {
+    let Some(foot) = super::ledge::feet_supports_first((hl + hr) * 0.5, n, collision) else {
         return [1.0, 0.0, 0.0];
     };
-    let wall = origin - out * d;
-    let a = (mid - wall).dot(out).atan2(mid.y - wall.y);
+    let a = super::ledge::reception_lean(hl, hr, n, Some(foot));
     if a >= 0.0 {
         let w = (a / 30f32.to_radians()).min(1.0);
         [1.0 - w, w, 0.0]
@@ -2339,7 +2359,7 @@ pub fn pulldown_blend(p: Vec3, n: Vec3, from: Vec3, orient_action: Option<Action
     let p2 = mid + n * (1.0 - inset) - Vec3::Y * 0.8;
     let descent = mk(2, [descent_action, None, None, None], p1, p2, facing_in, facing_in, false, false);
     let wall = super::ledge::feet_supports(mid, n, collision);
-    let w = pulldown_wall_weights(mid, n, collision);
+    let w = pulldown_wall_weights(hl, hr, n, collision);
     let reception = if wall {
         mk(
             3,

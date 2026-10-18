@@ -428,6 +428,43 @@ pub fn release_record(root: Vec3, hang: LedgeHangType) -> Vec3 {
     root + Vec3::Y * if hang == LedgeHangType::Wall { 1.1 } else { 2.4 }
 }
 
+/// `HumanLedge__Pullup_Start` 0xDDBE80 with the room found at `mid` (from Movement through `CanPullup` 0xDE2270, from
+/// the wall reception through its event 0 guard `sub_DD1680`).
+fn start_pullup(d: &mut HumanLedgeData, feet: Vec3, limbs: &mut LimbTargets, n: Vec3, mid: Vec3, collision: &CollisionWorld) {
+    let right = right_of(-Vec3::new(n.x, 0.0, n.z).normalize_or_zero());
+    // root: from a wall hang, linear up to the hands' height, then the second item's own motion in over
+    // the lip (RE/24 LEDGE-15, `pullup_move`); from a free hang along the clips' own displacement
+    // (FROMANIM). PORT: for the free hang, with a floor 0.5 m in (Pullup_Start 0xDDBE80's stand point)
+    // the root is also corrected onto it; on a narrow top (a beam) the clips alone place it, and the
+    // free-step stay mounts what is there
+    let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
+    let standable = collision
+        .ground_height(top + Vec3::Y * 0.05, 0.3)
+        .filter(|h| (h - mid.y).abs() < 0.25)
+        .is_some()
+        && collision.capsule_fits(Vec3::new(top.x, mid.y, top.z));
+    let top_feet = standable.then(|| Vec3::new(top.x, mid.y, top.z));
+    // HumanLedge__PullupNeedsOneHand 0xDD1120: from the hands' midpoint (higher hand) 0.15 m in, the
+    // drop beyond the top 0.35 m to either side (Human__MeasureDropBeyondEdge 0xB19620: offset 0.35,
+    // search 0.5 down, the point itself as the feet: 0xDD126D / 0xDD129C); more than 0.2 m on a
+    // side → the one-hand pull-up
+    let p = Vec3::new(mid.x, d.hand_l.y.max(d.hand_r.y), mid.z) - n * 0.15;
+    let drops = |side: Vec3| super::jump_candidates::measure_drop_from(Some(p), p, side, 0.5, 0.35, collision, None) > 0.2;
+    let one_hand = drops(right) || drops(-right);
+    // the WallFree type (+104 = 2; never held in v1.02, see `LedgeHangType::WallFree`) does not pull up:
+    // `Pullup_Start` 0xDDC2E3 plays `hangwallfree_tr_hangwall` into the wall hang (+104 := 0)
+    if d.hang_type == LedgeHangType::WallFree {
+        start_move(d, ledge_moves::wallfree_to_wall_move(feet, d.hand_l, d.hand_r, n, collision), "wall-free to wall hang");
+        return;
+    }
+    let (mv, rest) = ledge_moves::pullup_move(d.hang_type, one_hand, feet, d.hand_l, d.hand_r, n, top_feet);
+    start_move(d, mv, if one_hand { "pull-up (one hand)" } else { "pull-up" });
+    d.queue = rest.into_iter().collect();
+    d.sub_state = LedgeSubState::Pullup;
+    limbs.suspended = !ledge_ik_runs(d.sub_state, d.mv.and_then(|m| m.current()).map(|(b, _)| b.id));
+    limbs.hands = None;
+}
+
 fn hand_mid(d: &HumanLedgeData) -> Vec3 {
     (d.hand_l + d.hand_r) * 0.5
 }
@@ -545,6 +582,16 @@ pub fn feet_supports_point(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> O
     }
 }
 
+/// `Human__FindWallHangFeetSupports` 0xB16130's first record: the first search (0.2 m to the left, raised 0.1 m), else
+/// the second's copy (the found record is copied into the other).
+pub fn feet_supports_first(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
+    let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let c = hand - Vec3::Y + facing * 0.125;
+    wall_support_point(c, n, -0.2, 0.1, SUPPORT_FEET, collision)
+        .or_else(|| wall_support_point(c, n, 0.0, -0.1, SUPPORT_FEET, collision))
+        .map(|p| snap_to_wall(p, n, collision))
+}
+
 /// The jump arrival's hand records (`HumanInAir__CheckJumpTargetArrival` 0xE07D00): `Guidance__ProbeBoxHandPair`
 /// 0x1171050 at the target point, the box facing into the wall, mask 306, step 0.1, hand references (∓0.3, −0.15, 0) in
 /// the box frame (right, forward, up): 0.3 m to either side, 0.15 m out from the wall. The generic receptions (the wall
@@ -565,9 +612,34 @@ pub fn arrival_hands(target: Vec3, n: Vec3, straight: bool, guidance: &crate::gu
 /// and 0.15 m into the wall, one 0.15 m to the left raised 0.05 m and one 0.15 m to the right lowered 0.05 m
 /// (`SUPPORT_WIDE`). Both feet must find the wall.
 pub fn reception_feet(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> bool {
+    reception_first_foot(hand, n, collision).is_some()
+}
+
+/// `reception_feet`'s first record (the search across −0.15 m, up +0.05 m) when both feet find the wall: the foot
+/// `sub_B157B0` builds the wall hang's body axis from (it reads its a8 twice, `(a8 + a8)·0.5`, and never a9).
+pub fn reception_first_foot(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3> {
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let c = hand - Vec3::Y + facing * 0.15;
-    wall_support(c, n, -0.15, 0.05, SUPPORT_WIDE, collision) && wall_support(c, n, 0.15, -0.05, SUPPORT_WIDE, collision)
+    let first = wall_support_point(c, n, -0.15, 0.05, SUPPORT_WIDE, collision)?;
+    wall_support(c, n, 0.15, -0.05, SUPPORT_WIDE, collision).then_some(snap_to_wall(first, n, collision))
+}
+
+/// A support point put onto the wall face with an exact ray (the support sweep steps 2 cm; the game's ray returns the
+/// hit). PORT: only the leans read it.
+fn snap_to_wall(p: Vec3, n: Vec3, collision: &CollisionWorld) -> Vec3 {
+    let into = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    let start = p - into * 0.05;
+    collision.ray_hit(start, into, 0.1, 0).map(|(d, _)| start + into * d).unwrap_or(p)
+}
+
+/// `HumanInAir__WallReceptionWeights` 0xE02790's lean a: the wall hang pose's body axis (`sub_B157B0`'s up, from the
+/// arrival hands and the first reception foot, the higher hand) against world up, signed about the lateral axis
+/// normalize(forward × up) (`Math__SignedAngleAroundAxis` 0x55E570: acos of the dot, + when (axis × up)·lateral ≥ 0).
+pub fn reception_lean(hand_l: Vec3, hand_r: Vec3, n: Vec3, foot: Option<Vec3>) -> f32 {
+    let (_, out, axis) = wall_hang_pose(hand_l, hand_r, n, foot, true);
+    let lateral = (-out).cross(Vec3::Y).normalize_or_zero();
+    let a = axis.dot(Vec3::Y).clamp(-1.0, 1.0).acos();
+    if axis.cross(Vec3::Y).dot(lateral) >= 0.0 { a } else { -a }
 }
 
 /// Foot supports for a hang at `mid` (`sub_DE0A60` from TrySwitchHangType 0xDE1060): two rays of 1.2 m toward
@@ -691,7 +763,8 @@ pub fn wall_hang_root(hand_l: Vec3, hand_r: Vec3, n: Vec3, feet: Option<Vec3>, h
     wall_hang_pose(hand_l, hand_r, n, feet, higher).0
 }
 
-/// `sub_B157B0`'s whole pose: the root, its forward (into the wall, square to the body axis) and its up (the body axis).
+/// `sub_B157B0`'s whole pose: the root, the direction out of the wall square to the body axis (the game's forward, into
+/// the wall, negated) and its up (the body axis).
 pub fn wall_hang_pose(hand_l: Vec3, hand_r: Vec3, n: Vec3, feet: Option<Vec3>, higher: bool) -> (Vec3, Vec3, Vec3) {
     let mid = (hand_l + hand_r) * 0.5;
     let y = if higher { hand_l.y.max(hand_r.y) } else { hand_l.y.min(hand_r.y) };
@@ -968,6 +1041,33 @@ pub fn update_ledge(
 
         // ---------------------------------------------------------------- corner / ledge jump / hop
         if let Some(mut mv) = d.mv {
+            // the wall reception's event 0 (state +2810's handler `sub_DE09B0`, guard `sub_DD1680`): the interpreter's
+            // pull-up (the stick past the dead zone within 45° of up) is taken once the reception's last item plays
+            // (`Anim__GetPlayingItemIndex` > item count − 2, 0xDD16E1) with all holds alive and knee room on top at the
+            // hands' midpoint along the facing (`Human__KneeCatchRoomOnTop` 0xB2E240), then `Pullup_Start` 0xDDBE80;
+            // no +1862 here. The interpreter sees the item the previous frame left playing, so the test runs before
+            // this frame's advance. Lab edge410_freerun / hang_reception_feet / hangtype72_reception: the pull-up 0.424 s
+            // after the reception starts (0.1666 s blend + item a)
+            let reception = mv.seq[0].is_some_and(|a| a.id == ledge_moves::RECEPTION_WALL_OTHER || a.id == ledge_moves::RECEPTION_SURFACE_WALL);
+            // (the two reception actions play only as the jump's wall reception, SubState 6; the port's move runs under
+            // HandPlacement)
+            if reception && mv.on_last_item() && pad.speed01 > 0.0
+                && quantize(pad.actor_dir(facing, pad.buttons[13]), facing) == LedgeDir::Up
+            {
+                let mid = hand_mid(d);
+                if ledge_moves::knee_room_on_top(mid, facing, &collision) {
+                    // +104 is the reception's hang type through it (0, wall: live RE/20 #72)
+                    if mv.end_wall {
+                        d.hang_type = LedgeHangType::Wall;
+                    } else if mv.end_free {
+                        d.hang_type = LedgeHangType::Free;
+                    }
+                    d.mv = None;
+                    d.queue.clear();
+                    start_pullup(d, body.feet, &mut limbs, n, mid, &collision);
+                    continue;
+                }
+            }
             let (p, done) = mv.advance(dt);
             body.feet = p;
             body.heading = heading_of(mv.facing());
@@ -1434,10 +1534,14 @@ pub fn update_ledge(
                     // 0xEEE700 → the ledge state 0xEECC78 sends event 0 while the stick is up), so its CanHandleEvent(0)
                     // reads the +1862 that the previous frame's ChooseAction set: the game pulls up (and switches, below)
                     // one frame after the first blocked frame (lab `beam_pullup` 2026-10-13_210349/006: stick up at row
-                    // 1445, the pull-up item at 1446). PORT (held back, RE/31c M3 group 2): the port still pulls up at
-                    // once. The frame of delay made climb_13 / climb10_lowhold diverge earlier: their walling entries
-                    // reach the hang 2 frames / 0.09 s late, and the instant pull-up hides that. Port it with that fix.
+                    // 1445, the pull-up item at 1446; climb10_lowhold 2026-10-17_014441/008: the hang's reception ends at
+                    // row 152, the decision runs at 153, the pull-up starts at 154).
+                    let armed = d.blocked_up;
                     d.blocked_up = true;
+                    if !armed {
+                        d.last_action = "blocked up";
+                        continue;
+                    }
                     // a free hang (+104 = 1) with no pending step whose two foot rays find the wall and whose wall-hang body
                     // box is free (`HumanLedge__FreeHangFeetFindWall` 0xDE0E30) is accepted before the room test, flag 0x20
                     // (0xDE22FD); `Pullup_Start` 0xDDC32C then switches it to the wall hang instead of pulling up
@@ -1471,37 +1575,7 @@ pub fn update_ledge(
                         }
                     }
                     if room {
-                        // root: from a wall hang, linear up to the hands' height, then the second item's own motion in over
-                        // the lip (RE/24 LEDGE-15, `pullup_move`); from a free hang along the clips' own displacement
-                        // (FROMANIM). PORT: for the free hang, with a floor 0.5 m in (Pullup_Start 0xDDBE80's stand point)
-                        // the root is also corrected onto it; on a narrow top (a beam) the clips alone place it, and the
-                        // free-step stay mounts what is there
-                        let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
-                        let standable = collision
-                            .ground_height(top + Vec3::Y * 0.05, 0.3)
-                            .filter(|h| (h - mid.y).abs() < 0.25)
-                            .is_some()
-                            && collision.capsule_fits(Vec3::new(top.x, mid.y, top.z));
-                        let top_feet = standable.then(|| Vec3::new(top.x, mid.y, top.z));
-                        // HumanLedge__PullupNeedsOneHand 0xDD1120: from the hands' midpoint (higher hand) 0.15 m in, the
-                        // drop beyond the top 0.35 m to either side (Human__MeasureDropBeyondEdge 0xB19620: offset 0.35,
-                        // search 0.5 down, the point itself as the feet: 0xDD126D / 0xDD129C); more than 0.2 m on a
-                        // side → the one-hand pull-up
-                        let p = Vec3::new(mid.x, d.hand_l.y.max(d.hand_r.y), mid.z) - n * 0.15;
-                        let drops = |side: Vec3| super::jump_candidates::measure_drop_from(Some(p), p, side, 0.5, 0.35, &collision, None) > 0.2;
-                        let one_hand = drops(right) || drops(-right);
-                        // the WallFree type (+104 = 2; never held in v1.02, see `LedgeHangType::WallFree`) does not pull up:
-                        // `Pullup_Start` 0xDDC2E3 plays `hangwallfree_tr_hangwall` into the wall hang (+104 := 0)
-                        if d.hang_type == LedgeHangType::WallFree {
-                            start_move(d, ledge_moves::wallfree_to_wall_move(body.feet, d.hand_l, d.hand_r, n, &collision), "wall-free to wall hang");
-                            continue;
-                        }
-                        let (mv, rest) = ledge_moves::pullup_move(d.hang_type, one_hand, body.feet, d.hand_l, d.hand_r, n, top_feet);
-                        start_move(d, mv, if one_hand { "pull-up (one hand)" } else { "pull-up" });
-                        d.queue = rest.into_iter().collect();
-                        d.sub_state = LedgeSubState::Pullup;
-                        limbs.suspended = !ledge_ik_runs(d.sub_state, d.mv.and_then(|m| m.current()).map(|(b, _)| b.id));
-                        limbs.hands = None;
+                        start_pullup(d, body.feet, &mut limbs, n, mid, &collision);
                         continue;
                     }
                     d.last_action = "blocked up";

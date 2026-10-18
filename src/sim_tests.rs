@@ -5814,22 +5814,24 @@ fn walking_and_running_off_an_edge_land_in_the_live_times() {
 fn the_pull_down_reception_blends_by_the_walls_lean() {
     use crate::collision::{Aabb3, CollisionWorld};
     use crate::player::ledge_moves::pulldown_wall_weights;
-    // 0xDDF0AA: the line from the foot support up to the hands, from vertical. A plain wall: straight.
+    // 0xDDEF99–0xDDF0AA: the wall-hang pose's body axis (the first foot support of 0xB16130, 0.9 m below the hands)
+    // against world up, signed about forward × up (`Math__SignedAngleAroundAxis` 0x55E570). A plain wall: straight.
+    let h = Vec3::new(0.0, 3.0, 0.0);
     let mut c = CollisionWorld::default();
     c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
-    assert_eq!(pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c), [1.0, 0.0, 0.0]);
-    // the wall 0.3 m further in at the feet (the hands 0.3 m out, 1 m up: 16.7°): toward 30_out
+    assert_eq!(pulldown_wall_weights(h, h, Vec3::Z, &c), [1.0, 0.0, 0.0]);
+    // the wall 0.3 m further in at the feet: the axis leans out, a < 0 → toward 45_in
     let mut c = CollisionWorld::default();
     c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 2.5, -0.3) });
     c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 2.5, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
-    let w = pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c);
-    assert!((w[1] - 0.3f32.atan2(1.0) / 30f32.to_radians()).abs() < 0.02 && w[2] == 0.0, "{w:?}");
-    // the wall 0.4 m further out at the feet (a plinth): toward 45_in
+    let w = pulldown_wall_weights(h, h, Vec3::Z, &c);
+    assert!((w[2] - 0.3f32.atan2(0.9) / 45f32.to_radians()).abs() < 0.02 && w[1] == 0.0, "{w:?}");
+    // the wall 0.4 m further out at the feet (a plinth): the axis leans in, a > 0 → toward 30_out
     let mut c = CollisionWorld::default();
     c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 0.0, -1.0), max: Vec3::new(2.0, 2.5, 0.4) });
     c.boxes.push(Aabb3 { min: Vec3::new(-2.0, 2.5, -1.0), max: Vec3::new(2.0, 3.0, 0.0) });
-    let w = pulldown_wall_weights(Vec3::new(0.0, 3.0, 0.0), Vec3::Z, &c);
-    assert!((w[2] - 0.4f32.atan2(1.0) / 45f32.to_radians()).abs() < 0.02 && w[1] == 0.0, "{w:?}");
+    let w = pulldown_wall_weights(h, h, Vec3::Z, &c);
+    assert!((w[1] - 0.4f32.atan2(0.9) / 30f32.to_radians()).abs() < 0.02 && w[2] == 0.0, "{w:?}");
 }
 
 #[test]

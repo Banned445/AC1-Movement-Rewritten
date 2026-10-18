@@ -898,11 +898,13 @@ pub fn update_air(
                             // reception (SubState 6) whatever the jump type; no holds → the swing (SubState 8) for a
                             // free-hang jump (0x80), else no arrival (the air catch takes over)
                             LedgeArrival::Surface { free } => {
-                                if super::ledge::reception_feet(mid, normal, &collision) {
+                                if let Some(foot) = super::ledge::reception_first_foot(mid, normal, &collision) {
                                     let arrival = LedgeArrival::Surface { free: false };
-                                    // the fall height (`GetFallHeight` 0xE07FB0) and the jump origin (Data+64) pick min / max
+                                    // the fall height (`GetFallHeight` 0xE07FB0) and the jump origin (Data+64) pick min / max;
+                                    // the lean is the wall-hang pose's (`sub_B157B0` 0xE09444 → 0xE094D1)
                                     let fall = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
-                                    let w = ledge_moves::wall_reception_weights(fall, air.start, mid, 0.0);
+                                    let lean = super::ledge::reception_lean(e.hand_l, e.hand_r, normal, Some(foot));
+                                    let w = ledge_moves::wall_reception_weights(fall, air.start, mid, lean);
                                     let mut m = ledge_moves::arrival_move(arrival, body.feet, e.hand_l, e.hand_r, normal, w, &collision);
                                     if free {
                                         ledge_moves::use_free_jump_wall_reception(&mut m, w);
