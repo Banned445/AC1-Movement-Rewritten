@@ -1071,7 +1071,8 @@ pub fn update_ledge(
             let (p, done) = mv.advance(dt);
             body.feet = p;
             body.heading = heading_of(mv.facing());
-            limbs.hands = None;
+            // (the hands keep the move's holds set above: `sub_DCD910` runs the limb IK through the moves of the IK
+            // sub-states, the clip's tags attaching and releasing them; RE/36 D1)
             // the stand-up's last item plays in NarrowObject: at the hangknee item's release `Pullup_Tick` 0xDE2EE0 calls
             // `HumanLedge__SwitchToNarrowObject_Enter` 0xDD2A50 (`hangknee_tr_freestep_entry`, SubState 6, +0xF0 = the root,
             // +0x100 = −the facing); the step-up's reception 0x012B33F1 likewise (0xE09752). The free-step stay
@@ -1119,7 +1120,8 @@ pub fn update_ledge(
                     // landing category 0 (0xDDFC30 → 0xDD8CF0): the end item plays in the Climb context
                     d.mv = None;
                     e.from_feet = body.feet;
-                    limbs.hands = None;
+                    // the hands keep their contacts into the Climb: `HumanClimb__EnterCommon` 0xDE97B0 releases the limb IK
+                    // only for the Default entry (0xDE9995), not FromLedge / FromLedgeParallelJump (RE/36 D1)
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
