@@ -1591,8 +1591,11 @@ pub fn update_ground(
         if let Some(mut c) = g.collide {
             g.sub_state = HumanGroundSubState::ObstacleCollision;
             // event 49 in the lean (`ObstacleCollision` handler 0xDA6FF0: HG+1492 clear → FindWallingWall → 0xDA5680,
-            // RE/24 WALL-19): the wall run starts from the lean with the same input as from Movement
-            if g.high_profile && wall_run_input && ab.allows(Ability::Walling) && c.phase == super::collide::CollidePhase::Wait {
+            // RE/24 WALL-19): the wall run starts from the lean with the same input as from Movement. The handler reads
+            // no item or phase (0xDA708F tests HG+1492 only, which the exit sets to 2 at 0xD9E288), so the collide item
+            // and its transition into the lean take it too (A01: lab 10-13 `023_freerun_east_drift4`); the exit leaves
+            // the lean in the port (`collide = None`), where Movement's `busy` holds the wall run off as +1492 does
+            if g.high_profile && wall_run_input && ab.allows(Ability::Walling) {
                 if let Some((contact, normal, slope)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
                     if pad.jump_buffered() {
                         pad.consume_jump();

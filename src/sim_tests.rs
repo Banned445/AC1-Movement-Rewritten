@@ -1068,6 +1068,27 @@ fn let_go_from_a_hang_falls_and_lands() {
     assert_eq!(s.ground().last_landing.map(|l| l.kind), Some(LandingType::Safe));
 }
 
+/// A37 / A36: `AnimSlot__IsActionDone` (0xE0F47A) waits for the whole fall action, so the wall hang's let-go
+/// 0x1120E17B plays `hangwall_tr_fall_a` (0.33 s) and then `_b` (0.53 s) before `jump_falling01`, which starts from
+/// rest (lab `catch_auto_wall`: 0.86 s of the action, then 0 m/s).
+#[test]
+fn a_fall_action_plays_all_its_items_then_falls_from_rest() {
+    use crate::player::climb::LOST_GRIP;
+    let from = Vec3::new(-20.0, 30.0, -20.0);
+    let mut s = Sim::new(from, 0.0);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::HangWall, speed_param: 0.0 }));
+    s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().air.fall_action = crate::player::ledge_moves::single_item(LOST_GRIP, 0);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(0.5, |s| s.data().air.fall_action.is_some_and(|a| a.item == 1)), "item b never played");
+    let t = s.data().air.fall_t;
+    assert!(t < 0.05, "item b starts where item a ended: {t}");
+    assert!(s.run_until(1.0, |s| s.data().air.fall_action.is_some_and(|a| s.data().air.fall_t >= a.duration())), "item b never ended");
+    s.run(1.0 / 60.0);
+    let v = s.body().velocity;
+    assert_eq!(s.loco().current, ActorContextId::InAir);
+    assert!(v.y > -0.5 && Vec3::new(v.x, 0.0, v.z).length() < 0.05, "the fall starts from rest: {v:?}");
+}
+
 #[test]
 fn the_empty_hand_buffer_lasts_one_frame() {
     // +0x1129 is set on the press and cleared the next frame unless Legs was pressed within 0.3 s (0xEEE0F8 / 0xEEE125,
@@ -2653,6 +2674,20 @@ fn snug_against_a_wall_legs_starts_the_wall_climb() {
     assert!(s.ground().collide.is_some_and(|c| c.phase == crate::player::collide::CollidePhase::Wait), "not leaning: {:?}", s.ground().collide.map(|c| c.phase));
     s.press_legs();
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Walling), "no wall climb: {:?} collide {:?}", s.loco().current, s.ground().collide.map(|c| c.phase));
+}
+
+/// A01: the lean's event 49 handler (0xDA6FF0, 0xDA708F) tests only HG+1492 (set by the exit, 0xD9E288), not the
+/// playing item: Legs during the collide item itself starts the wall run (lab 10-13 `023_freerun_east_drift4`:
+/// `impultionstraight_footl_to_wallingfront_step1` 0.12 s before the port's lean exit).
+#[test]
+fn legs_during_the_collide_starts_the_wall_run_before_the_lean() {
+    use crate::player::collide::CollidePhase;
+    let mut s = Sim::new(Vec3::new(7.46, 0.0, 28.5), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.ground().collide.is_some()), "no collide");
+    assert_eq!(s.ground().collide.map(|c| c.phase), Some(CollidePhase::Entry(0)), "the collide item plays");
+    s.press_legs();
+    assert!(s.run_until(0.6, |s| s.loco().current == ActorContextId::Walling), "no wall run from the collide: {:?} collide {:?}", s.loco().current, s.ground().collide.map(|c| c.phase));
 }
 
 #[test]
@@ -6039,6 +6074,31 @@ fn a_step_off_a_high_roof_falls_from_rest_after_its_flight() {
     assert!((4.4 - y - 3.0).abs() < 0.3, "the flight came down to its target 3 m below: {y}");
 }
 
+
+/// A36 (lab 10-14 / 10-17 `edge_landing_out` 005 / 032): `CheckAirCatch` runs during a free jump too, and its edge
+/// landing (LABEL_140, 0xE0D684) comes before the ground landing: the free jump coming down on a roof with its edge at
+/// the feet steps off (`fall_step_off_back_max`) instead of landing. When the step-off's fall item ends in the air,
+/// `jump_falling01` starts from rest (0xE0F47A; all 14 lab recordings of a fall action ending in the air).
+#[test]
+fn a_free_jump_coming_down_at_a_roof_edge_steps_off_and_falls_from_rest() {
+    use crate::player::air_catches::STEP_OFF;
+    // the 3 m roof (x 38..44, z 9..15): its south edge at z 9 (normal -Z); the free jump from 1.6 m above, 0.1 m inside
+    // it, facing along the edge (-X), comes down there (the flight aims 0.3 m on and 3 m down; the roof stops it first)
+    let from = Vec3::new(41.0, 4.6, 9.1);
+    let mut s = Sim::new(from, std::f32::consts::FRAC_PI_2);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::FreeJump { from, dir: Vec3::NEG_X, ahead: 0.3, speed_param: 0.0, foot_left: true }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.5, |s| s.data().air.flight.is_some_and(|f| STEP_OFF.contains(&f.id)) || s.loco().current != ActorContextId::InAir),
+        "no step off: {:?} {:?}", s.loco().current, s.body().feet);
+    assert_eq!(s.loco().current, ActorContextId::InAir, "stepped off, not landed");
+    assert_eq!(s.data().air.flight.map(|f| f.id), Some(STEP_OFF[2]), "the edge to the side: step_off_left");
+    // the step-off's fall item (`…_tr_fall_max`) carries the body down; at its end the fall starts from rest
+    assert!(s.run_until(1.5, |s| s.data().air.fall_action.is_some_and(|a| s.data().air.fall_t >= a.duration())), "the fall item never ended");
+    assert!(s.body().velocity.y < -5.0, "the item carries the body down at its own speed: {:?}", s.body().velocity);
+    s.run(1.0 / 60.0);
+    let v = s.body().velocity;
+    assert!(v.y > -0.5 && Vec3::new(v.x, 0.0, v.z).length() < 0.05, "the fall starts from rest: {v:?}");
+}
 
 #[test]
 fn a_landing_at_a_high_edge_turns_into_the_ledge_stop_at_once() {
