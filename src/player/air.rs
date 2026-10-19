@@ -189,7 +189,10 @@ pub const FREESTEP_ARRIVE: f32 = 0.066_666_67;
 /// 0.5·k (k = entity +0x7C, 1 for the player) along the flat direction from the start, before the distance class, the
 /// correction and the stored target (Data+560) read it (RE/24 AIR-2). The hang, ladder and surface types (0x40, 0x80,
 /// 0x1000, 0x2000, 0x4000, swing) replace it with their own aim (0xB1F60E, AIR-3); the port's aim for those is already
-/// the hang root. PORT: the setup byte a15 (+212 / HG+996, AIR-19) is taken as 0: its producer is untraced.
+/// the hang root. The setup byte a15 is 0 for the player: it is event 45's payload +212 (HG+996, copied by
+/// `HumanGround__PlayImpulsionJump` 0xD9BE90), the last argument of IHumanGround vt24 / vt20 (0xDBCDE0 / 0xDBCF80), and
+/// every ground jump of the interpreter passes 0 (the tap and free-run jumps 0xEE808A, the edge jump 0xEE87B2, the Leap
+/// of Faith 0xEE829D, `JumpToTargetOfType` 0xD832F0).
 pub fn pull_back(from: Vec3, aim: Vec3, target_type: u32) -> Vec3 {
     if !matches!(target_type, 1 | 0x10000 | 0x100 | 2 | 0x200 | 0x400 | 0x8000 | 0x800) {
         return aim;
@@ -787,16 +790,19 @@ pub fn update_air(
             // the side set-up first (it re-picks the actions), then the down variants' sweep
             data.air.begin_turn(body.heading);
             data.air.apply_down_variants(&collision);
+            // the take-off / fall action the switch played is advanced by the switch frame's animation update
+            // (`Locomotion::switch_owed`): lab, Ground → InAir: the first item seam came one row late in 81 of 131
+            // switches (NarrowObject → InAir 12 of 20, Ledge → InAir 4 of 4)
+            let owed = loco.switch_owed();
+            match &mut data.air.mode {
+                AirMode::Jump { t, duration, .. } => *t = (*t + owed).min(*duration),
+                AirMode::Fall { .. } => data.air.fall_t += owed,
+                _ => {}
+            }
             if loco.switched_this_frame {
-                // the controller keeps integrating the take-off velocity; the jump's path shifts with it so the
-                // linear correction (0xE0DEF0) still ends on the target
-                let before = body.feet;
+                // the controller keeps integrating the take-off velocity (the jump's path, its clock advanced above,
+                // covers this frame's step)
                 super::coast(&mut body, &collision, dt);
-                let d = body.feet - before;
-                if let AirMode::Jump { from, clip_end, .. } = &mut data.air.mode {
-                    *from += d;
-                    *clip_end += d;
-                }
                 continue;
             }
         }
@@ -939,13 +945,19 @@ pub fn update_air(
                         }
                         ladder_on = Some(e);
                     }
-                    // kiosk target (0x400): 0xE07D00 sets InAir+225 bit 8, entry FreeStep and the side, then
-                    // `HumanInAir__RequestKiosk` 0xE015A0 → context 19 (RE/18 §4)
+                    // kiosk target (0x400): 0xE07D00 plays the free-step reception (0xE084CA: leading foot 1 →
+                    // 0x010DF150, else 0x010DE1FE, with the arrival weights Data+452 = the flight's), sets InAir+225
+                    // bit 8, entry FreeStep and the side, then `HumanInAir__RequestKiosk` 0xE015A0 → context 19 (RE/18 §4)
                     if air.target_flags == 0x400 {
                         if let Some(t) = air.target {
                             if let Some(axis) = super::kiosk::kiosk_axis(t.position, &guidance) {
                                 let dir = Vec3::new(t.position.x - air.start.x, 0.0, t.position.z - air.start.z).normalize_or(fwd);
-                                kiosk_on = Some(super::kiosk::KioskEntry { from: body.feet, target: t.position, axis, dir, facing: body.forward() });
+                                // the arrival weights slot by slot over the reception's clips (its `_fast` half stays 0)
+                                let id = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
+                                let mut fw = air.flight.map(|f| f.weights().to_vec()).unwrap_or_else(|| vec![1.0]);
+                                fw.resize(jump_blend::action_items(id).and_then(|i| i.first()).map_or(fw.len(), |c| c.len()), 0.0);
+                                let reception = Some(ActionBlend::new(id, 0, &fw));
+                                kiosk_on = Some(super::kiosk::KioskEntry { from: body.feet, target: t.position, axis, dir, facing: body.forward(), reception });
                             }
                         }
                     }

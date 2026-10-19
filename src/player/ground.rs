@@ -941,6 +941,21 @@ fn angle_diff(a: f32, b: f32) -> f32 {
     d
 }
 
+/// `Math__SignedAngleAroundAxis` 0x55E570 → 0x55E470 about up: the f32 acos of the normalised directions' dot (0 at
+/// dot ≥ 1, π at dot ≤ −1), negative when cross(cur, dest) points down. At a right angle it rounds to f32 π/2 or above,
+/// where a heading difference can round below (the pivot's strict > π/2, 0xD84B66).
+fn signed_angle_about_up(cur: Vec3, dest: Vec3) -> f32 {
+    let (a, b) = (Vec3::new(cur.x, 0.0, cur.z).normalize_or_zero(), Vec3::new(dest.x, 0.0, dest.z).normalize_or_zero());
+    let d = a.dot(b);
+    if d >= 1.0 {
+        return 0.0;
+    }
+    if d <= -1.0 {
+        return std::f32::consts::PI;
+    }
+    if a.cross(b).y >= 0.0 { d.acos() } else { -d.acos() }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn update_ground(
     time: Res<Time>,
@@ -993,6 +1008,16 @@ pub fn update_ground(
                 }
             }
             body.grounded = true;
+            // the action the switch played runs the switch frame too (`Locomotion::switch_owed`; the animation update
+            // after the AI update advances it by that frame's dt, `Game__SetupPostAITasks` 0x45C900). A MoveTransition
+            // owes its clock only: its root motion from the advanced phase (catching the switch frame's displacement up
+            // too made four lab replays worse, RE/31c group 4)
+            let owed = loco.switch_owed();
+            if let Some(os) = g.oneshot.as_mut() {
+                os.t += owed;
+            } else if let Some(t) = g.tr.as_mut() {
+                t.phase = (t.phase + owed / t.action.duration().max(1e-4)).min(1.0);
+            }
             if loco.switched_this_frame {
                 // the controller keeps integrating the velocity the switch left (no one-frame freeze)
                 super::coast(&mut body, &collision, dt);
@@ -1224,7 +1249,7 @@ pub fn update_ground(
             pressed || held
         };
         // HG+1532: the signed angle from the current heading to the wanted one (Movement_PreUpdate 0xD97E30, no speed test).
-        let stick_turn = if mv_speed > 0.0 || wall_stopped { angle_diff(heading_of(mv_dir), body.heading) } else { 0.0 };
+        let stick_turn = if mv_speed > 0.0 || wall_stopped { signed_angle_about_up(body.forward(), mv_dir) } else { 0.0 };
         // A transition into the locomotion (the Move state's transition path) keeps steering and the other requests
         // live. A released stick leaves it like any Move: `HumanGround__Move_CanRunStop` 0xD7EC90 (high profile, the
         // run stop allowed, and the playing action is the locomotion, the skid-turn exits legacy 96 / 97, or past 0.33 of its
@@ -2089,8 +2114,9 @@ pub fn update_ground(
 }
 
 /// `GoAssassinActionInterpreter` wall slide (0xEDD7C0). Only with the stick-to-ground residual within 0.2 m: the
-/// controller contact whose normal faces the stick most directly, within 90 deg (`sub_4F8EA0`, contact mask 4; PORT:
-/// contacts steeper than 45 deg), at least 0.55 m above the feet. Its flat normal n against the stick d: within 135 deg
+/// controller contact whose normal faces the stick most directly, within 90 deg (`Manifold__FindContactAgainstDir`
+/// 0x4F8EA0 with mask 4: the contact class +40 that `sub_71B840` 0x71B888 writes for a wall, |normal z| ≤ 0.707,
+/// `proxy::contact_class`), at least 0.55 m above the feet. Its flat normal n against the stick d: within 135 deg
 /// of n the stick turns along the wall; beyond, d is turned straight into the wall and the wanted speed is 0 (result
 /// 2: SetDestSpeedRatio(0) and the run stop allowed).
 pub fn wall_slide(body: &Body, dir: Vec3, speed01: f32) -> (Vec3, f32) {
@@ -2100,7 +2126,7 @@ pub fn wall_slide(body: &Body, dir: Vec3, speed01: f32) -> (Vec3, f32) {
     }
     let mut best: Option<(f32, Vec3)> = None;
     for c in &body.proxy.manifold {
-        if c.normal.y.abs() >= std::f32::consts::FRAC_1_SQRT_2 || c.pos.y < body.feet.y + 0.55 {
+        if crate::proxy::contact_class(c) != 4 || c.pos.y < body.feet.y + 0.55 {
             continue;
         }
         let a = (-d).dot(c.normal).clamp(-1.0, 1.0).acos();
@@ -2519,6 +2545,22 @@ impl AnyHit for std::ops::RangeInclusive<f32> {
 #[cfg(test)]
 mod reanalysis_tests {
     use super::*;
+
+    /// 0x55E470: the signed angle follows the heading difference's sign, and a stick at a right angle reaches the
+    /// pivot's f32 π/2 (RE/34 A04: the game pivots at a 90.0° stick).
+    #[test]
+    fn the_signed_angle_is_the_acos_of_the_dot() {
+        for k in 0..64 {
+            let h = k as f32 * 0.37 - 10.0;
+            let fwd = Vec3::new(-h.sin(), 0.0, -h.cos());
+            for t in [0.3f32, 1.2, -0.8, 2.9, -2.5] {
+                let d = Vec3::new(-(h + t).sin(), 0.0, -(h + t).cos());
+                let a = signed_angle_about_up(fwd, d);
+                assert!((a - angle_diff(h + t, h)).abs() < 1e-3, "{h} {t}: {a}");
+            }
+        }
+        assert_eq!(signed_angle_about_up(Vec3::NEG_Z, Vec3::X).abs(), std::f32::consts::FRAC_PI_2);
+    }
 
     /// Event 45's guards (0xDB19BE): from the locomotion blend the run jump; from a start item early in its play the
     /// impulsion, entered at phase t / 0.75 (HG+616), with the target kept for the free-step takeoff; late in it the run
