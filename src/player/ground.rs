@@ -870,7 +870,15 @@ impl HumanGroundData {
                 self.reset_move_entry();
                 self.start_transition(super::ground_tree::ROLL_ENDING_EXIT, 0, 1, 1, &[], Some((ended.id, ended.item)));
             }
-            TreeState::Pivot | TreeState::RunStop | TreeState::RollEnding => self.enter_wait(ended, high),
+            // the run stop's Idle (`HumanGround__RunStopToIdle` 0xDA7710) sets HG+1504 = 1 first: the high wait through
+            // the stop's `runstop_foot?_tr_h_wait_*`, and in low profile Idle's wait update then changes back through the
+            // stance-change wait (lab 027_freerun_north: `runstop_footl_tr_h_wait_hipm_footr`, `hl_wait_hipm_footr`,
+            // `hl_wait_hipm_footr_tr_l_wait_hipm_footr`; RE/36 E1)
+            TreeState::RunStop => {
+                self.enter_wait(ended, true);
+                self.wait_high = true;
+            }
+            TreeState::Pivot | TreeState::RollEnding => self.enter_wait(ended, high),
             // the other one-shots (climb / ledge / hay exits, lean exits …): the item's authored transition into the
             // locomotion with the default layout, or into the wait. Their setups enter Idle at s = 0 (climb mode 1, hay
             // 0 / 1); the step into Move takes the start's s ≥ 0.25 / 0.5 (`PlayStartMove` 0xD98990; the port goes

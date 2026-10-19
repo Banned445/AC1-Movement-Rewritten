@@ -5109,6 +5109,21 @@ fn the_run_stop_plays_the_foot_of_the_locomotion_items_word() {
 }
 
 #[test]
+fn a_run_stop_ends_in_the_high_wait_then_changes_stance() {
+    // `HumanGround__RunStopToIdle` 0xDA7710 sets HG+1504 = 1 before Idle: the high wait, then in low profile the
+    // stance-change wait back to the low one (lab 027_freerun_north; RE/36 E1)
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(1.5);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.ground().owner, crate::player::ground::TreeState::RunStop);
+    assert!(s.run_until(3.0, |s| s.ground().oneshot.is_none()), "the stop never ended");
+    assert!(s.run_until(1.0, |s| s.ground().stance_change && !s.ground().wait_high), "no stance change from the high wait");
+    assert!(s.run_until(2.0, |s| !s.ground().stance_change && !s.ground().wait_high), "the low wait in the end");
+}
+
+#[test]
 fn moving_again_after_a_run_stop_plays_its_exit() {
     use crate::player::ground_tree::RUN_STOP_EXIT;
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);

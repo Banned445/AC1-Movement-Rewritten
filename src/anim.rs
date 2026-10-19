@@ -897,6 +897,8 @@ const ACT_CATCH_WALL: [u32; 2] = crate::player::ledge::ACT_CATCH_WALL;
 const ACT_CATCH_FREE: [u32; 2] = crate::player::ledge::ACT_CATCH_FREE;
 /// Falling (6-way grasp blend).
 const ACT_FALL: u32 = 0x1F0C_22C2;
+/// The JumpFallAction (HumanInAir +432, request 33): `xx_h_jump_falling01` (FROMPHYSICS).
+const ACT_JUMP_FALL: u32 = 0x00D8_1513;
 /// The same six clips as a second action, played instead while the reach lies at a signed angle ≥ 0 from the facing,
 /// when the character has it (`sub_B0EB20`, 0xE0C29E).
 const ACT_FALL_B: u32 = 0xCD6F_5E10;
@@ -1177,8 +1179,10 @@ fn choose_clip(
                 _ => {
                     // a jump set up by 0xB20200 whose flight ended without an arrival: the JumpFallAction (+432, request
                     // 33 = `xx_h_jump_falling01` 0x00D81513) plays at once with a 0.5 s blend (0xE0F3D4–0xE0F45B, RE/24
-                    // AIR-22). The falling blend 0x1F0C22C2 plays it: its layer 0 is that clip, and the grasp layers
-                    // carry the empty-hand grasp the game plays on the upper-body slot (RE/36 A10)
+                    // AIR-22), through the transition the code passes (0xE0F3E1: ActionTransition, blend A type 1
+                    // AROLLBROLL, 0.5 s). The grasp plays over it on the upper-body slot (the rule above). Its own blends
+                    // decide what follows (no out-transition, so a step-off takes its in-transition ASTOPBROLL; the
+                    // falling blend's AROLLBROLL out-transition rolled the fall on; lab 005_a1_drift4_grabs_y; RE/36 E4)
                     let after_flight = data.air.takeoff.is_some() && data.air.flight.is_some();
                     if p.seen_fall != Some(data.air.seq) {
                         p.seen_fall = Some(data.air.seq);
@@ -1207,6 +1211,9 @@ fn choose_clip(
                         // armed, falling01 alone (the grasp rule above takes the slot while it is armed)
                         p.set_overlay_weights(&fall_grasp_weights(Vec3::ZERO, body.forward()));
                         continue;
+                    } else if after_flight && lib.action_items(ACT_JUMP_FALL).is_some() {
+                        action(&lib, &[ACT_JUMP_FALL], true, 0, None, None).map(|r| Request { blend: Some(ActBlend { kind: 1, time: 0.5, ..ActBlend::DEFAULT }), ..r })
+                            .filter(|r| p.clip.as_deref() != Some(r.key.as_str()))
                     } else {
                         // no body-part data (or no entry clip): the falling blend on the full body, its weights the
                         // grasp's while the catch is armed (the rule above smooths +48)
