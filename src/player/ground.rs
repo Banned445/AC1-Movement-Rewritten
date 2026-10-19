@@ -530,12 +530,13 @@ impl HumanGroundData {
     /// (`HumanGround__InitAnimTables` 0xDB6F4E) holds legacy 86 / 87 for feet 0 / 1; its parallel-feet slot (2) stays −1
     /// (0xDB6E6A), so `Anim__PlayAction`(−1) plays no stop. The locomotion's items never report parallel feet (words
     /// 0x0FC9 / 0x0FC6); PORT: behind a transition that does, the right-foot stop plays.
-    pub fn start_run_stop(&mut self) {
-        let word = match self.tr {
-            Some(t) => super::anim_gate::word(&t.action),
-            None => super::anim_gate::item_word(super::move_blend::ACT_GROUND_LOCOMOTION, self.blend.foot),
-        };
-        let foot = super::ground_tree::pick_locomotion_foot(word, self.blend.foot).min(1);
+    /// A playing item whose word has no foot bits (bits 2–3 = 0, e.g. the starts `xx_l_wait_foot?_tr_l_walk_slow_*`, 0x0FC0)
+    /// takes `Human__GetLeadingFoot` 0xB18850 on the pose (0xD867A8): `leading` (0 = the left foot ahead), the
+    /// locomotion foot without a pose (lab 018_climb_17: the stop out of the start's walk is `jogstop_footl`, the left
+    /// foot ahead; RE/36 C2).
+    pub fn start_run_stop(&mut self, leading: Option<usize>) {
+        let word = self.playing_word();
+        let foot = super::ground_tree::pick_locomotion_foot(word, leading.unwrap_or(self.blend.foot)).min(1);
         let weights = match self.tr.filter(|t| !super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id)) {
             Some(t) => {
                 let v = ((t.phase - 0.33).max(0.0) / 0.67).clamp(0.0, 1.0);
@@ -622,6 +623,16 @@ impl HumanGroundData {
                 t.coast = coast;
                 t.blend_in = Some(crate::assets::ac_actions::ActBlend { kind: 1, acuator: 1, time: 0.2, ..crate::assets::ac_actions::ActBlend::DEFAULT });
             }
+        }
+    }
+
+    /// The playing item's word (`Anim__GetPlayingItem` +60): the transition action in front of the locomotion, the
+    /// one-shot, else the locomotion's item of the leading foot.
+    pub fn playing_word(&self) -> Option<u16> {
+        match (self.tr, self.oneshot) {
+            (Some(t), _) => super::anim_gate::word(&t.action),
+            (None, Some(o)) => super::anim_gate::word(&o.blend),
+            (None, None) => super::anim_gate::item_word(super::move_blend::ACT_GROUND_LOCOMOTION, self.blend.foot),
         }
     }
 
@@ -1268,7 +1279,7 @@ pub fn update_ground(
                     && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || t.phase > 0.33);
                 if can_run_stop {
                     // RunStop_Enter reads the transition still playing (its word, its normalised time)
-                    g.start_run_stop();
+                    g.start_run_stop(leading_foot);
                     g.tr = None;
                 } else {
                     g.tr = None;
@@ -1411,7 +1422,7 @@ pub fn update_ground(
         let tr_allows_stop = g.tr.is_none_or(|t| !t.to_wait && !super::anim_gate::locked(&t.action)
             && (super::ground_tree::RUN_TURN_EXIT.contains(&t.action.id) || t.phase > 0.33));
         if reversed && g.speed_param > BAND_WALK && g.oneshot.is_none() && tr_allows_stop {
-            g.start_run_stop();
+            g.start_run_stop(leading_foot);
         }
         if mv_speed <= 0.0 && g.speed_param > 0.0 && g.oneshot.is_none() && g.tr.is_none() {
             // the Move guards try the run stop first (0xD7EC90), Idle only otherwise: the run stop reads the playing
@@ -1425,7 +1436,7 @@ pub fn update_ground(
                 g.idle_from_move(lead, body.velocity.with_y(0.0).length());
             }
             if g.speed_param > 0.25 {
-                g.start_run_stop();
+                g.start_run_stop(leading_foot);
                 if !GAME_GROUND_TREE && g.oneshot.is_some() {
                     let foot = (g.blend.foot != 0) as usize;
                     g.oneshot_next = jump_blend::action_items(jump_blend::RUN_STOP_TO_WAIT[foot]).map(|_| ActionBlend::new(jump_blend::RUN_STOP_TO_WAIT[foot], 0, &[1.0]));
@@ -1761,7 +1772,7 @@ pub fn update_ground(
                 jump_log("free-run target jump", body.feet, Some(&target));
                 match g.event45(body.feet, body.forward(), ImpulsionJump::Target(target), free_run_ready, leading_foot) {
                     Event45::Run => {
-                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, leading_foot, g.blend.foot) };
+                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, g.playing_word(), leading_foot, g.blend.foot) };
                         switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
                     }
@@ -1881,7 +1892,7 @@ pub fn update_ground(
                 // the takeoff foot (`StartRunJumpToTarget` 0xD837A0: the playing item's word bits 2–3, 1 = the footl
                 // takeoff): the foot opposite the locomotion's (live RE/25: three free-run take-offs, the game always
                 // on the other foot from the port's former "same foot" reading)
-                Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, leading_foot, g.blend.foot) },
+                Some(t) => InAirEntry::JumpToTarget { from: body.feet, target: t, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, g.playing_word(), leading_foot, g.blend.foot) },
                 // vt28: free jump without a target, along the direction the candidates were searched in (IHuman vt68
                 // gets the query's own direction pointer, 0xEE842D / 0xEE81CE; live RE/25 freerun_east: the stick's
                 // (0.999, −0.038) while the body still faced 12° to the right)
@@ -1902,7 +1913,7 @@ pub fn update_ground(
                 if r.sq() < 0.01 && moving && ab.allows(Ability::Jump) && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
                     if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision) {
                         jump_log("edge jump", body.feet, Some(&target));
-                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, leading_foot, g.blend.foot) };
+                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, g.playing_word(), leading_foot, g.blend.foot) };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
                     }
@@ -2482,12 +2493,14 @@ fn step_off_entry(feet: Vec3, facing: Vec3, r: &super::jump_candidates::EdgeRepo
 /// `AC_JUMP_LOG=1`: which of the ground's jump paths fired, from where, at what target.
 /// The takeoff foot of a ground target jump (`HumanGround__StartRunJumpToTarget` 0xD837A0): in the Movement sub-state
 /// (HG data +176 = 0) it hands `Human__SetupJumpToTarget` foot 0, which takes `Human__GetLeadingFoot` 0xB18850 on the
-/// pose (0xB20435: the left foot ahead → the `footl` takeoff); in the others the playing item's word bits 2–3. PORT:
-/// the item word stands as the foot opposite the locomotion's (live RE/25), also without a pose.
-fn run_jump_foot_left(sub_state: HumanGroundSubState, leading_foot: Option<usize>, blend_foot: usize) -> bool {
-    match (sub_state, leading_foot) {
-        (HumanGroundSubState::Movement, Some(lead)) => lead == 0,
-        _ => blend_foot != 0,
+/// pose (0xB20435: the left foot ahead → the `footl` takeoff); in the others the playing item's word bits 2–3 (0xD837F6),
+/// and with no foot bits there (0) the same leading foot (lab 013_reception52_feet: out of the free-step entry's
+/// `freestep_entry_footl_tr_l_walk_footl` the `footl` takeoff; RE/36 C2). Without a pose: the foot opposite the
+/// locomotion's (live RE/25).
+fn run_jump_foot_left(sub_state: HumanGroundSubState, word: Option<u16>, leading_foot: Option<usize>, blend_foot: usize) -> bool {
+    match sub_state {
+        HumanGroundSubState::Movement => leading_foot.map_or(blend_foot != 0, |lead| lead == 0),
+        _ => super::takeoff_foot_left(word, leading_foot, blend_foot != 0),
     }
 }
 
@@ -2725,6 +2738,33 @@ mod reanalysis_tests {
         g.blend.lean = 0.3;
         g.play_start_move();
         assert_eq!((g.blend.slowdown, g.blend.settle, g.blend.lean), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_stop_or_takeoff_out_of_an_item_without_foot_bits_takes_the_leading_foot() {
+        // `PickLocomotionFoot` 0xD86760 / `StartRunJumpToTarget` 0xD837A0: the playing item's word bits 2–3, else (0)
+        // `Human__GetLeadingFoot` on the pose. The low start `xx_l_wait_footr_tr_l_walk_slow_footl` (0x09A0A426) has
+        // word 0x0FC0: lab 018_climb_17 stops out of it on the left foot ahead with `jogstop_footl`
+        if jump_blend::action_items(START_MOVE[0][1]).is_none() || jump_blend::action_items(jump_blend::RUN_STOP[0]).is_none() {
+            return;
+        }
+        assert_eq!(super::super::anim_gate::item_word(START_MOVE[0][1], 0).map(|w| (w >> 2) & 3), Some(0));
+        for (leading, stop) in [(Some(0), jump_blend::RUN_STOP[0]), (Some(1), jump_blend::RUN_STOP[1])] {
+            let mut g = HumanGroundData { speed_param: 0.5, ..Default::default() };
+            g.blend.foot = 1;
+            let seq = g.next_tr_seq();
+            let mut t = super::super::ground_tree::MoveTransition::new(ActionBlend::new(START_MOVE[0][1], 0, &[0.0, 1.0, 0.0, 0.0]), 7, 0, None, seq);
+            t.phase = 0.6;
+            g.tr = Some(t);
+            g.start_run_stop(leading);
+            assert_eq!(g.oneshot.map(|o| o.blend.id), Some(stop), "leading {leading:?}");
+        }
+        // the takeoff outside Movement: the word's foot bits, else the leading foot
+        let fs = HumanGroundSubState::FreeRun;
+        assert!(run_jump_foot_left(fs, Some(0x0FC6), Some(1), 0), "bits 1: footl");
+        assert!(!run_jump_foot_left(fs, Some(0x0FC9), Some(0), 1), "bits 2: footr");
+        assert!(run_jump_foot_left(fs, Some(0x0FC0), Some(0), 0), "no bits: the left foot ahead");
+        assert!(!run_jump_foot_left(HumanGroundSubState::Movement, Some(0x0FC6), Some(1), 1), "Movement: the pose only");
     }
 
     #[test]
