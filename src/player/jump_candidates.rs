@@ -439,7 +439,16 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
     // end (sub_678010 / sub_677E40); the game does not compare the subtypes.
     let mut chains: Vec<Vec<(usize, Vec3, Vec3)>> = Vec::new(); // (piece, start, end) in chain order
     for sector in 0..3u8 {
-        let mut cands: Vec<usize> = (0..pieces.len()).filter(|&i| pieces[i].sets & (1 << sector) != 0).collect();
+        // `GuidanceChainBuilder__CollectCandidates` 0x677B00: a piece whose ends match an earlier one's (either way round,
+        // 0.001 m per axis, 0x677D33–0x677DB4) is left out, so an edge listed twice gives one candidate (RE/34 A10)
+        let same = |p: Vec3, q: Vec3| (p - q).abs().max_element() <= 0.001;
+        let mut cands: Vec<usize> = Vec::new();
+        for i in (0..pieces.len()).filter(|&i| pieces[i].sets & (1 << sector) != 0) {
+            let (a, b) = (pieces[i].a, pieces[i].b);
+            if !cands.iter().any(|&o| (same(a, pieces[o].a) && same(b, pieces[o].b)) || (same(a, pieces[o].b) && same(b, pieces[o].a))) {
+                cands.push(i);
+            }
+        }
         while let Some(seed) = cands.pop() {
             let mut chain = std::collections::VecDeque::from([(seed, pieces[seed].a, pieces[seed].b)]);
             loop {

@@ -960,6 +960,26 @@ fn shimmy_reaches_out_then_brings_the_hands_together() {
     assert!(s.run_until(2.0, |s| spacing(s) > 0.95), "and the next reach: {}", spacing(&s));
 }
 
+#[test]
+fn the_hands_keep_their_ik_targets_through_a_ledge_move() {
+    // `sub_DCD910` runs the limb IK through the moves of the IK sub-states (HandPlacement here): the shimmy's holds stay
+    // the hands' targets while it plays, and the clip's tags attach and release them (RE/36 D1). The port cleared them
+    // on every move frame before.
+    let mut s = hang_on_jump_up_wall();
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_some()), "no shimmy started");
+    let mut frames = 0;
+    while s.data().ledge.mv.is_some() && frames < 200 {
+        s.run(1.0 / 60.0);
+        let limbs = *s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap();
+        if s.data().ledge.mv.is_some() && !limbs.suspended {
+            assert!(limbs.hands.is_some(), "the move's holds stay the hand targets (frame {frames})");
+        }
+        frames += 1;
+    }
+    assert!(frames > 5, "the move ran {frames} frames");
+}
+
 /// Free-hang balcony slab: top 2.9 m, x -1..5, front edge z 35.4 (normal -Z), nothing below.
 fn hang_on_balcony() -> Sim {
     let mut s = Sim::new(Vec3::new(2.0, 0.0, 33.0), FACE_PZ);
@@ -2436,6 +2456,31 @@ fn beam_step_off_travels_instead_of_teleporting_to_ground() {
     }
     assert_eq!(s.loco().current, ActorContextId::Ground);
     assert!((s.body().feet.x - start.x - 0.8).abs() < 0.06);
+}
+
+/// The walk's step off at an end with room beyond comes before its stop (`CanStepOffBeamEnd` 0xF77C00 at 0xF7F941,
+/// then the walk → wait test 0xF747B0), and the end clamp holds 0.3 m before every end (0xF7C739): walking off a beam
+/// onto the floor beyond never stops in the wait, and the Ground goes on moving (owner's north demo, 2026-10-19).
+#[test]
+fn walking_off_a_beam_end_onto_the_floor_keeps_moving() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    let point = Vec3::new(74.0, 4.0, 70.0);
+    let mut s = Sim::new(point, crate::player::heading_of(Vec3::X));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0: Vec3::new(72.0,4.0,70.0), p1: Vec3::new(78.0,4.0,70.0),
+        point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::X }));
+    s.pad(Vec3::X, 1.0, true, true);
+    assert!(s.run_until(1.0, |s| matches!(s.data().narrow.state, BeamState::Walk | BeamState::Start)), "never walked");
+    let mut stopped = false;
+    for _ in 0..400 {
+        s.run(1.0 / 60.0 + 1e-4);
+        if s.loco().current != ActorContextId::NarrowObject {
+            break;
+        }
+        stopped |= s.data().narrow.state == BeamState::Wait;
+    }
+    assert!(!stopped, "the walk stopped in the wait before the step off");
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    assert!(s.ground().speed_param > 0.0, "the Ground goes on moving");
 }
 
 /// RE/24 NARROW-13: standing at a beam end with room beyond, the stick steps off at once (Idle → step-off state), no
@@ -4103,11 +4148,12 @@ pub(crate) struct LabTrace {
     pub frames: Vec<crate::recorder::InputFrame>,
     pub start: Vec3,
     pub heading: f32,
-    /// The foot of the wait the recording starts in (the first ground wait action's last `_footl` / `_footr`): 0 = left.
+    /// The foot of the wait the recording starts in (`lab_wait_foot`): 0 = left.
     pub wait_foot: Option<usize>,
-    /// The game's velocity at the start (Bevy axes) when the recording starts just after the lab's teleport (the
-    /// player arrives moving, in the air); zero otherwise.
-    pub velocity: Vec3,
+    /// The lab teleport's target (game axes) when the recording starts with it. The game's first row is already the
+    /// teleport frame's outcome (on a roof edge: the Ground's event 68 step off, `run_front_050cm_*_to_air`), so the
+    /// replay puts the player standing in the Ground at the target and its own Ground plays that frame.
+    pub teleport_to: Option<Vec3>,
 }
 
 /// A lab frame onto the pad. Unlike the port's own recordings (whose press ages are the pad's), a recorded press only
@@ -4125,17 +4171,37 @@ pub(crate) fn apply_lab_frame(frame: &crate::recorder::InputFrame, pad: &mut Pad
 }
 
 impl LabTrace {
-    /// The replay starts in the recording's wait foot, so the next start and stop take the game's feet.
-    pub fn apply_start(&self, world: &mut World, player: Entity) {
+    /// The replay starts in the recording's wait foot, so the next start and stop take the game's feet. `start` is the
+    /// port-space point standing for the recording's first position; after a lab teleport the player is put standing
+    /// in the Ground at the teleport's target instead (`player::teleport`, entry mode 0), relative to it.
+    pub fn apply_start(&self, world: &mut World, player: Entity, start: Vec3) {
+        if let Some(to) = self.teleport_to {
+            let d = to - self.start;
+            let to = start + Vec3::new(d.x, d.z, -d.y);
+            let mut q = world.query::<(&mut crate::player::Locomotion, &mut HumanDataBundle, &mut Body)>();
+            if let Ok((mut loco, mut data, mut body)) = q.get_mut(world, player) {
+                crate::player::teleport(&mut loco, &mut data, &mut body, to);
+            }
+        }
         if let (Some(foot), Some(mut d)) = (self.wait_foot, world.get_mut::<HumanDataBundle>(player)) {
             d.ground.set_wait_foot(foot);
         }
-        if self.velocity != Vec3::ZERO {
-            if let Some(mut b) = world.get_mut::<Body>(player) {
-                b.velocity = self.velocity;
-            }
-        }
     }
+}
+
+/// The foot of a ground action's own wait: the part of the name (split at `_tr_` / `_to_`) that is a plain wait (not a
+/// wait turn), its `_footl` / `_footr`. `xx_h_wait_footl_tr_l_walk_slow_footr` is the left foot's wait,
+/// `xx_l_waitturn_right_090_footl_tr_l_wait_hipm_footr` the right's. 0 = left; `None` without a plain wait.
+pub(crate) fn lab_wait_foot(action: &str) -> Option<usize> {
+    let name = action.strip_prefix("HumanGround:")?.trim();
+    name.split("_tr_").flat_map(|p| p.split("_to_")).find(|p| p.contains("_wait") && !p.contains("waitturn")).and_then(|p| {
+        let i = p.find("_foot")?;
+        match p.as_bytes().get(i + 5) {
+            Some(b'l') => Some(0),
+            Some(b'r') => Some(1),
+            _ => None,
+        }
+    })
 }
 
 /// The camera yaw is not recorded; it follows from the raw stick and the interpreter's world move direction (the two
@@ -4155,23 +4221,43 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
     assert!(!rows.is_empty(), "empty trace");
     let f = |r: &Vec<&str>, c: usize| r[c].parse::<f32>().unwrap_or(0.0);
     // the lab's teleport can land a frame or two after the recording starts: the replay starts after it (the same
-    // frames `compare.py` drops), moving as the game was
+    // frames `compare.py` drops), standing at the teleport's target (`teleport_to`)
     let skip = lab_teleport_skip(&rows.iter().take(20).map(|r| Vec3::new(f(r, c_x), f(r, c_y), f(r, c_z))).collect::<Vec<_>>());
-    rows.drain(..skip);
-    let velocity = if skip > 0 {
-        let (c_vx, c_vy, c_vz) = (col("vx"), col("vy"), col("vz"));
-        Vec3::new(f(&rows[0], c_vx), f(&rows[0], c_vz), -f(&rows[0], c_vy))
-    } else {
-        Vec3::ZERO
-    };
+    let before: Vec<Vec<&str>> = rows.drain(..skip).collect();
     // game forward (row 1, Z-up) -> Bevy (x, z, -y); Body::forward = (-sin h, 0, -cos h)
     let (bx, bz) = (f(&rows[0], c_fx), -f(&rows[0], c_fy));
     let heading = (-bx).atan2(-bz);
     let start = Vec3::new(f(&rows[0], c_x), f(&rows[0], c_y), f(&rows[0], c_z));
+    // the teleport's target: the lab's TELEPORT event (events.log next to the recording, cm precision), else the first
+    // row less its own frame of motion
+    let teleport_to = (skip > 0).then(|| {
+        let events = std::fs::read_to_string(std::path::Path::new(path).with_file_name("events.log")).unwrap_or_default();
+        events
+            .lines()
+            .find_map(|l| {
+                let v: Vec<f32> = l.split_once(" TELEPORT teleported to (")?.1.split(')').next()?.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
+            })
+            .unwrap_or_else(|| {
+                let (c_vx, c_vy, c_vz) = (col("vx"), col("vy"), col("vz"));
+                start - Vec3::new(f(&rows[0], c_vx), f(&rows[0], c_vy), f(&rows[0], c_vz)) * f(&rows[0], c_dt)
+            })
+    });
+    // the wait foot: the game's action when the teleport moved it, else the first ground wait of the first 30 rows,
+    // else (the lab names no action for a while: an id missing from its table) the first named action when it is a
+    // wait reached without moving or turning from the first row
     let c_act = head.iter().position(|h| *h == "action_name");
-    let wait_foot = c_act.and_then(|c| rows.iter().take(30).map(|r| r[c]).find(|n| n.starts_with("HumanGround:") && n.contains("wait")))
-        .and_then(|n| n.rfind("_foot").map(|i| &n[i + 5..]))
-        .and_then(|s| match s.as_bytes().first() { Some(b'l') => Some(0), Some(b'r') => Some(1), _ => None });
+    let wait_foot = c_act.and_then(|c| {
+        let named = |r: &&Vec<&str>| !r[c].is_empty();
+        before.iter().rev().find(named).and_then(|r| lab_wait_foot(r[c]))
+            .or_else(|| rows.iter().take(30).find_map(|r| lab_wait_foot(r[c])))
+            .or_else(|| {
+                let r = rows.iter().find(named)?;
+                let still = Vec3::new(f(r, c_x), f(r, c_y), f(r, c_z)).distance(start) < 0.02
+                    && f(r, c_fx) * f(&rows[0], c_fx) + f(r, c_fy) * f(&rows[0], c_fy) > 5f32.to_radians().cos();
+                still.then(|| lab_wait_foot(r[c])).flatten()
+            })
+    });
     // the camera's yaw per frame in the port's convention (camera forward = (-sin yaw, 0, -cos yaw) in Bevy)
     let mut yaws: Vec<Option<f32>> = rows
         .iter()
@@ -4227,13 +4313,36 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
             }
         })
         .collect();
-    LabTrace { frames, start, heading, wait_foot, velocity }
+    LabTrace { frames, start, heading, wait_foot, teleport_to }
 }
 
-/// The frames before a teleport among a recording's first ones (a jump of more than 5 m between two frames): the count
-/// to drop, 0 when there is none. `compare.py` drops the same.
+/// The frames before a teleport among a recording's first ones (a jump of more than 1 m between two frames, which no
+/// movement makes in one frame; the lab's teleports moved 1.7 m and more): the count to drop, 0 when there is none.
+/// `compare.py` drops the same.
 pub(crate) fn lab_teleport_skip(positions: &[Vec3]) -> usize {
-    positions.windows(2).rposition(|w| w[0].distance(w[1]) > 5.0).map_or(0, |i| i + 1)
+    positions.windows(2).rposition(|w| w[0].distance(w[1]) > 1.0).map_or(0, |i| i + 1)
+}
+
+#[test]
+fn lab_replay_start_parsing() {
+    // a 1.7 m teleport (10-12 ik_landing 006) is skipped, a sprint frame is not
+    let p = [Vec3::new(52.0, 5.55, 11.47), Vec3::new(52.0, 5.98, 13.10), Vec3::new(52.0, 5.97, 13.10)];
+    assert_eq!(lab_teleport_skip(&p), 1);
+    assert_eq!(lab_teleport_skip(&[Vec3::ZERO, Vec3::X * 0.1, Vec3::X * 0.2]), 0);
+    assert_eq!(lab_wait_foot("HumanGround: xx_h_wait_footl_tr_l_walk_slow_footr"), Some(0));
+    assert_eq!(lab_wait_foot("HumanGround: xx_l_waitturn_right_090_footl_tr_l_wait_hipm_footr"), Some(1));
+    assert_eq!(lab_wait_foot("HumanGround: xx_l_wait_hipm_footl_to_l_waitturn_right_090_footl"), Some(0));
+    assert_eq!(lab_wait_foot("HumanGround: xx_l_ledge_lookdown_front_footl"), None);
+    assert_eq!(lab_wait_foot("HumanInAir: xx_h_run_front_050cm_footl_to_air"), None);
+}
+
+/// The clip column of a `port_trace.csv` row: the requested action (`AnimPlayer::clip`), or with `AC_LAB_ITEM_LABELS=1`
+/// the playing item's action, as the game's action column names the slot's playing action (a transition action queued
+/// in front of the request included), so `bone_errors.py` pairs those frames with the game's.
+pub(crate) fn lab_trace_clip(world: &World, player: Entity) -> String {
+    let p = world.get::<crate::anim::AnimPlayer>(player);
+    let item = p.filter(|_| std::env::var_os("AC_LAB_ITEM_LABELS").is_some()).and_then(|p| p.playing_action_label());
+    item.or_else(|| p.and_then(|p| p.clip.clone())).unwrap_or_default()
 }
 
 /// `port_trace.csv`'s columns.
@@ -4284,7 +4393,7 @@ fn replay_lab_trace() {
     let mut s = Sim::new(start, trace.heading);
     s.cam_follow = false;
     let player = s.player;
-    trace.apply_start(s.app.world_mut(), player);
+    trace.apply_start(s.app.world_mut(), player, start);
     let mut out = String::from(LAB_TRACE_HEADER);
     let mut t = 0.0f32;
     for (i, frame) in trace.frames.iter().enumerate() {
@@ -4293,7 +4402,7 @@ fn replay_lab_trace() {
         s.app.world_mut().resource_mut::<CameraRig>().yaw = frame.cam_yaw;
         s.app.update();
         t += frame.dt_nanos as f32 * 1e-9;
-        let clip = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()).unwrap_or_default();
+        let clip = lab_trace_clip(s.app.world(), s.player);
         out.push_str(&lab_trace_row(i, t, s.loco().current, &clip, s.body().feet - start, s.body().velocity, s.app.world(), s.player));
     }
     let dst = std::path::Path::new(&path).with_file_name("port_trace.csv");
@@ -5025,6 +5134,21 @@ fn the_run_stop_plays_the_foot_of_the_locomotion_items_word() {
 }
 
 #[test]
+fn a_run_stop_ends_in_the_high_wait_then_changes_stance() {
+    // `HumanGround__RunStopToIdle` 0xDA7710 sets HG+1504 = 1 before Idle: the high wait, then in low profile the
+    // stance-change wait back to the low one (lab 027_freerun_north; RE/36 E1)
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(1.5);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.ground().owner, crate::player::ground::TreeState::RunStop);
+    assert!(s.run_until(3.0, |s| s.ground().oneshot.is_none()), "the stop never ended");
+    assert!(s.run_until(1.0, |s| s.ground().stance_change && !s.ground().wait_high), "no stance change from the high wait");
+    assert!(s.run_until(2.0, |s| !s.ground().stance_change && !s.ground().wait_high), "the low wait in the end");
+}
+
+#[test]
 fn moving_again_after_a_run_stop_plays_its_exit() {
     use crate::player::ground_tree::RUN_STOP_EXIT;
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
@@ -5431,12 +5555,41 @@ fn a_jump_at_a_kiosk_swings_through_its_frame_and_drops() {
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Kiosk), "never reached the kiosk: {:?} {:?}", s.loco().current, s.body().feet);
     let side = s.data().kiosk.side;
     assert!(matches!(side, KioskSide::FrontLeft | KioskSide::FrontRight), "{side:?}");
+    // the wait (0xE3EAA0): the arrival's free-step reception first, then the entry past 0.6 of it
+    assert!(s.data().kiosk.waiting);
+    assert!(s.data().kiosk.action.is_some_and(|a| crate::player::jump_blend::RECEPTION_FREESTEP.contains(&a.id)));
+    assert!(s.run_until(1.0, |s| !s.data().kiosk.waiting), "the wait never ended");
     assert_eq!(s.data().kiosk.action.map(|a| a.id), Some(KIOSK_ACTIONS[0][side as usize]));
     s.pad(Vec3::ZERO, 0.0, false, false);
     assert!(s.run_until(2.0, |s| s.data().kiosk.stage == 1), "no monkey bar");
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "never left the kiosk");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.body().feet);
     assert!(s.body().feet.y.abs() < 0.05, "on the street: {:?}", s.body().feet);
+}
+
+/// The Kiosk's actions move the root through the character controller on OnlyStaticAndCameraRaycast (`sub_E3D7F0`
+/// sets layer 27): a front entry's monkey bar stops at a wall behind the stall instead of passing through it (owner's
+/// north demo, 2026-10-19: 2.6 m through the stall's back at (115.0 42.3)).
+#[test]
+fn a_kiosk_front_entry_does_not_pass_through_a_wall_behind_it() {
+    use crate::player::kiosk::KioskEntry;
+    let target = Vec3::new(120.0, 3.0, 25.0);
+    let wall_x = target.x + 0.8;
+    let mut s = Sim::new(target, -std::f32::consts::FRAC_PI_2);
+    s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3 {
+        min: Vec3::new(wall_x, 0.0, 20.0), max: Vec3::new(wall_x + 1.0, 6.0, 30.0) });
+    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::Z, dir: Vec3::X, facing: Vec3::X, reception: None }));
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(!s.data().kiosk.side.lateral(), "a front side");
+    let mut max_x = f32::MIN;
+    for _ in 0..300 {
+        s.run(1.0 / 60.0);
+        if s.loco().current != ActorContextId::Kiosk {
+            break;
+        }
+        max_x = max_x.max(s.body().feet.x);
+    }
+    assert!(max_x < wall_x, "the root went through the wall: {max_x} against {wall_x}");
 }
 
 /// RE/24 NARROW-18: arriving at a kiosk along its axis is a lateral side: the side entry plays and, with no ground under
@@ -5446,7 +5599,7 @@ fn a_lateral_kiosk_side_plays_its_entry_then_falls() {
     use crate::player::kiosk::{KioskEntry, KIOSK_ACTIONS};
     let target = Vec3::new(120.0, 3.0, 25.0);
     let mut s = Sim::new(target, -std::f32::consts::FRAC_PI_2);
-    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::X, dir: Vec3::X, facing: Vec3::X }));
+    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::X, dir: Vec3::X, facing: Vec3::X, reception: None }));
     s.run(1.0 / 60.0 + 1e-4);
     let side = s.data().kiosk.side;
     assert!(side.lateral(), "{side:?}");

@@ -455,6 +455,7 @@ fn exit_with_hands(seq: [Option<ActionBlend>; 4], from: Vec3, to: Vec3, c: &Ledg
         lead: 0.0,
         table: None,
         root_time: None,
+        b_stop: 0.0,
         end_free: end.0,
         end_wall: end.1,
         end_stand: end.2,

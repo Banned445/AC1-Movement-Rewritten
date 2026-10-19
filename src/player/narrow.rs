@@ -365,6 +365,9 @@ pub struct HumanNarrowObjectData {
     pub hop: Option<CornerHop>,
     /// Mode 8 destination, independent of the beam segment.
     step_off_to: Vec3,
+    /// The step off plays the locomotion's jog slot (the beam speed at or above a quarter of the way from band 1 to
+    /// band 2, `HumanNarrowObjectBeam__StepOff_Enter` 0xF7B8C5), else the walk slot.
+    step_jog: bool,
     /// Beam +1716 / +1720: the walk's current and desired speed (m/s, RE/24 NARROW-1).
     pub speed: f32,
     pub desired: f32,
@@ -402,6 +405,14 @@ pub fn beam_bands() -> [f32; 5] {
         let (walk, jog) = (speed([1.0, 0.0]), speed([0.0, 1.0]));
         if walk > 0.0 && jog > walk { [walk, walk, jog, jog, jog] } else { [1.04, 1.78, 2.87, 4.71, 4.71] }
     })
+}
+
+/// `HumanNarrowObjectBeam__StepOff_Enter` 0xF7B8C5: the beam speed from which the step off plays the locomotion's jog
+/// slot, a quarter of the way from band 1 to band 2 of the beam's band table (+164: +4 / +8; **hypothesis** that those
+/// are `beam_bands`' entries 1 and 2).
+fn step_off_jog_speed() -> f32 {
+    let b = beam_bands();
+    b[1] + (b[2] - b[1]) * 0.25
 }
 
 /// The speed a walk item's [walk, jog] weights stand for (the inverse of `speed_weights`).
@@ -1686,7 +1697,10 @@ pub fn update_narrow(
                 let mut s = n.s + if BEAM_COMPLETION { along } else { step.y * sign };
                 // a next segment ahead (0xF753A0) lets the root run to the end and on along it
                 let next = next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance, &report);
-                let stop = if next.is_some() { 0.0 } else if can_step_off(n, &collision) { BEAM_STEP_OFF } else { BEAM_END_STOP };
+                // the clamp holds the root 0.3 m before any end (0xF7C739; its flag within 0.31 m, 0xF7C71E): an end with
+                // room beyond is left earlier, by the walk's own step off within 0.4 m (`CanStepOffBeamEnd` 0xF77C00,
+                // checked before the walk's stop, 0xF7F941)
+                let stop = if next.is_some() { 0.0 } else { BEAM_END_STOP };
                 let (lo_end, hi_end) = (n.lo_end(), n.hi_end());
                 let limit_lo = if n.toward_p1 { lo_end } else { lo_end + stop };
                 let limit_hi = if n.toward_p1 { hi_end - stop } else { hi_end };
@@ -1808,7 +1822,7 @@ pub fn update_narrow(
                 }
                 let last = next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance, &report).is_none();
                 let step_off_end = last && can_step_off(n, &collision);
-                let at_end = step_off_end && n.to_end() <= BEAM_STEP_OFF + 1e-3;
+                let at_end = step_off_end && n.to_end() < BEAM_STEP_OFF;
                 // the clamp holds the root 0.3 m before an end with no room beyond (an end with room lets it on to the
                 // step off)
                 let clamped = last && !step_off_end && n.to_end() <= BEAM_END_STOP + 0.01;
@@ -1822,7 +1836,8 @@ pub fn update_narrow(
                 } else if BEAM_COMPLETION && forward && n.kind == NarrowKind::Beam && at_end {
                     n.step_off_to = n.stand() + n.facing() * 0.8;
                     n.foot = n.item_foot();
-                    n.play(BeamState::StepOff, n.ground_step(false));
+                    n.step_jog = n.speed >= step_off_jog_speed();
+                    n.play(BeamState::StepOff, n.ground_step(n.step_jog));
                 } else if forward && !clamped {
                     // the start seeds the speed at band 0 (0xF724C4)
                     n.speed = beam_bands()[0];
@@ -1838,10 +1853,14 @@ pub fn update_narrow(
                 let b = beam_bands();
                 let walking = n.state == BeamState::Walk;
                 let phase = n.t / dur.max(1e-4);
-                let idle = n.clamped
+                // the walk's step off comes first (`CanStepOffBeamEnd` 0xF77C00 at 0xF7F941, then `sub_F70D20`), before
+                // its stop to the wait (0xF747B0): the step off itself is started below, after the root's motion
+                let steps_off = n.kind == NarrowKind::Beam && n.to_end() < BEAM_STEP_OFF
+                    && next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance, &report).is_none() && can_step_off(n, &collision);
+                let idle = !steps_off && (n.clamped
                     || (walking && n.speed < b[0])
-                    || (!walking && n.desired < b[0] && (phase < 0.5 || n.speed < b[0]));
-                let jog_stop = n.desired < b[0] && ((walking && n.speed > b[1]) || (!walking && n.speed > b[0] && phase > 0.5));
+                    || (!walking && n.desired < b[0] && (phase < 0.5 || n.speed < b[0])));
+                let jog_stop = !steps_off && n.desired < b[0] && ((walking && n.speed > b[1]) || (!walking && n.speed > b[0] && phase > 0.5));
                 if idle {
                     n.wait_state();
                 } else if jog_stop {
@@ -1851,8 +1870,12 @@ pub fn update_narrow(
                     if n.state == BeamState::Walk {
                         n.foot ^= 1;
                     }
+                    // the next item starts with the time the last one ran past its end (the evaluator's seam,
+                    // `ActionEvaluator__Advance` 0x730E50), as the walling seams do (RE/31c group 3)
+                    let over = (n.t - dur).max(0.0);
                     let w = item(BEAM_WALK, n.foot, &walk_w);
                     n.play(BeamState::Walk, w);
+                    n.t = over;
                 }
             }
             BeamState::Stop => {
@@ -2023,18 +2046,19 @@ pub fn update_narrow(
                     let foot = n.foot;
                     let phase = (n.t / dur).min(1.0);
                     let blocked = moved.hit_wall;
+                    let n_jog = n.step_jog;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });
                     // 0xF74BD0 keeps the locomotion action running into Movement. PORT: retain the
                     // shared blend phase without the native graph's transition fade.
                     let g = &mut data.ground;
-                    g.speed_param = if blocked { 0.0 } else if jog { 0.5 } else { 0.25 };
+                    g.speed_param = if blocked { 0.0 } else if n_jog { 0.5 } else { 0.25 };
                     g.blend.speed_param = g.speed_param;
                     g.blend.foot = foot;
                     g.blend.phase = phase;
                     g.blend.update_weights(g.speed_param, 0.0);
                 } else if done {
                     n.foot ^= 1;
-                    n.play(BeamState::StepOff, n.ground_step(jog));
+                    n.play(BeamState::StepOff, n.ground_step(n.step_jog));
                 }
                 continue;
             }
@@ -2081,7 +2105,7 @@ pub fn update_narrow(
         // step off the end onto the floor beyond (0xF77C00) → Ground
         if n.kind == NarrowKind::Beam
             && matches!(n.state, BeamState::Walk | BeamState::Start)
-            && n.to_end() <= BEAM_STEP_OFF + 1e-3
+            && n.to_end() < BEAM_STEP_OFF
             && next_segment(n.stand(), n.facing(), (n.p0, n.p1), &guidance, &report).is_none()
             && can_step_off(n, &collision)
         {
@@ -2092,7 +2116,10 @@ pub fn update_narrow(
                 // 0 → the pose's leading foot (`PickLocomotionFoot`): the walk's item by that foot (live beam_turns 005:
                 // item 0 with the left foot ahead, where the beam's stored foot took item 1)
                 n.foot = n.item_foot();
-                n.play(BeamState::StepOff, n.ground_step(jog));
+                // the slot by the beam speed (`StepOff_Enter` 0xF7B720: the jog slot 6 at or above band 1 + ¼ (band 2 −
+                // band 1), else the walk slot 3), not by the profile held
+                n.step_jog = n.speed >= step_off_jog_speed();
+                n.play(BeamState::StepOff, n.ground_step(n.step_jog));
             } else {
                 body.feet += n.facing() * (BEAM_STEP_OFF + 0.2);
                 switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });

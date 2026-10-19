@@ -254,7 +254,7 @@ fn replay_trace(s: &mut CitySim, path: &str, respawn: bool) {
     s.teleport(start);
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
     let player = s.player;
-    trace.apply_start(s.app.world_mut(), player);
+    trace.apply_start(s.app.world_mut(), player, start);
     // `AC_LAB_EXPORT=<folder>`: the recording's inputs as a bug folder's `input.txt` (the F9 format), for the windowed
     // replay (`AC_REPLAY`, `AC_VIDEO`) with `AC_NATIVE_MAP=damascus AC_CITY_AT=<the recording's start>`
     if let Ok(dir) = std::env::var("AC_LAB_EXPORT") {
@@ -279,7 +279,7 @@ fn replay_trace(s: &mut CitySim, path: &str, respawn: bool) {
             eprintln!("REPLAY WARNING: the streaming hold froze the player at frame {i} (the replay no longer follows the recording)");
         }
         t += frame.dt_nanos as f32 * 1e-9;
-        let clip = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()).unwrap_or_default();
+        let clip = crate::sim_tests::lab_trace_clip(s.app.world(), s.player);
         out.push_str(&crate::sim_tests::lab_trace_row(i, t, s.loco().current, &clip, s.body().feet - start, s.body().velocity, s.app.world(), s.player));
     }
     let dst = std::path::Path::new(path).with_file_name("port_trace.csv");

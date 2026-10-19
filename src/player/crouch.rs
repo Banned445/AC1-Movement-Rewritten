@@ -151,8 +151,9 @@ impl Crouch {
             }
             return Some(Vec3::ZERO);
         }
-        // PORT: simulation root clock samples the selected item directly; native displacement during
-        // a graph transition still needs the shared ActionEvaluator blend/synchronisation backend.
+        // the simulation's root clock samples the selected item directly; while the animation blends into it from
+        // another action the caller scales the displacement by the blend's shares (`anim::root_weight`, the game's
+        // `BlendNode__GatherDisplacement` 0x774350; A's share stands for the same motion, RE/36 A8 / A20).
         let mut left = dt;
         let mut delta = Vec3::ZERO;
         while left > 0.000001 {

@@ -80,6 +80,30 @@ pub struct Locomotion {
     /// The switch happened this frame: the context's update already ran for this frame (the old context's), so a
     /// context later in the chain skips the rest of it. `player::interpreter` clears it at the start of every frame.
     pub switched_this_frame: bool,
+    /// This frame's and the previous frame's dt (`player::interpreter` shifts them at the start of every frame).
+    pub frame_dt: f32,
+    pub prev_dt: f32,
+    /// The switching context already gave the new context's action its share of the switch frame (the time past the
+    /// old action's end when the switch came at that end; walling's exits): `switch_owed` is then not added.
+    pub owed_given: bool,
+}
+
+impl Locomotion {
+    /// The time a new context's action clock owes on its first update. `AIActor__SwitchLocomotionContext` 0x55F7E0
+    /// runs the old context's Exit, the fill and the new context's Enter at once, so what they play is advanced by the
+    /// switch frame's animation update (the animation runs after the AI update, `Game__SetupPostAITasks` 0x45C900),
+    /// while the new context's own logic waits for the next frame (`AIActor__UpdateContexts` 0x55F6A9). A context later
+    /// in the port's chain sees the switch frame itself (`switched_this_frame`: this frame's dt); one earlier in the
+    /// chain first runs on the next frame (the previous frame's dt).
+    pub fn switch_owed(&self) -> f32 {
+        if self.owed_given {
+            0.0
+        } else if self.switched_this_frame {
+            self.frame_dt
+        } else {
+            self.prev_dt
+        }
+    }
 }
 
 /// Kinematic body: feet position, facing (yaw, radians; 0 = facing -Z) and velocity.
@@ -147,11 +171,6 @@ pub struct LimbTargets {
     /// The ladder's rail goals for the left / right hand, set outside the contact tags (effectors 8 / 13, weight 1,
     /// blended in and out over 0.1 s; `sub_E20DC0`, RE/24 LADDER-20).
     pub rails: [Option<Vec3>; 2],
-    /// The port's foot lift onto the surface under a foot (`ik::ground_foot_target`, a stand-in for the landings) is off:
-    /// it runs only on the ground, in the air and on beams. The lab's bone ranking (headless IK) showed it lifting the
-    /// feet in the haystack (0.13 m), the wall-hang look-arounds (up to 0.6 m), the ladder climb and the wall run's step
-    /// into the hang, where the game leaves the animated feet.
-    pub no_ground_fix: bool,
 }
 
 /// Linear root interpolation used by all discrete moves (`sub_711130` / `sub_7113F0(human+80)`).
@@ -230,6 +249,7 @@ pub fn teleport(loco: &mut Locomotion, data: &mut HumanDataBundle, body: &mut Bo
 /// Immediate context switch (0x55F7E0): exit old, apply setup to destination data, enter new.
 pub fn switch_context(loco: &mut Locomotion, data: &mut HumanDataBundle, setup: TransitionSetup) {
     loco.previous = loco.current;
+    loco.owed_given = false;
     loco.current = match setup {
         TransitionSetup::ToMovement { landing } => {
             data.ground.enter(landing);
@@ -342,6 +362,9 @@ pub fn proxy_layer(mut q: Query<(&Locomotion, &HumanDataBundle, &mut Body), With
             // inside a haystack: HollywoodMode, which collides with almost nothing (every `HumanHayStack__Enter*`,
             // 0xE41D8C / 0xE421B4 / 0xE42444 / 0xE4273C); the hop out and the pass-over set Character back
             ActorContextId::HayStack => crate::layers::HOLLYWOOD_MODE,
+            // a market stall: OnlyStaticAndCameraRaycast, set directly (not through `Human__CharacterLayer`) by the
+            // context's enter `sub_E3D7F0` and restored by its exit `sub_E3EB70`
+            ActorContextId::Kiosk => crate::layers::ONLY_STATIC_AND_CAMERA_RAYCAST,
             _ => crate::layers::MAIN_CHARACTER,
         };
         if body.proxy.layer != layer {
@@ -362,7 +385,6 @@ pub fn release_limbs(mut q: Query<(&Locomotion, &mut LimbTargets), With<Player>>
         if loco.current != ActorContextId::Ledge {
             limbs.suspended = false;
         }
-        limbs.no_ground_fix = !matches!(loco.current, ActorContextId::Ground | ActorContextId::InAir | ActorContextId::NarrowObject);
         // leaving the ladder's main state releases both rails (`sub_E21160`)
         if loco.current != ActorContextId::Ladder {
             limbs.rails = [None; 2];
@@ -377,7 +399,7 @@ pub fn player_components(feet: Vec3, heading: f32) -> impl Bundle {
     (
         Player,
         social::SocialHelper::default(),
-        Locomotion { current: ActorContextId::Ground, previous: ActorContextId::Ground, just_switched: false, switched_this_frame: false },
+        Locomotion { current: ActorContextId::Ground, previous: ActorContextId::Ground, just_switched: false, switched_this_frame: false, frame_dt: 0.0, prev_dt: 0.0, owed_given: false },
         Body { feet, heading, grounded: true, ..default() },
         HumanDataBundle::default(),
         LimbTargets::default(),

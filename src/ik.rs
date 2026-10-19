@@ -22,7 +22,9 @@
 //!
 //! The port solves each limb analytically (two-bone, keeping the animation's bend plane), which is what the game
 //! asks of HumanIK. After it the hand/foot keeps its **animated world orientation** (the grip/finger pose stays as
-//! authored). PORT (hypothesis): with rotation reach 0 HumanIK may instead keep the end bone's local rotation.
+//! authored). With rotation reach 0 HumanIK may instead keep the end bone's local rotation (hypothesis): its solve is
+//! the linked middleware's and is not decoded. The lab ranks positions only (hands, feet), which the end bone's
+//! rotation does not move, so the choice stays (RE/36 A14).
 
 use bevy::prelude::*;
 
@@ -323,8 +325,9 @@ impl Iso {
 }
 
 /// Where the IK end bone (wrist / ankle) goes for a contact point, in world space, for a rig without the effector bones
-/// (`LIMB_EFFECTORS`). PORT fallback: offsets from the game's hang/climb clips (see tuning.rs); with the effector bones
-/// the end bone goes to the hold minus its animated offset to the effector (`end_goal`).
+/// (`LIMB_EFFECTORS`): offsets from the game's hang/climb clips (see tuning.rs), a fallback for a rig without those
+/// bones only (Altaïr's rig and the headless one have them; RE/36 A15, class E). With the effector bones the end bone
+/// goes to the hold minus its animated offset to the effector (`end_goal`).
 pub fn effector_goal(limb: usize, contact: Vec3, normal: Vec3) -> Vec3 {
     if limb < 2 {
         contact + Vec3::Y * IK_HAND_DROP + normal * IK_HAND_OUT
@@ -347,9 +350,6 @@ fn end_goal(limb: usize, contact: Vec3, normal: Vec3, effector_offset: Option<Ve
         None => effector_goal(limb, contact, normal),
     }
 }
-
-/// PORT: ankle height above the sole (xx_h_wait_hipm: ankles ~0.09 m above the animation origin).
-const ANKLE_HEIGHT: f32 = 0.09;
 
 /// One foot of the game's standing foot IK (`scimitar::FootIK`, 720 bytes, two of them in `IKGroundBiped` 0x430CA0).
 /// `state` follows the exe's FootIK +4: 0 off, 1 fading in, 2 running, 3 fading out (timer +64 / length +68).
@@ -609,14 +609,6 @@ fn cached_socket(c: &crate::collision::CollisionWorld, cache: &mut Option<(Vec3,
     (knee.y - target >= 0.15).then_some(target)
 }
 
-/// PORT stand-in, outside the standing foot IK: a foot the animation puts below the surface under it is lifted onto
-/// it. Without it the flight clips' reaching leg went through the roof on landings.
-fn ground_foot_target(ankle: Vec3, collision: &crate::collision::CollisionWorld) -> Option<Vec3> {
-    let h = collision.ground_height(Vec3::new(ankle.x, ankle.y + 0.5, ankle.z), 1.0)?;
-    let want = h + ANKLE_HEIGHT;
-    (ankle.y < want - 1e-3).then_some(Vec3::new(ankle.x, want, ankle.z))
-}
-
 pub(crate) fn solve_limbs(
     time: Res<Time>,
     collision: Option<Res<crate::collision::CollisionWorld>>,
@@ -726,8 +718,10 @@ pub(crate) fn solve_limbs(
             goals[i] = g.map(|g| (g, ik.limbs[i].weight));
         }
         // the ladder's rail effectors (`sub_E20DC0`): set at weight 1 with a 0.1 s blend (`sub_E13C50`), moved while on
-        // (`sub_E12ED0`), released over 0.1 s (`sub_E128A0`). PORT (hypothesis): the blends are linear. The goal is the
-        // hand bone's (the chain's end), so the solver's contact is it plus the animated offset to the effector
+        // (`sub_E12ED0`), released over 0.1 s (`sub_E128A0`). The blends are linear: `LimbIK__BlendEffectorGoals`
+        // 0xE13370 runs a goal's elapsed time up by the frame time to its blend time, weight = elapsed / time (RE/36 A18).
+        // The goal is the hand bone's (the chain's end), so the solver's contact is it plus the animated offset to the
+        // effector
         let rail_offs = effector_offsets(&global);
         for h in 0..2 {
             let r = &mut ik.rails[h];
@@ -739,15 +733,10 @@ pub(crate) fn solve_limbs(
                 goals[h] = Some((r.1 + rail_offs[h].unwrap_or(Vec3::ZERO), r.0));
             }
         }
-        // feet without a hold: kept above the surface under them
+        // the standing foot IK's ankle targets. A foot without a hold is otherwise left on its clip: the game places feet
+        // only on holds (the limb IK) and while standing (`IKGroundBiped` 0x432AC0), so the port's former lift of a foot
+        // under the surface onto it (a stand-in for the landings) is gone (RE/36 A17)
         let mut ground_fix: [Option<Vec3>; 4] = [None; 4];
-        if let Some(c) = collision.as_deref().filter(|_| !targets.no_ground_fix) {
-            for limb in 2..4 {
-                if goals[limb].is_none() {
-                    ground_fix[limb] = ground_foot_target(global[chains[limb][2]].pos, c);
-                }
-            }
-        }
         // ---------------------------------------------------------------- standing foot IK (IKGroundBiped 0x432AC0)
         // Only while standing still on the ground (speed <= 0.001). Each foot looks for the ground under it; the IK runs
         // when the feet's targets differ by 5 cm or the left one sits 5 cm off the root, the pelvis drops for the lower
@@ -923,12 +912,7 @@ pub(crate) fn solve_limbs(
             let (target, w) = match (goals[limb], ground_fix[limb]) {
                 (Some((contact, w)), _) => (c.lerp(end_goal(limb, contact, n, offs[limb]), w), w),
                 // the standing foot IK's ankle height
-                (None, Some(t)) if ground_goal[limb - 2].is_some() => (t, 1.0),
-                // the hips may have moved: re-check the foot against the surface
-                (None, Some(_)) => match collision.as_deref().and_then(|col| ground_foot_target(c, col)) {
-                    Some(t) => (t, 1.0),
-                    None => continue,
-                },
+                (None, Some(t)) => (t, 1.0),
                 _ => continue,
             };
             // elbows bend back, knees forward (used only when the limb is straight)

@@ -105,8 +105,10 @@ pub struct MoveBlend {
     pub lean: f32,
     /// Data+0xD8: bank, ±π/2 (±π/4 when IHumanGroundAccess vt1120 says so — "careful" mode, not traced).
     pub bank: f32,
-    /// Which item of the action is playing: 0 = footl, 1 = footr. PORT: the game alternates the items in
-    /// the animation player; the port runs the step cycle here so the sim knows the root motion.
+    /// Which item of the action is playing: 0 = footl, 1 = footr. The game alternates the items in the animation
+    /// player; the port runs the same cycle here so the simulation knows the root motion (class E). Lab check
+    /// (RE/36 A19): over the 12,950 walking frames of `005_walk60_roof` the feet stay in phase with the game's (0.004 m
+    /// after a 0.02 s shift); the walks that part come from an earlier start choice (RE/34 A04) or start foot (C4).
     pub foot: usize,
     /// Normalised phase in the current step.
     pub phase: f32,

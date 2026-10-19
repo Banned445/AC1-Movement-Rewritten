@@ -46,7 +46,11 @@ pub struct FiredEvent {
 
 /// The event keys passed when a clip's time goes from `from` to `to`: (from, to], or, when the time went backwards
 /// (the loop wrapped), (from, end] and then [0, to]. `from = None`: the clip just started, [0, to].
-/// PORT (hypothesis): the game's firing rule (inclusive ends, keys skipped by a jump in time) is not traced.
+/// The game's rule (`sub_6DF420`, per event track of the clip's evaluator `sub_763890`): a cursor holds the last key
+/// fired (−1 at the start); each frame the keys after it whose time (u16 / 120 s) is at or before the clip's time fire
+/// in order and move the cursor. So the end is inclusive, a key at 0 fires on the first frame, and a jump in time
+/// skips none. Tracks above the entity's LOD (track +24, 0 = always) and events with +12 set are left out; the port
+/// fires all (hypothesis: the player is always within every track's LOD).
 fn passed_events(events: &[AnimEvent], from: Option<f32>, to: f32) -> impl Iterator<Item = &AnimEvent> {
     let (a, wrap) = match from {
         Some(f) if to >= f => (f, false),
@@ -283,7 +287,9 @@ enum ARoll {
     Blend { a: Option<Box<ARoll>>, a_pose: Vec<(Quat, Vec3)>, b: Box<ARoll>, blend: ActBlend, fade: f32, fade_time: f32 },
 }
 
-/// Nodes kept playing inside one another; a deeper one is frozen (PORT: a bound on the work per frame).
+/// Nodes kept playing inside one another; a deeper one is frozen. The game's bound: before a push `AnimSlot__SetAction`
+/// trims the slot to 3 evaluators (2 with a transition action queued, `sub_726700`), and the trimmed node's A stops
+/// rolling with its pose baked (`sub_774130`: AROLLBROLL → ASTOPBROLL, AROLLBSTOP → ASTOPBSTOP; RE/36 A2).
 const AROLL_DEPTH: usize = 4;
 
 impl ARoll {
@@ -357,6 +363,14 @@ impl ARoll {
                     }
                 }
             }
+        }
+    }
+
+    /// The dominant clip of its newest item and that clip's time (for the event keys A passes while it rolls).
+    fn event_time(&self, lib: &AnimLibrary) -> Option<(String, f32)> {
+        match self {
+            ARoll::Item { items, item, phase, .. } => items.get(*item).and_then(|it| lib.dominant(it)).map(|c| (c.name.clone(), *phase * c.duration)),
+            ARoll::Blend { b, .. } => b.event_time(lib),
         }
     }
 
@@ -459,19 +473,29 @@ pub struct AnimPlayer {
 }
 
 /// A partial-body slot (`Anim__PlayActionOnSlots` 0x4FE730: an action on a channel of slot group 1 plays on the
-/// slots whose mask meets the channel's, over the full-body slot). PORT (hypothesis on the slot model): one overlay
-/// slot with the channel's bones, faded in and out like the default transition (0.2 s); while it shows, its bones
-/// follow its action instead of the full-body one.
+/// slots whose mask meets the channel's, over the full-body slot). While it shows, its bones follow its action instead
+/// of the full-body one. Its blends are the game's (`AnimSlot__SetAction` 0x727F70, `sub_726F40`):
+/// - in: an empty slot linked to the full-body one first plays a proxy of that slot's pose (`sub_77A360`, 0x728038),
+///   then looks the transition up from the full-body slot's playing item into the new action (`game_transition`
+///   with the channels' slot groups, so the new action's in-transition counts); a slot already playing looks it up
+///   from its own item. No transition is a cut (the action shows at once). A caller's blend wins.
+/// - out (`sub_726F40`): the transition from the overlay's item to the full-body slot's action, then the proxy; a
+///   higher slot group never takes the full-body action's in-transition or the default, so this is the overlay's item
+///   transitions or its action's out-transition (+20); none clears the slot at once (`sub_726370`).
+/// The slot model itself (one slot per channel, hypothesis) and the proxy's pose under an A-stop blend (the port
+/// blends over the live full-body pose) stay the port's.
 #[derive(Clone, Debug, Default)]
 pub struct Overlay {
     pub action: u32,
     items: Vec<ItemPlay>,
     item: usize,
     phase: f32,
-    /// 0 → 1 over `fade`, back to 0 when the action ends.
+    /// 0 → 1 over the blend in, back to 0 over the blend out.
     pub weight: f32,
-    /// Its blend in and out (s).
-    fade: f32,
+    /// The blend running (in, or out once `ending`), its elapsed time and the weight it started from.
+    blend: ActBlend,
+    t: f32,
+    w0: f32,
     pub(crate) ending: bool,
     looping: bool,
     /// Action +32: the item a looping action starts again at (RE/24 ANIM-5).
@@ -481,8 +505,6 @@ pub struct Overlay {
     mask: Vec<bool>,
 }
 
-/// Fade time of the overlay slot (PORT: the default transition's 0.2 s).
-const OVERLAY_FADE: f32 = 0.2;
 
 impl AnimPlayer {
     /// Update the simulation-driven item in place (its weights change every frame), behind a transition action
@@ -502,11 +524,15 @@ impl AnimPlayer {
     /// Play `action` on the partial-body slot when its channel is in slot group 1; returns false for a full-body
     /// action (play those through the normal selection).
     pub fn play_overlay(&mut self, lib: &AnimLibrary, action: u32) -> bool {
-        self.play_overlay_fade(lib, action, OVERLAY_FADE)
+        self.play_overlay_blend(lib, action, None)
     }
 
-    /// `play_overlay` with its own blend time.
+    /// `play_overlay` with the caller's blend time (a transition the code passes, e.g. the fidget's 0.15 s).
     pub fn play_overlay_fade(&mut self, lib: &AnimLibrary, action: u32, fade: f32) -> bool {
+        self.play_overlay_blend(lib, action, Some(ActBlend { time: fade, ..ActBlend::DEFAULT }))
+    }
+
+    fn play_overlay_blend(&mut self, lib: &AnimLibrary, action: u32, given: Option<ActBlend>) -> bool {
         if self.overlay.as_ref().is_some_and(|o| o.action == action && !o.ending) {
             return true;
         }
@@ -518,8 +544,18 @@ impl AnimPlayer {
         let Some(items) = lib.action_items(action) else { return false };
         let bones = lib.body.bones(ch.mask);
         let weight = self.overlay.as_ref().map_or(0.0, |o| o.weight);
+        // the transition from what the slot shows: its own item while it plays, else the full-body item (the proxy)
+        let from = match self.overlay.as_ref().filter(|o| !o.ending) {
+            Some(o) => o.items.get(o.item).cloned(),
+            None => self.items.get(self.item.min(self.items.len().max(1) - 1)).filter(|_| self.clip.is_some()).cloned(),
+        };
+        let blend = given.unwrap_or_else(|| game_transition(lib, from.as_ref(), action).map(|t| t.blend_a).unwrap_or_default());
         let loop_item = (a.loop_item as usize).min(items.len() - 1);
-        self.overlay = Some(Overlay { action, items, item: 0, phase: 0.0, weight, fade: fade.max(1e-3), ending: false, looping: a.repeat == 0, loop_item, bones, mask: Vec::new() });
+        let mut o = Overlay { action, items, item: 0, phase: 0.0, weight, blend, t: 0.0, w0: weight, ending: false, looping: a.repeat == 0, loop_item, bones, mask: Vec::new() };
+        if blend.kind == 0 || blend.time <= 0.0 {
+            o.weight = 1.0;
+        }
+        self.overlay = Some(o);
         true
     }
 
@@ -541,10 +577,17 @@ impl AnimPlayer {
         self.overlay.as_ref().filter(|o| !o.ending).and_then(|o| o.items.get(o.item)).and_then(|it| it.layers.first()).map_or(0.0, |l| 1.0 - l.1)
     }
 
-    /// Stop the partial-body action (it fades out).
-    pub fn stop_overlay(&mut self) {
+    /// The action of the playing item as `act_xxxxxxxx` (a transition action queued in front included), as the lab's
+    /// action column names the slot's playing action; None for a named clip or nothing playing.
+    pub fn playing_action_label(&self) -> Option<String> {
+        self.items.get(self.item).filter(|it| it.action != 0 && self.clip.is_some()).map(|it| format!("act_{:08x}", it.action))
+    }
+
+    /// Stop the partial-body action: it leaves through its transition into the full-body action (`sub_726F40`).
+    pub fn stop_overlay(&mut self, lib: &AnimLibrary) {
+        let base = self.items.get(self.item.min(self.items.len().max(1) - 1)).map_or(0, |i| i.action);
         if let Some(o) = self.overlay.as_mut() {
-            o.ending = true;
+            o.leave(lib, base);
         }
     }
 }
@@ -574,8 +617,27 @@ pub fn pick_associated(lib: &AnimLibrary, action: u32, played: &mut Vec<u32>, rn
     Some(pick)
 }
 
-/// Blend the overlay's pose over the full-body pose on its bones; advances it by `dt`.
-fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, skel: &PoseSkeleton, pose: &mut [(Quat, Vec3)], dt: f32) {
+impl Overlay {
+    /// Start leaving the slot (`sub_726F40`): the overlay's transition into the full-body slot's action `base`; none
+    /// clears the slot at once (`sub_726370`).
+    fn leave(&mut self, lib: &AnimLibrary, base: u32) {
+        if self.ending {
+            return;
+        }
+        self.ending = true;
+        self.w0 = self.weight;
+        self.t = 0.0;
+        let out = self.items.get(self.item).and_then(|it| game_transition(lib, Some(it), base)).map(|t| t.blend_a).unwrap_or_default();
+        self.blend = out;
+        if out.kind == 0 || out.time <= 0.0 {
+            self.weight = 0.0;
+        }
+    }
+}
+
+/// Blend the overlay's pose over the full-body pose on its bones; advances it by `dt`. `base`: the full-body slot's
+/// action (where a one-shot overlay leaves to when it ends).
+fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, skel: &PoseSkeleton, pose: &mut [(Quat, Vec3)], dt: f32, base: u32) {
     if o.mask.len() != skel.bone_ids.len() {
         o.mask = skel.bone_ids.iter().map(|b| o.bones.contains(b)).collect();
     }
@@ -590,11 +652,16 @@ fn apply_overlay(o: &mut Overlay, lib: &AnimLibrary, skel: &PoseSkeleton, pose: 
             o.item = o.loop_item;
             o.phase = o.phase.fract();
         } else {
+            // a one-shot that ends leaves the slot as a stop does (hypothesis: the evaluator's end runs `sub_726F40`)
             o.phase = 1.0;
-            o.ending = true;
+            o.leave(lib, base);
         }
     }
-    o.weight = if o.ending { (o.weight - dt / o.fade).max(0.0) } else { (o.weight + dt / o.fade).min(1.0) };
+    o.t += dt;
+    if o.blend.kind != 0 && o.blend.time > 0.0 {
+        let w = blend_weight(&o.blend, o.t / o.blend.time);
+        o.weight = if o.ending { o.w0 * (1.0 - w) } else { o.w0 + (1.0 - o.w0) * w };
+    }
     let mut ov = Vec::new();
     sample_layers(lib, skel, &o.items[o.item].layers, o.items[o.item].clip_phase(o.phase), &mut ov);
     blend_masked(pose, &ov, &o.mask, o.weight);
@@ -618,7 +685,8 @@ struct Request {
     looping: bool,
     fit: Option<f32>,
     token: u64,
-    /// PORT: fallback only (named clips, `named_blend`); graph actions take the authored blends (RE/24 ANIM-18).
+    /// Named clips only (`named_blend`): the fallbacks without the install's action (RE/36 A5, class E); graph actions
+    /// take the game's blends (RE/24 ANIM-18).
     fade: f32,
     hold: bool,
     /// The blend into the requested action when the simulation knows it (a ground transition action: the authored
@@ -678,8 +746,8 @@ fn action(lib: &AnimLibrary, ids: &[u32], looping: bool, token: u64, fade: Optio
     Some(Request { key, items, sim: false, looping, fit: None, token, fade, hold: false, blend: None, playing_w: None })
 }
 
-/// PORT: a named clip (outside the graph) enters as the default transition does (A frozen, B playing, linear)
-/// over `fade`.
+/// A named clip (outside the graph: the fallbacks without the install's action, RE/36 A6, class E) enters as the
+/// default transition does (A frozen, B playing, linear) over `fade`.
 fn named_blend(fade: f32) -> ActBlend {
     ActBlend { time: fade, ..ActBlend::DEFAULT }
 }
@@ -687,8 +755,9 @@ fn named_blend(fade: f32) -> ActBlend {
 /// The game's transition into `new` from the playing item (`sub_725950`, RE/13 §7.1), in this order:
 /// 1. the playing item's transitions whose destination is `new` (`sub_5B98B0`);
 /// 2. the playing action's out-transition (Action +20);
-/// 3. `new`'s in-transition (Action +16) (the exe first checks the body-part channel priorities; the port's actions
-///    share one channel);
+/// 3. `new`'s in-transition (Action +16), only when the playing action's channel is in a slot group at or below
+///    `new`'s (0x725A2F: channel +12, the slot group; full body 0, upper body 1), so an upper-body action leaving into
+///    the full-body one never takes it, nor step 4;
 /// 4. the default transition (ASTOPBROLL 0.2 s, `sub_46A460`), unless `new` has flag bit 2, and only when the playing
 ///    item and `new`'s item 0 differ in the player's animation remap (0x725A3E: `AnimItem__DominantAnimEntry` 0x5BC790
 ///    of each, the remap entry of its heaviest remapped clip above 0.0005, or none; RE/24 ANIM-3). Altaïr's one set
@@ -704,6 +773,10 @@ pub fn game_transition(lib: &AnimLibrary, cur: Option<&ItemPlay>, new: u32) -> O
         if let Some(t) = lib.graph.actions.get(&item.action).and_then(|a| a.out_transition) {
             return Some(t);
         }
+    }
+    let group = |action: u32| lib.graph.actions.get(&action).and_then(|a| lib.body.channels.get(&a.channel)).map_or(0, |c| c.group);
+    if cur.is_some_and(|it| group(it.action) > group(new)) {
+        return None;
     }
     if let Some(t) = new_action.in_transition {
         return Some(t);
@@ -732,8 +805,9 @@ pub fn blend_weight(b: &ActBlend, t: f32) -> f32 {
 /// The shares of the root displacement while a blend runs (RE/24 ANIM-16, `sub_774350`): (A's, B's). A's displacement
 /// is gathered only while A plays on (AROLLB*, kinds 1 / 3); then ACTBlendDispSrcMode: BLENDAB lerps A's and B's by the
 /// blend weight `w`, FROMAONLY takes A's, FROMBONLY B's. So under the default ASTOPBROLL the new action's root motion
-/// ramps in with the weight. PORT: B is taken to play on in every type (the simulation's clock does not stop for the
-/// ASTOPBSTOP / AROLLBSTOP types, so their displacement is not held back).
+/// ramps in with the weight. In the B-stop types (AROLLBSTOP, ASTOPBSTOP*) the game gathers no B displacement
+/// (0x774350), because B's clock is held; the simulation's clock runs through those blends (the Ladder's item seams),
+/// so B's share stands for the motion the game delays (RE/36 A7; holding the ladder's clock is listed there).
 pub fn root_shares(b: &ActBlend, w: f32) -> (f32, f32) {
     let a = if matches!(b.kind, 1 | 3) { 1.0 } else { 0.0 };
     match b.disp_src {
@@ -757,8 +831,9 @@ impl AnimPlayer {
     }
 }
 
-/// The weight of `action`'s own displacement this frame (`root_shares_for`, A's share counted as the same motion:
-/// PORT, the simulation runs one action, so a rolling A's displacement stands for itself). 1 without an animation.
+/// The weight of `action`'s own displacement this frame (`root_shares_for`, A's share counted as the same motion: the
+/// simulation runs one action, so a rolling A's displacement stands for itself; RE/36 A8, class E). 1 without an
+/// animation.
 pub fn root_weight(anim: Option<&AnimPlayer>, action: u32) -> f32 {
     anim.map_or(1.0, |p| {
         let (a, b) = p.root_shares_for(action);
@@ -822,6 +897,8 @@ const ACT_CATCH_WALL: [u32; 2] = crate::player::ledge::ACT_CATCH_WALL;
 const ACT_CATCH_FREE: [u32; 2] = crate::player::ledge::ACT_CATCH_FREE;
 /// Falling (6-way grasp blend).
 const ACT_FALL: u32 = 0x1F0C_22C2;
+/// The JumpFallAction (HumanInAir +432, request 33): `xx_h_jump_falling01` (FROMPHYSICS).
+const ACT_JUMP_FALL: u32 = 0x00D8_1513;
 /// The same six clips as a second action, played instead while the reach lies at a signed angle ≥ 0 from the facing,
 /// when the character has it (`sub_B0EB20`, 0xE0C29E).
 const ACT_FALL_B: u32 = 0xCD6F_5E10;
@@ -869,6 +946,13 @@ fn sim_request(p: &mut AnimPlayer, lib: &AnimLibrary, b: &crate::player::jump_bl
     Some(Request { key, items: vec![it], sim: true, looping: false, fit: None, token, fade, hold: false, blend: None, playing_w: None })
 }
 
+/// The next item's phase at an item seam: the time left over past the old item's end (`carry`, s at the playback
+/// rate) goes on in it (`ActionEvaluator__Advance` 0x730E50), unless its blend holds B (AROLLBSTOP / ASTOPBSTOP*:
+/// B starts once the blend is over).
+fn carry_phase(carry: f32, next_duration: f32, held: bool) -> f32 {
+    if held { 0.0 } else { (carry.max(0.0) / next_duration.max(1e-3)).min(0.999) }
+}
+
 /// The seam from a queued transition action's last item into the requested action's first item (`loop_from`, on the
 /// first pass only: a loop back to `loop_from` comes from the action's own last item).
 fn queued_seam(loop_from: usize, from: usize, to: usize) -> bool {
@@ -896,7 +980,7 @@ fn choose_clip(
         p.sim_phase = None;
         // the falling blend belongs to InAir: leaving it (a landing, a catch) fades the partial slot out
         if loco.current != ActorContextId::InAir && p.overlay.as_ref().is_some_and(|o| o.action == ACT_FALL || o.action == ACT_FALL_B) {
-            p.stop_overlay();
+            p.stop_overlay(&lib);
         }
         // the grasp (`HumanInAir__CheckAirCatch` 0xE0BF2B–0xE0C31F): every frame the empty-hand catch is armed, the
         // reach (+32) is smoothed at 7/s into +48 and the falling blend plays on the upper body with its weights, over
@@ -920,7 +1004,7 @@ fn choose_clip(
             p.grasp_on = false;
             p.grasp_dir = Vec3::ZERO;
             if p.overlay.as_ref().is_some_and(|o| o.action == ACT_FALL || o.action == ACT_FALL_B) {
-                p.stop_overlay();
+                p.stop_overlay(&lib);
             }
         }
         // the walking fidget on the upper-body slot (RE/24 GROUND-18): a new request picks a cycle breaker from the
@@ -939,7 +1023,7 @@ fn choose_clip(
             }
             let stop = loco.current != ActorContextId::Ground || f.stop;
             if stop && p.overlay.as_ref().is_some_and(|o| !o.ending && is_fidget(&lib, o.action)) {
-                p.stop_overlay();
+                p.stop_overlay(&lib);
             }
         }
         if let Some(ctx) = p.hold {
@@ -996,12 +1080,15 @@ fn choose_clip(
                 // the same transition action can lead to several destinations (e.g. the skid turn's exit into the
                 // locomotion and into a fight action): the one into the locomotion, or into a wait
                 let wanted = |b: u32| if t.to_wait { ACT_WAIT.iter().flatten().any(|w| *w == b) || crate::player::ground_tree::WAITS_PARALLEL.contains(&b) } else { b == ACT_GROUND_LOCOMOTION };
-                let authored = t.from.and_then(|(a, i)| lib.graph.actions.get(&a).and_then(|a| a.items.get(i)))
+                // a transition the code passes (`blend_in`) is the one played (`AnimSlot__FindTransition` 0x725950 returns
+                // the caller's at once): no authored item transition is looked up for it
+                let authored = t.from.filter(|_| t.blend_in.is_none()).and_then(|(a, i)| lib.graph.actions.get(&a).and_then(|a| a.items.get(i)))
                     .and_then(|it| it.transitions.iter().find(|tr| tr.action_a == t.action.id && wanted(tr.action_b)).copied());
                 let cur = p.items.get(p.item.min(p.items.len().max(1) - 1)).filter(|_| p.clip.is_some()).cloned();
                 let blend_a = t.blend_in.or(authored.map(|a| a.blend_a)).unwrap_or_else(|| game_transition(&lib, cur.as_ref(), t.action.id).map(|tr| tr.blend_a).unwrap_or_default());
-                // PORT (hypothesis): a transition the code passes explicitly (start, run stop / skid-turn exits) hands over
-                // with a cut, as the authored ones do (their clips are made to meet the destination's first frame)
+                // a transition the code passes (start, run stop / skid-turn exits, the accel into the wait) is an
+                // `ActionTransition` whose blend B the code leaves at the ctor's NONE (0x564B00; set only at +20 / +36 in
+                // `PlayStartMove` 0xD98990 and `PlayRunTurnExitMove` 0xD8F2B0): a cut at the seam into the destination
                 let dest = authored.map(|a| a.action_b).unwrap_or(if t.to_wait { 0 } else { ACT_GROUND_LOCOMOTION });
                 let blend_b = authored.map(|a| a.blend_b).unwrap_or_default();
                 p.pending_b = Some((dest, blend_b));
@@ -1092,8 +1179,10 @@ fn choose_clip(
                 _ => {
                     // a jump set up by 0xB20200 whose flight ended without an arrival: the JumpFallAction (+432, request
                     // 33 = `xx_h_jump_falling01` 0x00D81513) plays at once with a 0.5 s blend (0xE0F3D4–0xE0F45B, RE/24
-                    // AIR-22). PORT: the falling blend 0x1F0C22C2 stands in for it (its layer 0 is falling01; the grasp
-                    // layers carry the empty-hand grasp the game plays on the upper body)
+                    // AIR-22), through the transition the code passes (0xE0F3E1: ActionTransition, blend A type 1
+                    // AROLLBROLL, 0.5 s). The grasp plays over it on the upper-body slot (the rule above). Its own blends
+                    // decide what follows (no out-transition, so a step-off takes its in-transition ASTOPBROLL; the
+                    // falling blend's AROLLBROLL out-transition rolled the fall on; lab 005_a1_drift4_grabs_y; RE/36 E4)
                     let after_flight = data.air.takeoff.is_some() && data.air.flight.is_some();
                     if p.seen_fall != Some(data.air.seq) {
                         p.seen_fall = Some(data.air.seq);
@@ -1122,6 +1211,9 @@ fn choose_clip(
                         // armed, falling01 alone (the grasp rule above takes the slot while it is armed)
                         p.set_overlay_weights(&fall_grasp_weights(Vec3::ZERO, body.forward()));
                         continue;
+                    } else if after_flight && lib.action_items(ACT_JUMP_FALL).is_some() {
+                        action(&lib, &[ACT_JUMP_FALL], true, 0, None, None).map(|r| Request { blend: Some(ActBlend { kind: 1, time: 0.5, ..ActBlend::DEFAULT }), ..r })
+                            .filter(|r| p.clip.as_deref() != Some(r.key.as_str()))
                     } else {
                         // no body-part data (or no entry clip): the falling blend on the full body, its weights the
                         // grasp's while the catch is armed (the rule above smooths +48)
@@ -1195,9 +1287,16 @@ fn choose_clip(
                 sim_request(&mut p, &lib, &po.action, 7_500_000 + po.seq as u64, 0.06)
             }
             ActorContextId::Ledge if data.ledge.mv.and_then(|m| m.current()).is_some_and(|(b, _)| sim_item(&lib, &b).is_some()) => {
-                let (b, ph) = data.ledge.mv.unwrap().current().unwrap();
+                let mv = data.ledge.mv.unwrap();
+                let (b, ph) = mv.current().unwrap();
                 p.sim_phase = Some(ph);
-                sim_request(&mut p, &lib, &b, 7_000_000 + data.ledge.step_seq as u64 * 4 + b.item as u64, 0.08)
+                let r = sim_request(&mut p, &lib, &b, 7_000_000 + data.ledge.step_seq as u64 * 4 + b.item as u64, 0.08);
+                // a first item whose blend holds B (the wall reception's 0.1666 s ASTOPBSTOP) enters with that blend
+                if mv.b_stop > 0.0 && mv.t <= mv.b_stop {
+                    r.map(|r| Request { blend: Some(ActBlend { kind: 4, acuator: 1, time: mv.b_stop, ..ActBlend::DEFAULT }), ..r })
+                } else {
+                    r
+                }
             }
             ActorContextId::Ledge => {
                 let l = &data.ledge;
@@ -1356,8 +1455,9 @@ fn choose_clip(
                     // Not in front of the ground locomotion: there the simulation plays the transition action itself
                     // (`ground_tree`, MoveBlend's transition path keeps the speed and the foot in step with it) and hands
                     // over with the transition's blend B above; one it does not model is replaced by the default
-                    // transition (PORT, below). Nor in front of the simulation's one-shot moves, whose timing the body
-                    // follows.
+                    // transition (below). Nor in front of the simulation's one-shot moves, whose timing the body
+                    // follows: the contexts time those moves as the game does (M3), and a queued action would add time
+                    // the simulation does not have (RE/36 A11, class E).
                     let standing_loop = req.sim && !req.looping && lib.graph.actions.get(&new_action).is_some_and(|a| a.repeat == 0);
                     let queued = !req.sim || standing_loop;
                     let skipped = t.action_a != 0 && !queued;
@@ -1396,8 +1496,8 @@ fn choose_clip(
                         info!("anim skipped transition {:#010x} in front of {:#010x} ({:?})", t.action_a, new_action, loco.current);
                     }
                     if skipped {
-                        // PORT: the transition action is skipped, so its blend A (often a cut into that clip) would cut
-                        // into the destination: the default transition instead (ASTOPBROLL 0.2 s)
+                        // the transition action is skipped, so its blend A (authored as a cut into that clip) would cut
+                        // into the destination: the default transition instead (ASTOPBROLL 0.2 s; RE/36 A12, class E)
                         ActBlend::DEFAULT
                     } else {
                         t.blend_a
@@ -1588,7 +1688,7 @@ pub fn animate_pose(
         p.action_flags = if item.action == 0 { 8 } else { lib.graph.actions.get(&item.action).map_or(8, |a| a.flags) };
         let duration = lib.item_duration(&item).max(1e-3);
         let root_speed = item.layers.first().and_then(|(n, _)| lib.clips.get(n)).map(|c| c.root_speed).unwrap_or(0.0);
-        // playback rate (PORT: the named fallback cycles only, RE/24 ANIM-18): locomotion cycles match their root motion to the actual speed (no foot
+        // playback rate (the named fallback cycles only, RE/24 ANIM-18, RE/36 A13): locomotion cycles match their root motion to the actual speed (no foot
         // sliding); one-shots play at their own rate or are stretched to `fit`
         // (only the looping part: a transition action queued in front plays at its own rate)
         let rate = if p.looping && p.item >= p.loop_from && root_speed > 0.1 {
@@ -1603,6 +1703,9 @@ pub fn animate_pose(
         // B frozen while the blend runs (AROLLBSTOP / ASTOPBSTOP*)
         let b_stopped = p.fade < 1.0 && matches!(p.blend.kind, 3 | 4 | 5);
         let next = if b_stopped { p.phase } else { p.phase + dt * rate / duration };
+        // the event keys an item leaves behind at its seam: its evaluator runs to its end before the next one takes over
+        // (the per-track cursor `sub_6DF420` fires every key at or before the time reached)
+        let mut seam_events: Vec<FiredEvent> = Vec::new();
         if let Some(ph) = p.sim_phase.filter(|_| p.item >= p.sim_from) {
             p.phase = ph;
         } else if next >= 1.0 && (p.item + 1 < p.items.len() || (p.looping && p.items.len() > 1)) {
@@ -1611,6 +1714,14 @@ pub fn animate_pose(
             let a_state = (p.items.clone(), p.item, 1.0, false);
             let cur = p.items[p.item].clone();
             let from = p.item;
+            if let Some(c) = lib.dominant(&cur) {
+                let from_t = p.event_cursor.as_ref().filter(|(n, _)| *n == c.name).map(|(_, f)| *f);
+                seam_events.extend(passed_events(&c.events, from_t, c.duration).map(|e| FiredEvent { clip: c.name.clone(), time: e.time, kind: e.kind.clone() }));
+                p.event_cursor = None;
+            }
+            // the time left over past the item's end goes on in the next item (`ActionEvaluator__Advance` 0x730E50:
+            // an item ends only with time left to carry, 0x778010)
+            let carry = (next - 1.0) * duration;
             // a looping action starts again at its Action +32 item (`ActionEvaluator__Advance` 0x730E50 at 0x730F3F; RE/24
             // ANIM-5), counted from the requested action's first item
             p.item = if p.item + 1 < p.items.len() { p.item + 1 } else { (p.loop_from + p.loop_item).min(p.items.len() - 1) };
@@ -1628,16 +1739,19 @@ pub fn animate_pose(
             p.blend_from = cur.action;
             start_blend(&mut p, b, true, Some(a_state), &lib);
             p.action_switch = nxt_switch;
-            p.phase = 0.0;
+            let held = p.fade < 1.0 && matches!(p.blend.kind, 3 | 4 | 5);
+            p.phase = carry_phase(carry, lib.item_duration(&p.items[p.item]), held);
         } else if p.looping {
             p.phase = next.fract();
         } else {
             p.phase = next.min(1.0);
         }
         // A keeps playing for the AROLLB* types
+        let a_before = p.a_roll.as_ref().and_then(|a| a.event_time(&lib));
         if let Some(a) = p.a_roll.as_mut() {
             a.advance(&lib, dt);
         }
+        let a_after = p.a_roll.as_ref().and_then(|a| a.event_time(&lib));
         p.fade = (p.fade + dt / p.fade_time.max(0.01)).min(1.0);
         let weight = blend_weight(&p.blend, p.fade);
         let item = p.items[p.item].clone();
@@ -1653,17 +1767,26 @@ pub fn animate_pose(
             })
             .unwrap_or_default();
 
-        // event keys the dominant clip passed since the last frame
-        p.events.clear();
+        // event keys the dominant clip passed since the last frame (an item's events come from its dominant clip's
+        // evaluator, `sub_777860`), after the keys an item left at its seam; while a blend runs, a rolling A's keys too
+        // while the weight is below 0.5 (`BlendNode__CollectEvents` 0x773A40)
+        p.events = seam_events;
+        if let (Some((an, a0)), Some((bn, a1))) = (a_before.as_ref(), a_after.as_ref()) {
+            if an == bn && p.fade < 1.0 && weight < 0.5 && matches!(p.blend.kind, 1 | 3) {
+                if let Some(c) = lib.clips.get(an) {
+                    p.events.extend(passed_events(&c.events, Some(*a0), *a1).map(|e| FiredEvent { clip: c.name.clone(), time: e.time, kind: e.kind.clone() }));
+                }
+            }
+        }
         if let Some(c) = lib.dominant(&item) {
             let t = p.phase * c.duration;
             let from = p.event_cursor.as_ref().filter(|(n, _)| *n == c.name).map(|(_, f)| *f);
             let fired: Vec<FiredEvent> =
                 passed_events(&c.events, from, t).map(|e| FiredEvent { clip: c.name.clone(), time: e.time, kind: e.kind.clone() }).collect();
-            for e in &fired {
+            p.events.extend(fired);
+            for e in &p.events {
                 debug!("anim event: {} t={:.3} {}", e.clip, e.time, event_label(&e.kind));
             }
-            p.events = fired;
             p.event_cursor = Some((c.name.clone(), t));
         }
 
@@ -1721,8 +1844,9 @@ pub fn animate_pose(
                 }
             })
             .collect();
+        let base_action = item.action;
         if let Some(o) = p.overlay.as_mut() {
-            apply_overlay(o, &lib, skel, &mut base, dt);
+            apply_overlay(o, &lib, skel, &mut base, dt, base_action);
         }
         if p.overlay.as_ref().is_some_and(|o| o.ending && o.weight <= 0.0) {
             p.overlay = None;
@@ -2031,6 +2155,48 @@ mod tests {
         // a frozen-A blend (the default ASTOPBROLL) freezes the half-blended pose on screen
         start_blend(&mut p, ActBlend::DEFAULT, true, Some(item(3)), &lib);
         assert!(p.a_roll.is_none() && p.prev.is_some());
+    }
+
+    #[test]
+    fn an_item_seam_carries_the_time_over_and_fires_the_old_items_tail() {
+        // 0.0166 s past a 0.5 s item's end, the next 0.25 s item starts 0.0166 s in; a held B starts at 0
+        assert!((carry_phase(0.0166, 0.25, false) - 0.0664).abs() < 1e-4);
+        assert_eq!(carry_phase(0.0166, 0.25, true), 0.0);
+        assert_eq!(carry_phase(-0.001, 0.25, false), 0.0);
+        // the old item's keys after the cursor up to its end fire at the seam (inclusive end, `sub_6DF420`)
+        let ev = |t: f32| AnimEvent { time: t, kind: EventKind::Contact { ty: 2, bits: 3 } };
+        let keys = [ev(0.1), ev(0.49), ev(0.5)];
+        let tail: Vec<f32> = passed_events(&keys, Some(0.48), 0.5).map(|e| e.time).collect();
+        assert_eq!(tail, vec![0.49, 0.5]);
+    }
+
+    #[test]
+    fn the_overlay_slot_blends_by_the_games_transitions() {
+        let Some(lib) = shared_library() else {
+            eprintln!("skipped: game install not found");
+            return;
+        };
+        let item = |action: u32| {
+            let it = &lib.graph.actions[&action].items[0];
+            ItemPlay { layers: Vec::new(), blend: it.blend, root_motion: false, action, transitions: it.transitions.clone(), word: it.flags, repeat: it.repeat }
+        };
+        // into the upper-body falling blend from a full-body wait: its in-transition (slot group 0 ≤ 1), AROLLBROLL 0.2 s
+        let t = game_transition(&lib, Some(&item(0x00D8_243F)), ACT_FALL).expect("in-transition");
+        assert_eq!((t.blend_a.kind, t.blend_a.time), (1, 0.2));
+        // out of it into a full-body action: only its own out-transition counts (the wait's in-transition and the default
+        // need the playing channel's group at or below the new one's, 0x725A2F)
+        let t = game_transition(&lib, Some(&item(ACT_FALL)), 0x00D8_243F).expect("out-transition");
+        assert_eq!((t.blend_a.kind, t.blend_a.time), (1, 0.2));
+        let blocked = game_transition(&lib, Some(&ItemPlay { action: ACT_FALL, ..Default::default() }), 0x00D8_37AE);
+        assert!(blocked.is_some_and(|t| t.blend_a.kind == 1), "the falling blend's own out-transition, not the run stop's in-transition");
+        // the player: the overlay ramps in over that blend and leaves over the out-transition
+        let mut p = AnimPlayer { clip: Some("act_00d8243f".into()), items: vec![item(0x00D8_243F)], ..Default::default() };
+        assert!(p.play_overlay(&lib, ACT_FALL));
+        let o = p.overlay.as_ref().unwrap();
+        assert_eq!((o.blend.kind, o.weight), (1, 0.0));
+        p.stop_overlay(&lib);
+        let o = p.overlay.as_ref().unwrap();
+        assert!(o.ending && o.blend.kind == 1 && (o.blend.time - 0.2).abs() < 1e-6);
     }
 
     #[test]
