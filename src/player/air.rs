@@ -112,8 +112,8 @@ pub enum InAirEntry {
     /// No target found: the free-jump target (`Human__MakeFreeJumpTarget` 0xB13630 → 0xB1E7F0, `FREE_JUMP_AHEAD` along
     /// `dir`, `FREE_JUMP_DOWN` below), jumped at like any target (type 1) and ended by the ground contact.
     /// `ahead` = how far along `dir` the target lies (`FREE_JUMP_AHEAD`; the step off an edge, event 68, aims
-    /// 1 + 2·profile·speed m ahead, 0xD9D1F0). `tap`: the tap jump's (vt28), whose fall at the target starts from rest.
-    FreeJump { from: Vec3, dir: Vec3, ahead: f32, speed_param: f32, foot_left: bool, tap: bool },
+    /// 1 + 2·profile·speed m ahead, 0xD9D1F0).
+    FreeJump { from: Vec3, dir: Vec3, ahead: f32, speed_param: f32, foot_left: bool },
     /// A free-step jump (jump kind 1: the `freestep_*_to_air` takeoff) from a beam or a pilotis to a target
     /// (NarrowObject event 4 → `Human__SetupJumpToTarget` 0xB20200 with kind 1, 0xE4D950).
     FreeStepJump { from: Vec3, target: JumpTarget, foot_left: bool },
@@ -145,7 +145,7 @@ impl InAirEntry {
     pub fn starting_at(self, p: Vec3) -> Self {
         match self {
             InAirEntry::JumpToTarget { target, speed_param, foot_left, .. } => InAirEntry::JumpToTarget { from: p, target, speed_param, foot_left },
-            InAirEntry::FreeJump { dir, ahead, speed_param, foot_left, tap, .. } => InAirEntry::FreeJump { from: p, dir, ahead, speed_param, foot_left, tap },
+            InAirEntry::FreeJump { dir, ahead, speed_param, foot_left, .. } => InAirEntry::FreeJump { from: p, dir, ahead, speed_param, foot_left },
             InAirEntry::FreeStepJump { target, foot_left, .. } => InAirEntry::FreeStepJump { from: p, target, foot_left },
             InAirEntry::FreeStepFreeJump { dir, ahead, down, foot_left, .. } => InAirEntry::FreeStepFreeJump { from: p, dir, ahead, down, foot_left },
             InAirEntry::OnPlace { fwd, action, fall, .. } => InAirEntry::OnPlace { from: p, fwd, action, fall },
@@ -291,9 +291,6 @@ pub struct HumanInAirData {
     /// The jump is at the free-jump target (no target found): the ground contact ends it, as it does in the game
     /// (0xE05200 on the controller contact) long before the target 3 m down is reached.
     pub free_target: bool,
-    /// The free target is the tap jump's (vt28) or the free-step free jump's: at its end the fall starts from rest (see
-    /// the flight's end).
-    pub tap_free_jump: bool,
     /// A free-step arrival cancelled by a ceiling contact (`sub_E009F0`): the fall plays with a 0.3 s blend (RE/24 AIR-10).
     pub free_step_abort: bool,
     /// Ground loss: the drop sub-state's (type, side) (InAirData+944 +64 / +68) and the edge's outward normal.
@@ -335,7 +332,6 @@ impl HumanInAirData {
         self.fall_action = None;
         self.fall_t = 0.0;
         self.free_target = false;
-        self.tap_free_jump = false;
         self.free_step_abort = false;
         self.drop = None;
         self.slope_slide = default();
@@ -449,7 +445,7 @@ impl HumanInAirData {
                 let d = action.duration().max(0.1);
                 self.mode = AirMode::Jump { from, clip_end, aim: clip_end, duration: d, t: 0.0, then_fall_to: Some(clip_end), t_takeoff: 0.0, fwd };
             }
-            InAirEntry::FreeJump { from, dir, ahead, speed_param, foot_left, tap } => {
+            InAirEntry::FreeJump { from, dir, ahead, speed_param, foot_left } => {
                 self.start_y = from.y;
                 self.start = from;
                 self.apex_y = from.y;
@@ -466,7 +462,6 @@ impl HumanInAirData {
                 self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
                 self.free_target = true;
-                self.tap_free_jump = tap;
             }
             InAirEntry::FreeStepFreeJump { from, dir, ahead, down, foot_left } => {
                 self.start_y = from.y;
@@ -480,9 +475,6 @@ impl HumanInAirData {
                 self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 1);
                 self.free_target = true;
-                // the beam's free jump falls from rest at its target too (chain_beam 001 / 012 / 013 / 025: 0.04–1.07
-                // m/s after a 3.5–4.2 m/s flight)
-                self.tap_free_jump = true;
             }
             InAirEntry::LetGoDive { from, target, origin } => {
                 self.entry_velocity = Some(Vec3::ZERO);
@@ -994,13 +986,14 @@ pub fn update_air(
                             // no over-drop (the fall point at the aim's height: a free jump's own target, the aim only
                             // pulled back 0.5 m along it; an over-drop's aim sits `OVERDROP` above its target)
                             let free_end = (p.y - aim.y).abs() < 1e-4;
-                            if free_end && air.tap_free_jump {
-                                // the tap jump's free jump at its own target: the jump ends there and the fall starts
-                                // from the controller's velocity, which the flight's kinematic moves never set. Live, 30
-                                // lab recordings (freerun_east lines, chain_beam, beam_freerun): 0–1 m/s across, mostly
-                                // ≈ 0.4, after a 3.8 m/s flight, falling from rest, then the 4 m/s² drift decay. PORT:
-                                // that stale velocity is taken as 0. Event 68's step-off keeps its flight speed (live
-                                // landing times, `walking_and_running_off_an_edge_land_in_the_live_times`)
+                            if free_end {
+                                // a free jump at its own target (the tap jump's, the free-step free jump's and event 68's
+                                // step off an edge): the flight ends with no arrival and the JumpFallAction plays
+                                // (0xE0F3D4–0xE0F45B), which sets no velocity, so the fall starts from the controller's
+                                // velocity, which the flight's kinematic moves (`CharacterController__RequestMoveTo`
+                                // 0x710B40) do not keep. Lab: the tap jump's 30 recordings 0–1 m/s across, mostly ≈ 0.4,
+                                // after a 3.8 m/s flight; the step off's 24 (A35) −1.3 to +0.5 m/s up after the flight's
+                                // −7.4, then gravity and the 4 m/s² drift decay. PORT: that stale velocity is taken as 0
                                 body.velocity = Vec3::ZERO;
                             }
                             air.mode = AirMode::Fall { steer_to: if free_end { None } else { Some(p) } };
@@ -1507,7 +1500,7 @@ mod fall_tests {
             let mut c = CollisionWorld::default();
             c.boxes.push(Aabb3 { min: Vec3::new(-5.0, -1.0, -floor_ahead), max: Vec3::new(5.0, 0.0, 5.0) });
             let mut air = HumanInAirData::default();
-            air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true, tap: true });
+            air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
             air.apply_down_variants(&c);
             air.flight.map(|f| f.id).unwrap()
         };
@@ -1521,7 +1514,7 @@ mod fall_tests {
         let mut air = HumanInAirData::default();
         let start = 0.0f32; // facing −Z
         let dir = Quat::from_rotation_y(-0.75) * Vec3::NEG_Z; // 43° to the right
-        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true, tap: true });
+        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
         air.begin_turn(start);
         let AirMode::Jump { t_takeoff, fwd, from, clip_end, .. } = air.mode else { panic!("not a jump") };
         assert!(t_takeoff > 0.1, "{t_takeoff}");
@@ -1562,7 +1555,7 @@ mod fall_tests {
     #[test]
     fn the_takeoff_item_holds_the_apex_record() {
         let mut air = HumanInAirData::default();
-        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true, tap: true });
+        air.enter(InAirEntry::FreeJump { from: Vec3::ZERO, dir: Vec3::NEG_Z, ahead: FREE_JUMP_AHEAD, speed_param: 0.5, foot_left: true });
         let takeoff = |air: &HumanInAirData| air.playing_word().is_some_and(|w| w & super::super::anim_gate::TAKEOFF != 0);
         assert!(takeoff(&air), "{:?}", air.playing_word());
         let AirMode::Jump { t_takeoff, .. } = &mut air.mode else { panic!() };

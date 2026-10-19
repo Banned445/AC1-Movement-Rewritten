@@ -1364,6 +1364,7 @@ pub fn update_ledge(
             let dive = ab.allows(super::abilities::Ability::LeapOfFaith)
                 .then(|| super::hay::search(body.feet, away, away, &super::hay::LET_GO, &guidance.haystacks, &collision))
                 .flatten();
+            let plain = dive.is_none();
             let entry = match dive {
                 Some(s) => {
                     let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
@@ -1372,6 +1373,14 @@ pub fn update_ledge(
                 None => InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+            if plain {
+                // the let-go's fill (`HumanLedge__FillInAirData_LetGo` 0xDD7810) hands InAir its fall action, 0x1120E17B
+                // `hangwall_tr_fall` from a wall hang, 0x1120E179 from a free hang (request 33, blend 0.2): a FROMANIM
+                // item whose root carries the drop before `jump_falling01` (lab A37 `catch_auto_wall`: 0.86 s). PORT: the
+                // free hang's action is not in the dumped table; the wall hang's stands in (as for the dive)
+                let id = if origin == FallOrigin::HangFree { super::air::LET_GO_FREE } else { super::climb::LOST_GRIP };
+                data.air.fall_action = ledge_moves::single_item(id, 0).or_else(|| ledge_moves::single_item(super::climb::LOST_GRIP, 0));
+            }
             data.air.release_hold = Some(hold);
             continue;
         }

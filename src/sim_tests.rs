@@ -1059,6 +1059,11 @@ fn let_go_from_a_hang_falls_and_lands() {
     s.press_hand();
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::InAir), "did not let go");
     assert_eq!(s.data().air.fall_origin, air::FallOrigin::HangFree);
+    // A37: the let-go's fill (0xDD7810) hands InAir the free hang's let-go action 0x1120E179 (a wall hang's is
+    // 0x1120E17B `hangwall_tr_fall`), whose root carries the drop before `jump_falling01` (PORT: 0x1120E179 is not in
+    // the dumped table, the wall hang's stands in)
+    let id = s.data().air.fall_action.map(|a| a.id);
+    assert!(id == Some(air::LET_GO_FREE) || id == Some(crate::player::climb::LOST_GRIP), "the let-go plays its fall action: {id:?}");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
     assert_eq!(s.ground().last_landing.map(|l| l.kind), Some(LandingType::Safe));
 }
@@ -2649,6 +2654,19 @@ fn snug_against_a_wall_legs_starts_the_wall_climb() {
     s.press_legs();
     assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Walling), "no wall climb: {:?} collide {:?}", s.loco().current, s.ground().collide.map(|c| c.phase));
 }
+
+#[test]
+fn a_landing_against_a_wall_is_cut_by_the_obstacle_collision() {
+    // A01: event 42's sender (0xEE8C83–0xEE8DB0) and Movement's acceptance (0xDAF73F) read no animation gate, so the
+    // collide cuts a landing (lab `freerun_east_drift3` 014: `landing_damage_footl_roll` cut 0.32 s in at the wall).
+    // Falling beside the 1.1 m wall at z -4 (face at z -3.8), pushing into it.
+    let mut s = Sim::new_falling(Vec3::new(30.0, 2.5, -3.38), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
+    assert!(s.ground().oneshot.is_some(), "a landing plays");
+    assert!(s.run_until(0.2, |s| s.ground().collide.is_some()), "the landing was not cut by the collide: {:?}", s.ground().oneshot.map(|o| o.blend.id));
+}
+
 
 #[test]
 fn obstacle_collision_leans_on_a_low_wall_and_releasing_stands_up() {
@@ -5982,7 +6000,10 @@ fn walking_and_running_off_an_edge_land_in_the_live_times() {
     for (from, h, stick, high, (lo, hi)) in [
         (Vec3::new(70.0, 1.8, 60.5), 1.8, 1.0, true, (0.42, 0.50)),
         (Vec3::new(70.0, 1.8, 60.5), 1.8, 0.6, false, (0.42, 0.55)),
-        (Vec3::new(7.0, 3.2, 23.0), 3.2, 1.0, true, (0.56, 0.70)),
+        // PORT (owner decision, A35): the lab's 24 run-offs (250 fps) start the fall at the flight's end (3 m down, 0.64 s)
+        // from rest, so the last 0.2 m takes 0.2 s more than the live 0.58–0.68 s (normal frame rate, walk and run-offs
+        // mixed); a live check at the normal frame rate is listed in RE/20
+        (Vec3::new(7.0, 3.2, 23.0), 3.2, 1.0, true, (0.56, 0.82)),
     ] {
         let mut s = Sim::new(from, 0.0);
         s.pad(Vec3::NEG_Z, stick, high, false);
@@ -5999,6 +6020,37 @@ fn walking_and_running_off_an_edge_land_in_the_live_times() {
         assert!(t > lo && t < hi, "{h} m (stick {stick}, high {high}): {t:.3} s in the air");
         assert!(top - h < 0.15, "{h} m: rose {:.3} m", top - h);
     }
+}
+
+
+#[test]
+fn a_step_off_a_high_roof_falls_from_rest_after_its_flight() {
+    // A35 (lab, 24 recordings: `hay_plainfall`, `lip_drop_*`, `catch69_*`, `fall3_stepoff`): event 68's flight to its
+    // free target 3 m down ends with no arrival and the JumpFallAction plays (0xE0F3D4); the fall starts from the
+    // controller's stale velocity (−1.3 to +0.5 m/s up), not the flight's −7.4 m/s
+    // the 4.4 m roof (x 11.5..16.5, z 21.5..26.5; under the ledge stop's 5 m)
+    let mut s = Sim::new(Vec3::new(14.0, 4.4, 24.0), 0.0);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    assert!(s.run_until(5.0, |s| s.loco().current == ActorContextId::InAir), "never left the roof");
+    assert!(s.run_until(1.5, |s| matches!(s.data().air.mode, air::AirMode::Fall { .. })), "the flight never ended");
+    let (v, y) = (s.body().velocity, s.body().feet.y);
+    assert_eq!(s.loco().current, ActorContextId::InAir, "still in the air at the flight's end");
+    assert!(v.y > -1.0 && Vec3::new(v.x, 0.0, v.z).length() < 1.0, "the fall starts near rest: {v:?}");
+    assert!((4.4 - y - 3.0).abs() < 0.3, "the flight came down to its target 3 m below: {y}");
+}
+
+
+#[test]
+fn a_landing_at_a_high_edge_turns_into_the_ledge_stop_at_once() {
+    // A36 (lab `edge_landing_out` 004): the landing (Movement state 21) takes event 69 with only its guards (0xDAFA09)
+    // and the sender has no stick test, so `landing_straight_soft` plays one frame, then `ledge_stop_start`. The 5.6 m
+    // roof (x 18.5..23.5, z 21.5..26.5), landing 0.1 m from its -Z edge facing it, the stick released; a 0.25 m drop,
+    // under the InAir edge landing's 0.3 m / 0.4 s gate (that one steps off instead, RE/24 AIR-16).
+    let mut s = Sim::new_falling(Vec3::new(21.0, 5.85, 21.6), 0.0);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.loco().current);
+    assert!(s.ground().oneshot.is_some(), "a landing plays");
+    assert!(s.run_until(0.05, |s| s.ground().ledge_stop.is_some()), "the landing played on: {:?}", s.ground().oneshot.map(|o| o.blend.id));
 }
 
 

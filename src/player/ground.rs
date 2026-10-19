@@ -1336,6 +1336,8 @@ pub fn update_ground(
         }
         let busy = g.oneshot.is_some() || g.tr.is_some_and(|t| t.to_wait);
         let moving = mv_speed > 0.0 && !busy;
+        // a landing one-shot (Movement states 21 / 22): no HG+609 bit, no animation gate on events 68 / 69 (below)
+        let landing_cut = matches!(g.owner, TreeState::Landing | TreeState::DamageLanding) && g.oneshot.is_some();
 
         // ---------------------------------------------------------------- beam (NarrowObject, event 72)
         // The sender (`GoAssassinActionInterpreter__ProcessGroundMovement`, RE/28 §2): every frame with the Jump ability
@@ -1829,8 +1831,11 @@ pub fn update_ground(
         // (high profile + Legs) jumps first (the interpreter's jump branch returns before it). In low profile the edge
         // halt above comes first (its reach is larger) and its look-down returns before the sender.
         let run_stopping = g.oneshot.is_some_and(|o| jump_blend::RUN_STOP.contains(&o.blend.id) || jump_blend::RUN_STOP_TO_WAIT.contains(&o.blend.id));
-        let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id)) && !run_stopping;
-        if (moving || run_stopping) && !busy && !edge_halt && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
+        // a landing (states 21 / 22) at the edge stops on its first frame: Movement takes event 69 with only its guards
+        // (0xDAFA09), the sender has no stick test (lab A36 `edge_landing_out` 004: `landing_straight_soft` for one frame,
+        // then `ledge_stop_start` with the stick released)
+        let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id)) && !run_stopping && !landing_cut;
+        if (moving || run_stopping || landing_cut) && !busy && !edge_halt && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
             if let Some((p, n)) = edge_report_drop(body.feet, body.forward(), REPORT_PICK_RADIUS, LEDGE_STOP_SQ, FRONT_COS, LEDGE_STOP_DROP, &guidance, &collision).map(|r| (r.0, r.1)) {
                 if let Some(b) = super::ledge_moves::single_item(super::ledge_moves::LEDGE_STOP_START, 0) {
                     g.ledge_stop = Some(LedgeStop { point: p, normal: n, ending: false });
@@ -1904,14 +1909,17 @@ pub fn update_ground(
                 // vt28: free jump without a target, along the direction the candidates were searched in (IHuman vt68
                 // gets the query's own direction pointer, 0xEE842D / 0xEE81CE; live RE/25 freerun_east: the stick's
                 // (0.999, −0.038) while the body still faced 12° to the right)
-                None => InAirEntry::FreeJump { from: body.feet, dir: want, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0, tap: true },
+                None => InAirEntry::FreeJump { from: body.feet, dir: want, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;
         }
 
         // ---------------------------------------------------------------- at an edge: the edge jump, event 68
-        if !busy {
+        // Event 68 is taken in every Ground state (`HumanGround__CanHandleEvent` 0xDB48B0) with only its guard, HG+609
+        // bit 0 clear, which the landings (states 21 / 22) never set: a landing past the edge steps off on its first
+        // frame (lab A36 `edge_landing_out` 005: `fall_step_off_back_max` right after the landing)
+        if !busy || landing_cut {
             if let Some(r) = facing_report {
                 // The edge jump (0xEE8679): at or past the edge (+52 < 0.01), the stick past the dead zone and both
                 // the stick and the facing within 45 degrees of the edge normal → IHuman vt56 kind 2 (high) / 1 along
@@ -2074,7 +2082,12 @@ pub fn update_ground(
         // feet), no anim gate: it starts again during the push-away's transition into the walk (unlocked), not during the
         // locked push-away itself. The direction is the stick, so standing along the wall and pushing into it turns the
         // character to face it (the entry's 0.15 s warp).
-        let unlocked = g.oneshot.is_none_or(|o| !super::anim_gate::locked(&o.blend)) && g.tr.is_none_or(|t| !super::anim_gate::locked(&t.action));
+        // The sender (0xEE8C83–0xEE8DB0) and Movement's acceptance (0xDAF73F) read no animation gate, so a Movement
+        // child's one-shot (a landing or the landing roll, a run stop, a skid turn, a pivot, the roll ending) is cut by
+        // the collide at the wall (lab A01: `landing_damage_footl_roll` cut 0.32 s in, `jogstop` cut on its first frame).
+        // PORT: the locked one-shots and transitions of the rest (the push-away's walk back) keep the stand-in gate.
+        let unlocked = g.owner != TreeState::Other
+            || (g.oneshot.is_none_or(|o| !super::anim_gate::locked(&o.blend)) && g.tr.is_none_or(|t| !super::anim_gate::locked(&t.action)));
         let event42 = ab.allows(Ability::Jump) && pad.magnitude > crate::tuning::STICK_DEADZONE && unlocked && g.ledge_stop.is_none()
             && body.stick_residual.abs() <= 0.2 && super::collide::has_obstacle_contact(&body.proxy.manifold, pad.dir);
         if event42 {
@@ -2495,7 +2508,7 @@ fn step_off_entry(feet: Vec3, facing: Vec3, r: &super::jump_candidates::EdgeRepo
     }
     let dir = if angle.abs() <= 60f32.to_radians() { facing } else { Quat::from_rotation_y(60f32.to_radians() * angle.signum()) * r.normal };
     let a = if high { 1.0 } else { 0.0 };
-    Some(InAirEntry::FreeJump { from: feet, dir, ahead: 1.0 + 2.0 * a * speed_param, speed_param, foot_left, tap: false })
+    Some(InAirEntry::FreeJump { from: feet, dir, ahead: 1.0 + 2.0 * a * speed_param, speed_param, foot_left })
 }
 
 /// `AC_JUMP_LOG=1`: which of the ground's jump paths fired, from where, at what target.
