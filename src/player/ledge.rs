@@ -256,6 +256,15 @@ pub struct HumanLedgeData {
     pub hand_l: Vec3,
     pub hand_r: Vec3,
     pub normal: Vec3,
+    /// The hand records' own wall normals (+1584 left, +1600 right) and the hang normal they were last averaged into
+    /// (`hand_n_of`): `HumanLedge__ComputeRootFromHandTargets` 0xDD6730 takes the hang's facing from −(n_L + n_R),
+    /// so a shimmy across a bend turns the body half way on the reach and fully on the closing step. Reset to the hang
+    /// normal whenever other code sets that.
+    pub hand_n: [Vec3; 2],
+    pub hand_n_of: Vec3,
+    /// The heading at the start of a shimmy step that turns the body, while its root interpolation runs (the game's
+    /// RootInterp `sub_711130` carries the new facing +1664 from `StartHandStep` 0xDDE483).
+    pub turn_from: Option<f32>,
     /// +0x85: shimmy alternation flag. false = lead hand reaches out next, true = trailing hand closes.
     pub alt_flag: bool,
     /// +0x746: stick up and nothing else possible â†’ pull-up allowed.
@@ -801,6 +810,17 @@ pub fn entry_feet(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3
 
 /// A hand step's root (`ComputeRootFromHandTargets` 0xDD6730): the free pose, or the wall pose from the held foot
 /// records; `lateral` steps (dir 2 / 3) read the higher hand, the vertical ones the lower.
+/// The hang normal from the hand records' normals (`HumanLedge__ComputeRootFromHandTargets` 0xDD6730: the facing +1664
+/// = −(n_L + n_R), the left one alone when they are opposed, dot < −cos 10°; flattened here, as the hang's facing is).
+pub fn bent_hang_normal(nl: Vec3, nr: Vec3) -> Vec3 {
+    let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
+    let (l, r) = (flat(nl), flat(nr));
+    if l.dot(r) < -0.984_807_7 {
+        return l;
+    }
+    (l + r).normalize_or(l)
+}
+
 fn step_root(d: &HumanLedgeData, n: Vec3, lateral: bool) -> Vec3 {
     match d.hang_type {
         LedgeHangType::Free => hang_root(d.hand_l, d.hand_r, n, d.hang_type),
@@ -977,6 +997,16 @@ pub fn update_ledge(
         let n = d.normal;
         let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
         body.heading = heading_of(facing);
+        // a shimmy step that turned the hang: the facing goes over with the step's root interpolation
+        match (d.turn_from, d.moves.first()) {
+            (Some(h0), Some(m)) => {
+                let s = (m.t / m.reach.clamp(1e-3, m.duration)).min(1.0);
+                let dh = (body.heading - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                body.heading = h0 + dh * s;
+            }
+            (Some(_), None) => d.turn_from = None,
+            _ => {}
+        }
         body.velocity = Vec3::ZERO;
         body.grounded = false;
         if !d.hang_set {
@@ -1635,6 +1665,23 @@ pub fn update_ledge(
                         continue;
                     }
                     if move_right_hand { d.hand_r = t } else { d.hand_l = t }
+                    // the moved hand's record takes its piece's normal (row 3's hit; a closing step onto the other
+                    // hand's point, that hand's), and the hang faces −(n_L + n_R) (0xDD6730; across a bend of a chained
+                    // ledge, e.g. the octagonal tower's cornice, the body turned with the hands)
+                    if d.hand_n_of != d.normal {
+                        d.hand_n = [d.normal; 2];
+                    }
+                    let k = move_right_hand as usize;
+                    d.hand_n[k] = rows[3].filter(|h| h.point.distance(t) < 1e-4).map(|h| h.wall_normal).unwrap_or(d.hand_n[1 - k]);
+                    let new_n = bent_hang_normal(d.hand_n[0], d.hand_n[1]);
+                    // (a step that does not turn the hang starts from the facing it has: no turn carried over)
+                    d.turn_from = None;
+                    if new_n.dot(d.normal) < 0.999_9 {
+                        d.turn_from = Some(body.heading);
+                        d.normal = new_n;
+                    }
+                    d.hand_n_of = d.normal;
+                    let n = d.normal;
                     d.last_hand = move_right_hand as usize;
                     d.alt_flag = !d.alt_flag;
                     let to = step_root(d, n, true);

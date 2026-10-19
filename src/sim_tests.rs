@@ -980,6 +980,45 @@ fn the_hands_keep_their_ik_targets_through_a_ledge_move() {
     assert!(frames > 5, "the move ran {frames} frames");
 }
 
+/// `HumanLedge__ComputeRootFromHandTargets` 0xDD6730: the hang faces −(n_L + n_R) of the two hand records. Shimmying
+/// across a 45° bend of a chained ledge turns the body half way on the reach and square to the next piece on the
+/// closing step (owner's bug 1792432460: the octagonal tower's cornice in Damascus, the body left facing the old face).
+#[test]
+fn a_shimmy_across_a_bend_turns_the_hang_onto_the_next_piece() {
+    use crate::guidance::{GuidanceEdge, GuidanceSubType};
+    let o = Vec3::new(300.0, 3.0, 300.0);
+    let (na, nb) = (Vec3::NEG_Z, Vec3::new(-1.0, 0.0, -1.0).normalize());
+    let mut s = Sim::new(o + Vec3::new(1.0, -2.4, -0.1), crate::player::heading_of(Vec3::Z));
+    {
+        let mut g = s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>();
+        g.edges.push(GuidanceEdge { p0: o, p1: o + Vec3::X * 3.0, n0: Vec3::Y, n1: na, subtype: GuidanceSubType::LedgeGrab });
+        g.edges.push(GuidanceEdge { p0: o + Vec3::new(-2.0, 0.0, 2.0), p1: o, n0: Vec3::Y, n1: nb, subtype: GuidanceSubType::LedgeGrab });
+    }
+    let (hl, hr) = (o + Vec3::new(1.0, 0.0, 0.0), o + Vec3::new(0.7, 0.0, 0.0));
+    let mut e = crate::player::ledge::LedgeEntry::at((hl + hr) * 0.5, na, s.body().feet, crate::player::ledge::LedgeSubState::Movement);
+    (e.hand_l, e.hand_r) = (hl, hr);
+    force(&mut s, crate::player::TransitionSetup::ToLedge(e));
+    s.run(0.3);
+    let facing = |s: &Sim| s.body().forward().with_y(0.0).normalize();
+    assert!(facing(&s).dot(-na) > 0.99, "hangs square to the first piece: {:?}", facing(&s));
+    // shimmy toward the bend (−X is the hang's right while it faces +Z)
+    let dir = if crate::player::right_of(-na).dot(Vec3::NEG_X) > 0.0 { crate::player::right_of(-na) } else { -crate::player::right_of(-na) };
+    s.pad(dir, 0.8, false, false);
+    let mut prev = s.body().heading;
+    let mut max_jump = 0.0f32;
+    for _ in 0..360 {
+        s.run(1.0 / 60.0);
+        let h = s.body().heading;
+        max_jump = max_jump.max(((h - prev + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI).abs());
+        prev = h;
+    }
+    let d = &s.data().ledge;
+    let on_b = |p: Vec3| (p - o).dot(Vec3::X) < -0.05;
+    assert!(on_b(d.hand_l) && on_b(d.hand_r), "both hands crossed onto the next piece: {:?} {:?}", d.hand_l, d.hand_r);
+    assert!(facing(&s).dot(-nb) > 0.99, "the hang faces the next piece: {:?}", facing(&s));
+    assert!(max_jump < 0.1, "the turn goes over with the steps, not in one frame: {max_jump}");
+}
+
 /// Free-hang balcony slab: top 2.9 m, x -1..5, front edge z 35.4 (normal -Z), nothing below.
 fn hang_on_balcony() -> Sim {
     let mut s = Sim::new(Vec3::new(2.0, 0.0, 33.0), FACE_PZ);
