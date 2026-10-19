@@ -254,7 +254,7 @@ fn replay_trace(s: &mut CitySim, path: &str, respawn: bool) {
     s.teleport(start);
     s.app.world_mut().get_mut::<Body>(s.player).unwrap().heading = trace.heading;
     let player = s.player;
-    trace.apply_start(s.app.world_mut(), player);
+    trace.apply_start(s.app.world_mut(), player, start);
     // `AC_LAB_EXPORT=<folder>`: the recording's inputs as a bug folder's `input.txt` (the F9 format), for the windowed
     // replay (`AC_REPLAY`, `AC_VIDEO`) with `AC_NATIVE_MAP=damascus AC_CITY_AT=<the recording's start>`
     if let Ok(dir) = std::env::var("AC_LAB_EXPORT") {
