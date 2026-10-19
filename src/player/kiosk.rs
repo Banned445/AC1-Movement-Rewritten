@@ -5,7 +5,10 @@
 //!   is interpolated to the target over 0.067 s; InAir+228 = entry type FreeStep (0), +232 = the side from the
 //!   kiosk's axis and the jump direction: within 10 degrees along the axis (dot > 0.9848) LateralLeft, against it
 //!   LateralRight, otherwise FrontLeft / FrontRight. `HumanInAir__RequestKiosk` 0xE015A0 → context 19
-//!   (`TransitionSetupDataToHumanKiosk`).
+//!   (`TransitionSetupDataToHumanKiosk`). The arrival also plays the free-step reception (0xE084CA: 0x010DF150 with
+//!   `Human__GetLeadingFoot` 1, else 0x010DE1FE, the arrival weights Data+452).
+//! - **Wait** (the first state, +104, 0xE3EAA0): the root interpolation runs while the reception plays; once its
+//!   normalised time (`sub_501DF0`) passes 0.6 (dword_16834C4) the entry starts (`HumanKiosk__Entry_Enter` 0xE3E790).
 //! - **Actions** (table 0xE3DAE0 at 0x1A2F280, index 2·side + entry type; the two entry types share their clips):
 //!   stage 0 the entry, stage 1 the monkey bar (front sides only), stage 2 its `_tr_fall` exit.
 //! - **Front** (0xE3E320 → 0xE3E390): the entry plays to its end, then one monkey-bar cycle (0xE3DD40), then InAir
@@ -33,6 +36,8 @@ pub const SIDE_ROLL: u32 = 0x2288_984C;
 pub const SIDE_ROLL_PHASE: f32 = 0.73;
 /// Root interpolation to the kiosk target at arrival (`flt_1700FC4`).
 pub const ARRIVAL_INTERP: f32 = 0.067;
+/// The reception's normalised time after which the entry starts (0xE3EAC9, dword_16834C4).
+pub const WAIT_PHASE: f32 = 0.6;
 /// cos 10 degrees (0x16FEBC0 / 0x16D90A0).
 const LATERAL_COS: f32 = 0.984_807_7;
 
@@ -62,6 +67,8 @@ pub struct KioskEntry {
     pub dir: Vec3,
     /// The player's facing at the arrival (the entity's forward row, `sub_4C2F90`).
     pub facing: Vec3,
+    /// The free-step reception the arrival played (0xE084CA), held by the wait state.
+    pub reception: Option<ActionBlend>,
 }
 
 /// The entry side (0xE08672): `d` = axis·dir (the kiosk entity's forward row against the jump direction);
@@ -108,6 +115,8 @@ pub fn kiosk_axis(p: Vec3, guidance: &GuidanceWorld) -> Option<Vec3> {
 #[derive(Debug, Default)]
 pub struct HumanKioskData {
     pub side: KioskSide,
+    /// The wait state (+104) before the entry: the arrival's reception plays.
+    pub waiting: bool,
     /// 0 entry, 1 monkey bar.
     pub stage: usize,
     pub action: Option<ActionBlend>,
@@ -135,7 +144,8 @@ impl HumanKioskData {
         self.axis = e.axis;
         self.dir = Vec3::new(e.dir.x, 0.0, e.dir.z).normalize_or(Vec3::NEG_Z);
         self.heading = super::heading_of(self.dir);
-        self.action = action(KIOSK_ACTIONS[0][self.side as usize]);
+        self.waiting = e.reception.is_some_and(|r| r.duration() > 0.0);
+        self.action = if self.waiting { e.reception } else { action(KIOSK_ACTIONS[0][self.side as usize]) };
         self.t = 0.0;
         self.applied = [0.0; 3];
         self.interp = super::RootInterp::new(e.from, e.target, ARRIVAL_INTERP);
@@ -155,6 +165,10 @@ pub fn update_kiosk(
         }
         if loco.just_switched {
             loco.just_switched = false;
+            // the reception the arrival played runs the switch frame too (`Locomotion::switch_owed`)
+            if data.kiosk.waiting {
+                data.kiosk.t += loco.switch_owed();
+            }
             if loco.switched_this_frame {
                 continue;
             }
@@ -166,6 +180,19 @@ pub fn update_kiosk(
         // the arrival's root interpolation, then the action's root motion (FROMANIM) from the target
         let start = if k.interp.done() { k.base } else { k.interp.advance(dt).0 };
         k.t += dt;
+        if k.waiting {
+            // the wait (0xE3EAA0): the root on the interpolation, the reception playing; past 0.6 the entry
+            body.feet = start;
+            let dur = k.action.map_or(0.0, |a| a.duration());
+            if dur <= 1e-4 || k.t / dur > WAIT_PHASE {
+                k.waiting = false;
+                k.t = 0.0;
+                k.applied = [0.0; 3];
+                k.action = action(KIOSK_ACTIONS[0][k.side as usize]);
+                k.seq = k.seq.wrapping_add(1);
+            }
+            continue;
+        }
         let fwd = Vec3::new(-k.heading.sin(), 0.0, -k.heading.cos());
         let (dur, disp) = match k.action {
             Some(a) => (a.duration(), a.disp((k.t / a.duration().max(1e-4)).min(1.0))),

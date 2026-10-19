@@ -5431,6 +5431,10 @@ fn a_jump_at_a_kiosk_swings_through_its_frame_and_drops() {
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Kiosk), "never reached the kiosk: {:?} {:?}", s.loco().current, s.body().feet);
     let side = s.data().kiosk.side;
     assert!(matches!(side, KioskSide::FrontLeft | KioskSide::FrontRight), "{side:?}");
+    // the wait (0xE3EAA0): the arrival's free-step reception first, then the entry past 0.6 of it
+    assert!(s.data().kiosk.waiting);
+    assert!(s.data().kiosk.action.is_some_and(|a| crate::player::jump_blend::RECEPTION_FREESTEP.contains(&a.id)));
+    assert!(s.run_until(1.0, |s| !s.data().kiosk.waiting), "the wait never ended");
     assert_eq!(s.data().kiosk.action.map(|a| a.id), Some(KIOSK_ACTIONS[0][side as usize]));
     s.pad(Vec3::ZERO, 0.0, false, false);
     assert!(s.run_until(2.0, |s| s.data().kiosk.stage == 1), "no monkey bar");
@@ -5446,7 +5450,7 @@ fn a_lateral_kiosk_side_plays_its_entry_then_falls() {
     use crate::player::kiosk::{KioskEntry, KIOSK_ACTIONS};
     let target = Vec3::new(120.0, 3.0, 25.0);
     let mut s = Sim::new(target, -std::f32::consts::FRAC_PI_2);
-    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::X, dir: Vec3::X, facing: Vec3::X }));
+    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::X, dir: Vec3::X, facing: Vec3::X, reception: None }));
     s.run(1.0 / 60.0 + 1e-4);
     let side = s.data().kiosk.side;
     assert!(side.lateral(), "{side:?}");

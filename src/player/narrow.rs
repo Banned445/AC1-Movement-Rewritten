@@ -1851,8 +1851,12 @@ pub fn update_narrow(
                     if n.state == BeamState::Walk {
                         n.foot ^= 1;
                     }
+                    // the next item starts with the time the last one ran past its end (the evaluator's seam,
+                    // `ActionEvaluator__Advance` 0x730E50), as the walling seams do (RE/31c group 3)
+                    let over = (n.t - dur).max(0.0);
                     let w = item(BEAM_WALK, n.foot, &walk_w);
                     n.play(BeamState::Walk, w);
+                    n.t = over;
                 }
             }
             BeamState::Stop => {

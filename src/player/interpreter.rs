@@ -139,6 +139,8 @@ pub fn update_interpreter(
     // a new frame: a switch made last frame no longer skips anything (`AIActor__UpdateContexts` 0x55F6A9 cleared the
     // byte right after the update that switched; RE/24 INPUT-1)
     loco.switched_this_frame = false;
+    loco.prev_dt = loco.frame_dt;
+    loco.frame_dt = dt.min(1.0 / 20.0);
     // +0x1244 (0xEEE250): the stick's angle to the facing, only while the stick is past 0.35
     if pad.magnitude > 0.35 {
         let (s, f) = (Vec3::new(pad.dir.x, 0.0, pad.dir.z).normalize_or_zero(), body.forward());
