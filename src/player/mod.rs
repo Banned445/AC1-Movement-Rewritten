@@ -362,6 +362,9 @@ pub fn proxy_layer(mut q: Query<(&Locomotion, &HumanDataBundle, &mut Body), With
             // inside a haystack: HollywoodMode, which collides with almost nothing (every `HumanHayStack__Enter*`,
             // 0xE41D8C / 0xE421B4 / 0xE42444 / 0xE4273C); the hop out and the pass-over set Character back
             ActorContextId::HayStack => crate::layers::HOLLYWOOD_MODE,
+            // a market stall: OnlyStaticAndCameraRaycast, set directly (not through `Human__CharacterLayer`) by the
+            // context's enter `sub_E3D7F0` and restored by its exit `sub_E3EB70`
+            ActorContextId::Kiosk => crate::layers::ONLY_STATIC_AND_CAMERA_RAYCAST,
             _ => crate::layers::MAIN_CHARACTER,
         };
         if body.proxy.layer != layer {

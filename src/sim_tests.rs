@@ -2458,6 +2458,31 @@ fn beam_step_off_travels_instead_of_teleporting_to_ground() {
     assert!((s.body().feet.x - start.x - 0.8).abs() < 0.06);
 }
 
+/// The walk's step off at an end with room beyond comes before its stop (`CanStepOffBeamEnd` 0xF77C00 at 0xF7F941,
+/// then the walk → wait test 0xF747B0), and the end clamp holds 0.3 m before every end (0xF7C739): walking off a beam
+/// onto the floor beyond never stops in the wait, and the Ground goes on moving (owner's north demo, 2026-10-19).
+#[test]
+fn walking_off_a_beam_end_onto_the_floor_keeps_moving() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    let point = Vec3::new(74.0, 4.0, 70.0);
+    let mut s = Sim::new(point, crate::player::heading_of(Vec3::X));
+    force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0: Vec3::new(72.0,4.0,70.0), p1: Vec3::new(78.0,4.0,70.0),
+        point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::X }));
+    s.pad(Vec3::X, 1.0, true, true);
+    assert!(s.run_until(1.0, |s| matches!(s.data().narrow.state, BeamState::Walk | BeamState::Start)), "never walked");
+    let mut stopped = false;
+    for _ in 0..400 {
+        s.run(1.0 / 60.0 + 1e-4);
+        if s.loco().current != ActorContextId::NarrowObject {
+            break;
+        }
+        stopped |= s.data().narrow.state == BeamState::Wait;
+    }
+    assert!(!stopped, "the walk stopped in the wait before the step off");
+    assert_eq!(s.loco().current, ActorContextId::Ground);
+    assert!(s.ground().speed_param > 0.0, "the Ground goes on moving");
+}
+
 /// RE/24 NARROW-13: standing at a beam end with room beyond, the stick steps off at once (Idle → step-off state), no
 /// walk start first.
 #[test]
@@ -5540,6 +5565,31 @@ fn a_jump_at_a_kiosk_swings_through_its_frame_and_drops() {
     assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::InAir), "never left the kiosk");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never landed: {:?}", s.body().feet);
     assert!(s.body().feet.y.abs() < 0.05, "on the street: {:?}", s.body().feet);
+}
+
+/// The Kiosk's actions move the root through the character controller on OnlyStaticAndCameraRaycast (`sub_E3D7F0`
+/// sets layer 27): a front entry's monkey bar stops at a wall behind the stall instead of passing through it (owner's
+/// north demo, 2026-10-19: 2.6 m through the stall's back at (115.0 42.3)).
+#[test]
+fn a_kiosk_front_entry_does_not_pass_through_a_wall_behind_it() {
+    use crate::player::kiosk::KioskEntry;
+    let target = Vec3::new(120.0, 3.0, 25.0);
+    let wall_x = target.x + 0.8;
+    let mut s = Sim::new(target, -std::f32::consts::FRAC_PI_2);
+    s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3 {
+        min: Vec3::new(wall_x, 0.0, 20.0), max: Vec3::new(wall_x + 1.0, 6.0, 30.0) });
+    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::Z, dir: Vec3::X, facing: Vec3::X, reception: None }));
+    s.run(1.0 / 60.0 + 1e-4);
+    assert!(!s.data().kiosk.side.lateral(), "a front side");
+    let mut max_x = f32::MIN;
+    for _ in 0..300 {
+        s.run(1.0 / 60.0);
+        if s.loco().current != ActorContextId::Kiosk {
+            break;
+        }
+        max_x = max_x.max(s.body().feet.x);
+    }
+    assert!(max_x < wall_x, "the root went through the wall: {max_x} against {wall_x}");
 }
 
 /// RE/24 NARROW-18: arriving at a kiosk along its axis is a lateral side: the side entry plays and, with no ground under

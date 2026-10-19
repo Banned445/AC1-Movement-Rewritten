@@ -198,7 +198,17 @@ pub fn update_kiosk(
             Some(a) => (a.duration(), a.disp((k.t / a.duration().max(1e-4)).min(1.0))),
             None => (0.0, [0.0; 3]),
         };
-        body.feet = start + super::right_of(fwd) * disp[0] + fwd * disp[1] + Vec3::Y * disp[2];
+        // the actions' root motion goes through the character controller (`HumanKiosk` enter 0xE3D7F0 only swaps the
+        // character's collision layer to OnlyStaticAndCameraRaycast 27, restored on exit 0xE3EB70): it collides with
+        // the static world and slides along it. Before, the port set the root straight onto the clip and the front
+        // entry's monkey bar carried it through the wall behind a stall
+        let want = start + super::right_of(fwd) * disp[0] + fwd * disp[1] + Vec3::Y * disp[2];
+        if k.interp.done() {
+            let moved = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, want - b.feet, false, dt) };
+            body.feet = moved.position;
+        } else {
+            body.feet = want;
+        }
         // the lateral side (state +113, `sub_E3E3F0`; RE/24 NARROW-18): past 73 % of the side entry with a controller
         // contact underfoot it rolls onto the ground (`sub_E3E0E0` → Ground with `sub_E3DA00`: `side_freestep_to_roll`);
         // at its end without one, it falls (`sub_E3DE20`). The "jump out" 0xE3BF90 belongs to HumanRiding.
