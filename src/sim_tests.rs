@@ -960,6 +960,26 @@ fn shimmy_reaches_out_then_brings_the_hands_together() {
     assert!(s.run_until(2.0, |s| spacing(s) > 0.95), "and the next reach: {}", spacing(&s));
 }
 
+#[test]
+fn the_hands_keep_their_ik_targets_through_a_ledge_move() {
+    // `sub_DCD910` runs the limb IK through the moves of the IK sub-states (HandPlacement here): the shimmy's holds stay
+    // the hands' targets while it plays, and the clip's tags attach and release them (RE/36 D1). The port cleared them
+    // on every move frame before.
+    let mut s = hang_on_jump_up_wall();
+    s.pad(Vec3::NEG_X, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ledge.mv.is_some()), "no shimmy started");
+    let mut frames = 0;
+    while s.data().ledge.mv.is_some() && frames < 200 {
+        s.run(1.0 / 60.0);
+        let limbs = *s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap();
+        if s.data().ledge.mv.is_some() && !limbs.suspended {
+            assert!(limbs.hands.is_some(), "the move's holds stay the hand targets (frame {frames})");
+        }
+        frames += 1;
+    }
+    assert!(frames > 5, "the move ran {frames} frames");
+}
+
 /// Free-hang balcony slab: top 2.9 m, x -1..5, front edge z 35.4 (normal -Z), nothing below.
 fn hang_on_balcony() -> Sim {
     let mut s = Sim::new(Vec3::new(2.0, 0.0, 33.0), FACE_PZ);
