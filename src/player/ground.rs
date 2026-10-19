@@ -756,9 +756,15 @@ impl HumanGroundData {
         } else {
             (RUN_STOP_EXIT[0], 1)
         };
-        if self.start_transition(action, 0, dest, 1, &[], Some((turn_item.id, turn_item.item))) && !turned {
+        // both branches pass their own ActionTransition (0xD8F321, ctor 0x564B00): ASTOPBROLL 0.2 s when no longer
+        // turned (0xD8F567); still turned, its blend A stays the ctor's NONE, a cut into the turn's exit
+        if self.start_transition(action, 0, dest, 1, &[], Some((turn_item.id, turn_item.item))) {
             if let Some(t) = self.tr.as_mut() {
-                t.blend_in = Some(crate::assets::ac_actions::ActBlend { kind: 2, time: 0.2, ..crate::assets::ac_actions::ActBlend::DEFAULT });
+                t.blend_in = Some(if turned {
+                    crate::assets::ac_actions::ActBlend::default()
+                } else {
+                    crate::assets::ac_actions::ActBlend { kind: 2, time: 0.2, ..crate::assets::ac_actions::ActBlend::DEFAULT }
+                });
             }
         }
     }
@@ -2719,6 +2725,26 @@ mod reanalysis_tests {
         g.blend.lean = 0.3;
         g.play_start_move();
         assert_eq!((g.blend.slowdown, g.blend.settle, g.blend.lean), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn the_run_turn_exits_pass_their_own_transition() {
+        // `PlayRunTurnExitMove` 0xD8F2B0 passes an ActionTransition (ctor 0x564B00) in both branches: no longer turned,
+        // ASTOPBROLL 0.2 s (0xD8F567); still turned, the ctor's NONE (a cut into the turn's exit). The animator plays
+        // a passed transition as it is (no authored item transition is looked up for it, `AnimSlot__FindTransition`
+        // 0x725950), so its blend B is the ctor's NONE as well.
+        use super::super::ground_tree::{RUN_TURN, RUN_TURN_EXIT};
+        if jump_blend::action_items(RUN_TURN_EXIT[0]).is_none() {
+            return;
+        }
+        for turned in [false, true] {
+            let mut g = HumanGroundData::default();
+            let mut heading = 0.0;
+            g.run_turn_exit(ActionBlend::new(RUN_TURN[0], 0, &[1.0]), turned, &mut heading);
+            let t = g.tr.expect("the exit transition");
+            let b = t.blend_in.expect("passed by the code");
+            assert_eq!(b.kind, if turned { 0 } else { 2 }, "turned {turned}");
+        }
     }
 
     #[test]

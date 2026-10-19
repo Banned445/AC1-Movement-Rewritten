@@ -4236,6 +4236,15 @@ pub(crate) fn lab_teleport_skip(positions: &[Vec3]) -> usize {
     positions.windows(2).rposition(|w| w[0].distance(w[1]) > 5.0).map_or(0, |i| i + 1)
 }
 
+/// The clip column of a `port_trace.csv` row: the requested action (`AnimPlayer::clip`), or with `AC_LAB_ITEM_LABELS=1`
+/// the playing item's action, as the game's action column names the slot's playing action (a transition action queued
+/// in front of the request included), so `bone_errors.py` pairs those frames with the game's.
+pub(crate) fn lab_trace_clip(world: &World, player: Entity) -> String {
+    let p = world.get::<crate::anim::AnimPlayer>(player);
+    let item = p.filter(|_| std::env::var_os("AC_LAB_ITEM_LABELS").is_some()).and_then(|p| p.playing_action_label());
+    item.or_else(|| p.and_then(|p| p.clip.clone())).unwrap_or_default()
+}
+
 /// `port_trace.csv`'s columns.
 pub(crate) const LAB_TRACE_HEADER: &str = "frame,time,ctx,clip,x,y,z,hspeed,\
     head_f,head_r,head_u,spine_f,spine_r,spine_u,lh_f,lh_r,lh_u,rh_f,rh_r,rh_u,lf_f,lf_r,lf_u,rf_f,rf_r,rf_u\n";
@@ -4293,7 +4302,7 @@ fn replay_lab_trace() {
         s.app.world_mut().resource_mut::<CameraRig>().yaw = frame.cam_yaw;
         s.app.update();
         t += frame.dt_nanos as f32 * 1e-9;
-        let clip = s.app.world().get::<crate::anim::AnimPlayer>(s.player).and_then(|p| p.clip.clone()).unwrap_or_default();
+        let clip = lab_trace_clip(s.app.world(), s.player);
         out.push_str(&lab_trace_row(i, t, s.loco().current, &clip, s.body().feet - start, s.body().velocity, s.app.world(), s.player));
     }
     let dst = std::path::Path::new(&path).with_file_name("port_trace.csv");
