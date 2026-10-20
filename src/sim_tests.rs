@@ -1617,6 +1617,58 @@ fn pull_down_from_the_ledge_stop_uses_the_edge_stop_orientation() {
     assert_eq!(s.loco().current, ActorContextId::Ledge);
 }
 
+/// M3 group 10: the pull-down's stages hand over within the frame (`HumanLedge__PullDown_Update` 0xDDE980: a stage ends
+/// when its RootInterp reaches 1 after this frame's dt and the next action plays at once, and the animation update moves
+/// it by the same dt), and the ground pull-down's orientation takes the switch frame too (lab 10-12 `roof_jogoff_high`
+/// 003, 10-17 `hay43_letgo` 005: the port's orientation and descent each ran a frame longer than the game's).
+#[test]
+fn the_pull_down_stages_hand_over_within_the_frame() {
+    use crate::player::ledge_moves::MoveKind;
+    const DT: f32 = 1.0 / 60.0;
+    let mut s = Sim::new(Vec3::new(-11.0, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, true, false);
+    assert!(s.run_until(3.0, |s| s.ground().ledge_stop.is_some()));
+    assert!(s.run_until(0.5, |s| s.loco().current == ActorContextId::Ledge), "no pull-down");
+    // whichever way the chain runs, one frame after the switch frame the orientation has had both frames' time
+    s.run(DT + 1e-4);
+    let mv = s.data().ledge.mv.expect("orientation");
+    assert_eq!(mv.kind, MoveKind::PullDown { stage: 1 });
+    assert!((mv.t - 2.0 * DT).abs() < 1e-3, "the orientation's clock after the switch frame and one more: {}", mv.t);
+    // the descent's first frame already carries its time
+    assert!(s.run_until(1.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::PullDown { stage: 2 })));
+    let t = s.data().ledge.mv.unwrap().t;
+    assert!(t > 0.5 * DT && t <= DT + 1e-4, "the descent started with the frame's dt: {t}");
+}
+
+/// M3 group 10: the pivot's foot is `PickLocomotionFoot` 0xD86760 on the item playing as the frame starts (0xDA62C2): its
+/// word's foot bits, else the pose's leading foot (lab 10-17 `roof_jogoff_high` 035: the free-step stay's transition into
+/// the right wait, word 0x0FC0, with the left foot ahead → `h_wait_hipm_footl_to_h_waitturn_left_090_footl`).
+#[test]
+fn the_wait_turn_takes_the_foot_of_the_item_playing_as_the_frame_starts() {
+    use crate::player::ground::pivot_foot;
+    // a transition without foot bits into the right wait (column 1), the left foot ahead: the left turn
+    assert_eq!(pivot_foot(Some(Some(0x0FC0)), 0.0, 1, None, 0, 1), 0);
+    // foot bits win over the pose: 0x0FC8 right ahead, 0x0FC4 left ahead
+    assert_eq!(pivot_foot(Some(Some(0x0FC8)), 0.0, 0, None, 0, 0), 1);
+    assert_eq!(pivot_foot(Some(Some(0x0FC4)), 0.0, 1, None, 1, 1), 0);
+    // Idle's plain wait: its own column
+    assert_eq!(pivot_foot(None, 0.0, 1, Some(0x0FC4), 0, 0), 1);
+    // walking (no item in front of the locomotion): the locomotion item's word
+    assert_eq!(pivot_foot(None, 0.25, 0, Some(0x0FC8), 0, 0), 1);
+    // parallel feet (0x0FCC) have no player turn column: the locomotion's foot
+    assert_eq!(pivot_foot(Some(Some(0x0FCC)), 0.0, 0, None, 0, 1), 1);
+}
+
+/// M3 group 10: the port's ledge-stop lock (a stand-in) ends when the Ground is left: pulled down and back up with the
+/// stick still toward the same edge, the game stops there again (lab 10-12 `roof_jogoff_high` 003, 10-17 035).
+#[test]
+fn the_ledge_stop_lock_ends_when_the_ground_is_left() {
+    let mut g = crate::player::ground::HumanGroundData::default();
+    g.ledge_stop_lock = Some(Vec3::X);
+    g.enter(None);
+    assert!(g.ledge_stop_lock.is_none());
+}
+
 #[test]
 fn leap_of_faith_into_the_haystack_then_hop_out() {
     use crate::player::hay::{HayPhase, HAYSTACK_FAITH_LANDING, HAYSTACK_HOP_OUT, HAYSTACK_WAIT};

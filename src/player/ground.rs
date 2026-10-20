@@ -918,6 +918,10 @@ impl HumanGroundData {
         self.turn_k = PLAYER_TURN_BAND_K0;
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
+        // the stand-in lock ends with the Ground (lab 10-12 `roof_jogoff_high` 003, 10-17 035: pulled down, climbed back
+        // up with the stick held toward the same edge, the game stops there again; a re-stop within one Ground stay is
+        // still the M5 live check)
+        self.ledge_stop_lock = None;
         self.wall_start = None;
         self.impulsion_jump = None;
         self.collide = None;
@@ -1322,6 +1326,9 @@ pub fn update_ground(
         // (`free_step.rs`, SubState 6), which hands over to the Ground when the action is done (`CheckSupportAndFall`
         // 0xE51190); their authored exits (`freestep_entry_tr_*`, entered with a cut) start from its last frame.
         let gated = !GAME_GROUND_TREE || g.owner == TreeState::Other;
+        // the item playing as the frame starts: the turn below reads it (`PickLocomotionFoot` in `Pivot_Enter`) even when
+        // this frame's start drops it
+        let frame_word = (g.tr.is_some() || g.oneshot.is_some()).then(|| g.playing_word());
         if mv_speed > 0.0
             && gated
             && g.ledge_stop.is_none()
@@ -1484,7 +1491,8 @@ pub fn update_ground(
             // destination profile HG+1504 to the current one HG+1500, so the player only plays the low → low and
             // high → high turns
             let to_high = if GAME_GROUND_TREE { prev_high } else { g.high_profile };
-            let id = PIVOT[(!left) as usize][prev_high as usize][to_high as usize][(g.blend.foot != 0) as usize];
+            let foot = pivot_foot(frame_word, g.speed_param, g.wait_foot, g.playing_word(), leading_foot.unwrap_or(g.blend.foot), g.blend.foot);
+            let id = PIVOT[(!left) as usize][prev_high as usize][to_high as usize][foot];
             let w = ((pivot_off - std::f32::consts::FRAC_PI_2) / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
             if jump_blend::action_items(id).is_some() {
                 g.play_oneshot(ActionBlend::new(id, 0, &[1.0 - w, w]));
@@ -2493,6 +2501,26 @@ fn try_pulldown(feet: Vec3, forward: Vec3, guidance: &GuidanceWorld, collision: 
 const GRAB_PROBE_RADIUS: f32 = 0.75;
 /// Event 68 guard 0xD84190: the edge must be at least 0.53 m above the feet.
 const GRAB_MIN_HEIGHT: f32 = 0.53;
+
+/// The pivot's foot column (`HumanGround__Pivot_Enter` 0xDA6150 → `HumanGround__PickLocomotionFoot` 0xD86760 at 0xDA62C2):
+/// the word bits 2–3 of the item playing as the frame started (`frame_word`; a transition into the wait that this
+/// frame's stick drops still counts), else the pose's leading foot `lead`; in Idle's plain wait (no item, speed 0) the
+/// wait's own column; else the locomotion item's word. Lab 10-17 `roof_jogoff_high` 035: after the free-step stay's
+/// `freestep_entry_footl_tr_h_wait_footr` (word 0x0FC0) with the left foot ahead, `h_wait_hipm_footl_to_h_waitturn_left`
+/// although the wait it leads to is the right one. The parallel column (2) has no player turn (RE/02 §4.3): the
+/// locomotion's foot then. PORT: the flip for the six actions 0xD8680E names (none of them movement actions the lab
+/// records) is not ported.
+pub fn pivot_foot(frame_word: Option<Option<u16>>, speed_param: f32, wait_foot: usize, playing_word: Option<u16>, lead: usize, blend_foot: usize) -> usize {
+    let picked = match frame_word {
+        Some(w) => super::ground_tree::pick_locomotion_foot(w, lead),
+        None if speed_param <= 0.0 => wait_foot,
+        None => super::ground_tree::pick_locomotion_foot(playing_word, lead),
+    };
+    match picked {
+        f @ 0..=1 => f,
+        _ => (blend_foot != 0) as usize,
+    }
+}
 
 /// The ledge stop's squared edge distance: the interpreter passes 0.0225 (0.15 m) to `ClassifyEdgeSide` (vt744,
 /// 0xEE8899), which compares it with the signed squared distance to the report point (0xD9D7F0).

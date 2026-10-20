@@ -917,6 +917,18 @@ pub fn update_ledge(
         if loco.just_switched {
             loco.just_switched = false;
             limbs.feet = None;
+            // the pull-down's orientation moves in the switch frame already (lab 10-12 `roof_jogoff_high` 003, 10-17
+            // `hay43_letgo` 005: the root's first Ledge frame carries the RootInterp's step; the port's orientation ran a
+            // frame longer than the game's in both): the ground pull-down takes the switch frame's dt (`switch_owed`). The other Ledge
+            // entries keep the switch frame (M3 group 4)
+            let d = &mut data.ledge;
+            if let Some(mut mv) = d.mv.filter(|m| loco.previous == ActorContextId::Ground && m.t == 0.0 && matches!(m.kind, ledge_moves::MoveKind::PullDown { .. })) {
+                let (p, _) = mv.advance(loco.switch_owed());
+                loco.owed_given = true;
+                body.feet = p;
+                body.heading = heading_of(mv.facing());
+                d.mv = Some(mv);
+            }
             if loco.switched_this_frame {
                 continue;
             }
@@ -1133,8 +1145,15 @@ pub fn update_ledge(
             }
             if done && !d.queue.is_empty() {
                 // next queued stage (pull-down: orientation → descent → reception)
+                // `HumanLedge__PullDown_Update` 0xDDE980: a stage ends when its RootInterp reaches 1 after this frame's dt
+                // (0xDDE9FD / 0xDDEA11) and the next action is played at once; the animation update after the AI then
+                // advances it by the same dt (lab 10-12 `roof_jogoff_high` 003: the descent's first frame already
+                // carries its clip motion). So the next stage takes this frame's dt too
                 let mut next = d.queue.remove(0);
                 next.from = body.feet;
+                let (p, _) = next.advance(dt);
+                body.feet = p;
+                body.heading = heading_of(next.facing());
                 d.mv = Some(next);
                 continue;
             }
