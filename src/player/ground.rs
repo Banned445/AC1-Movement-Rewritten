@@ -891,6 +891,14 @@ impl HumanGroundData {
                         self.blend.speed_param = self.speed_param;
                         self.enter_move(ended, 1);
                     }
+                } else if super::climb::CLIMB_TO_GROUND_B.contains(&ended.id) {
+                    // the climb's drop to the ground (+4612 clear) hands the Ground setup mode 1 (0xDE9E59 →
+                    // `TransitionSetupDataToMovement` +16 = 1): Idle in the high profile, HG+1500 = 1, whatever the
+                    // stick's profile; a low-profile stick then changes back through the stance-change wait, and a
+                    // turn before that is the high one (A03, lab 10-17 `climb10_lowhold`: `climb_1m_tr_h_wait_*`, then
+                    // `h_wait` and `h_waitturn_*`)
+                    self.enter_wait(ended, true);
+                    self.wait_high = true;
                 } else {
                     self.enter_wait(ended, high);
                 }

@@ -4816,6 +4816,24 @@ fn climbing_down_to_the_bottom_steps_off_onto_the_ground() {
     assert_eq!(one.blend.id, climb::CLIMB_TO_GROUND_B[(pose == 3) as usize]);
 }
 
+/// A03: the climb's drop to the ground hands the Ground setup mode 1 (`HumanClimb__FillGround_FromClimb` 0xDE9C60,
+/// 0xDE9E59): the high-profile Idle, with the stick in the low profile too (lab 10-17 `climb10_lowhold`: then `h_wait`
+/// and `h_waitturn_*`), before the stance change back to the low wait.
+#[test]
+fn the_climb_drop_to_the_ground_stands_in_the_high_wait() {
+    let mut s = Sim::new(Vec3::new(-20.5, 0.0, 26.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Climb));
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(10.0, |s| s.data().climb.foot_l.y.min(s.data().climb.foot_r.y) > 2.0), "never climbed up");
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    assert!(s.run_until(15.0, |s| s.data().climb.to_ground), "never climbed down to the ground");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::Ground));
+    assert!(s.run_until(3.0, |s| s.ground().oneshot.is_none()), "the _b action never ended");
+    assert!(s.ground().wait_high, "the drop's setup stands in the high wait");
+}
+
 #[test]
 fn pulling_up_at_the_end_of_a_wall_uses_one_hand() {
     use crate::player::ledge_moves::{ACT_KNEE_ONEHAND_TO_FREESTEP, ACT_PULLUP_WALL, ACT_PULLUP_WALL_ONEHAND, MoveKind};
