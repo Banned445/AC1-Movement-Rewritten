@@ -257,8 +257,9 @@ pub fn lean_stick(stick: Vec3, normal: Vec3) -> Vec3 {
 pub enum CollideOut {
     Stay,
     /// Leave through these actions (root motion), then Movement at `speed` (0 = standing). `face`: the facing the
-    /// exit ends in (its clips turn the character away; the port takes the stick direction, clamped to along the
-    /// obstacle, since the clips' root yaw is not dumped (hypothesis)), applied when `then` starts.
+    /// exit ends in, applied when `then` starts: only a fallback for an exit whose clips carry no root yaw (the dumped
+    /// exits turn the body by theirs, back π / side π/2, in the exit's start frame; ground.rs `face_next`); the port
+    /// takes the stick direction, clamped to along the obstacle.
     Leave { first: Option<ActionBlend>, then: Option<ActionBlend>, speed: f32, face: Option<Vec3> },
 }
 

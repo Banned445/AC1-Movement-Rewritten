@@ -3320,6 +3320,52 @@ fn a_blocked_approach_side_turns_onto_the_far_side() {
     assert!(s.body().forward().dot(Vec3::NEG_Z) > 0.99, "facing the ladder from the far side");
 }
 
+/// A15: the back-approach turn ends through the ground entry's state (`HumanLadder__StateEntry_Update`, then
+/// `sub_E1D7C0` at 0xE27DE5), so its item b's feet bits (word 0x0FC0) pick the wait column r after either turn (lab
+/// `ladder_bureau_up` `turn_r` and `ladder_footm` `turn_l`, both then `ladder_wait_r`).
+#[test]
+fn both_back_approach_turns_end_in_the_right_hand_wait() {
+    use crate::player::ladder::{LadderEntry, LadderPhase, TURN, WAIT};
+    let (base, top) = (Vec3::new(50.0, 0.0, 63.5), Vec3::new(50.0, 5.0, 63.5));
+    for left in [true, false] {
+        let from = Vec3::new(50.0, 0.0, 62.6);
+        let mut s = Sim::new(from, FACE_PZ);
+        force(&mut s, crate::player::TransitionSetup::ToLadder(LadderEntry { base, top, n: Vec3::Z, from, facing: Vec3::Z, back_turn: Some(left), foot: 0, ..Default::default() }));
+        assert_eq!(s.data().ladder.action.map(|a| a.id), Some(TURN[(!left) as usize]));
+        assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "never settled: {:?}", s.data().ladder.phase);
+        assert_eq!(s.data().ladder.action.map(|a| a.id), Some(WAIT[0][1]), "turn {}: the wait r", if left { "a (0x0A64400C)" } else { "b (0x0A64400D)" });
+    }
+}
+
+/// A19: the root tables are sampled at the clips' key rate, 1/30 s (at least the old 9 samples), so a long start such
+/// as the 3.2 s `h_wait_footl_tr_l_walk_slow_footr` keeps its acceleration instead of 0.4 s straight segments.
+#[test]
+fn the_root_tables_are_sampled_at_the_key_rate() {
+    for c in crate::player::jump_clips::CLIPS {
+        // intervals: ceil(30 T), at least 8 (the duration is printed to 4 places, so allow the rounding)
+        let n = (c.disp.len() - 1) as f32;
+        assert!(n >= 8.0 && n >= c.duration * 30.0 - 0.01 && n < (c.duration * 30.0).max(8.0) + 1.0, "{}: {} samples for {} s", c.name, c.disp.len(), c.duration);
+        assert_eq!(c.yaw.len(), c.disp.len(), "{}", c.name);
+    }
+    let start = crate::player::jump_blend::clip("xx_h_wait_footl_tr_l_walk_slow_footr").expect("the high wait's start");
+    assert!(start.disp.len() >= 97, "{} samples over {} s", start.disp.len(), start.duration);
+}
+
+/// A02: the knee's stand-up onto the top follows the playing item's feet bits (0xDD2AA8: left ahead → 0x248E9730,
+/// else 0x248E9731), so a climb's knee transition on the right foot stands up on the right foot.
+#[test]
+fn the_knee_stand_up_takes_the_foot_of_the_item_before_it() {
+    use crate::player::ledge_moves::{knee_stand_after, single_item, ACT_KNEE_TO_FREESTEP};
+    use crate::player::jump_blend::action_items;
+    // every action whose item words say left / right ahead picks its own side
+    let left = single_item(ACT_KNEE_TO_FREESTEP[0], 0);
+    let right = single_item(ACT_KNEE_TO_FREESTEP[1], 0);
+    assert!(action_items(ACT_KNEE_TO_FREESTEP[0]).is_some());
+    assert_eq!(knee_stand_after(left).map(|a| a.id), Some(ACT_KNEE_TO_FREESTEP[0]), "left ahead (word 0x0FC4)");
+    assert_eq!(knee_stand_after(right).map(|a| a.id), Some(ACT_KNEE_TO_FREESTEP[1]), "right ahead (word 0x0FC8)");
+    assert_eq!(knee_stand_after(None).map(|a| a.id), Some(ACT_KNEE_TO_FREESTEP[0]), "no item: the left one");
+}
+
 /// RE/24 LADDER-5: the ground entry attaches at the nearest rung to the root's height, 0.5 m higher in high profile.
 #[test]
 fn a_ground_entry_attaches_at_the_rung_and_higher_in_high_profile() {
@@ -4713,7 +4759,10 @@ fn climbing_up_to_a_top_edge_climbs_out_onto_the_roof() {
     assert_eq!(mv.seq[0].map(|a| a.id), Some(CLIMB_OUT[(pose == 3) as usize]), "1m / 2m by the pose ({pose})");
     assert_eq!(mv.seq[1].map(|a| a.id), Some(CLIMB_OUT[(pose == 3) as usize]), "both items of the action");
     assert!((mv.to.y - 9.6).abs() < 0.05 && (mv.to.z - 27.1).abs() < 0.05, "knee on the edge, 0.1 m in: {:?}", mv.to);
-    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_some_and(|m| m.seq[0].map(|a| a.id) == Some(ACT_KNEE_TO_FREESTEP[0]))));
+    // the stand-up by the climb-out's item b feet bits (A02, 0xDD2AA8; lab `probeS_climb24`: `hangknee_footr_tr_freestep_entry_footr`)
+    let stand = crate::player::ledge_moves::knee_stand_after(mv.seq[1]).map(|a| a.id);
+    assert!(stand.is_some_and(|id| ACT_KNEE_TO_FREESTEP.contains(&id)));
+    assert!(s.run_until(4.0, |s| s.data().ledge.mv.is_some_and(|m| m.seq[0].map(|a| a.id) == stand)));
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground));
     assert!(s.body().feet.y > 9.5 && s.body().feet.z > 27.0, "standing on the roof: {:?}", s.body().feet);
 }

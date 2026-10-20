@@ -952,7 +952,11 @@ pub fn update_ladder(
                             if matches!(a.id,CATCH_AIR|ARRIVE_TARGET) { l.blend_time=0.0; } // DataPC item blend NONE.
                         }
                         None => {
-                            if phase == LadderPhase::EnterGround {
+                            // the back-approach turn ends through the same state as the ground entry
+                            // (`HumanLadder__StateEntry_Update`, then `sub_E1D7C0` at 0xE27DE5): its item b's feet bits
+                            // (word 0x0FC0) pick the wait column r after both turns (A15, lab `ladder_footm`: `turn_l` then
+                            // `ladder_wait_r`)
+                            if phase == LadderPhase::EnterGround || l.action.is_some_and(|a| TURN.contains(&a.id)) {
                                 l.foot_from_entry();
                                 // the climb frame again (the entry played in the character's start frame)
                                 l.fwd = -l.n;

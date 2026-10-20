@@ -553,14 +553,14 @@ impl ActionBlend {
     /// Blended root yaw at `phase` (radians, + = left): the DISPLACEMENT track's rotation, which turns the character
     /// when the item is FROMANIM (the pivots, the lean exits …).
     pub fn yaw(&self, phase: f32) -> f32 {
-        let x = phase.clamp(0.0, 1.0) * 8.0;
-        let i = (x.floor() as usize).min(7);
-        let s = x - i as f32;
         self.clips()
             .iter()
             .zip(self.weights())
             .filter(|(_, w)| **w > 0.0)
-            .filter_map(|(n, w)| clip(n).map(|c| (c.yaw[i] + (c.yaw[i + 1] - c.yaw[i]) * s) * w))
+            .filter_map(|(n, w)| clip(n).map(|c| {
+                let (i, s) = sample_at(c.yaw.len(), phase);
+                (c.yaw[i] + (c.yaw[i + 1] - c.yaw[i]) * s) * w
+            }))
             .sum()
     }
 }
@@ -601,10 +601,17 @@ pub fn item_duration(clips: &[&str], w: &[f32]) -> f32 {
     clips.iter().zip(w).filter_map(|(n, w)| clip(n).map(|c| c.duration * w)).sum()
 }
 
+/// The interval and the fraction in it for `phase` in a table of `n` evenly spaced samples (`jump_clips.rs`: the clips'
+/// key rate, 1/30 s, at least 9 samples; A19).
+fn sample_at(n: usize, phase: f32) -> (usize, f32) {
+    let last = n.max(2) - 1;
+    let x = phase.clamp(0.0, 1.0) * last as f32;
+    let i = (x.floor() as usize).min(last - 1);
+    (i, x - i as f32)
+}
+
 fn sample(c: &ClipRoot, phase: f32) -> [f32; 3] {
-    let x = phase.clamp(0.0, 1.0) * 8.0;
-    let i = (x.floor() as usize).min(7);
-    let s = x - i as f32;
+    let (i, s) = sample_at(c.disp.len(), phase);
     let (a, b) = (c.disp[i], c.disp[i + 1]);
     [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s]
 }
