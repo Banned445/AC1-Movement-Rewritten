@@ -383,6 +383,22 @@ impl HumanLadderData {
         self.seq = self.seq.wrapping_add(1);
     }
 
+    /// The frame's time left after the step before ended (`over`, seconds) runs in the new step: through its B-stop hold
+    /// first, the rest on its clock. The animation runs the next item within the frame (`AnimComponent__RunStages` with
+    /// the frame's dt), so a step seam loses no time (lab 10-12 `ladder_footm`: the game's 0.40 s steps end at 2.5485 /
+    /// 2.9501 / 3.3498 s; restarting each step at 0 put the port 4–5 ms behind per seam, as the beam walk's items were,
+    /// RE/31c g4 A18).
+    fn start_with(&mut self, over: f32) {
+        if over <= 0.0 {
+            return;
+        }
+        let rest = over - self.hold;
+        self.hold = (self.hold - over).max(0.0);
+        if rest > 0.0 {
+            self.t += rest * if self.rate > 0.0 { self.rate } else { 1.0 };
+        }
+    }
+
     /// 0xE23F70 / 0xE0BB70: interpolation advances independently of the action chain.
     pub fn advance_catch_root(&mut self, body: &mut Body, dt: f32) {
         if let Some((from,to,h0,h1,ref mut t,duration)) = self.warp {
@@ -592,6 +608,20 @@ pub fn find_ladder_catch(feet: Vec3, dir: Vec3, grab: bool, guidance: &GuidanceW
     Some(LadderEntry { base, top, n: out, from: feet, facing: -out, catch_out: Some(out), from_ledge: true, height: Some(h), action: Some(CATCH_AIR), chain: true, ..Default::default() })
 }
 
+/// The segment `Human__CanGrabLadder` 0xB239D0 measures to: the ladder entity's own axis (its matrix translation … + H·Z,
+/// 0xB23A3C–0xB23AA4), found as the entity axis lying within 2 cm of the guidance line's base and top; the guidance line
+/// (base, top) when there is none (a map without entities). The guidance line lies 5 mm off the axis along each of the
+/// entity's local axes (`city::decode::ladder_axis_of`), so the reach crossed a frame or two apart (RE/31c g10
+/// `ladder_footm`). The entry's frame (attach point, side, top entry) stays the guidance line's.
+pub fn grab_axis(base: Vec3, top: Vec3, guidance: &GuidanceWorld) -> (Vec3, Vec3) {
+    guidance
+        .ladders
+        .iter()
+        .copied()
+        .find(|&(b, t)| b.distance(base) < 0.02 && t.distance(top) < 0.02)
+        .unwrap_or((base, top))
+}
+
 /// The wall run's ladder (`GoAssassinActionInterpreter__WallingState` 0xEE05E0 with the Ladder ability `sub_D32600`):
 /// the search `sub_EDFBC0`(1) needs the stick (> 0) and takes a ladder whose segment (base … top + 0.5 m) passes within
 /// √20 m of the root, its nearest point within 90° of the stick. IHumanWalling slot 7 (`sub_E36420` → `sub_E34160`) accepts
@@ -618,8 +648,9 @@ pub fn find_wall_run_ladder(feet: Vec3, stick: Vec3, guidance: &GuidanceWorld) -
         if to.length() > 1e-3 && to.normalize().angle_between(stick) >= std::f32::consts::FRAC_PI_2 {
             continue;
         }
-        // Human__CanGrabLadder: within 0.6 m of the segment, on its front
-        let q = Vec3::new(base.x, feet.y.clamp(base.y, top.y), base.z);
+        // Human__CanGrabLadder: within 0.6 m of the ladder entity's axis, on its front
+        let (axis_base, axis_top) = grab_axis(base, top, guidance);
+        let q = axis_base + (axis_top - axis_base) * ((feet - axis_base).dot(axis_top - axis_base) / (axis_top - axis_base).length_squared().max(1e-8)).clamp(0.0, 1.0);
         let d = Vec3::new(feet.x - q.x, 0.0, feet.z - q.z);
         if feet.distance(q) > 0.6 || (d.length() > 1e-3 && d.normalize().dot(n) < 0.0) {
             continue;
@@ -684,17 +715,18 @@ pub fn find_ladder(feet: Vec3, head: Option<Vec3>, stick: Vec3, forward: Vec3, g
         if to.length() > 1e-4 && to.normalize().dot(stick) < 0.0 {
             continue;
         }
-        // CanGrabLadder: the root or the head within reach of base … top
-        let q = closest(base, top, feet);
+        // CanGrabLadder: the root or the head within reach of the ladder entity's axis (`grab_axis`)
+        let (axis_base, axis_top) = grab_axis(base, top, guidance);
+        let q = closest(axis_base, axis_top, feet);
         let head = head.unwrap_or(feet + Vec3::Y * 1.7);
-        if (feet - q).length() > REACH && (head - closest(base, top, head)).length() > REACH {
+        if (feet - q).length() > REACH && (head - closest(axis_base, axis_top, head)).length() > REACH {
             continue;
         }
         let away = flat(feet - q);
         if away.length() > 1e-4 && away.normalize().dot(-forward) < 0.0 {
             continue;
         }
-        let from_top = (feet.y - top.y).abs() <= TOP_ENTRY_BAND;
+        let from_top = (feet.y - axis_top.y).abs() <= TOP_ENTRY_BAND;
         // the climb side: toward the climber from the foot (LADDER-3), away from him from the top (LADDER-23,
         // 0xE26DDD–0xE26DE7: the side opposite the character's, `top_entry_side` then tests its box)
         let mut n = flat(e.n1).normalize_or_zero();
@@ -840,8 +872,11 @@ pub fn update_ladder(
         }
         let l = &mut data.ladder;
         if l.hold > 0.0 {
-            // an ASTOPBSTOP seam: B waits on its start frame (RE/36 A7)
-            l.hold = (l.hold - dt).max(0.0);
+            // an ASTOPBSTOP seam: B waits on its start frame (RE/36 A7); the frame's time past the hold runs its clock
+            let hold = l.hold;
+            l.hold = 0.0;
+            l.start_with(dt - hold);
+            l.hold = (hold - dt).max(0.0);
         } else {
             l.t += dt * if l.rate > 0.0 { l.rate } else { 1.0 };
         }
@@ -1127,6 +1162,8 @@ pub fn update_ladder(
                     }
                 }
                 if !stepping {
+                    // the time this frame ran past a finished step (seconds), carried into the next one (`start_with`)
+                    let over = if matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) && done { (l.t - dur) / if l.rate > 0.0 { l.rate } else { 1.0 } } else { 0.0 };
                     // the next step's foot. The game picks the exits, release and jump by the lower foot instead
                     // (`Human__GetLowerFoot` 0xB188F0 in `HumanLadder__PlayExit` 0xE254C0): at every step seam and in the
                     // waits that is this foot (the exit `climb_up_X_tr_…` starts where step X starts)
@@ -1167,6 +1204,7 @@ pub fn update_ladder(
                             l.play(LadderPhase::ClimbUp, blend(CLIMB_UP[hi], l.foot, &[]), from, to, true);
                             l.rate = rate;
                             l.hold = step_seam_hold(prev, CLIMB_UP[hi]);
+                            l.start_with(over);
                         }
                     } else if along < -0.5 {
                         let step = if l.high { 1.0 } else { 0.5 };
@@ -1181,6 +1219,7 @@ pub fn update_ladder(
                             l.play(LadderPhase::ClimbDown, blend(CLIMB_DOWN[hi], l.foot, &[]), from, to, true);
                             l.rate = rate;
                             l.hold = step_seam_hold(prev, CLIMB_DOWN[hi]);
+                            l.start_with(over);
                         }
                     } else if phase != LadderPhase::Wait || done {
                         l.wait();
@@ -1304,6 +1343,26 @@ mod catch_tests {
         let mut wall = CollisionWorld::default();
         wall.boxes.push(Aabb3 { min: Vec3::new(-1.0, 0.0, 0.05), max: Vec3::new(1.0, 5.0, 2.0) });
         assert_eq!(top_entry_side(base, top, n, &wall), -n, "blocked: the near side");
+    }
+    /// `Human__CanGrabLadder` 0xB239D0 measures the reach to the ladder entity's own axis (0xB23AA4), which lies a few
+    /// millimetres from the guidance line: a walk-in 0.603 m from the line and 0.596 m from the axis grabs.
+    #[test]
+    fn the_ladder_reach_is_measured_to_the_entity_axis() {
+        use crate::guidance::GuidanceEdge;
+        let (base, top) = (Vec3::ZERO, Vec3::Y * 8.5);
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: base, p1: top, n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::Ladder });
+        // the root on the guidance front (−Z), the head over it, facing the ladder
+        let feet = Vec3::new(0.0, 0.0, -0.603);
+        assert!(find_ladder(feet, Some(feet + Vec3::Y * 1.5), Vec3::Z, Vec3::Z, &g).is_none(), "0.603 m from the line");
+        // the entity's axis 7 mm toward the climber (5 mm along two local axes, 5 mm down)
+        let off = Vec3::new(0.005, -0.005, -0.005);
+        g.ladders.push((base + off, top + off));
+        assert_eq!(grab_axis(base, top, &g), (base + off, top + off));
+        let (b, t, _, from_top) = find_ladder(feet, Some(feet + Vec3::Y * 1.5), Vec3::Z, Vec3::Z, &g).expect("within reach of the axis");
+        assert_eq!((b, t, from_top), (base, top, false), "the entry keeps the guidance line's frame");
+        // another ladder's axis is not taken
+        assert_eq!(grab_axis(base + Vec3::X, top + Vec3::X, &g), (base + Vec3::X, top + Vec3::X));
     }
     #[test]
     fn rung_truncation_has_no_epsilon_and_strict_top_limit() {

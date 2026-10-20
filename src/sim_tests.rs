@@ -6698,6 +6698,32 @@ fn a_ladder_step_from_the_wait_holds_its_first_frame_then_climbs() {
     assert!(s.body().feet.y > y0 + 0.05, "climbing after the seam: {y0} → {}", s.body().feet.y);
 }
 
+/// The animation runs the next item within the frame, so a ladder step that ends mid-frame starts the next one with the
+/// rest of the frame (lab 10-12 `ladder_footm`: the game's 0.40 s steps end at 2.5485 / 2.9501 / 3.3498 s, no time lost
+/// at the seams).
+#[test]
+fn the_next_ladder_step_starts_with_the_rest_of_the_frame() {
+    use crate::player::ladder::LadderPhase;
+    let mut s = on_the_ladder();
+    // a frame that does not divide the step: each seam falls inside a frame
+    let dt = 0.013;
+    s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(dt)));
+    s.pad(Vec3::Z, 1.0, false, false);
+    let (mut seams, mut seq) = (0, s.data().ladder.seq);
+    for _ in 0..200 {
+        s.app.update();
+        let l = &s.data().ladder;
+        if l.seq != seq {
+            seq = l.seq;
+            if l.phase == Some(LadderPhase::ClimbUp) && seams < 3 && l.t > 0.0 {
+                assert!(l.t < dt + 1e-4, "the carried rest is under a frame: {}", l.t);
+                seams += 1;
+            }
+        }
+    }
+    assert!(seams >= 2, "step seams carried: {seams}");
+}
+
 /// RE/24 LADDER-15: the revolve sub-state takes events 0 and 1 (`HumanLadder__MainB_HandleEvent` 0xE1F760): the empty
 /// hand drops off mid-swing.
 #[test]

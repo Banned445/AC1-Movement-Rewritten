@@ -452,6 +452,44 @@ mod tests {
         for (n, k) in v.iter().take(25) { println!("{k:5} {n}"); }
     }
 
+    /// The ladder entities (a body with a Ladder guidance edge; RE/31c g11): the entity's origin and Z row against its
+    /// guidance line (the line's base in the entity's local frame: −5 mm on each axis at every Damascus ladder), the
+    /// line's length and the body's stored heights (two floats equal to LadderHeight, every ladder), game coordinates.
+    #[test]
+    #[ignore]
+    fn probe_ladder_entities() {
+        let Some(w) = damascus() else { return };
+        for cell in 0..w.data.grid.cells.len() {
+            let c = &w.data.grid.cells[cell];
+            let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+            let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+            let Some(entry) = w.data.archives.find(a, &file) else { continue };
+            let Ok(res) = w.data.archives.file(a, entry) else { continue };
+            for r in res.values() {
+                for body in decode::bodies(r) {
+                    let Ok(m) = decode::placement(body) else { continue };
+                    let mut ladder = Vec::new();
+                    for g in decode::markers(body, "GuidanceSystem") {
+                        let Some(start) = g.checked_sub(4) else { continue };
+                        let Ok(parsed) = crate::assets::world::parse_guidance(&body[start..]) else { continue };
+                        let p = crate::assets::world::NativePlacement { id: parsed.id, name: r.name.clone(), transform: m, guidance: parsed };
+                        ladder.extend(p.world_edges().into_iter().map(|(_, e)| e).filter(|e| e.subtype == crate::guidance::GuidanceSubType::Ladder));
+                    }
+                    let Some(e) = ladder.first() else { continue };
+                    let g = |v: Vec3| Vec3::new(v.x, -v.z, v.y);
+                    let (p0, p1) = if e.p0.y <= e.p1.y { (g(e.p0), g(e.p1)) } else { (g(e.p1), g(e.p0)) };
+                    let local = m.inverse().transform_point3(p0);
+                    // the heights the body stores (whole or half metres, 2–20 m)
+                    let heights: Vec<f32> = (0..body.len().saturating_sub(4)).map(|q| f32::from_le_bytes(body[q..q + 4].try_into().unwrap()))
+                        .filter(|v| (2.0..=20.0).contains(v) && (v * 2.0).fract() == 0.0 && *v != 10.0).collect();
+                    let behaviour = !decode::markers(body, "BhvLadder").is_empty();
+                    println!("{}/{:08x} cell {cell}: BhvLadder {behaviour} origin {:.4} z {:.4} line base local {:.4} length {:.3} stored {heights:?}",
+                        r.name, u32::from_le_bytes(body[..4].try_into().unwrap()), m.w_axis.truncate(), m.z_axis.truncate(), local, p0.distance(p1));
+                }
+            }
+        }
+    }
+
     /// The haystack objects' own collision: layers, triangle count, the hull's vertical extent against the hay volume
     /// (AIR-25 probe).
     #[test]

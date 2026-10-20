@@ -52,6 +52,9 @@ pub struct GuidanceWorld {
     /// The kiosks' owner entities (bounds, Bevy space, and the entity's forward row, flattened): the Kiosk context's
     /// axis (`kiosk::kiosk_axis`). Empty on maps without entities (the greybox), which fall back to the pieces.
     pub kiosks: Vec<(crate::collision::Aabb3, Vec3)>,
+    /// The ladder entities' own axes (base, top; Bevy space), the segment `Human__CanGrabLadder` measures the reach to
+    /// (`ladder::grab_axis`). Empty on maps without entities, which fall back to the guidance line.
+    pub ladders: Vec<(Vec3, Vec3)>,
     /// PORT (speed): `ledge_report_depth`'s depth-filtered pieces per edge (`DepthCache`).
     pub(crate) depth_cache: std::sync::Mutex<DepthCache>,
 }
