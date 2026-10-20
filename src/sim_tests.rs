@@ -4247,6 +4247,26 @@ fn starting_from_standing_plays_the_start_item() {
     assert_eq!(s.ground().speed_param, 0.0);
 }
 
+/// RE/34 A23 (M3 group 10): the stick let go during a high-profile start (a transition in front of the locomotion) stops
+/// through Idle from Move in the wanted profile: `h_accel_tr_l_wait` into the low wait, with no stance change after it
+/// (lab 10-17 `lip13_east` 013: out of the free-step entry's walk, `xx_h_accel_tr_l_wait_footr`).
+#[test]
+fn letting_go_in_a_high_start_stops_into_the_low_wait_without_a_stance_change() {
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);
+    s.run(0.2);
+    s.pad(Vec3::NEG_Z, 1.0, true, false);
+    s.run(0.1);
+    assert!(s.ground().tr.is_some_and(|t| !t.to_wait), "no start transition");
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    let tr = s.ground().tr.expect("the accel transition");
+    assert!(tr.to_wait && crate::player::ground_tree::IDLE_FROM_MOVE[0].contains(&tr.action.id), "{:#x}", tr.action.id);
+    assert!(!s.ground().wait_high && !s.ground().stance_change);
+    s.run(0.1);
+    assert!(s.ground().tr.is_some_and(|t| t.action.id == tr.action.id), "the accel transition was dropped");
+    assert!(!s.ground().stance_change, "a stance change followed");
+}
+
 #[test]
 fn a_light_stick_starts_into_the_slow_walk() {
     // the player (EntityDescriptorType Main) gets no [0.25, 0.5] clamp on the transition path: layout 7 steers the

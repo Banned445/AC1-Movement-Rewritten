@@ -619,6 +619,8 @@ impl HumanGroundData {
     /// `coast`: the walk's speed, whose displacement fades out over the blend (BLENDAB).
     fn idle_from_move(&mut self, lead: usize, coast: f32) {
         self.set_wait_foot(lead);
+        // the wait it enters is the wanted profile's: no stance change follows (lab 10-17 `lip13_east` 013, RE/34 A23)
+        self.wait_high = self.high_profile;
         let id = super::ground_tree::IDLE_FROM_MOVE[self.high_profile as usize][lead.min(1)];
         if self.start_transition(id, 0, 0, 0, &[], None) {
             if let Some(t) = self.tr.as_mut() {
@@ -1309,6 +1311,10 @@ pub fn update_ground(
                     // Idle from Move (0xD8B220) as below: the leading foot's wait (RE/24 GROUND-24) through the accel
                     // transition; PORT without a pose: the transition's exit foot
                     let lead = leading_foot.unwrap_or_else(|| super::ground_tree::pick_locomotion_foot(super::anim_gate::word(&t.action), g.blend.foot));
+                    // the accel transition of the wanted profile (HG+1504, this frame's: the profile update below runs
+                    // later in the port's frame). Lab 10-17 `lip13_east` 013: the stick let go in the free-step entry's
+                    // walk (high) → `h_accel_tr_l_wait_footr`, not the high wait and a stance change (RE/34 A23)
+                    g.high_profile = pad.high_profile && ab.max_speed() > 1;
                     g.idle_from_move(lead, body.velocity.with_y(0.0).length());
                     g.speed_param = 0.0;
                     g.blend.speed_param = 0.0;
