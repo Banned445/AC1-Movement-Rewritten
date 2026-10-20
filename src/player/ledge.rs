@@ -1147,13 +1147,18 @@ pub fn update_ledge(
                 // next queued stage (pull-down: orientation → descent → reception)
                 // `HumanLedge__PullDown_Update` 0xDDE980: a stage ends when its RootInterp reaches 1 after this frame's dt
                 // (0xDDE9FD / 0xDDEA11) and the next action is played at once; the animation update after the AI then
-                // advances it by the same dt (lab 10-12 `roof_jogoff_high` 003: the descent's first frame already
-                // carries its clip motion). So the next stage takes this frame's dt too
+                // advances it by the same dt (lab 10-12 `roof_jogoff_high` 003, 10-17 `hay43_letgo` 005: the descent's
+                // first frame already carries its clip motion). So the ground pull-down's next stage takes this frame's
+                // dt too. The other queues keep the frame: the beam pull-down (type 3, lab 10-12 `beam_hand_side` 014) and
+                // the jump reception's pull-up (`edge410_freerun` 006, `hang_reception_feet` 007) match the game without
+                // it (**hypothesis**: their stages hand over through the animation, not the RootInterp)
                 let mut next = d.queue.remove(0);
                 next.from = body.feet;
-                let (p, _) = next.advance(dt);
-                body.feet = p;
-                body.heading = heading_of(next.facing());
+                if loco.previous == ActorContextId::Ground && matches!(next.kind, ledge_moves::MoveKind::PullDown { .. }) {
+                    let (p, _) = next.advance(dt);
+                    body.feet = p;
+                    body.heading = heading_of(next.facing());
+                }
                 d.mv = Some(next);
                 continue;
             }
