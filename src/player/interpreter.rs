@@ -92,9 +92,15 @@ pub fn tracker_dirs_of(dir: Vec3, stick: Vec2, cam_yaw: f32) -> (Vec3, Vec3) {
     if n == Vec2::ZERO || dir == Vec3::ZERO {
         return (Vec3::ZERO, Vec3::ZERO);
     }
+    let snap = if n.y > SNAP_COS { Vec3::new(-cam_yaw.sin(), 0.0, -cam_yaw.cos()) } else { dir };
+    // the curve runs on the snapped stick (0x55E8E9 replaces it before the curve at 0x55E92F): inside the snap both
+    // directions are the camera's forward (lab 10-13 `freerun_east_drift4` 018: a 2° stick, the facing settles on the
+    // snapped direction; RE/31c g9)
+    if n.y > SNAP_COS {
+        return (snap, snap);
+    }
     let a = n.x.atan2(n.y);
     let c = curve(a.abs() / std::f32::consts::PI) * a.signum();
-    let snap = if n.y > SNAP_COS { Vec3::new(-cam_yaw.sin(), 0.0, -cam_yaw.cos()) } else { dir };
     // stick angles grow toward the camera's right, i.e. clockwise seen from above: a rotation by -(c - a) about +Y
     // (a rotation below 1e-5 rad is float noise of the rebuilt stick, not a curve)
     let moved = if (c - a).abs() < 1e-5 { dir } else { (Quat::from_rotation_y(-(c - a)) * dir).normalize_or_zero() };
@@ -111,7 +117,8 @@ pub fn tracker_dirs(stick: Vec2, cam_yaw: f32) -> (Vec3, Vec3) {
     let right = Vec3::new(-forward.z, 0.0, forward.x);
     let world = |s: Vec2| (forward * s.y + right * s.x).normalize_or_zero();
     let snapped = if n.y > SNAP_COS { Vec2::Y } else { n };
-    let a = n.x.atan2(n.y);
+    // the curve runs on the snapped stick (0x55E8E9, then 0x55E92F)
+    let a = snapped.x.atan2(snapped.y);
     let c = curve(a.abs() / std::f32::consts::PI) * a.signum();
     (world(snapped), world(Vec2::new(c.sin(), c.cos())))
 }
@@ -270,6 +277,19 @@ mod tests {
         let (snap, _) = tracker_dirs(Vec2::new(a.sin(), a.cos()), 1.0);
         assert!((deg(snap, 1.0) - 6.0).abs() < 1e-3);
         assert_eq!(tracker_dirs(Vec2::ZERO, 0.0), (Vec3::ZERO, Vec3::ZERO));
+    }
+
+    /// `sub_55E7E0` snaps the stick (0x55E8E9) before the curve (0x55E92F): inside the snap the curved direction
+    /// (+0x1270, the ground's steering) is the camera's forward as well (lab 10-13 `freerun_east_drift4` 018: a 2°
+    /// stick, the facing settles on the snapped direction).
+    #[test]
+    fn inside_the_snap_the_curved_direction_is_straight_ahead_too() {
+        let a = 3f32.to_radians();
+        let (snap, curved) = tracker_dirs(Vec2::new(a.sin(), a.cos()), 1.0);
+        assert!(deg(snap, 1.0).abs() < 1e-3 && deg(curved, 1.0).abs() < 1e-3, "{} / {}", deg(snap, 1.0), deg(curved, 1.0));
+        let dir = Quat::from_rotation_y(-a) * Vec3::new(-1f32.sin(), 0.0, -1f32.cos());
+        let (snap, curved) = tracker_dirs_of(dir, Vec2::new(a.sin(), a.cos()), 1.0);
+        assert!(deg(snap, 1.0).abs() < 1e-3 && deg(curved, 1.0).abs() < 1e-3, "{} / {}", deg(snap, 1.0), deg(curved, 1.0));
     }
 
     #[test]
