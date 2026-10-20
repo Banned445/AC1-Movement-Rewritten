@@ -1636,9 +1636,15 @@ pub fn update_ledge(
                 let (rows, target) = ledge_moves::probe_lateral(mover, other, n, dv, d.alt_flag, d.hang_type, &report, &collision);
                 // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side, skipped during a closing
                 // step (+133 set, RE/03 §7.6e; live RE/25: the shimmy closes the trailing hand before the ladder move)
-                if let Some((mv, e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision).filter(|_| !d.alt_flag) {
-                    start_move(d, mv, "side to ladder");
-                    d.then_ladder = Some(e);
+                if let Some((mv, mut e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision).filter(|_| !d.alt_flag) {
+                    // the Ladder takes over in this frame and plays the move (+1860 & 0x10 read right after
+                    // ChooseAction, `StateMovement_Update` 0xDE3980; RE/34 A28)
+                    e.action = mv.seq[0].map(|a| a.id);
+                    e.side_from = Some((body.feet, mv.facing_from));
+                    d.last_action = "side to ladder";
+                    d.mv = None;
+                    limbs.hands = None;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
                     continue;
                 }
                 // TrySideMoveToClimbHolds 0xDD48B0 on a row source, the bands in order (none during a closing step)

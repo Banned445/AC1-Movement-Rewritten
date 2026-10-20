@@ -445,6 +445,9 @@ impl HumanGroundData {
             ImpulsionJump::Free { dir } => feet + Vec3::new(dir.x, 0.0, dir.z).normalize_or(forward) * FREE_JUMP_AHEAD - Vec3::Y * crate::tuning::FREE_JUMP_DOWN,
         };
         let item = self.tr.map(|t| (t.action, t.phase)).or_else(|| self.oneshot.map(|o| (o.blend, o.t / o.duration.max(1e-4))));
+        if std::env::var_os("AC_JUMP_LOG").is_some() {
+            eprintln!("event 45: item {:?} free run {free_run}", item.map(|(b, t)| (format!("{:#x}/{}", b.id, b.item), t)));
+        }
         if item.is_some_and(|(b, _)| super::anim_gate::locked(&b)) {
             return Event45::Refused;
         }
@@ -1473,7 +1476,10 @@ pub fn update_ground(
         // only cleared at 0xDB2CE7 / 0xDA7F6E), so the stick into a wall behind turns the character round.
         let pivot_off = if GAME_GROUND_TREE { stick_turn.abs() } else { off };
         if (moving || wall_stopped) && !busy && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none() && pivot_off > std::f32::consts::FRAC_PI_2 && g.speed_param <= BAND_WALK {
-            let left = mv_dir.dot(super::right_of(body.forward())) < 0.0;
+            // the side HG+660 = (HG+1532 >= 0) (`Pivot_Enter` 0xDA6150), HG+1532 being `Math__SignedAngleAroundAxis`
+            // 0x55E570 of (dest, heading) about up: its dot <= -1 returns +π (0x55E470), so an exact reversal turns
+            // right (RE/31c g9, A05)
+            let left = signed_angle_about_up(mv_dir, body.forward()) < 0.0;
             // the player's EntityDescriptorType is Main (entity+168 & 7 == 1): `Pivot_Enter` 0xDA6150 then sets the
             // destination profile HG+1504 to the current one HG+1500, so the player only plays the low → low and
             // high → high turns
@@ -1848,8 +1854,13 @@ pub fn update_ground(
         // a landing (states 21 / 22) at the edge stops on its first frame: Movement takes event 69 with only its guards
         // (0xDAFA09), the sender has no stick test (lab A36 `edge_landing_out` 004: `landing_straight_soft` for one frame,
         // then `ledge_stop_start` with the stick released)
-        let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id)) && !run_stopping && !landing_cut;
-        if (moving || run_stopping || landing_cut) && !busy && !edge_halt && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
+        // The other Movement children (the pivot, the skid turn, the roll ending) fall through to the same switch
+        // (`HumanGround__Movement_CanHandleEvent` 0xDAF708 → 0xDAFA09): no anim gate either, so a wait turn toward a
+        // roof edge is cut by the ledge stop (lab 10-12 `roof_jogoff_high` 003, 10-17 035: `h_waitturn` for 0.08 s,
+        // then `ledge_stop_start`; M3 group 9)
+        let movement_child = GAME_GROUND_TREE && g.oneshot.is_some() && g.owner != TreeState::Other && mv_speed > 0.0;
+        let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id)) && !run_stopping && !landing_cut && !movement_child;
+        if (moving || run_stopping || landing_cut || movement_child) && !busy && !edge_halt && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
             if let Some((p, n)) = edge_report_drop(body.feet, body.forward(), REPORT_PICK_RADIUS, LEDGE_STOP_SQ, FRONT_COS, LEDGE_STOP_DROP, &guidance, &collision)
                 .map(|r| (r.0, r.1))
                 .filter(|&(p, n)| super::narrow::pull_down_clear(body.feet, p, n, &collision))
@@ -1946,6 +1957,17 @@ pub fn update_ground(
                 if r.sq() < 0.01 && moving && ab.allows(Ability::Jump) && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
                     if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision) {
                         jump_log("edge jump", body.feet, Some(&target));
+                        // the target goes to IHuman vt24 (0xEE87BF), event 45 as the tap jump's: the impulsion or the run
+                        // jump by the playing item (lab 10-12 `climb_16` 017: out of `freestep_entry_tr_l_walk` at 0.32
+                        // of it, `impultionstraight_footl_to_ground_to_air_front_down`; RE/34 A34)
+                        match g.event45(body.feet, forward, ImpulsionJump::Target(target), free_run_ready, leading_foot) {
+                            Event45::Run => {}
+                            Event45::Impulsion => {
+                                body.velocity = Vec3::ZERO;
+                                continue;
+                            }
+                            Event45::Refused => continue,
+                        }
                         let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, g.playing_word(), leading_foot, g.blend.foot) };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;

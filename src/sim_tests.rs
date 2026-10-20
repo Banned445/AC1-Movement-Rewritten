@@ -2099,6 +2099,26 @@ fn pilotis_impulsion_and_jump_on_the_spot() {
     assert!((s.body().feet.y - top.y).abs() < 0.05 && off < 0.3, "on the post's top: {:?}", s.body().feet);
 }
 
+/// RE/34 A34: the edge jump (0xEE8679) hands its target to IHuman vt24 (0xEE87BF), event 45 as the tap jump does:
+/// from a start transition before 0.75 of it the impulsion plays first (`Guard_Event45_Impulsion` 0xD83830), not the
+/// run jump (lab 10-12 `climb_16` 017: `impultionstraight_footl_to_ground_to_air_front_down` out of the free-step exit).
+#[test]
+fn an_edge_jump_out_of_a_start_takes_the_impulsion() {
+    use crate::guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld};
+    // the 3.5 m roof (x 5..11, z 9..15), its +Z edge 5 cm ahead; a ledge 1.3 m out and 1.3 m down inside the edge
+    // query's zone (slot 10)
+    let mut s = Sim::new(Vec3::new(8.2, 3.5, 14.95), std::f32::consts::PI);
+    s.app.world_mut().resource_mut::<GuidanceWorld>().edges.push(GuidanceEdge {
+        p0: Vec3::new(7.4, 2.2, 16.3), p1: Vec3::new(9.0, 2.2, 16.3), n0: Vec3::Y, n1: Vec3::NEG_Z, subtype: GuidanceSubType::LedgeGrab,
+    });
+    s.run(0.2);
+    s.pad(Vec3::Z, 1.0, true, false);
+    assert!(s.run_until(0.5, |s| s.ground().impulsion_jump.is_some() || s.loco().current == ActorContextId::InAir), "no jump");
+    assert_eq!(s.loco().current, ActorContextId::Ground, "the run jump, not the impulsion");
+    assert!(s.ground().oneshot.is_some_and(|o| crate::player::jump_blend::IMPULSION_JUMP.contains(&o.blend.id)));
+    assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::InAir), "the impulsion never took off");
+}
+
 #[test]
 fn running_jump_onto_a_beam_targets_it_and_mounts_on_arrival() {
     use crate::player::narrow::{BeamEntryMode, BeamState, NarrowKind};
@@ -4061,6 +4081,37 @@ fn running_off_a_roof_steps_off_at_the_rim() {
     assert!(s.data().air.free_target, "the step off is a free jump");
 }
 
+/// M3 group 9: the pivot (Movement state 25) takes event 69 with only its guards (`Movement_CanHandleEvent` 0xDAF708 →
+/// 0xDAFA09, no anim gate): a high-profile wait turn toward a roof edge behind is cut by the ledge stop (lab 10-17
+/// `roof_jogoff_high` 035: `h_waitturn` 0.08 s, then `ledge_stop_start`).
+#[test]
+fn a_wait_turn_toward_a_roof_edge_is_cut_by_the_ledge_stop() {
+    let mut s = Sim::new(Vec3::new(-9.62, 6.0, 4.0), std::f32::consts::FRAC_PI_2); // the 6 m block, facing -X, its edge at x -9.5 behind
+    s.run(0.2);
+    s.pad(Vec3::X, 1.0, true, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    assert_eq!(s.ground().owner, crate::player::ground::TreeState::Pivot, "no wait turn");
+    assert!(s.run_until(0.5, |s| s.ground().ledge_stop.is_some()), "the turn was not cut by the ledge stop");
+    assert!(s.body().feet.x < -9.5, "stopped on the roof: {:?}", s.body().feet);
+}
+
+/// RE/34 A05: the pivot's side is HG+1532 ≥ 0 (`Pivot_Enter` 0xDA6150), `Math__SignedAngleAroundAxis` 0x55E570 of
+/// (dest, heading): a dot of −1 or below returns +π (0x55E470), so an exact reversal turns right; a hair either side of
+/// it turns toward that side.
+#[test]
+fn an_exact_reversal_pivots_right_and_a_near_one_toward_its_side() {
+    use crate::player::ground::PIVOT;
+    let side_of = |id: u32| PIVOT.iter().position(|s| s.iter().flatten().flatten().any(|&x| x == id));
+    for (dir, want) in [(Vec3::Z, 1), (Vec3::new(0.03, 0.0, 1.0).normalize(), 1), (Vec3::new(-0.03, 0.0, 1.0).normalize(), 0)] {
+        let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0); // facing -Z, +X on the right
+        s.run(0.2);
+        s.pad(dir, 1.0, true, false);
+        s.run(1.0 / 60.0 + 1e-4);
+        let os = s.ground().oneshot.expect("no pivot");
+        assert_eq!(side_of(os.blend.id), Some(want), "stick {dir:?}: pivot {:#x}", os.blend.id);
+    }
+}
+
 #[test]
 fn reversing_from_standing_pivots_with_the_turn_clip() {
     use crate::player::ground::PIVOT;
@@ -4459,6 +4510,16 @@ pub(crate) fn load_lab_trace(path: &str) -> LabTrace {
             let b = u32::from_str_radix(r[c_b], 16).unwrap_or(0);
             let mag = f(r, c_mag).min(1.0);
             let dir = Vec3::new(f(r, c_dx), f(r, c_dz), -f(r, c_dy)).normalize_or_zero();
+            // the recorded direction is +0x1250, snapped to the camera's forward within 5° of up; the pad carries the
+            // stick's own direction (the port snaps it itself, and its curved +0x1270 keeps the small lateral, RE/31c
+            // g9 A05): turn the snapped direction back by the stick's angle
+            let (lx, ly) = (f(r, c_lx), f(r, c_ly));
+            let dir = if lx.hypot(ly) >= 0.4 && ly / lx.hypot(ly) > crate::player::interpreter::SNAP_COS && lx != 0.0 {
+                let a = f(r, c_dy).atan2(f(r, c_dx)) + ly.atan2(lx) - std::f32::consts::FRAC_PI_2;
+                Vec3::new(a.cos(), 0.0, -a.sin())
+            } else {
+                dir
+            };
             legs_ago = if b & 1 != 0 && prev_b & 1 == 0 { 0.0 } else { legs_ago + dt };
             hand_ago = if b & 8 != 0 && prev_b & 8 == 0 { 0.0 } else { hand_ago + dt };
             prev_b = b;
@@ -4716,10 +4777,17 @@ fn a_hang_beside_a_ladder_moves_sideways_onto_it() {
     s.run_until(1.0, |s| s.data().ledge.mv.is_none() && s.data().ledge.hang_set);
     assert_eq!(s.data().ledge.hang_type, ledge::LedgeHangType::Wall);
     s.pad(Vec3::X, 1.0, false, false); // toward the ladder: +X is the character's left (facing +Z)
-    let moved = s.run_until(2.0, |s| s.data().ledge.mv.is_some_and(|m| m.kind == MoveKind::SideToLadder));
+    // the Ladder takes over in the frame the move starts and plays it (`StateMovement_Update` 0xDE3980; RE/34 A28)
+    let _ = MoveKind::SideToLadder;
+    let start = s.body().feet;
+    let moved = s.run_until(2.0, |s| s.loco().current == ActorContextId::Ladder);
     assert!(moved, "no side move to the ladder: {}", s.data().ledge.last_action);
-    assert_eq!(s.data().ledge.mv.unwrap().seq[0].map(|a| a.id), Some(FROM_LEDGE_SIDE[0][0]));
+    assert_eq!(s.data().ledge.last_action, "side to ladder");
+    let l = &s.data().ladder;
+    assert_eq!((l.phase, l.action.map(|a| a.id)), (Some(LadderPhase::Entry), Some(FROM_LEDGE_SIDE[0][0])));
+    assert!((s.body().feet - start).length() < 0.1, "the root starts from the hang: {start:?} → {:?}", s.body().feet);
     s.pad(Vec3::X, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::Wait)), "the move never ended");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "never reached the ladder: {}", s.data().ledge.last_action);
     let l = &s.data().ladder;
     assert_eq!(l.phase, Some(LadderPhase::Wait));
@@ -6536,6 +6604,26 @@ fn a_ladder_reversal_waits_on_the_mirrored_frame_then_climbs_back() {
     assert!((s.data().ladder.current().unwrap().1 - start).abs() < 1e-4, "B's clock held");
     s.run(0.25);
     assert!(s.body().feet.y < y0 - 0.1, "climbing down after the seam: {y0} → {}", s.body().feet.y);
+}
+
+/// RE/36 §4 (A7) / M3 group 9: every item transition into a ladder step is ASTOPBSTOP (DataPC `HumanLadder`): from
+/// the wait the step's clock holds 0.15 s with no displacement before it climbs (lab 10-12 `ladder_footm` 1.95 s: the
+/// root still for 0.15 s after `ladder_wait_r` → `climb_up`); the next item of the same step action has no hold.
+#[test]
+fn a_ladder_step_from_the_wait_holds_its_first_frame_then_climbs() {
+    use crate::player::ladder::{step_seam_hold, LadderPhase, CLIMB_DOWN, CLIMB_UP, WAIT};
+    assert_eq!(step_seam_hold(Some(WAIT[0][1]), CLIMB_UP[0]), 0.15);
+    assert_eq!(step_seam_hold(Some(CLIMB_UP[0]), CLIMB_UP[0]), 0.0);
+    assert_eq!(step_seam_hold(Some(CLIMB_UP[0]), CLIMB_UP[1]), 0.2);
+    assert_eq!(step_seam_hold(Some(CLIMB_UP[1]), CLIMB_DOWN[1]), 0.15);
+    let mut s = on_the_ladder();
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| matches!(s.data().ladder.phase, Some(LadderPhase::ClimbUp))));
+    let y0 = s.body().feet.y;
+    s.run(0.12);
+    assert!((s.body().feet.y - y0).abs() < 2e-3, "held through the seam: {y0} → {}", s.body().feet.y);
+    s.run(0.2);
+    assert!(s.body().feet.y > y0 + 0.05, "climbing after the seam: {y0} → {}", s.body().feet.y);
 }
 
 /// RE/24 LADDER-15: the revolve sub-state takes events 0 and 1 (`HumanLadder__MainB_HandleEvent` 0xE1F760): the empty

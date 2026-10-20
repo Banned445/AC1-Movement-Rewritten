@@ -738,7 +738,8 @@ fn probe_jump_candidates_at() {
                 let p = pos + step * (0.02 * i as f32);
                 for r in edge_reports(p, 0.75, 0.45, None, s.guidance(), s.collision()) {
                     let room = crate::player::narrow::pull_down_clear(p, r.point, r.normal, s.collision());
-                    eprintln!("{axis} {i}: feet {:.3} report {:.3} n {:.2} dist {:.3} drop {:.3} edge {} hang room {room}", game(p), game(r.point), game(r.normal), r.dist, r.drop, r.edge);
+                    let past = crate::player::jump_candidates::room_past_edge(&r, s.collision());
+                    eprintln!("{axis} {i}: feet {:.3} report {:.3} n {:.2} dist {:.3} drop {:.3} edge {} floor {} hang room {room} step-off room {past}", game(p), game(r.point), game(r.normal), r.dist, r.drop, r.edge, r.floor);
                     if !room && i == n / 2 {
                         // what fills the two boxes of `sub_B2E4F0` (as `narrow::pull_down_clear` places them)
                         let right = crate::player::right_of(r.normal);

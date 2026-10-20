@@ -11,6 +11,19 @@ pub const CLIMB_DOWN: [u32; 2] = [0x0106_9001, 0x010C_9CEE];
 /// The low-profile reversal's seam: `climb_up_l/r` ↔ `climb_down` are ASTOPBSTOP 0.150 s, bpos INVPROGRESSIVE (the action
 /// graph's items of 0x01068FFF / 0x01069001).
 pub const REVERSAL_HOLD: f32 = 0.15;
+
+/// The B-stop hold of a step started from `from` (the playing action): the action graph's item transitions into the
+/// four step actions (DataPC `HumanLadder`) are all ASTOPBSTOP, B's clock held with no displacement (`sub_774350`,
+/// RE/36 A7): from either wait 0.150 s, low climb up → high climb up 0.200 s, any other change of step action 0.150 s.
+/// The next item of the same step action has no blend (NONE): no hold.
+pub fn step_seam_hold(from: Option<u32>, to: u32) -> f32 {
+    match from {
+        Some(f) if f == to => 0.0,
+        Some(f) if f == CLIMB_UP[0] && to == CLIMB_UP[1] => 0.2,
+        Some(f) if WAIT.iter().flatten().any(|&w| w == f) || CLIMB_UP.contains(&f) || CLIMB_DOWN.contains(&f) => 0.15,
+        _ => 0.0,
+    }
+}
 /// 7 / 8: enter from the ground, [low, high] × [foot l, foot r]; 3 clips [straight, left, right].
 pub const ENTER_GROUND: [[u32; 2]; 2] = [[0x010A_34A7, 0x010A_34A6], [0x010A_251E, 0x010A_2520]];
 /// 9 / 10: enter from the top (the pull-down onto it), then its transition into the wait (0xE25240).
@@ -161,6 +174,11 @@ pub struct LadderEntry {
     /// The back-approach turn (`sub_E24FD0`: the attach box blocked on the approach side, RE/24 LADDER-4): `Some(true)`
     /// = `TURN[0]` (signed approach angle > 0), `Some(false)` = `TURN[1]`; `n` stays the approach side (live RE/25 #68).
     pub back_turn: Option<bool>,
+    /// The side move from a hang (`HumanLedge__TrySideMoveToLadder` 0xDD4CD0): the hang's root and facing it starts
+    /// from. The Ledge switches to the Ladder in the frame the move starts (+1860 & 0x10 read right after
+    /// `Movement_ChooseAction`, `StateMovement_Update` 0xDE3980), and the Ladder plays it, the root interpolated from
+    /// here to `from` over the action (sub_711130).
+    pub side_from: Option<(Vec3, Vec3)>,
 }
 
 /// The top entry's side (`StateEntry_Enter` 0xE26D7E–0xE26F23; RE/24 LADDER-23): the target is base + (H − 0.7)·Z
@@ -462,6 +480,9 @@ impl HumanLadderData {
                 Some(a) => {
                     let p = self.root_at(self.height);
                     self.play(LadderPhase::Entry, Some(a), e.from, p, false);
+                    if let Some((start, facing)) = e.side_from {
+                        self.warp = Some((start, p, super::heading_of(facing), super::heading_of(e.facing), 0.0, a.duration().max(1e-3)));
+                    }
                     if matches!(a.id, CATCH_AIR | ARRIVE_TARGET) {
                         let out = e.catch_out.unwrap_or(self.n);
                         let to = self.base + self.axis() * self.height + out * ATTACH_OUT;
@@ -1142,8 +1163,10 @@ pub fn update_ladder(
                             let from = l.root_at(l.height);
                             l.height = (l.height + step).min(len);
                             let to = l.root_at(l.height);
+                            let prev = l.action.map(|a| a.id);
                             l.play(LadderPhase::ClimbUp, blend(CLIMB_UP[hi], l.foot, &[]), from, to, true);
                             l.rate = rate;
+                            l.hold = step_seam_hold(prev, CLIMB_UP[hi]);
                         }
                     } else if along < -0.5 {
                         let step = if l.high { 1.0 } else { 0.5 };
@@ -1154,8 +1177,10 @@ pub fn update_ladder(
                             let from = l.root_at(l.height);
                             l.height -= step;
                             let to = l.root_at(l.height);
+                            let prev = l.action.map(|a| a.id);
                             l.play(LadderPhase::ClimbDown, blend(CLIMB_DOWN[hi], l.foot, &[]), from, to, true);
                             l.rate = rate;
+                            l.hold = step_seam_hold(prev, CLIMB_DOWN[hi]);
                         }
                     } else if phase != LadderPhase::Wait || done {
                         l.wait();
