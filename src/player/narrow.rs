@@ -672,7 +672,10 @@ fn pilotis_weights(l: f32) -> [f32; 3] {
 /// - the root within the beam's width + 0.5·(1 − clamp((beam − feet) / 0.53)) of the beam's vertical plane;
 /// - the root in the box (−(w + 0.5), −0.5, −0.5)…(w + 0.5, 1.0, 0.5) of the beam's frame (across, along, up) at the
 ///   closest point (`sub_527EC0`).
-/// No facing / axis angle test: every angle is a mode-1 mount. PORT: the beam's width (`sub_116C8F0`) is 0.
+/// No facing / axis angle test: every angle is a mode-1 mount. The beam's width at the closest point (`sub_116C8F0`
+/// 0xD9F731) is the beam contact's half width (the report entry's +0 / +4, written by the beam pairing, `beam_contacts`;
+/// `GuidanceContact__AddCutLengths` 0x6764E0 skips Beam contacts, so the clipped piece keeps its full ends' widths,
+/// interpolated along the clipped piece). Greybox centre lines carry none (0).
 pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<BeamEntry> {
     let f = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     if f == Vec3::ZERO {
@@ -680,16 +683,15 @@ pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
     }
     let r = super::right_of(f);
     // 0xD9F4C0's query (sub_116E1A0 over HumanGuidance's report, the same query as 0xE0B890)
-    let segments: Vec<(Vec3, Vec3)> = if NATIVE_BEAM_MOUNT && !collision.triangles.is_empty() {
+    let segments: Vec<(Vec3, Vec3, [f32; 2])> = if NATIVE_BEAM_MOUNT && !collision.triangles.is_empty() {
         let centre = feet + f * 0.5;
         crate::guidance::beam_contacts::detect(guidance, collision, centre, r.abs() * 0.75 + f.abs() * 0.5 + Vec3::Y * 0.53)
-            .into_iter().map(|b| (b.p0, b.p1)).collect()
+            .into_iter().map(|b| (b.p0, b.p1, b.widths)).collect()
     } else {
-        guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::Beam).map(|e| (e.p0, e.p1)).collect()
+        guidance.edges.iter().filter(|e| e.subtype == GuidanceSubType::Beam).map(|e| (e.p0, e.p1, [0.0; 2])).collect()
     };
-    const W: f32 = 0.0;
-    let mut best: Option<(f32, Vec3, Vec3, Vec3, Vec3)> = None;
-    for (p0, p1) in segments {
+    let mut best: Option<(f32, Vec3, Vec3, Vec3, Vec3, f32)> = None;
+    for (p0, p1, widths) in segments {
         let v = p1 - p0;
         let flat = Vec3::new(v.x, 0.0, v.z);
         if flat.length_squared() < 1e-8 || flat.dot(f).abs() < 1e-4 {
@@ -732,10 +734,13 @@ pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
         let kk = ((Vec3::new(feet.x - p0.x, 0.0, feet.z - p0.z)).dot(full) / full.length_squared()).clamp(0.0, 1.0);
         let dist = Vec3::new(p0.x + full.x * kk - feet.x, 0.0, p0.z + full.z * kk - feet.z).length();
         if best.is_none_or(|b| dist < b.0) {
-            best = Some((dist, q, p0, p1, flat.normalize()));
+            // `sub_116C8F0` on the clipped hit: its ends' widths are the full contact's (the hit keeps the entry's +0 / +4),
+            // interpolated along the clipped piece c0 … c1
+            let w = widths[0] + (widths[1] - widths[0]) * k;
+            best = Some((dist, q, p0, p1, flat.normalize(), w));
         }
     }
-    let (_, q, p0, p1, axis) = best?;
+    let (_, q, p0, p1, axis, w) = best?;
     // the piece oriented along the event's direction
     let along = if axis.dot(f) >= 0.0 { axis } else { -axis };
     let point = q + along * 0.5;
@@ -750,12 +755,12 @@ pub fn try_mount_beam(feet: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
     let across = super::right_of(along);
     let rel = feet - q;
     let rise = ((q.y - feet.y) / 0.53).clamp(0.0, 1.0);
-    if rel.dot(across).abs() >= (1.0 - rise) * 0.5 + W {
+    if rel.dot(across).abs() >= (1.0 - rise) * 0.5 + w {
         return None;
     }
     // the root in the beam frame's box
     let (x, y, z) = (rel.dot(across), rel.dot(along), rel.y);
-    if x.abs() > W + 0.5 || !(-0.5..=1.0).contains(&y) || z.abs() > 0.5 {
+    if x.abs() > w + 0.5 || !(-0.5..=1.0).contains(&y) || z.abs() > 0.5 {
         return None;
     }
     let toward_p1 = along.dot(p1 - p0) >= 0.0;
@@ -2194,5 +2199,24 @@ mod air_catch_tests {
         assert!((p.y-4.0).abs()<1e-5 && p.z.abs()<1e-5 && (b-a).length()>3.99);
         guidance.edges[1].p0.z=1.0;guidance.edges[1].p1.z=1.0;
         assert!(beam_at(Vec3::new(2.0,4.1,0.05),Vec3::X,&guidance,&world).is_none());
+    }
+
+    /// RE/34 A24 (`sol31_lookdown` 011, `roof_freerun_off`): the mount guard 0xD9F4C0 widens both of its bounds by the beam's
+    /// half width at the point (`sub_116C8F0` 0xD9F731, the beam contact's widths). A root 0.6 m beside the centre line of a
+    /// 0.6 m wide beam is outside the 0.5 m bound of a line without width, and inside it with the beam's 0.3 m.
+    #[test]
+    fn the_beam_mount_adds_the_beams_half_width_to_its_bounds() {
+        let mut guidance = GuidanceWorld::default();
+        for (z, n) in [(-0.3, Vec3::NEG_Z), (0.3, Vec3::Z)] {
+            guidance.edges.push(crate::guidance::GuidanceEdge { p0: Vec3::new(0.0, 0.0, z), p1: Vec3::new(4.0, 0.0, z), n0: Vec3::Y, n1: n, subtype: GuidanceSubType::LedgeGrab });
+        }
+        let mut world = CollisionWorld::default();
+        world.native_query_culling = true;
+        // a triangle far away: the native beam contacts (`beam_contacts::detect`) run on a world with triangles
+        world.triangles.extend(crate::triangles::Triangle::new([Vec3::new(50.0, 0.0, 50.0), Vec3::new(51.0, 0.0, 50.0), Vec3::new(50.0, 0.0, 51.0)], 0));
+        // the stick 37° along the beam (a stick square to it finds no piece, and the piece must run away from the feet)
+        let dir = Vec3::new(0.6, 0.0, -0.8);
+        assert!(try_mount_beam(Vec3::new(1.5, 0.0, 0.75), dir, &guidance, &world).is_some(), "0.75 m out: inside 0.5 + 0.3");
+        assert!(try_mount_beam(Vec3::new(1.5, 0.0, 0.85), dir, &guidance, &world).is_none(), "0.85 m out: past it");
     }
 }

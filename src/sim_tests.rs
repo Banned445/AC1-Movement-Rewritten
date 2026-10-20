@@ -6698,6 +6698,25 @@ fn a_ladder_step_from_the_wait_holds_its_first_frame_then_climbs() {
     assert!(s.body().feet.y > y0 + 0.05, "climbing after the seam: {y0} → {}", s.body().feet.y);
 }
 
+/// M3 group 12: the climb's root is the animation's root projected on the ladder line (`HumanLadder__ClimbMovement`
+/// 0xE25ED0 → `sub_E21600` 0xE218FD), with no rung in it: a step runs from wherever the root is; only the wait aligns
+/// to a rung (`AlignRootWhileWaiting` 0xE226D0, 2 m/s). A step started while the wait is still aligning keeps the root
+/// where it is (the port put it back on the rung at the step's first frame).
+#[test]
+fn a_ladder_step_starts_from_the_root_not_the_rung() {
+    use crate::player::ladder::LadderPhase;
+    let mut s = on_the_ladder();
+    s.run(0.3);
+    let rung = s.body().feet.y;
+    s.app.world_mut().get_mut::<Body>(s.player).unwrap().feet.y += 0.1;
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| matches!(s.data().ladder.phase, Some(LadderPhase::ClimbUp))));
+    let y0 = s.body().feet.y;
+    assert!(y0 > rung + 0.05, "still aligning when the step starts: rung {rung}, root {y0}");
+    s.run(0.05);
+    assert!((s.body().feet.y - y0).abs() < 0.01, "the step holds where the root is, not on the rung: {y0} → {}", s.body().feet.y);
+}
+
 /// The animation runs the next item within the frame, so a ladder step that ends mid-frame starts the next one with the
 /// rest of the frame (lab 10-12 `ladder_footm`: the game's 0.40 s steps end at 2.5485 / 2.9501 / 3.3498 s, no time lost
 /// at the seams).

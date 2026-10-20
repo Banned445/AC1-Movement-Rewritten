@@ -12,6 +12,19 @@ pub const CLIMB_DOWN: [u32; 2] = [0x0106_9001, 0x010C_9CEE];
 /// graph's items of 0x01068FFF / 0x01069001).
 pub const REVERSAL_HOLD: f32 = 0.15;
 
+/// The climb's root (MvtAnimState ≥ 2, `HumanLadder__ClimbMovement` 0xE25ED0 → `sub_E21600` 0xE21887–0xE2191E): every
+/// frame the skeleton is switched to its detached root (`sub_5043B0`(1) → `sub_4E0450`: skeleton +416 = 1 selects the
+/// second root object, created by `sub_71D140` and set from the entity's matrix by `sub_52AAF0`), the animation runs this
+/// frame's dt (`AnimComponent__RunStages`), and that root, projected on the ladder line less 0.5·F, is the move target.
+/// There is no rung in it: a step runs from wherever the root is, by the clip's DISPLACEMENT (0.500 m a low step up,
+/// 0.499 m down), and only the wait aligns to a rung (`AlignRootWhileWaiting` 0xE226D0, 2 m/s).
+/// Not ported: the Bureau ladder's extra rise (lab 10-12 `ladder_footm` / `ladder_bureau_up` / `ladder_drop`, all on the
+/// ladder at (54.16, 3.25): +0.003…+0.013 m a step up, −0.007…−0.019 m a step down, +1.4 cm through a B-stop hold),
+/// which the other ladders do not show (10-15 `ladder61_*`, 10-17 `ladder38_rows`, 10-18 `a6_ladder_side_shimmy`:
+/// 0.497–0.506 m a step): not the clips' motion, a drift of the detached root on that ladder (**hypothesis**: the
+/// character proxy against that ladder's geometry). RE/31c g12.
+pub const LADDER_STEP_FROM_ROOT: bool = true;
+
 /// The B-stop hold of a step started from `from` (the playing action): the action graph's item transitions into the
 /// four step actions (DataPC `HumanLadder`) are all ASTOPBSTOP, B's clock held with no displacement (`sub_774350`,
 /// RE/36 A7): from either wait 0.150 s, low climb up → high climb up 0.200 s, any other change of step action 0.150 s.
@@ -911,7 +924,12 @@ pub fn update_ladder(
             // the ground entry and the back-approach turn drive the correction by min(2s, 1)
             // (`HumanLadder__DriveRootFromClip` 0xE1EF50 a5 = 2.0; RE/24 LADDER-6), the others linearly
             let c = if phase == LadderPhase::EnterGround || l.start_frame { (2.0 * k).min(1.0) } else { k };
-            l.from + w(d) + (l.to - (l.from + w(dend))) * c
+            if LADDER_STEP_FROM_ROOT && matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) {
+                // the climb: the clip's motion from where the step started, no correction onto a rung
+                l.from + w(d)
+            } else {
+                l.from + w(d) + (l.to - (l.from + w(dend))) * c
+            }
         } else {
             l.from.lerp(l.to, k)
         };
@@ -928,6 +946,11 @@ pub fn update_ladder(
         } else {
             body.feet = p;
             body.heading = super::heading_of(l.heading);
+            if LADDER_STEP_FROM_ROOT && matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) {
+                // HeightInLadder is the root's (`sub_E211D0`): the next step, the top / bottom tests and the wait's rung
+                // start from it
+                l.height = l.height_of(p);
+            }
             if phase == LadderPhase::EnterGround {
                 // the turn onto the ladder by min(2s, 1) from the start facing (`sub_E1EF50`, RE/24 LADDER-6)
                 let (h0, h1) = (super::heading_of(l.fwd), super::heading_of(-l.n));
@@ -1197,6 +1220,10 @@ pub fn update_ladder(
                             // exit to the top (13 / 14)
                             l.play_exit(true, body.feet, &collision);
                         } else {
+                            // the step starts where the root is (from a wait still aligning, too: `LADDER_STEP_FROM_ROOT`)
+                            if LADDER_STEP_FROM_ROOT {
+                                l.height = l.height_of(body.feet);
+                            }
                             let from = l.root_at(l.height);
                             l.height = (l.height + step).min(len);
                             let to = l.root_at(l.height);
@@ -1208,10 +1235,18 @@ pub fn update_ladder(
                         }
                     } else if along < -0.5 {
                         let step = if l.high { 1.0 } else { 0.5 };
-                        if l.height - step < -0.01 {
+                        // PORT (`LADDER_STEP_FROM_ROOT` off): a rung below the ground ends the climb at the seam. The game has no
+                        // seam test: the step down plays and ReachedBottom (height − buried ≤ 0 or a ground contact,
+                        // `UpdateReachedTopBottom` 0xE1D490) posts the exit mid-step (above)
+                        let bottom = if LADDER_STEP_FROM_ROOT { l.height <= 0.0 } else { l.height - step < -0.01 };
+                        if bottom {
                             // exit to the ground (11 / 12)
                             l.play_exit(false, body.feet, &collision);
                         } else {
+                            // the step starts where the root is (from a wait still aligning, too: `LADDER_STEP_FROM_ROOT`)
+                            if LADDER_STEP_FROM_ROOT {
+                                l.height = l.height_of(body.feet);
+                            }
                             let from = l.root_at(l.height);
                             l.height -= step;
                             let to = l.root_at(l.height);
