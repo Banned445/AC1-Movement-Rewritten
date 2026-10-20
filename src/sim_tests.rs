@@ -1575,6 +1575,33 @@ fn walking_into_a_roof_edge_stops_then_steps_back() {
     assert!(s.run_until(1.0, |s| s.loco().current == ActorContextId::Ledge), "held into the edge: the pull-down");
 }
 
+/// A19: the ledge stop's guard (0xDA5DE0) also wants room to hang below the edge (`sub_B2E4F0`(feet, point, normal, 1)
+/// at 0xDA5EA1: the pull-down's upright and 30° descent boxes). Something under the edge refuses the stop and the walk
+/// steps off instead (event 68; lab 10-17 `hay43_letgo` 003 / 006: the corner block under the roof edge).
+#[test]
+fn a_ledge_with_no_room_to_hang_below_is_walked_off_not_ledge_stopped() {
+    use crate::collision::{Aabb3, CollisionWorld};
+    for blocked in [false, true] {
+        let mut s = Sim::new(Vec3::new(-12.0, 6.0, 4.0), -std::f32::consts::FRAC_PI_2);
+        if blocked {
+            // an awning over the drop at head height, 0.2–0.7 m out from the 6 m roof's edge (x −9.5): in the upright box
+            // (feet + 0.35 … 1.8 m), clear of the walk and of the drop's rays
+            s.app.world_mut().resource_mut::<CollisionWorld>().boxes.push(Aabb3 { min: Vec3::new(-9.3, 7.7, 2.5), max: Vec3::new(-8.8, 8.0, 5.5) });
+        }
+        let room = crate::player::narrow::pull_down_clear(Vec3::new(-9.6, 6.0, 4.0), Vec3::new(-9.5, 6.0, 4.0), Vec3::X, s.app.world().resource::<CollisionWorld>());
+        assert_eq!(room, !blocked);
+        s.pad(Vec3::X, 1.0, true, false);
+        let stopped = s.run_until(3.0, |s| s.ground().ledge_stop.is_some() || s.loco().current == ActorContextId::InAir);
+        assert!(stopped, "neither stopped nor stepped off: {:?}", s.body().feet);
+        if blocked {
+            assert_eq!(s.loco().current, ActorContextId::InAir, "walked off the edge");
+            assert!(s.body().feet.x > -9.5 - 0.15, "at the edge: {:?}", s.body().feet);
+        } else {
+            assert!(s.ground().ledge_stop.is_some(), "ledge-stopped");
+        }
+    }
+}
+
 #[test]
 fn pull_down_from_the_ledge_stop_uses_the_edge_stop_orientation() {
     use crate::player::ledge_moves::{MoveKind, PULLDOWN_ORIENT};
@@ -6466,6 +6493,31 @@ fn the_low_profile_reverses_a_step_mid_way_and_the_high_profile_finishes_it() {
             assert_eq!(l.action.map(|a| (a.id, a.item)), Some((CLIMB_DOWN[0], foot ^ 1)));
         }
     }
+}
+
+/// A15: the reversal's transition (`climb_up_l/r` → `climb_down`, ASTOPBSTOP 0.15 s, bpos INVPROGRESSIVE) starts the
+/// down step at 1 − the up step's progress and holds its clock 0.15 s with the root still, then climbs down (lab 10-12
+/// `ladder_footm` 3.71 s: 0.13 s still, then down at 1.24 m/s; the port crept 0.06 m/s for 0.41 s).
+#[test]
+fn a_ladder_reversal_waits_on_the_mirrored_frame_then_climbs_back() {
+    use crate::player::ladder::{LadderPhase, REVERSAL_HOLD};
+    let mut s = on_the_ladder();
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(1.0, |s| matches!(s.data().ladder.phase, Some(LadderPhase::ClimbUp))));
+    s.run(0.3);
+    let progress = s.data().ladder.current().unwrap().1;
+    s.pad(Vec3::NEG_Z, 1.0, false, false);
+    s.run(1.0 / 60.0 + 1e-4);
+    let l = &s.data().ladder;
+    assert_eq!(l.phase, Some(LadderPhase::ClimbDown));
+    let start = l.current().unwrap().1;
+    assert!((start - (1.0 - progress)).abs() < 0.05, "starts at 1 − {progress}: {start}");
+    let y0 = s.body().feet.y;
+    s.run(REVERSAL_HOLD - 0.03);
+    assert!((s.body().feet.y - y0).abs() < 1e-3, "still through the seam: {y0} → {}", s.body().feet.y);
+    assert!((s.data().ladder.current().unwrap().1 - start).abs() < 1e-4, "B's clock held");
+    s.run(0.25);
+    assert!(s.body().feet.y < y0 - 0.1, "climbing down after the seam: {y0} → {}", s.body().feet.y);
 }
 
 /// RE/24 LADDER-15: the revolve sub-state takes events 0 and 1 (`HumanLadder__MainB_HandleEvent` 0xE1F760): the empty

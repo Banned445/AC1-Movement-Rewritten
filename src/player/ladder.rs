@@ -8,6 +8,9 @@ pub const WAIT: [[u32; 2]; 2] = [[0x0106_8FF7, 0x0106_8FF8], [0x0106_902E, 0x010
 /// 2 / 4: climb up, 3 / 5: climb down (each 2 items, l / r), [low, high].
 pub const CLIMB_UP: [u32; 2] = [0x0106_8FFF, 0x0106_8FF9];
 pub const CLIMB_DOWN: [u32; 2] = [0x0106_9001, 0x010C_9CEE];
+/// The low-profile reversal's seam: `climb_up_l/r` ↔ `climb_down` are ASTOPBSTOP 0.150 s, bpos INVPROGRESSIVE (the action
+/// graph's items of 0x01068FFF / 0x01069001).
+pub const REVERSAL_HOLD: f32 = 0.15;
 /// 7 / 8: enter from the ground, [low, high] × [foot l, foot r]; 3 clips [straight, left, right].
 pub const ENTER_GROUND: [[u32; 2]; 2] = [[0x010A_34A7, 0x010A_34A6], [0x010A_251E, 0x010A_2520]];
 /// 9 / 10: enter from the top (the pull-down onto it), then its transition into the wait (0xE25240).
@@ -261,6 +264,11 @@ pub struct HumanLadderData {
     pub blend_time: f32,
     /// Independent RootInterp timer (0xE23F70), preserved across action items.
     warp: Option<(Vec3, Vec3, f32, f32, f32, f32)>,
+    /// The running step's start phase (its transition's `bpos`): 1 − the reversed step's progress for INVPROGRESSIVE,
+    /// else 0. The root follows the clip from there.
+    k0: f32,
+    /// What is left of the step's ASTOPBSTOP seam: B's clock is held, with no displacement (`sub_774350`, RE/36 A7).
+    hold: f32,
     /// The running exit's path over its whole action (`HumanLadder__PlayExit` 0xE254C0): its summed item duration, the
     /// time of the items already played, the ground snap (+728) and the body's pitch at the start.
     exit: Option<ExitPath>,
@@ -352,6 +360,8 @@ impl HumanLadderData {
         self.follow = follow;
         self.start_frame = false;
         self.rate = 1.0;
+        self.k0 = 0.0;
+        self.hold = 0.0;
         self.seq = self.seq.wrapping_add(1);
     }
 
@@ -808,7 +818,12 @@ pub fn update_ladder(
             }
         }
         let l = &mut data.ladder;
-        l.t += dt * if l.rate > 0.0 { l.rate } else { 1.0 };
+        if l.hold > 0.0 {
+            // an ASTOPBSTOP seam: B waits on its start frame (RE/36 A7)
+            l.hold = (l.hold - dt).max(0.0);
+        } else {
+            l.t += dt * if l.rate > 0.0 { l.rate } else { 1.0 };
+        }
         body.velocity = Vec3::ZERO;
         body.grounded = false;
         let Some(phase) = l.phase else { continue };
@@ -825,8 +840,13 @@ pub fn update_ladder(
         let done = l.t >= dur;
         // root: the action's displacement (in the facing frame) + linear correction to the end, or a plain warp
         let p = if l.follow {
-            let d = l.action.map(|a| a.disp(k)).unwrap_or([0.0; 3]);
-            let dend = l.action.map(|a| a.disp(1.0)).unwrap_or([0.0; 3]);
+            // from the step's start phase k0 (0 but for a reversal): the clip's motion since k0, corrected over the rest
+            let k0 = l.k0.min(k);
+            let d0 = l.action.map(|a| a.disp(k0)).unwrap_or([0.0; 3]);
+            let sub = |a: [f32; 3]| [a[0] - d0[0], a[1] - d0[1], a[2] - d0[2]];
+            let d = sub(l.action.map(|a| a.disp(k)).unwrap_or([0.0; 3]));
+            let dend = sub(l.action.map(|a| a.disp(1.0)).unwrap_or([0.0; 3]));
+            let k = if k0 > 0.0 { ((k - k0) / (1.0 - k0).max(1e-4)).clamp(0.0, 1.0) } else { k };
             // the frame: the character's upright start frame for the ground entry (+592, RE/24 LADDER-6) and the revolve,
             // else the ladder frame (F × Z, F, Z) the root holds on the ladder (`sub_E21600`; RE/24 LADDER-17)
             let (f, u) = if matches!(phase, LadderPhase::EnterGround | LadderPhase::Revolve(_)) || l.start_frame { (l.fwd, Vec3::Y) } else { (-l.out(), l.axis()) };
@@ -1039,12 +1059,15 @@ pub fn update_ladder(
                 }
                 // the low profile reverses mid-step: `HumanLadder__ChooseClimbAnim` switches up ↔ down at once (MvtAnimState
                 // 3 → 2 at 0xE249B9, 2 → 3 at 0xE24A88); the high profile only on the item's flag (+42 & 4) or its end
-                // (RE/24 LADDER-15). The other clip back to the rung the step left, on the other foot. PORT: the item and
-                // its start point come from the action graph's transitions (Anim__PlayAction(id, 0, 0, −1)); the high
-                // profile's flag is not read, its steps finish
+                // (RE/24 LADDER-15). The other clip back to the rung the step left, on the other foot. Its start point is
+                // the action graph's transition (Anim__PlayAction(id, 0, 0, −1)): every `climb_up_l/r` → `climb_down` and
+                // `climb_down_l/r` → `climb_up` is ASTOPBSTOP 0.15 s with bpos INVPROGRESSIVE, so B starts at 1 − A's
+                // progress and its clock waits 0.15 s first (lab 10-12 `ladder_footm` 3.71 s: 0.13 s still, then down
+                // at 1.24 m/s; A15). The high profile's flag is not read, its steps finish
                 if stepping && !l.high && ((phase == LadderPhase::ClimbUp && along < -0.5) || (phase == LadderPhase::ClimbDown && along > 0.5)) {
                     let up = along > 0.5;
                     let rate = if pad.band <= 1 { 0.5 } else { 1.0 };
+                    let progress = k.min(1.0);
                     l.foot ^= 1;
                     l.height = (l.height + if up { 0.5 } else { -0.5 }).clamp(0.0, len);
                     if !up {
@@ -1054,6 +1077,9 @@ pub fn update_ladder(
                     let id = if up { CLIMB_UP[0] } else { CLIMB_DOWN[0] };
                     l.play(if up { LadderPhase::ClimbUp } else { LadderPhase::ClimbDown }, blend(id, l.foot, &[]), from, to, true);
                     l.rate = rate;
+                    l.k0 = 1.0 - progress;
+                    l.t = l.k0 * l.action.map_or(0.0, |a| a.duration());
+                    l.hold = REVERSAL_HOLD;
                     continue;
                 }
                 // the sideways move (event 4, slots 14 / 15): the stick within 20° of the side (|dot(d, facing)| <

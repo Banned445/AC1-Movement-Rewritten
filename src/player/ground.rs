@@ -1825,8 +1825,11 @@ pub fn update_ground(
                 g.ledge_stop_lock = None;
             }
         }
-        // Movement event 69 (0xDB1470): guard 0xDA5DE0 = front edge (ClassifyEdgeSide 0xD9D7F0 → 1), drop > 2 m,
-        // body space → ToLedgeStop 0xDA99F0. Side edges (3/4, guard 0xDA5D90) go to another state (not ported).
+        // Movement event 69 (0xDB1470): guard 0xDA5DE0 = front edge (ClassifyEdgeSide 0xD9D7F0 → 1), drop > 2 m, and
+        // room to hang below the edge (`sub_B2E4F0`(feet, point, normal, 1) 0xDA5EA1, the pull-down's clearance: the
+        // upright torso box and the 30° descent box, `narrow::pull_down_clear`) → ToLedgeStop 0xDA99F0. Refused, the
+        // walk goes on and steps off the edge (event 68; lab 10-17 `hay43_letgo` 003 / 006, A19). Side edges (3/4,
+        // guard 0xDA5D90) go to another state (not ported).
         // Sender: the input interpreter (0xEE8899 → IHumanGround vt748 `HumanGround__DoLedgeStop` 0xDBCAD0): a front
         // edge (vt744) within 0.15 m (0.0225 = 0.15²) with a drop of more than 5 m, in either profile, every frame
         // without a stick test: a run stop sliding to the edge turns into the ledge stop (RE/25 #12: live, released
@@ -1839,7 +1842,10 @@ pub fn update_ground(
         // then `ledge_stop_start` with the stick released)
         let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id)) && !run_stopping && !landing_cut;
         if (moving || run_stopping || landing_cut) && !busy && !edge_halt && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
-            if let Some((p, n)) = edge_report_drop(body.feet, body.forward(), REPORT_PICK_RADIUS, LEDGE_STOP_SQ, FRONT_COS, LEDGE_STOP_DROP, &guidance, &collision).map(|r| (r.0, r.1)) {
+            if let Some((p, n)) = edge_report_drop(body.feet, body.forward(), REPORT_PICK_RADIUS, LEDGE_STOP_SQ, FRONT_COS, LEDGE_STOP_DROP, &guidance, &collision)
+                .map(|r| (r.0, r.1))
+                .filter(|&(p, n)| super::narrow::pull_down_clear(body.feet, p, n, &collision))
+            {
                 if let Some(b) = super::ledge_moves::single_item(super::ledge_moves::LEDGE_STOP_START, 0) {
                     g.ledge_stop = Some(LedgeStop { point: p, normal: n, ending: false });
                     g.ledge_stop_lock = Some(n);
