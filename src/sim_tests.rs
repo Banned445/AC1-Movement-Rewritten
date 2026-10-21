@@ -173,6 +173,35 @@ fn low_profile_full_stick_is_walk_band() {
     assert!(s.body().feet.z > SPAWN.z + 2.0, "walked forward: {:?}", s.body().feet);
 }
 
+/// The blend (M3 group 16, A22): Legs held in low profile is the upper-body FSM's mode 9, which IHumanGround vt1196
+/// reports; the interpreter caps its speed factor at 0.75 (0xEE6C58). At stick 0.6 the start and the walk run on
+/// s = 0.25 · 0.385 · 0.75 (lab 10-17 `crouch4_blend` 047: 0.27 / 0.31 m/s against 0.35 / 0.40 without Legs).
+#[test]
+fn the_blend_walks_three_quarters_of_the_stick() {
+    let run = |legs: bool| {
+        let mut s = Sim::new(SPAWN, std::f32::consts::PI);
+        s.pad(Vec3::ZERO, 0.0, false, legs);
+        s.run(0.5);
+        assert_eq!(s.ground().pray, legs, "the blend while standing");
+        s.pad(Vec3::Z, 0.6, false, legs);
+        s.run(3.0);
+        assert_eq!(s.ground().pray, legs, "the blend while walking");
+        let z0 = s.body().feet.z;
+        s.run(1.0);
+        (s.ground().speed_param, s.body().feet.z - z0)
+    };
+    let stick = (0.6 - 0.35) / 0.65;
+    let (s_plain, d_plain) = run(false);
+    let (s_pray, d_pray) = run(true);
+    assert!((s_plain - 0.25 * stick).abs() < 1e-3, "plain s {s_plain}");
+    assert!((s_pray - 0.25 * stick * crate::player::ground::PRAY_SPEED_CAP).abs() < 1e-3, "blend s {s_pray}");
+    assert!(d_pray > 0.1 && d_pray < 0.85 * d_plain, "the blend walks slower: {d_pray} against {d_plain}");
+    // the turn rates of the vt1196 state (0xEE6D27)
+    assert_eq!(crate::tuning::player_turn_rate_in(2.0, true, true, 1.0), 3.0);
+    assert_eq!(crate::tuning::player_turn_rate_in(0.05, true, true, 1.0), 0.375);
+    assert_eq!(crate::tuning::player_turn_rate_in(2.0, false, true, 1.0), 4.0);
+}
+
 #[test]
 fn high_profile_runs_and_legs_sprints() {
     let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0);

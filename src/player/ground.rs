@@ -148,6 +148,11 @@ pub struct HumanGroundData {
     /// HG+1524: the stance-change wait plays (RE/24 GROUND-14); `stance_timer` is its time still to play (HG+736).
     pub stance_change: bool,
     pub stance_timer: f32,
+    /// The blend: the upper-body FSM (HG+0x580) in mode 9 (`UpperBodyFSM__EnterPray` 0xDC6317 on its event 12, left on
+    /// event 13 by `UpperBodyFSM__LeavePray` 0xDC8870), `HumanGround_Pray` `xx_l_pray_wait` on the upper slot.
+    /// IHumanGround vt1196 (`HumanGround__IsBlendPray` 0xD80820) reports it to
+    /// the interpreter, which caps the wanted speed at 0.75 (0xEE6C58) and turns at 0.375 / 3.0 rad/s (0xEE6D27).
+    pub pray: bool,
     /// Human+3056 … +3093: the step-up just made, while it holds (RE/24 GUIDE-15).
     pub step_up: Option<StepUp>,
     /// Which of the foot-IK switching states the ground was in last frame (RE/24 GROUND-16).
@@ -1095,7 +1100,7 @@ pub fn update_ground(
                     }
                     ImpulsionJump::Free { dir } => {
                         jump_log("impulsion free jump takeoff", body.feet, None);
-                        InAirEntry::FreeStepFreeJump { from: body.feet, dir, ahead: FREE_JUMP_AHEAD, down: crate::tuning::FREE_JUMP_DOWN, foot_left }
+                        InAirEntry::FreeStepFreeJump { from: body.feet, dir, ahead: FREE_JUMP_AHEAD, down: crate::tuning::FREE_JUMP_DOWN, edge: None, foot_left }
                     }
                 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
@@ -1370,6 +1375,12 @@ pub fn update_ground(
         // (RE/24 GROUND-22)
         g.sprint = ab.max_speed() == 4 && pad.legs_held;
         g.sub_state = if !GAME_GROUND_EXTRAS && g.sprint && g.high_profile { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
+        // the blend (upper-body mode 9). PORT: the upper-body FSM is not ported and the senders of its events 12 / 13 are
+        // untraced (`sub_D82880` / `sub_D828B0` post them, no reference found); live, the pray overlay holds exactly while
+        // Legs is held in low profile, standing, starting and walking (lab 10-17 `crouch4_blend` 047: 1.010–7.013 s, RE/20 #4)
+        g.pray = PRAY_BLEND && GAME_GROUND_TREE && pad.legs_held && !g.high_profile && g.sub_state == HumanGroundSubState::Movement
+            && g.oneshot.is_none() && g.collide.is_none() && g.crouch.is_none() && g.extra.is_none() && g.look_down.is_none()
+            && g.ledge_stop.is_none();
 
         // turn attenuation (interpreter 0xEE65A0): beyond 45° slow down; forced to 1 in low profile. The angle is +0x1264,
         // the curved stick's (+0x1270) before the wall slide (0xEE69DA).
@@ -1403,7 +1414,9 @@ pub fn update_ground(
         };
         // the target follows the stick even while a landing action plays (MoveBlend's transition path keeps
         // ramping toward it, 0xDA0810)
-        let target = if mv_speed > 0.0 { (base + STICK_SPAN * mv_speed * g.turn_atten).min(1.0) } else { 0.0 };
+        // the interpreter's factor is min(+4304, crowd, vt1052's 0, 0.75 in the blend) (0xEE6C68–0xEE6CA6)
+        let factor = if g.pray { g.turn_atten.min(PRAY_SPEED_CAP) } else { g.turn_atten };
+        let target = if mv_speed > 0.0 { (base + STICK_SPAN * mv_speed * factor).min(1.0) } else { 0.0 };
         // stick released (desired mode HG+0x5D8 = 0): the game leaves the Move state instead of decelerating
         // (the curve at HG+0x63C only runs while still moving toward a slower band):
         // - jog or faster (HG+0x5DC, speed > 0.25) → RunStop 0xD98E30 (guard 0xD7EC90): the run-stop action by the
@@ -1570,10 +1583,9 @@ pub fn update_ground(
             // `HumanGround__ctor` (0 at 0xDB2DA3) and read by `UpdateMoveBlend` 0xDA1A7D / `UpdateHeading`, so the
             // player always turns the shorter way (2026-10-18; the port kept a started side near 180° before).
             // the player's rates are set every frame by the interpreter (IHumanGround vt952 / vt956 → HG+1752 / +1756,
-            // 0xEE6D3F–0xEE6D91): 1.5 / 4.0 rad/s, with Legs held 0.975 / 2.6 (0.375 / 3.0 in the vt1196 state, not
-            // reached by the port); `RotateTowards` 0xD94F30 picks between them by the angle band 10° / 60° × k
-            // (RE/24 INPUT-5)
-            let rate = if GAME_GROUND_TREE { player_turn_rate(d.abs(), pad.legs_held, g.turn_k) } else { PLAYER_TURN_RATE };
+            // 0xEE6D3F–0xEE6D91): 1.5 / 4.0 rad/s, with Legs held 0.975 / 2.6 (0.375 / 3.0 in the blend, the vt1196
+            // state); `RotateTowards` 0xD94F30 picks between them by the angle band 10° / 60° × k (RE/24 INPUT-5)
+            let rate = if GAME_GROUND_TREE { crate::tuning::player_turn_rate_in(d.abs(), pad.legs_held, g.pray, g.turn_k) } else { PLAYER_TURN_RATE };
             let step = rate * dt;
             let turn = d.clamp(-step, step);
             g.turn_sign = if d.abs() > 1e-3 { turn.signum() } else { 0.0 };
@@ -2620,6 +2632,10 @@ const STEP_OFF_BACK: u32 = 0x935C_E89E;
 const LOOK_DOWN_HOLD: f32 = 0.25;
 /// The pull-down's empty-hand window (interpreter 0xEE8A33, dword_170861C).
 const PULLDOWN_HAND_WINDOW: f32 = 0.2;
+/// The blend's cap on the interpreter's speed factor (IHumanGround vt1196 → 0.75, 0xEE6C58).
+pub const PRAY_SPEED_CAP: f32 = 0.75;
+/// The blend (`HumanGroundData::pray`): Legs held in low profile caps the speed and turn rates as the vt1196 state does.
+pub const PRAY_BLEND: bool = true;
 
 /// Pull-down from the ground at edge `p` / normal `n`: type Wait (from Movement) or EdgeStop (from the ledge stop).
 fn pulldown_entry(p: Vec3, n: Vec3, feet: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<super::ledge::LedgeEntry> {

@@ -119,8 +119,9 @@ pub enum InAirEntry {
     FreeStepJump { from: Vec3, target: JumpTarget, foot_left: bool },
     /// The free-step stay's jump without a candidate (NarrowObjectState 0xEE99A9: IHuman vt68 → `Human__BuildFreeJumpTarget`
     /// 0xB1E7F0, `ahead` along `dir` and `down` below by its mode, type 1), posted as event 4: kind 1, ended by the
-    /// ground contact.
-    FreeStepFreeJump { from: Vec3, dir: Vec3, ahead: f32, down: f32, foot_left: bool },
+    /// ground contact. `edge`: the drop edge report (point, outward normal) the height is taken under and the target
+    /// pushed past (`free_step::free_target_past_edge`).
+    FreeStepFreeJump { from: Vec3, dir: Vec3, ahead: f32, down: f32, edge: Option<(Vec3, Vec3)>, foot_left: bool },
     /// A jump without a target that plays one action's root motion, then falls (the beam's jump on the spot,
     /// 0xF73B80: `beam_jumpstraight_clear`, then InAir +416 = `…_clear_tr_fall`).
     OnPlace { from: Vec3, fwd: Vec3, action: ActionBlend, fall: Option<ActionBlend> },
@@ -147,7 +148,7 @@ impl InAirEntry {
             InAirEntry::JumpToTarget { target, speed_param, foot_left, .. } => InAirEntry::JumpToTarget { from: p, target, speed_param, foot_left },
             InAirEntry::FreeJump { dir, ahead, speed_param, foot_left, .. } => InAirEntry::FreeJump { from: p, dir, ahead, speed_param, foot_left },
             InAirEntry::FreeStepJump { target, foot_left, .. } => InAirEntry::FreeStepJump { from: p, target, foot_left },
-            InAirEntry::FreeStepFreeJump { dir, ahead, down, foot_left, .. } => InAirEntry::FreeStepFreeJump { from: p, dir, ahead, down, foot_left },
+            InAirEntry::FreeStepFreeJump { dir, ahead, down, edge, foot_left, .. } => InAirEntry::FreeStepFreeJump { from: p, dir, ahead, down, edge, foot_left },
             InAirEntry::OnPlace { fwd, action, fall, .. } => InAirEntry::OnPlace { from: p, fwd, action, fall },
             InAirEntry::SwingJump { target, dir, .. } => InAirEntry::SwingJump { from: p, target, dir },
             InAirEntry::ReboundJump { target, dir, foot_left, .. } => InAirEntry::ReboundJump { from: p, target, dir, foot_left },
@@ -463,7 +464,7 @@ impl HumanInAirData {
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 0);
                 self.free_target = true;
             }
-            InAirEntry::FreeStepFreeJump { from, dir, ahead, down, foot_left } => {
+            InAirEntry::FreeStepFreeJump { from, dir, ahead, down, edge, foot_left } => {
                 self.start_y = from.y;
                 self.start = from;
                 self.apex_y = from.y;
@@ -472,6 +473,11 @@ impl HumanInAirData {
                 self.foot_left = foot_left;
                 let flat = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::NEG_Z);
                 let aim = from + flat * ahead - Vec3::Y * down;
+                // with the drop edge report: under its point, then past it (0xB1EA2E, `sub_B17D50`)
+                let aim = match edge {
+                    Some((p, n)) => super::free_step::free_target_past_edge(Vec3::new(aim.x, p.y - down, aim.z), from, flat, p, n),
+                    None => aim,
+                };
                 self.target_flags = TARGET_FREESTEP;
                 self.mode = self.real_jump(from, aim, TARGET_FREESTEP, Some(aim), 1);
                 self.free_target = true;

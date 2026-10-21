@@ -54,6 +54,9 @@ pub const PLAYER_TURN_RATE_GAME: f32 = 4.0;
 pub const PLAYER_TURN_RATE_LEGS: f32 = 2.6;
 pub const PLAYER_TURN_RATE_MIN: f32 = 1.5;
 pub const PLAYER_TURN_RATE_MIN_LEGS: f32 = 0.975;
+/// With Legs held in the blend (IHumanGround vt1196, the upper-body FSM's mode 9, 0xEE6D27): 0.375 / 3.0.
+pub const PLAYER_TURN_RATE_MIN_PRAY: f32 = 0.375;
+pub const PLAYER_TURN_RATE_PRAY: f32 = 3.0;
 /// The angle band `RotateTowards` 0xD94F30 scales the rate by (HG+1760 / +1764): below `lo` the min rate, above `hi`
 /// the max, linear between. The interpreter's Ground-state enter `sub_ED72E0` sets 10° / 60° (vt960 / vt964,
 /// 0.17453292 / 1.0471976) and never resets them; `UpdateHeading` 0xD95290 multiplies both by k (RE/24 INPUT-5).
@@ -68,7 +71,18 @@ pub const PLAYER_TURN_BAND_RATE: f32 = 0.5;
 /// `HumanGround__RotateTowards` 0xD94F30: the turn rate for an angle (unsigned) to turn through, by the min / max rates
 /// and the band scaled by k.
 pub fn player_turn_rate(angle: f32, legs: bool, k: f32) -> f32 {
-    let (min, max) = if legs { (PLAYER_TURN_RATE_MIN_LEGS, PLAYER_TURN_RATE_LEGS) } else { (PLAYER_TURN_RATE_MIN, PLAYER_TURN_RATE_GAME) };
+    player_turn_rate_in(angle, legs, false, k)
+}
+
+/// `player_turn_rate` with the blend's pair when `pray` (the vt1196 state; read only with Legs held, 0xEE6D19).
+pub fn player_turn_rate_in(angle: f32, legs: bool, pray: bool, k: f32) -> f32 {
+    let (min, max) = if legs && pray {
+        (PLAYER_TURN_RATE_MIN_PRAY, PLAYER_TURN_RATE_PRAY)
+    } else if legs {
+        (PLAYER_TURN_RATE_MIN_LEGS, PLAYER_TURN_RATE_LEGS)
+    } else {
+        (PLAYER_TURN_RATE_MIN, PLAYER_TURN_RATE_GAME)
+    };
     let (lo, hi) = (PLAYER_TURN_BAND.0 * k, PLAYER_TURN_BAND.1 * k);
     if angle >= hi {
         max
