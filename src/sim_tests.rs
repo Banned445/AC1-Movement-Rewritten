@@ -4444,6 +4444,21 @@ fn a_free_hang_drops_onto_climb_holds_below() {
 }
 
 #[test]
+fn a_free_hang_drop_ends_with_its_locked_item_in_the_climb() {
+    use crate::player::climb::{FREE_DROP_TO_CLIMB_END, FREE_DROP_TO_CLIMB_END_TIME};
+    // A13 (RE/31c g14): `sub_DDA3D0` 0xDDA3D0 plays the climb wait through the locked `_c` item 0x1EB225F1; the stick
+    // held down takes no step until it has played (lab 10-13 `climb_08` 007)
+    let mut s = hang_at(Vec3::new(-22.0, 3.5, 26.0), Vec3::NEG_Z);
+    s.run_until(1.0, |s| s.data().ledge.mv.is_none() && s.data().ledge.hang_set);
+    s.pad(Vec3::NEG_Z, 1.0, false, false); // down, held
+    assert!(s.run_until(5.0, |s| s.loco().current == ActorContextId::Climb), "never reached the climb: {}", s.data().ledge.last_action);
+    assert_eq!(s.data().climb.settle.map(|(id, _)| id), Some(FREE_DROP_TO_CLIMB_END), "the end item plays in the wait");
+    let held = s.run_until(FREE_DROP_TO_CLIMB_END_TIME - 0.02, |s| s.data().climb.moving.is_some());
+    assert!(!held, "a move started under the locked item: {}", s.data().climb.last_action);
+    assert!(s.run_until(0.1, |s| s.data().climb.settle.is_none()), "the item never ended");
+}
+
+#[test]
 fn a_free_hang_drops_into_a_wall_hang_on_the_ledge_below() {
     use crate::player::climb::FREE_DROP_TO_HANG;
     use crate::player::ledge_moves::MoveKind;

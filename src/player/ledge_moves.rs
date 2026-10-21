@@ -1293,7 +1293,7 @@ pub fn try_free_hang_drop(
         let to = super::climb::climb_root_at(upper.point, upper.point, lower.point, lower.point, nn);
         let e = ClimbEntry {
             entry_type: ClimbEntryType::FromLedge,
-            pose_2m: None, end_action: None,
+            pose_2m: None, end_action: Some(super::climb::FREE_DROP_TO_CLIMB_END),
             hand_l: upper.point,
             hand_r: upper.point,
             foot_l: lower.point,

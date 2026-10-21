@@ -64,6 +64,16 @@ pub const LEDGE_TO_CLIMB: [[u32; 2]; 2] = [[0x01C3_2292, 0x01C3_2F9D], [0x01C3_2
 /// interpolated to the new pose (state 15, 0xDE0870). To climb holds: 0x1EB225EF / 0x1EB225F0, then Climb (fill
 /// 0xDDFBF0); to a wall-hang ledge: 0x49CE7E53 / 0x49CE7E54, then the hang (0xDDA3D0).
 pub const FREE_DROP_TO_CLIMB: [u32; 2] = [0x1EB2_25EF, 0x1EB2_25F0];
+/// A13 (RE/31c g14): the drop's end in the Climb. When the second action ends, `sub_DDA3D0` 0xDDA3D0 plays the climb
+/// wait 0x012DA39F through the transition item 0x1EB225F1 (`climb2m_down_min_200_c`, 0xDDA48B; blend 0.3 / 0.15) and
+/// sets ClimbData+36; that item is locked (word 0x0FF0), so the Climb takes no move until it has played. Lab 10-13
+/// `climb_08`: in 10-18 017, with the stick held down, the item plays 13.827 → 13.985 s and the step down starts on the
+/// next frame (13.990 s); in 10-13 007 it plays 13.853 → 14.011 s and the stick lets go on that frame, so no step.
+pub const FREE_DROP_TO_CLIMB_END: u32 = 0x1EB2_25F1;
+/// How long the end item holds the Climb: the transition's 0.15 s (0xDDA477; the item's own clip is 0.333 s). The lab's
+/// item ends 0.158 s after it starts, the frame after 0.15 s has run, in both recordings **(hypothesis: the
+/// ActionTransition's length)**.
+pub const FREE_DROP_TO_CLIMB_END_TIME: f32 = 0.15;
 pub const FREE_DROP_TO_HANG: [u32; 2] = [0x49CE_7E53, 0x49CE_7E54];
 /// The fall started when a hold is lost (`HumanClimb__FillInAirData_LostGrip` 0xDF3300: InAir animation state 33 with
 /// action 287367547, blend 0.2).
@@ -195,7 +205,7 @@ pub const DUMPED_ACTIONS: &[u32] = &[
     // climb jump up to an overhang (TryBackEject 0xDF2F50 → StartRelease 0xDE96A0 → 0xDF9650)
     CLIMB_IMPULSE, CLIMB_JUMP_SWINGBACK,
     // free hang → drop onto climb holds / a wall ledge below (TryFreeHangDropToClimb 0xDDF390, 0xDDA120)
-    FREE_DROP_TO_CLIMB[0], FREE_DROP_TO_CLIMB[1], FREE_DROP_TO_HANG[0], FREE_DROP_TO_HANG[1],
+    FREE_DROP_TO_CLIMB[0], FREE_DROP_TO_CLIMB[1], FREE_DROP_TO_CLIMB_END, FREE_DROP_TO_HANG[0], FREE_DROP_TO_HANG[1],
     // lost grip (HumanClimb__FillInAirData_LostGrip 0xDF3300)
     LOST_GRIP,
     // climb → free hang on holds that stick out (TryTransitionToLedgeHang 0xDF4BA0)
@@ -428,6 +438,11 @@ impl HumanClimbData {
         if e.action.is_none() && e.from_feet.distance(self.frame.root) < 1e-3 {
             // the Ledge context already brought the root onto the pose (free-hang drop, 0xDE0870 → 0xDDFBF0)
             self.moving = None;
+        }
+        // the free-hang drop's end item, locked while it plays (`FREE_DROP_TO_CLIMB_END`)
+        if let Some(end) = e.end_action.filter(|&id| id == FREE_DROP_TO_CLIMB_END) {
+            self.move_seq += 1;
+            self.settle = Some((end, FREE_DROP_TO_CLIMB_END_TIME));
         }
     }
 }
@@ -1491,6 +1506,10 @@ pub fn update_climb(
 
         // Wait state (StateWait_Update 0xDFE760)
         body.tilt = d.frame.tilt();
+        // the guards read the item playing as the frame starts (the contexts run before the animation update), so a
+        // locked item that ends during this frame still holds it (lab `climb_08` 10-18 017: the drop's end item ends
+        // 13.985 s, the step starts on the next frame)
+        let locked = d.settle.is_some_and(|(id, _)| super::anim_gate::item_word(id, 0).is_some_and(|w| w & 0x20 != 0));
         if let Some((_, t)) = d.settle.as_mut() {
             *t -= dt;
             if *t <= 0.0 {
@@ -1506,7 +1525,7 @@ pub fn update_climb(
         // a locked end action (a reach's `_c`, word 0x20) holds the next move until it has played:
         // `HumanClimb__CanStartGridMove` 0xDE7FA0, `CanStartReachMove` 0xDE8020 and `WantsLedgeContext` 0xDE8070 all
         // refuse while the playing item is locked
-        if d.settle.is_some_and(|(id, _)| super::anim_gate::item_word(id, 0).is_some_and(|w| w & 0x20 != 0)) {
+        if locked {
             continue;
         }
         // the interpreter's latched stick in the character's frame (`ClimbState` 0xEE6036: the actor matrix × +0x1310;
