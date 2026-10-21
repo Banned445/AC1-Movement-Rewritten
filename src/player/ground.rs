@@ -148,6 +148,11 @@ pub struct HumanGroundData {
     /// HG+1524: the stance-change wait plays (RE/24 GROUND-14); `stance_timer` is its time still to play (HG+736).
     pub stance_change: bool,
     pub stance_timer: f32,
+    /// The blend: the upper-body FSM (HG+0x580) in mode 9 (`UpperBodyFSM__EnterPray` 0xDC6317 on its event 12, left on
+    /// event 13 by `UpperBodyFSM__LeavePray` 0xDC8870), `HumanGround_Pray` `xx_l_pray_wait` on the upper slot.
+    /// IHumanGround vt1196 (`HumanGround__IsBlendPray` 0xD80820) reports it to
+    /// the interpreter, which caps the wanted speed at 0.75 (0xEE6C58) and turns at 0.375 / 3.0 rad/s (0xEE6D27).
+    pub pray: bool,
     /// Human+3056 … +3093: the step-up just made, while it holds (RE/24 GUIDE-15).
     pub step_up: Option<StepUp>,
     /// Which of the foot-IK switching states the ground was in last frame (RE/24 GROUND-16).
@@ -445,6 +450,9 @@ impl HumanGroundData {
             ImpulsionJump::Free { dir } => feet + Vec3::new(dir.x, 0.0, dir.z).normalize_or(forward) * FREE_JUMP_AHEAD - Vec3::Y * crate::tuning::FREE_JUMP_DOWN,
         };
         let item = self.tr.map(|t| (t.action, t.phase)).or_else(|| self.oneshot.map(|o| (o.blend, o.t / o.duration.max(1e-4))));
+        if std::env::var_os("AC_JUMP_LOG").is_some() {
+            eprintln!("event 45: item {:?} free run {free_run}", item.map(|(b, t)| (format!("{:#x}/{}", b.id, b.item), t)));
+        }
         if item.is_some_and(|(b, _)| super::anim_gate::locked(&b)) {
             return Event45::Refused;
         }
@@ -616,6 +624,8 @@ impl HumanGroundData {
     /// `coast`: the walk's speed, whose displacement fades out over the blend (BLENDAB).
     fn idle_from_move(&mut self, lead: usize, coast: f32) {
         self.set_wait_foot(lead);
+        // the wait it enters is the wanted profile's: no stance change follows (lab 10-17 `lip13_east` 013, RE/34 A23)
+        self.wait_high = self.high_profile;
         let id = super::ground_tree::IDLE_FROM_MOVE[self.high_profile as usize][lead.min(1)];
         if self.start_transition(id, 0, 0, 0, &[], None) {
             if let Some(t) = self.tr.as_mut() {
@@ -891,6 +901,14 @@ impl HumanGroundData {
                         self.blend.speed_param = self.speed_param;
                         self.enter_move(ended, 1);
                     }
+                } else if super::climb::CLIMB_TO_GROUND_B.contains(&ended.id) {
+                    // the climb's drop to the ground (+4612 clear) hands the Ground setup mode 1 (0xDE9E59 →
+                    // `TransitionSetupDataToMovement` +16 = 1): Idle in the high profile, HG+1500 = 1, whatever the
+                    // stick's profile; a low-profile stick then changes back through the stance-change wait, and a
+                    // turn before that is the high one (A03, lab 10-17 `climb10_lowhold`: `climb_1m_tr_h_wait_*`, then
+                    // `h_wait` and `h_waitturn_*`)
+                    self.enter_wait(ended, true);
+                    self.wait_high = true;
                 } else {
                     self.enter_wait(ended, high);
                 }
@@ -907,6 +925,10 @@ impl HumanGroundData {
         self.turn_k = PLAYER_TURN_BAND_K0;
         self.sub_state = HumanGroundSubState::Movement;
         self.ledge_stop = None;
+        // the stand-in lock ends with the Ground (lab 10-12 `roof_jogoff_high` 003, 10-17 035: pulled down, climbed back
+        // up with the stick held toward the same edge, the game stops there again; a re-stop within one Ground stay is
+        // still the M5 live check)
+        self.ledge_stop_lock = None;
         self.wall_start = None;
         self.impulsion_jump = None;
         self.collide = None;
@@ -1078,7 +1100,7 @@ pub fn update_ground(
                     }
                     ImpulsionJump::Free { dir } => {
                         jump_log("impulsion free jump takeoff", body.feet, None);
-                        InAirEntry::FreeStepFreeJump { from: body.feet, dir, ahead: FREE_JUMP_AHEAD, down: crate::tuning::FREE_JUMP_DOWN, foot_left }
+                        InAirEntry::FreeStepFreeJump { from: body.feet, dir, ahead: FREE_JUMP_AHEAD, down: crate::tuning::FREE_JUMP_DOWN, edge: None, foot_left }
                     }
                 };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
@@ -1294,6 +1316,10 @@ pub fn update_ground(
                     // Idle from Move (0xD8B220) as below: the leading foot's wait (RE/24 GROUND-24) through the accel
                     // transition; PORT without a pose: the transition's exit foot
                     let lead = leading_foot.unwrap_or_else(|| super::ground_tree::pick_locomotion_foot(super::anim_gate::word(&t.action), g.blend.foot));
+                    // the accel transition of the wanted profile (HG+1504, this frame's: the profile update below runs
+                    // later in the port's frame). Lab 10-17 `lip13_east` 013: the stick let go in the free-step entry's
+                    // walk (high) → `h_accel_tr_l_wait_footr`, not the high wait and a stance change (RE/34 A23)
+                    g.high_profile = pad.high_profile && ab.max_speed() > 1;
                     g.idle_from_move(lead, body.velocity.with_y(0.0).length());
                     g.speed_param = 0.0;
                     g.blend.speed_param = 0.0;
@@ -1311,6 +1337,9 @@ pub fn update_ground(
         // (`free_step.rs`, SubState 6), which hands over to the Ground when the action is done (`CheckSupportAndFall`
         // 0xE51190); their authored exits (`freestep_entry_tr_*`, entered with a cut) start from its last frame.
         let gated = !GAME_GROUND_TREE || g.owner == TreeState::Other;
+        // the item playing as the frame starts: the turn below reads it (`PickLocomotionFoot` in `Pivot_Enter`) even when
+        // this frame's start drops it
+        let frame_word = (g.tr.is_some() || g.oneshot.is_some()).then(|| g.playing_word());
         if mv_speed > 0.0
             && gated
             && g.ledge_stop.is_none()
@@ -1336,36 +1365,8 @@ pub fn update_ground(
         }
         let busy = g.oneshot.is_some() || g.tr.is_some_and(|t| t.to_wait);
         let moving = mv_speed > 0.0 && !busy;
-
-        // ---------------------------------------------------------------- beam (NarrowObject, event 72)
-        // The sender (`GoAssassinActionInterpreter__ProcessGroundMovement`, RE/28 §2): every frame with the Jump ability
-        // and the stick past 0.35 it asks the guard (IHumanGround vt756 → CanHandleEvent(72), 0xEE79C3) along the
-        // stick's direction (+0x1250), before the edge halt zeroes the wanted speed, and posts the event (vt760,
-        // 0xEE860D) ahead of the edge jump, the ledge stop and the obstacle collision; the Ground's own update (the pivot,
-        // the start) comes after. So standing on or beside a beam, any stick toward it mounts it. Guard 0xD9F4C0
-        // (RE/24 NARROW-3).
-        if pad.speed01 > 0.0 && !busy && ab.allows(Ability::Jump) {
-            let event_dir = if pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { pad.dir };
-            if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, event_dir, &guidance, &collision) {
-                // Mode 1 plays the beam walk (`sub_F7B3B0` 0xF7B619: 0x28A3A8E4), keeping the playing locomotion item's
-                // index (the foot), jog weights [0, 1] when the Ground runs (NarrowObjectData+228 = Ground+1500), else
-                // walk [1, 0] (RE/24 NARROW-2; RE/05 §2.12's "retains the incoming locomotion" was wrong). PORT: the
-                // 1.0 s crossfade from the locomotion is the animator's
-                if super::narrow::BEAM_COMPLETION {
-                    entry.foot = g.blend.foot;
-                    let w = if g.speed_param > 0.25 { [0.0, 1.0] } else { [1.0, 0.0] };
-                    entry.action = Some(super::jump_blend::ActionBlend::new(super::narrow::BEAM_WALK, g.blend.foot, &w));
-                }
-                let phase = g.blend.phase;
-                switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(entry));
-                if super::narrow::BEAM_COMPLETION {
-                    // The incoming locomotion action carries on (0xF7AAA0 mode 1): keep its phase, not item start.
-                    let n = &mut data.narrow;
-                    n.t = phase * n.action.map(|a| a.duration()).unwrap_or(0.0);
-                }
-                continue;
-            }
-        }
+        // a landing one-shot (Movement states 21 / 22): no HG+609 bit, no animation gate on events 68 / 69 (below)
+        let landing_cut = matches!(g.owner, TreeState::Landing | TreeState::DamageLanding) && g.oneshot.is_some();
 
         let prev_high = g.high_profile;
         // IHumanGround vt12 SetHighProfile: high profile only above MaxSpeed Walk (0xEE70F9, RE/24 INPUT-10)
@@ -1374,6 +1375,12 @@ pub fn update_ground(
         // (RE/24 GROUND-22)
         g.sprint = ab.max_speed() == 4 && pad.legs_held;
         g.sub_state = if !GAME_GROUND_EXTRAS && g.sprint && g.high_profile { HumanGroundSubState::FreeRun } else { HumanGroundSubState::Movement };
+        // the blend (upper-body mode 9). PORT: the upper-body FSM is not ported and the senders of its events 12 / 13 are
+        // untraced (`sub_D82880` / `sub_D828B0` post them, no reference found); live, the pray overlay holds exactly while
+        // Legs is held in low profile, standing, starting and walking (lab 10-17 `crouch4_blend` 047: 1.010–7.013 s, RE/20 #4)
+        g.pray = PRAY_BLEND && GAME_GROUND_TREE && pad.legs_held && !g.high_profile && g.sub_state == HumanGroundSubState::Movement
+            && g.oneshot.is_none() && g.collide.is_none() && g.crouch.is_none() && g.extra.is_none() && g.look_down.is_none()
+            && g.ledge_stop.is_none();
 
         // turn attenuation (interpreter 0xEE65A0): beyond 45° slow down; forced to 1 in low profile. The angle is +0x1264,
         // the curved stick's (+0x1270) before the wall slide (0xEE69DA).
@@ -1407,7 +1414,9 @@ pub fn update_ground(
         };
         // the target follows the stick even while a landing action plays (MoveBlend's transition path keeps
         // ramping toward it, 0xDA0810)
-        let target = if mv_speed > 0.0 { (base + STICK_SPAN * mv_speed * g.turn_atten).min(1.0) } else { 0.0 };
+        // the interpreter's factor is min(+4304, crowd, vt1052's 0, 0.75 in the blend) (0xEE6C68–0xEE6CA6)
+        let factor = if g.pray { g.turn_atten.min(PRAY_SPEED_CAP) } else { g.turn_atten };
+        let target = if mv_speed > 0.0 { (base + STICK_SPAN * mv_speed * factor).min(1.0) } else { 0.0 };
         // stick released (desired mode HG+0x5D8 = 0): the game leaves the Move state instead of decelerating
         // (the curve at HG+0x63C only runs while still moving toward a slower band):
         // - jog or faster (HG+0x5DC, speed > 0.25) → RunStop 0xD98E30 (guard 0xD7EC90): the run-stop action by the
@@ -1463,12 +1472,16 @@ pub fn update_ground(
         // only cleared at 0xDB2CE7 / 0xDA7F6E), so the stick into a wall behind turns the character round.
         let pivot_off = if GAME_GROUND_TREE { stick_turn.abs() } else { off };
         if (moving || wall_stopped) && !busy && g.oneshot.is_none() && g.collide.is_none() && g.ledge_stop.is_none() && pivot_off > std::f32::consts::FRAC_PI_2 && g.speed_param <= BAND_WALK {
-            let left = mv_dir.dot(super::right_of(body.forward())) < 0.0;
+            // the side HG+660 = (HG+1532 >= 0) (`Pivot_Enter` 0xDA6150), HG+1532 being `Math__SignedAngleAroundAxis`
+            // 0x55E570 of (dest, heading) about up: its dot <= -1 returns +π (0x55E470), so an exact reversal turns
+            // right (RE/31c g9, A05)
+            let left = signed_angle_about_up(mv_dir, body.forward()) < 0.0;
             // the player's EntityDescriptorType is Main (entity+168 & 7 == 1): `Pivot_Enter` 0xDA6150 then sets the
             // destination profile HG+1504 to the current one HG+1500, so the player only plays the low → low and
             // high → high turns
             let to_high = if GAME_GROUND_TREE { prev_high } else { g.high_profile };
-            let id = PIVOT[(!left) as usize][prev_high as usize][to_high as usize][(g.blend.foot != 0) as usize];
+            let foot = pivot_foot(frame_word, g.speed_param, g.wait_foot, g.playing_word(), leading_foot.unwrap_or(g.blend.foot), g.blend.foot);
+            let id = PIVOT[(!left) as usize][prev_high as usize][to_high as usize][foot];
             let w = ((pivot_off - std::f32::consts::FRAC_PI_2) / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
             if jump_blend::action_items(id).is_some() {
                 g.play_oneshot(ActionBlend::new(id, 0, &[1.0 - w, w]));
@@ -1570,10 +1583,9 @@ pub fn update_ground(
             // `HumanGround__ctor` (0 at 0xDB2DA3) and read by `UpdateMoveBlend` 0xDA1A7D / `UpdateHeading`, so the
             // player always turns the shorter way (2026-10-18; the port kept a started side near 180° before).
             // the player's rates are set every frame by the interpreter (IHumanGround vt952 / vt956 → HG+1752 / +1756,
-            // 0xEE6D3F–0xEE6D91): 1.5 / 4.0 rad/s, with Legs held 0.975 / 2.6 (0.375 / 3.0 in the vt1196 state, not
-            // reached by the port); `RotateTowards` 0xD94F30 picks between them by the angle band 10° / 60° × k
-            // (RE/24 INPUT-5)
-            let rate = if GAME_GROUND_TREE { player_turn_rate(d.abs(), pad.legs_held, g.turn_k) } else { PLAYER_TURN_RATE };
+            // 0xEE6D3F–0xEE6D91): 1.5 / 4.0 rad/s, with Legs held 0.975 / 2.6 (0.375 / 3.0 in the blend, the vt1196
+            // state); `RotateTowards` 0xD94F30 picks between them by the angle band 10° / 60° × k (RE/24 INPUT-5)
+            let rate = if GAME_GROUND_TREE { crate::tuning::player_turn_rate_in(d.abs(), pad.legs_held, g.pray, g.turn_k) } else { PLAYER_TURN_RATE };
             let step = rate * dt;
             let turn = d.clamp(-step, step);
             g.turn_sign = if d.abs() > 1e-3 { turn.signum() } else { 0.0 };
@@ -1589,8 +1601,11 @@ pub fn update_ground(
         if let Some(mut c) = g.collide {
             g.sub_state = HumanGroundSubState::ObstacleCollision;
             // event 49 in the lean (`ObstacleCollision` handler 0xDA6FF0: HG+1492 clear → FindWallingWall → 0xDA5680,
-            // RE/24 WALL-19): the wall run starts from the lean with the same input as from Movement
-            if g.high_profile && wall_run_input && ab.allows(Ability::Walling) && c.phase == super::collide::CollidePhase::Wait {
+            // RE/24 WALL-19): the wall run starts from the lean with the same input as from Movement. The handler reads
+            // no item or phase (0xDA708F tests HG+1492 only, which the exit sets to 2 at 0xD9E288), so the collide item
+            // and its transition into the lean take it too (A01: lab 10-13 `023_freerun_east_drift4`); the exit leaves
+            // the lean in the port (`collide = None`), where Movement's `busy` holds the wall run off as +1492 does
+            if g.high_profile && wall_run_input && ab.allows(Ability::Walling) {
                 if let Some((contact, normal, slope)) = super::walling::wall_ahead(body.feet, body.forward(), &collision) {
                     if pad.jump_buffered() {
                         pad.consume_jump();
@@ -1820,8 +1835,11 @@ pub fn update_ground(
                 g.ledge_stop_lock = None;
             }
         }
-        // Movement event 69 (0xDB1470): guard 0xDA5DE0 = front edge (ClassifyEdgeSide 0xD9D7F0 → 1), drop > 2 m,
-        // body space → ToLedgeStop 0xDA99F0. Side edges (3/4, guard 0xDA5D90) go to another state (not ported).
+        // Movement event 69 (0xDB1470): guard 0xDA5DE0 = front edge (ClassifyEdgeSide 0xD9D7F0 → 1), drop > 2 m, and
+        // room to hang below the edge (`sub_B2E4F0`(feet, point, normal, 1) 0xDA5EA1, the pull-down's clearance: the
+        // upright torso box and the 30° descent box, `narrow::pull_down_clear`) → ToLedgeStop 0xDA99F0. Refused, the
+        // walk goes on and steps off the edge (event 68; lab 10-17 `hay43_letgo` 003 / 006, A19). Side edges (3/4,
+        // guard 0xDA5D90) go to another state (not ported).
         // Sender: the input interpreter (0xEE8899 → IHumanGround vt748 `HumanGround__DoLedgeStop` 0xDBCAD0): a front
         // edge (vt744) within 0.15 m (0.0225 = 0.15²) with a drop of more than 5 m, in either profile, every frame
         // without a stick test: a run stop sliding to the edge turns into the ledge stop (RE/25 #12: live, released
@@ -1829,9 +1847,20 @@ pub fn update_ground(
         // (high profile + Legs) jumps first (the interpreter's jump branch returns before it). In low profile the edge
         // halt above comes first (its reach is larger) and its look-down returns before the sender.
         let run_stopping = g.oneshot.is_some_and(|o| jump_blend::RUN_STOP.contains(&o.blend.id) || jump_blend::RUN_STOP_TO_WAIT.contains(&o.blend.id));
-        let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id)) && !run_stopping;
-        if (moving || run_stopping) && !busy && !edge_halt && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
-            if let Some((p, n)) = edge_report_drop(body.feet, body.forward(), REPORT_PICK_RADIUS, LEDGE_STOP_SQ, FRONT_COS, LEDGE_STOP_DROP, &guidance, &collision).map(|r| (r.0, r.1)) {
+        // a landing (states 21 / 22) at the edge stops on its first frame: Movement takes event 69 with only its guards
+        // (0xDAFA09), the sender has no stick test (lab A36 `edge_landing_out` 004: `landing_straight_soft` for one frame,
+        // then `ledge_stop_start` with the stick released)
+        // The other Movement children (the pivot, the skid turn, the roll ending) fall through to the same switch
+        // (`HumanGround__Movement_CanHandleEvent` 0xDAF708 → 0xDAFA09): no anim gate either, so a wait turn toward a
+        // roof edge is cut by the ledge stop (lab 10-12 `roof_jogoff_high` 003, 10-17 035: `h_waitturn` for 0.08 s,
+        // then `ledge_stop_start`; M3 group 9)
+        let movement_child = GAME_GROUND_TREE && g.oneshot.is_some() && g.owner != TreeState::Other && mv_speed > 0.0;
+        let busy = g.oneshot.is_some_and(|o| !is_start(o.blend.id)) && !run_stopping && !landing_cut && !movement_child;
+        if (moving || run_stopping || landing_cut || movement_child) && !busy && !edge_halt && g.ledge_stop_lock.is_none() && !(g.high_profile && pad.legs_held) {
+            if let Some((p, n)) = edge_report_drop(body.feet, body.forward(), REPORT_PICK_RADIUS, LEDGE_STOP_SQ, FRONT_COS, LEDGE_STOP_DROP, &guidance, &collision)
+                .map(|r| (r.0, r.1))
+                .filter(|&(p, n)| super::narrow::pull_down_clear(body.feet, p, n, &collision))
+            {
                 if let Some(b) = super::ledge_moves::single_item(super::ledge_moves::LEDGE_STOP_START, 0) {
                     g.ledge_stop = Some(LedgeStop { point: p, normal: n, ending: false });
                     g.ledge_stop_lock = Some(n);
@@ -1904,14 +1933,50 @@ pub fn update_ground(
                 // vt28: free jump without a target, along the direction the candidates were searched in (IHuman vt68
                 // gets the query's own direction pointer, 0xEE842D / 0xEE81CE; live RE/25 freerun_east: the stick's
                 // (0.999, −0.038) while the body still faced 12° to the right)
-                None => InAirEntry::FreeJump { from: body.feet, dir: want, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0, tap: true },
+                None => InAirEntry::FreeJump { from: body.feet, dir: want, ahead: FREE_JUMP_AHEAD, speed_param: g.speed_param, foot_left: g.blend.foot != 0 },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
             continue;
         }
 
+        // ---------------------------------------------------------------- beam (NarrowObject, event 72)
+        // The sender (`GoAssassinActionInterpreter__ProcessGroundMovement`, RE/28 §2): every frame with the Jump ability
+        // and the stick past 0.35 it asks the guard (IHumanGround vt756 → CanHandleEvent(72), 0xEE79C3) along the
+        // stick's direction (+0x1250), before the edge halt zeroes the wanted speed, and posts the event (vt760,
+        // 0xEE862E) ahead of the edge jump (0xEE8679), the ledge stop and the obstacle collision; the Ground's own update
+        // (the pivot, the start) comes after. So standing on or beside a beam, any stick toward it mounts it. Guard
+        // 0xD9F4C0 (RE/24 NARROW-3). The tap / free-run jump above (0xEE817E: event 45 through vt24 / vt28) returns
+        // before the post, so a jump that fires wins over the mount (A24, lab 10-12 `roof_freerun_off` 003: the free
+        // run off the roof edge flies onto the beam's far part instead of mounting it at the edge).
+        if pad.speed01 > 0.0 && !busy && ab.allows(Ability::Jump) {
+            let event_dir = if pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { pad.dir };
+            if let Some(mut entry) = super::narrow::try_mount_beam(body.feet, event_dir, &guidance, &collision) {
+                // Mode 1 plays the beam walk (`sub_F7B3B0` 0xF7B619: 0x28A3A8E4), keeping the playing locomotion item's
+                // index (the foot), jog weights [0, 1] when the Ground runs (NarrowObjectData+228 = Ground+1500), else
+                // walk [1, 0] (RE/24 NARROW-2; RE/05 §2.12's "retains the incoming locomotion" was wrong). PORT: the
+                // 1.0 s crossfade from the locomotion is the animator's
+                if super::narrow::BEAM_COMPLETION {
+                    entry.foot = g.blend.foot;
+                    let w = if g.speed_param > 0.25 { [0.0, 1.0] } else { [1.0, 0.0] };
+                    entry.action = Some(super::jump_blend::ActionBlend::new(super::narrow::BEAM_WALK, g.blend.foot, &w));
+                }
+                let phase = g.blend.phase;
+                switch_context(&mut loco, &mut data, TransitionSetup::ToBeam(entry));
+                if super::narrow::BEAM_COMPLETION {
+                    // The incoming locomotion action carries on (0xF7AAA0 mode 1): keep its phase, not item start.
+                    let n = &mut data.narrow;
+                    n.t = phase * n.action.map(|a| a.duration()).unwrap_or(0.0);
+                }
+                continue;
+            }
+        }
+
+
         // ---------------------------------------------------------------- at an edge: the edge jump, event 68
-        if !busy {
+        // Event 68 is taken in every Ground state (`HumanGround__CanHandleEvent` 0xDB48B0) with only its guard, HG+609
+        // bit 0 clear, which the landings (states 21 / 22) never set: a landing past the edge steps off on its first
+        // frame (lab A36 `edge_landing_out` 005: `fall_step_off_back_max` right after the landing)
+        if !busy || landing_cut {
             if let Some(r) = facing_report {
                 // The edge jump (0xEE8679): at or past the edge (+52 < 0.01), the stick past the dead zone and both
                 // the stick and the facing within 45 degrees of the edge normal → IHuman vt56 kind 2 (high) / 1 along
@@ -1921,6 +1986,17 @@ pub fn update_ground(
                 if r.sq() < 0.01 && moving && ab.allows(Ability::Jump) && pad.dir.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 && flat_fwd.dot(r.normal) > std::f32::consts::FRAC_1_SQRT_2 {
                     if let Some(target) = super::targets::find_target(body.feet, forward, flat_fwd, &super::jump_candidates::Query::edge(g.high_profile), true, &guidance, &collision) {
                         jump_log("edge jump", body.feet, Some(&target));
+                        // the target goes to IHuman vt24 (0xEE87BF), event 45 as the tap jump's: the impulsion or the run
+                        // jump by the playing item (lab 10-12 `climb_16` 017: out of `freestep_entry_tr_l_walk` at 0.32
+                        // of it, `impultionstraight_footl_to_ground_to_air_front_down`; RE/34 A34)
+                        match g.event45(body.feet, forward, ImpulsionJump::Target(target), free_run_ready, leading_foot) {
+                            Event45::Run => {}
+                            Event45::Impulsion => {
+                                body.velocity = Vec3::ZERO;
+                                continue;
+                            }
+                            Event45::Refused => continue,
+                        }
                         let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, g.playing_word(), leading_foot, g.blend.foot) };
                 switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
                         continue;
@@ -2074,7 +2150,12 @@ pub fn update_ground(
         // feet), no anim gate: it starts again during the push-away's transition into the walk (unlocked), not during the
         // locked push-away itself. The direction is the stick, so standing along the wall and pushing into it turns the
         // character to face it (the entry's 0.15 s warp).
-        let unlocked = g.oneshot.is_none_or(|o| !super::anim_gate::locked(&o.blend)) && g.tr.is_none_or(|t| !super::anim_gate::locked(&t.action));
+        // The sender (0xEE8C83–0xEE8DB0) and Movement's acceptance (0xDAF73F) read no animation gate, so a Movement
+        // child's one-shot (a landing or the landing roll, a run stop, a skid turn, a pivot, the roll ending) is cut by
+        // the collide at the wall (lab A01: `landing_damage_footl_roll` cut 0.32 s in, `jogstop` cut on its first frame).
+        // PORT: the locked one-shots and transitions of the rest (the push-away's walk back) keep the stand-in gate.
+        let unlocked = g.owner != TreeState::Other
+            || (g.oneshot.is_none_or(|o| !super::anim_gate::locked(&o.blend)) && g.tr.is_none_or(|t| !super::anim_gate::locked(&t.action)));
         let event42 = ab.allows(Ability::Jump) && pad.magnitude > crate::tuning::STICK_DEADZONE && unlocked && g.ledge_stop.is_none()
             && body.stick_residual.abs() <= 0.2 && super::collide::has_obstacle_contact(&body.proxy.manifold, pad.dir);
         if event42 {
@@ -2442,6 +2523,26 @@ const GRAB_PROBE_RADIUS: f32 = 0.75;
 /// Event 68 guard 0xD84190: the edge must be at least 0.53 m above the feet.
 const GRAB_MIN_HEIGHT: f32 = 0.53;
 
+/// The pivot's foot column (`HumanGround__Pivot_Enter` 0xDA6150 → `HumanGround__PickLocomotionFoot` 0xD86760 at 0xDA62C2):
+/// the word bits 2–3 of the item playing as the frame started (`frame_word`; a transition into the wait that this
+/// frame's stick drops still counts), else the pose's leading foot `lead`; in Idle's plain wait (no item, speed 0) the
+/// wait's own column; else the locomotion item's word. Lab 10-17 `roof_jogoff_high` 035: after the free-step stay's
+/// `freestep_entry_footl_tr_h_wait_footr` (word 0x0FC0) with the left foot ahead, `h_wait_hipm_footl_to_h_waitturn_left`
+/// although the wait it leads to is the right one. The parallel column (2) has no player turn (RE/02 §4.3): the
+/// locomotion's foot then. PORT: the flip for the six actions 0xD8680E names (none of them movement actions the lab
+/// records) is not ported.
+pub fn pivot_foot(frame_word: Option<Option<u16>>, speed_param: f32, wait_foot: usize, playing_word: Option<u16>, lead: usize, blend_foot: usize) -> usize {
+    let picked = match frame_word {
+        Some(w) => super::ground_tree::pick_locomotion_foot(w, lead),
+        None if speed_param <= 0.0 => wait_foot,
+        None => super::ground_tree::pick_locomotion_foot(playing_word, lead),
+    };
+    match picked {
+        f @ 0..=1 => f,
+        _ => (blend_foot != 0) as usize,
+    }
+}
+
 /// The ledge stop's squared edge distance: the interpreter passes 0.0225 (0.15 m) to `ClassifyEdgeSide` (vt744,
 /// 0xEE8899), which compares it with the signed squared distance to the report point (0xD9D7F0).
 const LEDGE_STOP_SQ: f32 = 0.0225;
@@ -2495,7 +2596,7 @@ fn step_off_entry(feet: Vec3, facing: Vec3, r: &super::jump_candidates::EdgeRepo
     }
     let dir = if angle.abs() <= 60f32.to_radians() { facing } else { Quat::from_rotation_y(60f32.to_radians() * angle.signum()) * r.normal };
     let a = if high { 1.0 } else { 0.0 };
-    Some(InAirEntry::FreeJump { from: feet, dir, ahead: 1.0 + 2.0 * a * speed_param, speed_param, foot_left, tap: false })
+    Some(InAirEntry::FreeJump { from: feet, dir, ahead: 1.0 + 2.0 * a * speed_param, speed_param, foot_left })
 }
 
 /// `AC_JUMP_LOG=1`: which of the ground's jump paths fired, from where, at what target.
@@ -2531,6 +2632,10 @@ const STEP_OFF_BACK: u32 = 0x935C_E89E;
 const LOOK_DOWN_HOLD: f32 = 0.25;
 /// The pull-down's empty-hand window (interpreter 0xEE8A33, dword_170861C).
 const PULLDOWN_HAND_WINDOW: f32 = 0.2;
+/// The blend's cap on the interpreter's speed factor (IHumanGround vt1196 → 0.75, 0xEE6C58).
+pub const PRAY_SPEED_CAP: f32 = 0.75;
+/// The blend (`HumanGroundData::pray`): Legs held in low profile caps the speed and turn rates as the vt1196 state does.
+pub const PRAY_BLEND: bool = true;
 
 /// Pull-down from the ground at edge `p` / normal `n`: type Wait (from Movement) or EdgeStop (from the ledge stop).
 fn pulldown_entry(p: Vec3, n: Vec3, feet: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<super::ledge::LedgeEntry> {

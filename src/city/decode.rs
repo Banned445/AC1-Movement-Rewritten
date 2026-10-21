@@ -53,6 +53,8 @@ pub struct CityObject {
     pub collision: Vec<Triangle>,
     pub edges: Vec<GuidanceEdge>,
     pub haystack: Option<crate::collision::HayStack>,
+    /// A ladder entity's own axis (Bevy space, base and top): `ladder_axis_of`.
+    pub ladder: Option<(Vec3, Vec3)>,
     /// The entity's small / medium object flags (`entity_size_flags`): bit 0 small, bit 1 medium.
     pub size: u8,
 }
@@ -269,7 +271,7 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     let mut o = CityObject { name: name.to_string(), transform, center: transform.w_axis.truncate(), radius: 0.0,
         bounds: Aabb3 { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) }, meshes: Vec::new(), lod: LodTable::default(),
         visual_bounds: Aabb3 { min: Vec3::ZERO, max: Vec3::ZERO },
-        collision: Vec::new(), edges: Vec::new(), haystack: None, size: entity_size_flags(b) };
+        collision: Vec::new(), edges: Vec::new(), haystack: None, ladder: None, size: entity_size_flags(b) };
     // --- visual
     if let Some(&v) = visuals.first() {
         if b.get(v + 4) == Some(&1) {
@@ -339,6 +341,9 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     for e in &o.edges { grow(&mut o.bounds, e.p0); grow(&mut o.bounds, e.p1); }
     if !markers(b, "BhvHayStack").is_empty() {
         o.haystack = haystack_of(&o);
+    }
+    if !markers(b, "BhvLadder").is_empty() {
+        o.ladder = ladder_axis_of(&o);
     }
     if o.meshes.is_empty() && o.collision.is_empty() && o.edges.is_empty() { return Ok(None); }
     if !o.bounds.min.is_finite() { o.bounds = Aabb3 { min: o.center, max: o.center }; }
@@ -704,6 +709,20 @@ mod tests {
         let t = LodTable::build(&d([(1, 10.0), (0, 20.0), (0, 40.0), (0, 80.0), (0, 160.0)]), 1);
         assert_eq!(t.fade(9.5), None);
     }
+}
+
+/// The ladder entity's own axis, as `Human__CanGrabLadder` 0xB239D0 measures it: base = the entity matrix's translation,
+/// top = base + H·(its Z row) (0xB23A3C–0xB23A6E). H is LadderHeight, the entity's ObjectBehavior (`sub_44A860`(0x7BBFDBE3)
+/// finds the BhvLadder, type 0x1B087980) → vt176 (its BhvLadderData at +172) → +0xA4. The serialized BhvLadderData does
+/// not hold it; PORT: H is the ladder guidance line's length, which equals the height the body stores twice (all 333
+/// Damascus ladders, 4–12.5 m; `probe_ladder_entities`). The guidance line itself lies 5 mm off this axis
+/// along each of the entity's local axes (−x, −y, −z), so the reach differs by a few millimetres (RE/31c g10 / g11).
+fn ladder_axis_of(o: &CityObject) -> Option<(Vec3, Vec3)> {
+    let e = o.edges.iter().find(|e| e.subtype == crate::guidance::GuidanceSubType::Ladder)?;
+    let up = o.transform.z_axis.truncate().normalize_or_zero();
+    if up == Vec3::ZERO { return None; }
+    let base = o.transform.w_axis.truncate();
+    Some((base, base + up * e.p0.distance(e.p1)))
 }
 
 /// The haystack as the game's queries see it (`collision::HayStack`): the entity's origin, and its collision's box in

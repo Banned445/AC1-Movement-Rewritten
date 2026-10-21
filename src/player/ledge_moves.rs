@@ -1293,7 +1293,7 @@ pub fn try_free_hang_drop(
         let to = super::climb::climb_root_at(upper.point, upper.point, lower.point, lower.point, nn);
         let e = ClimbEntry {
             entry_type: ClimbEntryType::FromLedge,
-            pose_2m: None, end_action: None,
+            pose_2m: None, end_action: Some(super::climb::FREE_DROP_TO_CLIMB_END),
             hand_l: upper.point,
             hand_r: upper.point,
             foot_l: lower.point,
@@ -1581,7 +1581,7 @@ pub fn climb_out_moves(two_m: bool, from: Vec3, hand_l: Vec3, hand_r: Vec3, n: V
         hand_r,
         normal: n,
     };
-    let step = [single(ACT_KNEE_TO_FREESTEP[0], 0), None, None, None];
+    let step = [knee_stand_after(seq[1].or(seq[0])), None, None, None];
     let d = seq_durations(&step);
     let stand = LedgeMove {
         seq: step,
@@ -1629,7 +1629,7 @@ pub fn knee_catch_moves(action: u32, from: Vec3, edge: Vec3, n: Vec3) -> (LedgeM
         hand_r,
         normal: n,
     };
-    let step = [single(ACT_KNEE_TO_FREESTEP[0], 0), None, None, None];
+    let step = [knee_stand_after(seq[1].or(seq[0])), None, None, None];
     let d = seq_durations(&step);
     let stand = LedgeMove {
         seq: step,
@@ -1657,6 +1657,14 @@ pub const ACT_KNEE_TO_WAIT: u32 = 0x0106_C58B;
 /// item's leading foot (+60 & 0xC == 4 → left), then NarrowObject SubState 6 (the transient free-step stay, back to
 /// Ground on wide support). [footl, footr].
 pub const ACT_KNEE_TO_FREESTEP: [u32; 2] = [0x248E_9730, 0x248E_9731];
+
+/// `HumanLedge__SwitchToNarrowObject_Enter` 0xDD2A50: the knee's stand-up onto the top by the playing item's feet-after
+/// bits (+60 & 0xC == 4, left ahead → 0x248E9730, else 0x248E9731; 0xDD2AA8). A02 (lab `climb_11`, `probeS_climb24`:
+/// `hangknee_footr_tr_freestep_entry_footr` where the port played the left one). Without the item's word: the left one.
+pub fn knee_stand_after(prev: Option<ActionBlend>) -> Option<ActionBlend> {
+    let left = prev.and_then(|a| super::anim_gate::word(&a)).is_none_or(|w| w & 0xC == 4);
+    single(ACT_KNEE_TO_FREESTEP[(!left) as usize], 0)
+}
 /// The items a stand-up hands over to the free-step stay with (NarrowObject SubState 6, RE/05 §2.15): the knee's free
 /// step (two hands / one hand, 0xDD2A50) and the step-up's reception (0xE09752).
 pub const FREE_STEP_STAY: [u32; 4] = [ACT_KNEE_TO_FREESTEP[0], ACT_KNEE_TO_FREESTEP[1], ACT_KNEE_ONEHAND_TO_FREESTEP, RECEPTION_STEP_UP];
@@ -1820,13 +1828,13 @@ pub fn arrival_move(arr: LedgeArrival, from: Vec3, hand_l: Vec3, hand_r: Vec3, n
                 // catch's, 0xDF1CBB); `hangknee_tr_freestep_entry` adds no root motion and the free step's
                 // `freestep_entry_tr_l_wait` moves 0.3 m onto the top (live RE/25 crate_probe 001: the root holds at the
                 // knee through the stand-up item)
-                HangEnd::StandFromKnee => ([item(j.reception, 0, &w), item(j.reception, 1, &w), item(ACT_KNEE_TO_FREESTEP[0], 0, &[1.0]), None], mid + facing * 0.1, false, true),
+                HangEnd::StandFromKnee => ([item(j.reception, 0, &w), item(j.reception, 1, &w), knee_stand_after(item(j.reception, 1, &w).or(item(j.reception, 0, &w))), None], mid + facing * 0.1, false, true),
                 // PORT: the reception's root (FROMANIM) is corrected onto the pull-up's stand point; where the game's
                 // free-step stay leaves the root is not traced. Its exit transitions (low / high wait 0x69C24BB2 /
                 // 0x0D9971F9, jog 0x0D9971FB) are chosen by the animation graph; the port hands back to Ground.
                 HangEnd::FreeStep => ([item(j.reception, 0, &w), None, None, None], top, false, true),
                 HangEnd::StandFromWaist => (
-                    [item(j.reception, 0, &w), item(j.reception, 1, &w), item(ACT_WAIST_TO_KNEE, 0, &[1.0]), item(ACT_KNEE_TO_FREESTEP[0], 0, &[1.0])],
+                    [item(j.reception, 0, &w), item(j.reception, 1, &w), item(ACT_WAIST_TO_KNEE, 0, &[1.0]), knee_stand_after(item(ACT_WAIST_TO_KNEE, 0, &[1.0]))],
                     top,
                     false,
                     true,

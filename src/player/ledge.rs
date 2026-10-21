@@ -104,6 +104,11 @@ pub struct LedgeEntry {
     pub entry_rest: [Option<LedgeMove>; 2],
     /// Caught from a fall (`HumanInAir__CheckAirCatch` 0xE0BB70): Some(long catch, a fall of 3 m or more).
     pub catch: Option<bool>,
+    /// The hand records' own wall normals (+1584 / +1600) when the entry found a hand pair on two pieces: walling's wall
+    /// hang and the jump receptions hand the pair's hits to the limb contacts (0xE391FB / 0xE3920C, 0xE08BFB / 0xE09520),
+    /// each with its piece's normal, and `sub_B157B0` faces the hang −(n_L + n_R) (0xB157B0). `normal` is then that
+    /// bent normal. None: both hands take `normal`.
+    pub hand_n: Option<[Vec3; 2]>,
 }
 
 impl LedgeEntry {
@@ -123,8 +128,32 @@ impl LedgeEntry {
             entry_move: None,
             entry_rest: [None, None],
             catch: None,
+            hand_n: None,
         }
     }
+
+    /// The entry with the hand pair `[l, r]` (`GuidanceHit`s of `probe_facing_pair`): the hands on their points and, with
+    /// `HAND_PAIR_NORMALS`, each record on its own piece's normal and the hang facing −(n_L + n_R).
+    pub fn with_hand_pair(mut self, [l, r]: [crate::guidance::GuidanceHit; 2]) -> Self {
+        self.hand_l = l.point;
+        self.hand_r = r.point;
+        if HAND_PAIR_NORMALS {
+            self.normal = hand_pair_normal(l.wall_normal, r.wall_normal, self.normal);
+            self.hand_n = Some([l.wall_normal, r.wall_normal]);
+        }
+        self
+    }
+}
+
+/// A07 (RE/31c g13): the hand pairs' entries keep each hand's own normal and face −(n_L + n_R) (`sub_B157B0` 0xB157B0,
+/// from walling's probe D 0xE38F2B and the jump reception 0xE09444). Off: both hands on the first hand's / the target's
+/// normal, as before.
+pub const HAND_PAIR_NORMALS: bool = true;
+
+/// The hang normal of a hand pair (`bent_hang_normal` of the two flattened wall normals), else `fallback`.
+pub fn hand_pair_normal(nl: Vec3, nr: Vec3, fallback: Vec3) -> Vec3 {
+    let n = bent_hang_normal(nl, nr);
+    if n == Vec3::ZERO { fallback } else { n }
 }
 
 /// The air catches (CheckAirCatch): ledge with the wall below (3-way angle blend), free hang; [< 3 m, >= 3 m].
@@ -256,6 +285,15 @@ pub struct HumanLedgeData {
     pub hand_l: Vec3,
     pub hand_r: Vec3,
     pub normal: Vec3,
+    /// The hand records' own wall normals (+1584 left, +1600 right) and the hang normal they were last averaged into
+    /// (`hand_n_of`): `HumanLedge__ComputeRootFromHandTargets` 0xDD6730 takes the hang's facing from −(n_L + n_R),
+    /// so a shimmy across a bend turns the body half way on the reach and fully on the closing step. Reset to the hang
+    /// normal whenever other code sets that.
+    pub hand_n: [Vec3; 2],
+    pub hand_n_of: Vec3,
+    /// The heading at the start of a shimmy step that turns the body, while its root interpolation runs (the game's
+    /// RootInterp `sub_711130` carries the new facing +1664 from `StartHandStep` 0xDDE483).
+    pub turn_from: Option<f32>,
     /// +0x85: shimmy alternation flag. false = lead hand reaches out next, true = trailing hand closes.
     pub alt_flag: bool,
     /// +0x746: stick up and nothing else possible â†’ pull-up allowed.
@@ -338,6 +376,8 @@ impl HumanLedgeData {
         self.hand_l = e.hand_l;
         self.hand_r = e.hand_r;
         self.normal = e.normal;
+        self.hand_n = e.hand_n.unwrap_or([e.normal; 2]);
+        self.hand_n_of = e.normal;
         self.sub_state = e.sub_state;
         self.pass_over = None;
         self.swing = None;
@@ -600,11 +640,17 @@ pub fn feet_supports_first(hand: Vec3, n: Vec3, collision: &CollisionWorld) -> O
 /// over). Hands 0 / 1 are the left / right (`sub_E55CB0`(0 / 1, …), 0xE08BFB / 0xE09520 / 0xE096F2); the wall and free
 /// receptions keep them (EnterCommon 0xDE26D0 re-poses neither SubState 6 nor 8).
 pub fn arrival_hands(target: Vec3, n: Vec3, straight: bool, guidance: &crate::guidance::GuidanceWorld) -> Option<(Vec3, Vec3)> {
+    arrival_hand_pair(target, n, straight, guidance).map(|[l, r]| (l.point, r.point))
+}
+
+/// `arrival_hands` with the two hits (their pieces' normals: the reception's pose `sub_B157B0` 0xE09444 faces
+/// −(n_L + n_R), `LedgeEntry::with_hand_pair`).
+pub fn arrival_hand_pair(target: Vec3, n: Vec3, straight: bool, guidance: &crate::guidance::GuidanceWorld) -> Option<[crate::guidance::GuidanceHit; 2]> {
     let forward = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let right = right_of(forward);
     let (half, angle) = if straight { (Vec3::new(0.4, 0.15, 0.07), std::f32::consts::FRAC_PI_4) } else { (Vec3::new(0.4, 0.3, 0.3), 70f32.to_radians()) };
     let refs = [target - right * 0.3 - forward * 0.15, target + right * 0.3 - forward * 0.15];
-    guidance.probe_facing_pair(target, forward, half, refs, angle, 0.1, crate::guidance::MASK_CATCH).map(|[l, r]| (l.point, r.point))
+    guidance.probe_facing_pair(target, forward, half, refs, angle, 0.1, crate::guidance::MASK_CATCH)
 }
 
 /// `Human__FindReceptionFeetHolds` 0xB15C30: the jump arrival's foot holds under a hold point `hand`
@@ -801,6 +847,17 @@ pub fn entry_feet(mid: Vec3, n: Vec3, collision: &CollisionWorld) -> Option<Vec3
 
 /// A hand step's root (`ComputeRootFromHandTargets` 0xDD6730): the free pose, or the wall pose from the held foot
 /// records; `lateral` steps (dir 2 / 3) read the higher hand, the vertical ones the lower.
+/// The hang normal from the hand records' normals (`HumanLedge__ComputeRootFromHandTargets` 0xDD6730: the facing +1664
+/// = −(n_L + n_R), the left one alone when they are opposed, dot < −cos 10°; flattened here, as the hang's facing is).
+pub fn bent_hang_normal(nl: Vec3, nr: Vec3) -> Vec3 {
+    let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
+    let (l, r) = (flat(nl), flat(nr));
+    if l.dot(r) < -0.984_807_7 {
+        return l;
+    }
+    (l + r).normalize_or(l)
+}
+
 fn step_root(d: &HumanLedgeData, n: Vec3, lateral: bool) -> Vec3 {
     match d.hang_type {
         LedgeHangType::Free => hang_root(d.hand_l, d.hand_r, n, d.hang_type),
@@ -897,6 +954,18 @@ pub fn update_ledge(
         if loco.just_switched {
             loco.just_switched = false;
             limbs.feet = None;
+            // the pull-down's orientation moves in the switch frame already (lab 10-12 `roof_jogoff_high` 003, 10-17
+            // `hay43_letgo` 005: the root's first Ledge frame carries the RootInterp's step; the port's orientation ran a
+            // frame longer than the game's in both): the ground pull-down takes the switch frame's dt (`switch_owed`). The other Ledge
+            // entries keep the switch frame (M3 group 4)
+            let d = &mut data.ledge;
+            if let Some(mut mv) = d.mv.filter(|m| loco.previous == ActorContextId::Ground && m.t == 0.0 && matches!(m.kind, ledge_moves::MoveKind::PullDown { .. })) {
+                let (p, _) = mv.advance(loco.switch_owed());
+                loco.owed_given = true;
+                body.feet = p;
+                body.heading = heading_of(mv.facing());
+                d.mv = Some(mv);
+            }
             if loco.switched_this_frame {
                 continue;
             }
@@ -977,6 +1046,16 @@ pub fn update_ledge(
         let n = d.normal;
         let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
         body.heading = heading_of(facing);
+        // a shimmy step that turned the hang: the facing goes over with the step's root interpolation
+        match (d.turn_from, d.moves.first()) {
+            (Some(h0), Some(m)) => {
+                let s = (m.t / m.reach.clamp(1e-3, m.duration)).min(1.0);
+                let dh = (body.heading - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                body.heading = h0 + dh * s;
+            }
+            (Some(_), None) => d.turn_from = None,
+            _ => {}
+        }
         body.velocity = Vec3::ZERO;
         body.grounded = false;
         if !d.hang_set {
@@ -1103,8 +1182,20 @@ pub fn update_ledge(
             }
             if done && !d.queue.is_empty() {
                 // next queued stage (pull-down: orientation → descent → reception)
+                // `HumanLedge__PullDown_Update` 0xDDE980: a stage ends when its RootInterp reaches 1 after this frame's dt
+                // (0xDDE9FD / 0xDDEA11) and the next action is played at once; the animation update after the AI then
+                // advances it by the same dt (lab 10-12 `roof_jogoff_high` 003, 10-17 `hay43_letgo` 005: the descent's
+                // first frame already carries its clip motion). So the ground pull-down's next stage takes this frame's
+                // dt too. The other queues keep the frame: the beam pull-down (type 3, lab 10-12 `beam_hand_side` 014) and
+                // the jump reception's pull-up (`edge410_freerun` 006, `hang_reception_feet` 007) match the game without
+                // it (**hypothesis**: their stages hand over through the animation, not the RootInterp)
                 let mut next = d.queue.remove(0);
                 next.from = body.feet;
+                if loco.previous == ActorContextId::Ground && matches!(next.kind, ledge_moves::MoveKind::PullDown { .. }) {
+                    let (p, _) = next.advance(dt);
+                    body.feet = p;
+                    body.heading = heading_of(next.facing());
+                }
                 d.mv = Some(next);
                 continue;
             }
@@ -1232,7 +1323,7 @@ pub fn update_ledge(
                 // `AC_LEDGE_LOG=1`: the hands and +133 at each hang settle (game axes)
                 if std::env::var_os("AC_LEDGE_LOG").is_some() {
                     let g3 = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
-                    eprintln!("hang settle after {:?}: hands {:.3} {:.3} (move {:.3} {:.3}) alt {}", mv.kind, g3(d.hand_l), g3(d.hand_r), g3(mv.hand_l), g3(mv.hand_r), d.alt_flag);
+                    eprintln!("hang settle after {:?}: hands {:.3} {:.3} (move {:.3} {:.3}) alt {} facing {:.2}° hand normals {:.3} {:.3}", mv.kind, g3(d.hand_l), g3(d.hand_r), g3(mv.hand_l), g3(mv.hand_r), d.alt_flag, d.normal.z.atan2(-d.normal.x).to_degrees(), g3(d.hand_n[0]), g3(d.hand_n[1]));
                 }
             } else {
                 d.mv = Some(mv);
@@ -1334,6 +1425,7 @@ pub fn update_ledge(
             let dive = ab.allows(super::abilities::Ability::LeapOfFaith)
                 .then(|| super::hay::search(body.feet, away, away, &super::hay::LET_GO, &guidance.haystacks, &collision))
                 .flatten();
+            let plain = dive.is_none();
             let entry = match dive {
                 Some(s) => {
                     let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
@@ -1342,6 +1434,14 @@ pub fn update_ledge(
                 None => InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 },
             };
             switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+            if plain {
+                // the let-go's fill (`HumanLedge__FillInAirData_LetGo` 0xDD7810) hands InAir its fall action, 0x1120E17B
+                // `hangwall_tr_fall` from a wall hang, 0x1120E179 from a free hang (request 33, blend 0.2): a FROMANIM
+                // item whose root carries the drop before `jump_falling01` (lab A37 `catch_auto_wall`: 0.86 s). PORT: the
+                // free hang's action is not in the dumped table; the wall hang's stands in (as for the dive)
+                let id = if origin == FallOrigin::HangFree { super::air::LET_GO_FREE } else { super::climb::LOST_GRIP };
+                data.air.fall_action = ledge_moves::single_item(id, 0).or_else(|| ledge_moves::single_item(super::climb::LOST_GRIP, 0));
+            }
             data.air.release_hold = Some(hold);
             continue;
         }
@@ -1597,9 +1697,15 @@ pub fn update_ledge(
                 let (rows, target) = ledge_moves::probe_lateral(mover, other, n, dv, d.alt_flag, d.hang_type, &report, &collision);
                 // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side, skipped during a closing
                 // step (+133 set, RE/03 §7.6e; live RE/25: the shimmy closes the trailing hand before the ladder move)
-                if let Some((mv, e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision).filter(|_| !d.alt_flag) {
-                    start_move(d, mv, "side to ladder");
-                    d.then_ladder = Some(e);
+                if let Some((mv, mut e)) = ledge_moves::try_side_to_ladder(right_dir, n, body.feet, d.hang_type, &guidance, &collision).filter(|_| !d.alt_flag) {
+                    // the Ladder takes over in this frame and plays the move (+1860 & 0x10 read right after
+                    // ChooseAction, `StateMovement_Update` 0xDE3980; RE/34 A28)
+                    e.action = mv.seq[0].map(|a| a.id);
+                    e.side_from = Some((body.feet, mv.facing_from));
+                    d.last_action = "side to ladder";
+                    d.mv = None;
+                    limbs.hands = None;
+                    switch_context(&mut loco, &mut data, TransitionSetup::ToLadder(e));
                     continue;
                 }
                 // TrySideMoveToClimbHolds 0xDD48B0 on a row source, the bands in order (none during a closing step)
@@ -1635,6 +1741,23 @@ pub fn update_ledge(
                         continue;
                     }
                     if move_right_hand { d.hand_r = t } else { d.hand_l = t }
+                    // the moved hand's record takes its piece's normal (row 3's hit; a closing step onto the other
+                    // hand's point, that hand's), and the hang faces −(n_L + n_R) (0xDD6730; across a bend of a chained
+                    // ledge, e.g. the octagonal tower's cornice, the body turned with the hands)
+                    if d.hand_n_of != d.normal {
+                        d.hand_n = [d.normal; 2];
+                    }
+                    let k = move_right_hand as usize;
+                    d.hand_n[k] = rows[3].filter(|h| h.point.distance(t) < 1e-4).map(|h| h.wall_normal).unwrap_or(d.hand_n[1 - k]);
+                    let new_n = bent_hang_normal(d.hand_n[0], d.hand_n[1]);
+                    // (a step that does not turn the hang starts from the facing it has: no turn carried over)
+                    d.turn_from = None;
+                    if new_n.dot(d.normal) < 0.999_9 {
+                        d.turn_from = Some(body.heading);
+                        d.normal = new_n;
+                    }
+                    d.hand_n_of = d.normal;
+                    let n = d.normal;
                     d.last_hand = move_right_hand as usize;
                     d.alt_flag = !d.alt_flag;
                     let to = step_root(d, n, true);
@@ -1716,6 +1839,34 @@ mod tests {
     use super::*;
     use crate::collision::Aabb3;
     use crate::guidance::GuidanceHit;
+
+    /// A07 (RE/31c g13): a hand pair found across a bend (the jump reception's `Guidance__ProbeBoxHandPair`, 0.3 m to
+    /// either side of the target) keeps each hit's own normal in the hand records and the hang faces −(n_L + n_R)
+    /// (`sub_B157B0` 0xB157B0): half way round the bend, as the game's 120.1° between 113.2° and 127.0° (10-12
+    /// `climb_11` 012, walling's probe D the same way, 0xE38F2B).
+    #[test]
+    fn a_hand_pair_across_a_bend_faces_between_its_pieces() {
+        use crate::guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld};
+        let o = Vec3::new(0.0, 3.0, 0.0);
+        let (na, nb) = (Vec3::NEG_Z, Vec3::new(-1.0, 0.0, -1.0).normalize());
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: o, p1: o + Vec3::X * 3.0, n0: Vec3::Y, n1: na, subtype: GuidanceSubType::LedgeGrab });
+        g.edges.push(GuidanceEdge { p0: o + Vec3::new(-2.0, 0.0, 2.0), p1: o, n0: Vec3::Y, n1: nb, subtype: GuidanceSubType::LedgeGrab });
+        let target = o + Vec3::X * 0.1;
+        let pair = arrival_hand_pair(target, na, false, &g).expect("a hand pair at the bend");
+        assert!(pair[0].wall_normal.dot(pair[1].wall_normal) < 0.99, "the hands on the two pieces: {pair:?}");
+        let e = LedgeEntry::at(target, na, o - Vec3::Y * 1.1, LedgeSubState::HangWallReception).with_hand_pair(pair);
+        let half = (na + nb).normalize();
+        assert!(e.normal.dot(half) > 0.9999, "faces between the pieces: {} vs {half}", e.normal);
+        let mut d = HumanLedgeData::default();
+        d.enter(e);
+        assert_eq!(d.hand_n, [pair[0].wall_normal, pair[1].wall_normal], "the records keep their own normals");
+        assert_eq!(d.hand_n_of, d.normal);
+        // a pair on one piece keeps its normal
+        let one = arrival_hand_pair(o + Vec3::X * 1.5, na, false, &g).expect("a pair on the straight piece");
+        let e = LedgeEntry::at(o + Vec3::X * 1.5, na, o, LedgeSubState::HangWallReception).with_hand_pair(one);
+        assert!(e.normal.dot(na) > 0.9999, "{}", e.normal);
+    }
 
     /// The swing into the free idle holds the hang for its first item, min / max blended by the swing strength
     /// (`xx_h_hangfree_swingback_min_a` 0.533 s, `max_a` 0.733 s); live, wall 00's walling free hang held 0.70 s.

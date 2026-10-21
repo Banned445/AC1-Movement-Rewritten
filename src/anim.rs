@@ -1245,7 +1245,8 @@ fn choose_clip(
             ActorContextId::NarrowObject if data.narrow.current().is_some_and(|(b, _)| sim_item(&lib, &b).is_some()) => {
                 let (b, ph) = data.narrow.current().unwrap();
                 p.sim_phase = Some(ph);
-                sim_request(&mut p, &lib, &b, 9_000_000 + data.narrow.seq as u64, 0.12)
+                // the step off passes its own blend (`StepOff_Enter` 0xF7B720)
+                sim_request(&mut p, &lib, &b, 9_000_000 + data.narrow.seq as u64, 0.12).map(|r| Request { blend: data.narrow.entry_blend.or(r.blend), ..r })
             }
             // wall run (0xE37590): the sub-state's action at the sim's phase
             ActorContextId::Walling if data.walling.current().is_some_and(|(b, _)| sim_item(&lib, &b).is_some()) => {

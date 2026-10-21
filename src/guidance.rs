@@ -52,6 +52,9 @@ pub struct GuidanceWorld {
     /// The kiosks' owner entities (bounds, Bevy space, and the entity's forward row, flattened): the Kiosk context's
     /// axis (`kiosk::kiosk_axis`). Empty on maps without entities (the greybox), which fall back to the pieces.
     pub kiosks: Vec<(crate::collision::Aabb3, Vec3)>,
+    /// The ladder entities' own axes (base, top; Bevy space), the segment `Human__CanGrabLadder` measures the reach to
+    /// (`ladder::grab_axis`). Empty on maps without entities, which fall back to the guidance line.
+    pub ladders: Vec<(Vec3, Vec3)>,
     /// PORT (speed): `ledge_report_depth`'s depth-filtered pieces per edge (`DepthCache`).
     pub(crate) depth_cache: std::sync::Mutex<DepthCache>,
 }
@@ -713,8 +716,10 @@ impl GuidanceWorld {
     /// e_i = o − cut_end) must leave room: s_i + e_i + 0.0005 < L, or the chain cannot take the hands. The line is
     /// trimmed by the largest s_i / e_i (it grows where they are negative: the edge continues past the cut), then by
     /// `margin` less the positive trim; the target, along the line, is clamped onto that piece (its middle when none is
-    /// left). That point is carried onto the links by the plane across the line (the chain's two free link ends pulled
-    /// in by the positive trims, `sub_9765E0`); when no link meets the plane, the link end nearest along the line.
+    /// left). That point is carried onto the links by the plane across the line (`Math__SegmentPlaneIntersect` 0x9765E0;
+    /// the chain's two free link ends moved by min(trim, 0), `sub_40121C` → `sub_403550` = min: a negative trim, the
+    /// room past a cut end, pushes the end out over the part the cut took, a positive one leaves it, 0x66E8AB / 0x66E93F);
+    /// when no link meets the plane, the link end nearest along the line.
     pub fn grab_point(&self, chain: &Chain, target: Vec3, offsets: &[f32], margin: f32, scratch: &[Scratch]) -> Option<GuidanceHit> {
         self.grab_point_toward(chain, target, None, None, offsets, margin, scratch)
     }
@@ -775,10 +780,10 @@ impl GuidanceWorld {
         for (k, &(edge, mut a, mut b)) in chain.links.iter().enumerate() {
             let ld = (b - a).normalize_or_zero();
             if k == 0 {
-                a += ld * trim_s.max(0.0);
+                a += ld * trim_s.min(0.0);
             }
             if k == n - 1 {
-                b -= ld * trim_e.max(0.0);
+                b -= ld * trim_e.min(0.0);
             }
             let (da, db) = ((a - q).dot(along), (b - q).dot(along));
             if da * db <= 0.0 && (da - db).abs() > 1e-9 {
@@ -1237,15 +1242,33 @@ mod tests {
     fn grab_points_keep_the_margin_at_true_ends_but_not_at_cuts() {
         let g = GuidanceWorld { edges: vec![ledge(Vec3::new(0.0, 2.0, 0.0), Vec3::new(3.0, 2.0, 0.0))], ..Default::default() };
         let chain = Chain { links: vec![(0, Vec3::new(0.0, 2.0, 0.0), Vec3::new(3.0, 2.0, 0.0))] };
-        // a target past the true start: clamped to the margin (0.1) from it
+        // a target past the true start: clamped to the margin (0.1) from it. The hands' 0.5 m offset only decides whether
+        // the chain fits: the line is trimmed by it and the margin less it is added back (0x66E6A9), and a positive trim
+        // leaves the link's end where it is (min(trim, 0), 0x66E8AB)
         let h = g.grab_point(&chain, Vec3::new(-1.0, 2.0, -0.3), &[0.5, 0.1], 0.1, &[]).unwrap();
-        assert!((h.point.x - 0.5).abs() < 1e-4, "the hands' 0.5 m offset keeps the free end: {:?}", h.point);
-        // the same edge cut 2 m short of its start by the report: the hands may use it
+        assert!((h.point.x - 0.1).abs() < 1e-4, "the margin keeps the free end: {:?}", h.point);
+        // the same edge cut 2 m short of its start by the report: the hands may use it, and the link's end is pushed out
+        // over the cut part (min(trim, 0), 0x66E8AB), so the point lies past the piece's own end
         let h = g.grab_point(&chain, Vec3::new(-1.0, 2.0, -0.3), &[0.5, 0.1], 0.1, &[scratch_from_cut((2.0, 0.0))]).unwrap();
-        assert!(h.point.x.abs() < 1e-4, "the edge continues past the cut: {:?}", h.point);
+        assert!((h.point.x + 1.0).abs() < 1e-4, "the edge continues past the cut: {:?}", h.point);
         // a 0.9 m chain with nothing cut cannot take hands 0.5 m from each end
         let short = Chain { links: vec![(0, Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.9, 2.0, 0.0))] };
         assert!(g.grab_point(&short, Vec3::new(0.4, 2.0, 0.0), &[0.5, 0.1], 0.1, &[]).is_none());
+    }
+
+    /// RE/34 A11 (lab 10-12 `freerun_east_cands`, the post's west edge 6.999 → 6.202): the jump wedge leaves the piece
+    /// 6.560 → 6.202 (0.44 m cut, depth room 0.5 at both ends), hand offsets 0.5 / 0.1, margin 0.5. The trimmed line runs
+    /// over the whole edge, its margins cross, so the point is its middle, 6.601 (the game's c0), and the link's cut end
+    /// is pushed out to carry it (`sub_40121C` = min(trim, 0) at 0x66E8AB); the port stopped at the cut end, 6.560.
+    #[test]
+    fn a_grab_point_past_a_cut_end_lies_on_the_part_the_cut_took() {
+        let (a, b) = (Vec3::new(0.0, 2.0, -6.560), Vec3::new(0.0, 2.0, -6.202));
+        let g = GuidanceWorld { edges: vec![ledge(a, b)], ..Default::default() };
+        let chain = Chain { links: vec![(0, a, b)] };
+        let cut = 6.999 - 6.560;
+        let sc = [0.5 + cut, 0.5, 0.5 + cut, 0.5];
+        let h = g.grab_point_toward(&chain, Vec3::new(-2.0, 2.0, -6.0), None, Some(Vec3::X), &[0.5, 0.1], 0.5, &[sc]).unwrap();
+        assert!((h.point.z + 6.6005).abs() < 1e-3, "{:?}", h.point);
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl CitySim {
             .init_resource::<super::stream::City>()
             .add_systems(Update, (super::update_city, crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,
                 crate::player::air::update_air, crate::player::ledge::update_ledge, crate::player::climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk,
-                crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, super::hold_player).chain());
+                crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, crate::player::proxy_layer, super::hold_player).chain());
         let lab_ik = std::env::var_os("AC_LAB_IK").is_some();
         if lab_ik {
             app.add_systems(Update, (crate::anim::headless_animation_systems(), crate::ik::headless_ik_systems()).chain().after(super::hold_player));
@@ -728,6 +728,36 @@ fn probe_jump_candidates_at() {
     s.settle_streaming(60.0, Some(pos));
     s.place(pos, dir);
     let game = |p: Vec3| Vec3::new(p.x, -p.z, p.y);
+    // `LAB_EDGE=<n>`: the foot-level edge reports (0.75 m, drops ≥ 0.45 m) at `n` points from LAB_POS along LAB_DIR,
+    // 2 cm apart, then across it (the ledge stop's report, A19)
+    if let Some(n) = std::env::var("LAB_EDGE").ok().and_then(|v| v.parse::<usize>().ok()) {
+        use crate::player::jump_candidates::edge_reports;
+        let across = Vec3::new(-dir.z, 0.0, dir.x).normalize_or_zero();
+        for (axis, step) in [("along", dir.normalize_or_zero()), ("across", across)] {
+            for i in 0..n {
+                let p = pos + step * (0.02 * i as f32);
+                for r in edge_reports(p, 0.75, 0.45, None, s.guidance(), s.collision()) {
+                    let room = crate::player::narrow::pull_down_clear(p, r.point, r.normal, s.collision());
+                    let past = crate::player::jump_candidates::room_past_edge(&r, s.collision());
+                    eprintln!("{axis} {i}: feet {:.3} report {:.3} n {:.2} dist {:.3} drop {:.3} edge {} floor {} hang room {room} step-off room {past}", game(p), game(r.point), game(r.normal), r.dist, r.drop, r.edge, r.floor);
+                    if !room && i == n / 2 {
+                        // what fills the two boxes of `sub_B2E4F0` (as `narrow::pull_down_clear` places them)
+                        let right = crate::player::right_of(r.normal);
+                        let rot = Quat::from_axis_angle(right, 30f32.to_radians());
+                        let boxes = [
+                            ((r.point + r.normal * 0.25).with_y(p.y + 1.075), [right, Vec3::Y, r.normal], Vec3::new(0.3, 0.725, 0.75)),
+                            (r.point + rot * r.normal * 0.4 - rot * Vec3::Y * 0.4, [right, rot * Vec3::Y, rot * r.normal], Vec3::new(0.3, 0.8, 0.3)),
+                        ];
+                        for (k, (c, axes, half)) in boxes.into_iter().enumerate() {
+                            for t in s.collision().triangles.iter().filter(|t| t.intersects_box(c, axes, half)) {
+                                eprintln!("  box {k}: triangle layer {} material {} normal {:.2} at {:.2?}", t.layer, t.material, game(t.normal), t.vertices.map(game));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let q = Query { kind, mode: 0, long: false, beams: true, exclude: 0 };
     let cands = query(pos, dir, &q, s.guidance(), s.collision());
     for (i, c) in cands.iter().enumerate() {

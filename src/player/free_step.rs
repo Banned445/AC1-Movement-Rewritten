@@ -132,7 +132,12 @@ pub fn stay_edge(point: Vec3, normal: Vec3, small_box: bool, guidance: &Guidance
 /// flattened) faces along `dir`, with a drop of 0.5 m or more beyond them (`Human__MeasureDropBeyondEdge` 0xB19620 along
 /// the normal, 10 m, step 0.02); the nearest to the zone's rear point. Returns its drop.
 pub fn drop_edge_ahead(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<f32> {
-    drop_edge_report(pos, dir, (-0.3, 1.1), (-0.3, 0.3), 0.5, true, guidance, collision).map(|r| r.1)
+    drop_edge_ahead_report(pos, dir, guidance, collision).map(|r| r.2)
+}
+
+/// `drop_edge_ahead`'s report: the edge's crossing point, its outward normal and the drop.
+pub fn drop_edge_ahead_report(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3, f32)> {
+    drop_edge_report_n(pos, dir, (-0.3, 1.1), (-0.3, 0.3), 0.5, true, guidance, collision)
 }
 
 /// `Human__FindDropEdgeAhead` 0xB1C100 with the caller's zone: `along` (a5, a6) ahead of `pos` along `dir`, `up` (a7, a8),
@@ -140,13 +145,19 @@ pub fn drop_edge_ahead(pos: Vec3, dir: Vec3, guidance: &GuidanceWorld, collision
 /// Returns the edge's crossing point and its drop.
 #[allow(clippy::too_many_arguments)]
 pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32), min_drop: f32, along_normal: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, f32)> {
+    drop_edge_report_n(pos, dir, along, up, min_drop, along_normal, guidance, collision).map(|r| (r.0, r.2))
+}
+
+/// `drop_edge_report` with the edge's outward normal (the report's +32): (point, normal, drop).
+#[allow(clippy::too_many_arguments)]
+fn drop_edge_report_n(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32), min_drop: f32, along_normal: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, Vec3, f32)> {
     let f = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
     if f == Vec3::ZERO {
         return None;
     }
     let side = super::right_of(f);
     let rear = pos + f * along.0 + Vec3::Y * up.0;
-    let mut best: Option<(f32, Vec3, f32)> = None;
+    let mut best: Option<(f32, Vec3, Vec3, f32)> = None;
     for e in &guidance.edges {
         if crate::guidance::steep(e.p1 - e.p0) {
             continue;
@@ -187,11 +198,47 @@ pub fn drop_edge_report(pos: Vec3, dir: Vec3, along: (f32, f32), up: (f32, f32),
             eprintln!("  drop edge {:.3} -> {:.3} n {:.2} at {:.3} (along {a:.2}) drop {drop:.2}", g3(e.p0), g3(e.p1), g3(n), g3(x));
         }
         if best.is_none_or(|b| d < b.0) {
-            best = Some((d, x, drop));
+            best = Some((d, x, n, drop));
         }
     }
-    best.map(|b| (b.1, b.2))
+    best.map(|b| (b.1, b.2, b.3))
 }
+
+/// `Human__FreeTargetPastDropEdge` 0xB17D50 (from `Human__BuildFreeJumpTarget` 0xB1EA8B with 0.7 m and 90°, only with a
+/// drop edge report): the free
+/// target is pushed out to 0.7 m or more beyond the edge's plane, measured 0.5 m back along the jump, and keeps its
+/// height. `point` / `normal` are the report's (+16 / +32), `dir` the jump direction.
+/// - A direction more than 90° from the normal (the signed angle about up, 0xB17DB8; the other side is not tested) is
+///   first turned back by 90° (`sub_55E390`, **hypothesis**: the sign of that turn; no recording reaches it);
+/// - `Vec_ProjectOntoPlane` 0x9470B0 moves a point along a direction onto the edge's plane (none when they are parallel).
+pub fn free_target_past_edge(target: Vec3, pos: Vec3, dir: Vec3, point: Vec3, normal: Vec3) -> Vec3 {
+    let along_plane = |p: Vec3, d: Vec3| {
+        let k = d.dot(normal).clamp(-1.0, 1.0);
+        if k == 0.0 { Vec3::ZERO } else { p + d * (-(p - point).dot(normal) / k) }
+    };
+    let mut d = dir;
+    let (a, b) = (Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero(), Vec3::new(d.x, 0.0, d.z).normalize_or_zero());
+    let angle = if a.cross(b).y >= 0.0 { a.dot(b).clamp(-1.0, 1.0).acos() } else { -a.dot(b).clamp(-1.0, 1.0).acos() };
+    if angle > std::f32::consts::FRAC_PI_2 {
+        d = Quat::from_axis_angle(Vec3::Y, -std::f32::consts::FRAC_PI_2) * d;
+    }
+    let mut t = target;
+    t.y = along_plane(pos, d).y;
+    t -= d * EDGE_BACK;
+    let floor = along_plane(t, normal) + normal * EDGE_PAST;
+    if (t - floor).dot(normal) < 0.0 {
+        t = floor;
+    }
+    t += d * EDGE_BACK;
+    t.y = target.y;
+    t
+}
+
+/// `sub_B17D50`'s distances (0xB1EA8B's 0.7, its own 0.5 at 0xB17E50).
+const EDGE_PAST: f32 = 0.7;
+const EDGE_BACK: f32 = 0.5;
+/// The free jump off a drop edge goes past it (`free_target_past_edge`).
+pub const FREE_TARGET_PAST_EDGE: bool = true;
 
 /// IHuman vt148 0xB15DE0: a beam piece ahead (`sub_116E1A0` on HumanGuidance's report at `pos` + 0.35·`dir`, box
 /// (−0.5, 0, −0.5)…(0.5, 0.7, 0.5) in (across, ahead, up), within 45° of `dir`).
@@ -280,7 +327,10 @@ pub fn narrow_jump(feet: Vec3, forward: Vec3, dir: Vec3, kind: Option<u32>, free
         _ => 3.0,
     };
     let down = drop.map_or(3.0, |d| (d + 0.25).min(3.0));
-    Some(InAirEntry::FreeStepFreeJump { from: feet, dir, ahead, down, foot_left })
+    // with the drop edge the report goes along (vt68's a5): the height is taken under its point and the target pushed
+    // past it (`free_target_past_edge`); the interpreter's query ran along the same stick (+4320 = `dir`)
+    let edge = if FREE_TARGET_PAST_EDGE && drop.is_some() { drop_edge_ahead_report(feet, dir, guidance, collision).map(|r| (r.0, r.1)) } else { None };
+    Some(InAirEntry::FreeStepFreeJump { from: feet, dir, ahead, down, edge, foot_left })
 }
 
 /// The Ground setup the stay builds (0xE517C8–0xE51934): `TransitionSetupDataToMovement` mode by the profile
@@ -460,5 +510,24 @@ mod tests {
         // more than 120° from the facing counts as not moving
         assert_eq!(ground_mode(true, true, Vec3::Z, f, false), 1);
         assert_eq!(ground_mode(false, true, Vec3::Z, f, false), 0);
+    }
+
+    /// `sub_B17D50` (M3 group 16, A26): the free jump off a beam's side lands 0.7 m past the edge's plane plus 0.5 m
+    /// along the jump; a target already further out stays. Lab 10-15 `hangtype72_reception` (8.05 s): mode 1's 1 m at
+    /// 47° off the side gave 0.5 m out, under the down-variant sweep's reach; the game lands about 1.3 m out.
+    #[test]
+    fn the_free_jump_off_a_drop_edge_lands_past_it() {
+        let (feet, p, n) = (Vec3::new(0.0, 4.0, 0.0), Vec3::new(0.0, 4.0, -0.1), Vec3::NEG_Z);
+        let dir = Vec3::new(1.0, 0.0, -1.0).normalize();
+        let t = free_target_past_edge(feet + dir - Vec3::Y, feet, dir, p, n);
+        // 0.5 m back along the jump, out to 0.7 m past the plane, 0.5 m on again
+        let want = Vec3::new(0.5 * dir.x, 3.0, -0.1 - 0.7) + dir * 0.5;
+        assert!((t - want).length() < 1e-4, "{t} against {want}");
+        assert!((t - p).dot(n) > 1.0, "past the edge's plane by more than 1 m: {t}");
+        // far enough already: unchanged
+        let far = feet + n * 3.0 - Vec3::Y;
+        assert!((free_target_past_edge(far, feet, n, p, n) - far).length() < 1e-5);
+        // the height is the target's
+        assert_eq!(free_target_past_edge(feet + n - Vec3::Y * 2.0, feet, n, p, n).y, 2.0);
     }
 }

@@ -364,6 +364,15 @@ pub fn update_hay(
                         h.seq = h.seq.wrapping_add(1);
                         let f = Vec3::new(edge.x - body.feet.x, 0.0, edge.z - body.feet.z).normalize_or_zero();
                         h.face = (f != Vec3::ZERO).then_some(f);
+                        // the entry runs the interpolation's first step at once (`RootInterp__Advance` with the frame's
+                        // dt, 0xE42CF1)
+                        if PASS_OVER_ENTRY_STEP {
+                            h.t = dt;
+                            body.feet = h.from.lerp(edge, (h.t / h.interp).min(1.0));
+                            if let Some(f) = h.face {
+                                body.heading = super::heading_of(f);
+                            }
+                        }
                         continue;
                     }
                     if hop_out_exit(&stack, h.to, pad.dir, &collision).is_some() {
@@ -394,6 +403,9 @@ pub fn update_hay(
         }
     }
 }
+
+/// `HumanHayStack__ToPassOverJump` 0xE42B20 advances the root interpolation on its own frame (0xE42CF1).
+pub const PASS_OVER_ENTRY_STEP: bool = true;
 
 /// `sub_EDD5E0` (the haystack's event 2): IHuman vt56 `Human__FindJumpCandidates` along `dir` with request type 4 and
 /// beams (vt56 a5 → `Human__QueryJumpCandidates` a8), then `Human__SelectJumpCandidate` in mode 2 (the nearest
