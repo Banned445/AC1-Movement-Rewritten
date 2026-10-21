@@ -490,6 +490,49 @@ mod tests {
         }
     }
 
+    /// The guidance edges within 2 m of `AC_PROBE_AT` = "x,y,z" (game axes): ends, both normals (game axes), the
+    /// heading of the wall normal and of the edge's own square, and the placement's axis lengths (A07 probe).
+    #[test]
+    #[ignore]
+    fn probe_edges_near() {
+        let Some(w) = damascus() else { return };
+        let Ok(at) = std::env::var("AC_PROBE_AT") else { return };
+        let v: Vec<f32> = at.split(',').map(|s| s.trim().parse().unwrap()).collect();
+        let at = Vec3::new(v[0], v[1], v[2]);
+        let g = |v: Vec3| Vec3::new(v.x, -v.z, v.y);
+        for cell in 0..w.data.grid.cells.len() {
+            let c = &w.data.grid.cells[cell];
+            let Some((archive, file)) = w.data.archives.location(c.datablock).map(|(a, f)| (a.to_string(), f.to_string())) else { continue };
+            let a = w.data.archives.names.iter().position(|n| *n == archive).unwrap();
+            let Some(entry) = w.data.archives.find(a, &file) else { continue };
+            let Ok(res) = w.data.archives.file(a, entry) else { continue };
+            for r in res.values() {
+                for body in decode::bodies(r) {
+                    let Ok(m) = decode::placement(body) else { continue };
+                    for gs in decode::markers(body, "GuidanceSystem") {
+                        let Some(start) = gs.checked_sub(4) else { continue };
+                        let Ok(parsed) = crate::assets::world::parse_guidance(&body[start..]) else { continue };
+                        let p = crate::assets::world::NativePlacement { id: parsed.id, name: r.name.clone(), transform: m, guidance: parsed };
+                        for (_, e) in p.world_edges() {
+                            let (p0, p1) = (g(e.p0), g(e.p1));
+                            let d = p1 - p0;
+                            let t = ((at - p0).dot(d) / d.length_squared().max(1e-6)).clamp(0.0, 1.0);
+                            if (p0 + d * t).distance(at) > 2.0 {
+                                continue;
+                            }
+                            let (n0, n1) = (g(e.n0), g(e.n1));
+                            let wall = if n1.z <= n0.z { n1 } else { n0 };
+                            let sq = Vec3::new(d.y, -d.x, 0.0);
+                            println!("{} cell {cell} {:?} p0 {p0:.3} p1 {p1:.3} n0 {n0:.3} n1 {n1:.3} |n1| {:.3} wall heading {:.2} edge square {:.2} / {:.2} axes {:.3} {:.3} {:.3}",
+                                r.name, e.subtype, n1.length(), wall.y.atan2(wall.x).to_degrees(), sq.y.atan2(sq.x).to_degrees(), (-sq.y).atan2(-sq.x).to_degrees(),
+                                m.x_axis.truncate().length(), m.y_axis.truncate().length(), m.z_axis.truncate().length());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// The haystack objects' own collision: layers, triangle count, the hull's vertical extent against the hay volume
     /// (AIR-25 probe).
     #[test]

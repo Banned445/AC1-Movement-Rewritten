@@ -571,7 +571,13 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
             let Some([a, b]) = g.probe_facing_pair(c.point, f, Vec3::new(1.0, 0.3, 0.3), [local(-0.3), local(0.3)], 1.221_730_4, 0.4, crate::guidance::MASK_CATCH) else { continue };
             let (hl, hr) = (a.point, b.point);
             let mid = (hl + hr) * 0.5;
-            let n = Vec3::new(a.wall_normal.x, 0.0, a.wall_normal.z).normalize_or(c.normal);
+            // the pose faces −(n_L + n_R) of the pair's own pieces (`sub_B157B0` 0xE38F2B, a6 / a7 = the hits' normals): a
+            // pair across a bend turns the hang half way (A07, lab 10-12 `climb_11` 012: 113.2° / 127.0° → 120.1°)
+            let n = if super::ledge::HAND_PAIR_NORMALS {
+                super::ledge::hand_pair_normal(a.wall_normal, b.wall_normal, c.normal)
+            } else {
+                Vec3::new(a.wall_normal.x, 0.0, a.wall_normal.z).normalize_or(c.normal)
+            };
             let Some(feet) = super::ledge::feet_supports_point(mid, n, collision) else { continue };
             // clips 251 / 430 cm × 000 / 050 cm: v = min((height − h) / 1.5h, 1) (0xE39069, WALL-7); o = the foot support's
             // offset from the hands on the hands' level, min(d, 0.75) / 0.75 when it points back toward the character, else
@@ -587,7 +593,8 @@ fn probe_vertical(g: &GuidanceWorld, root: Vec3, facing: Vec3, collision: &Colli
             // pieces both on the piece's middle, so the hang starts with its hands together (live RE/25 climb survey
             // wall 08: 0.09 m apart, and the first side move goes onto the climb holds, `+133` clear); the port's ±0.2 m
             // spread made every such hang start with a closing step
-            return Some(exit_with_hands([blended(STEP1_TO_HANGWALL, 0, &w), blended(STEP1_TO_HANGWALL, 1, &w), None, None], root, to, &c, (false, true, false), (hl, hr)));
+            let e = exit_with_hands([blended(STEP1_TO_HANGWALL, 0, &w), blended(STEP1_TO_HANGWALL, 1, &w), None, None], root, to, &c, (false, true, false), (hl, hr));
+            return Some(e.with_hand_pair([a, b]));
         }
     }
     None

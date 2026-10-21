@@ -90,6 +90,10 @@ pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: 
     t
 }
 
+/// A10 (RE/31c g13): a hang target's aim and reception normal are the candidate's flat wall normal (`Candidate::wall`).
+/// Off: the piece's raw n1, as before.
+pub const FLAT_HANG_TARGET_NORMAL: bool = true;
+
 /// The port's jump target for a candidate and the scorer's jump type.
 pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, _collision: &CollisionWorld) -> Option<JumpTarget> {
     let base = JumpTarget { position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None, support: Some((c.wall, c.ty == 4)) };
@@ -117,13 +121,17 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, _
                 return None;
             }
             let e = &guidance.edges[c.edge?];
-            let on_edge = guidance.fit_hands(c.pos, e.n1);
+            // the request's normal is the candidate's, flattened (the scorer's records, lab probe `Sel` 0xE96BF0: c1's
+            // n = (−0.726, 0.687, 0) on a piece whose wall face leans, n1.z = 0.36): on a leaning piece the raw n1 lifted
+            // the aim 0.18 m (A10, lab 10-12 `freerun_east_cands`: the game's root lands at the edge − 1.1 m)
+            let n = if FLAT_HANG_TARGET_NORMAL { c.wall } else { e.n1 };
+            let on_edge = guidance.fit_hands(c.pos, n);
             // the aim (0xB1EC40 0xB1F60E, RE/24 AIR-3): the edge + 0.5·n, 1.1 m down for a wall hang (the wall-hang
             // root) and only 0.5 m down for a free hang (0x80); the swing reception then interpolates the root to the
             // free-hang pose (0xE09662). PORT: the game takes this aim only for a target with an owner entity (world
             // geometry has one), else the pulled-back point
-            let position = if ty == TARGET_LEDGE { hang_root(on_edge, on_edge, e.n1, LedgeHangType::Wall) } else { on_edge + e.n1 * 0.5 - Vec3::Y * 0.5 };
-            Some(JumpTarget { position, hang: Some((on_edge, e.n1)), ..base })
+            let position = if ty == TARGET_LEDGE { hang_root(on_edge, on_edge, n, LedgeHangType::Wall) } else { on_edge + n * 0.5 - Vec3::Y * 0.5 };
+            Some(JumpTarget { position, hang: Some((on_edge, n)), ..base })
         }
         TARGET_LADDER => {
             let e = &guidance.edges[c.edge?];
@@ -186,4 +194,25 @@ pub fn jump_off_wall_entry(from: Vec3, dir: Vec3, guidance: &GuidanceWorld, coll
 pub fn edge_ahead(feet: Vec3, forward: Vec3, collision: &CollisionWorld) -> bool {
     let probe = feet + forward * 0.6 + Vec3::Y * 0.05;
     collision.ground_height(probe, 0.6).is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::guidance::{GuidanceEdge, GuidanceSubType};
+
+    /// A10 (RE/31c g13): a wall-hang target on a piece whose wall face leans (n1 with an up part, as the 10-12
+    /// `freerun_east_cands` post's, n1.z = 0.36) aims at the edge + 0.5·n − 1.1 m with the candidate's flat normal: the
+    /// root 1.1 m under the edge, not 0.18 m higher.
+    #[test]
+    fn a_hang_target_on_a_leaning_piece_aims_with_the_flat_normal() {
+        let leaning = Vec3::new(0.0, 0.362, 0.932).normalize();
+        let mut g = GuidanceWorld::default();
+        g.edges.push(GuidanceEdge { p0: Vec3::new(-1.0, 3.0, 0.0), p1: Vec3::new(1.0, 3.0, 0.0), n0: Vec3::new(0.0, 0.93, -0.36), n1: leaning, subtype: GuidanceSubType::LedgeGrab });
+        let c = Candidate { pos: Vec3::new(0.0, 3.0, 0.0), top: Vec3::Y, wall: Vec3::Z, ty: 16, sub: 8, flags: 0xC0, subtype: GuidanceSubType::LedgeGrab, edge: Some(0), ladder: None };
+        let t = to_target(&c, TARGET_LEDGE, Vec3::new(0.0, 3.0, 4.0), &g, &CollisionWorld::default()).expect("a wall-hang target");
+        assert!((t.position.y - 1.9).abs() < 1e-4, "the root 1.1 m under the edge: {}", t.position);
+        assert!((t.position.z - 0.5).abs() < 1e-4, "0.5 m out along the flat normal: {}", t.position);
+        assert_eq!(t.hang.map(|(_, n)| n), Some(Vec3::Z), "the reception's normal is the flat one");
+    }
 }

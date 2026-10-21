@@ -1548,6 +1548,7 @@ pub fn update_climb(
                         entry_move: Some(mv),
                         entry_rest: [None, None],
                         catch: None,
+                        hand_n: None,
                     };
                     d.look = None;
                     d.last_action = "overhang";
@@ -1717,6 +1718,7 @@ pub fn update_climb(
                     entry_move: Some(mv),
                     entry_rest: [tail, None],
                     catch: None,
+                    hand_n: None,
                 };
                 d.look = None;
                 d.last_action = "reach to a hang";
@@ -1770,6 +1772,7 @@ pub fn update_climb(
                     entry_move: Some(knee),
                     entry_rest: [Some(stand), None],
                     catch: None,
+                    hand_n: None,
                 };
                 d.last_action = "climb out";
                 switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(entry));

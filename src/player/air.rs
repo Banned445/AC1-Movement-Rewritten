@@ -909,10 +909,12 @@ pub fn update_air(
                             None => LedgeArrival::Surface { free: t.type_flags == super::targets::TARGET_LEDGE_FREE },
                         };
                         let mut e = LedgeEntry::at(mid, normal, body.feet, LedgeSubState::HangWallReception);
-                        let hands = super::ledge::arrival_hands(mid, normal, matches!(arrival, LedgeArrival::Straight(_)), &guidance);
-                        if let Some((l, r)) = hands {
-                            (e.hand_l, e.hand_r) = (l, r);
+                        let hands = super::ledge::arrival_hand_pair(mid, normal, matches!(arrival, LedgeArrival::Straight(_)), &guidance);
+                        if let Some(pair) = hands {
+                            e = e.with_hand_pair(pair);
                         }
+                        // the reception's pose faces the pair's −(n_L + n_R) (0xE09444); the foot holds search from the target
+                        let (target_normal, normal) = (normal, e.normal);
                         match arrival {
                             // no hand pair at the target: the arrival returns 0 (0xE093CC / 0xE08B39)
                             _ if hands.is_none() => no_arrival = true,
@@ -920,7 +922,7 @@ pub fn update_air(
                             // reception (SubState 6) whatever the jump type; no holds → the swing (SubState 8) for a
                             // free-hang jump (0x80), else no arrival (the air catch takes over)
                             LedgeArrival::Surface { free } => {
-                                if let Some(foot) = super::ledge::reception_first_foot(mid, normal, &collision) {
+                                if let Some(foot) = super::ledge::reception_first_foot(mid, target_normal, &collision) {
                                     let arrival = LedgeArrival::Surface { free: false };
                                     // the fall height (`GetFallHeight` 0xE07FB0) and the jump origin (Data+64) pick min / max;
                                     // the lean is the wall-hang pose's (`sub_B157B0` 0xE09444 → 0xE094D1)

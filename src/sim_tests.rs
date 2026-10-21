@@ -2025,6 +2025,40 @@ fn walk_across_a_beam_onto_the_far_platform() {
     let _ = BeamState::Walk;
 }
 
+/// A24 (RE/31c g13): `ProcessGroundMovement` sends the free-run jump (0xEE817E, event 45) and returns before it posts
+/// event 72 (0xEE862E), so free running (high profile, Legs held) off an edge where a beam starts jumps instead of
+/// mounting the beam at the edge (lab 10-12 `roof_freerun_off` 003); walking onto it still mounts it
+/// (`walk_across_a_beam_onto_the_far_platform`).
+#[test]
+fn free_running_off_an_edge_at_a_beam_jumps_before_the_mount() {
+    use crate::collision::{Aabb3, CollisionWorld};
+    use crate::guidance::{GuidanceEdge, GuidanceSubType, GuidanceWorld};
+    // a roof (x < 2, top 4 m, its edge a ledge) and a beam line from its edge on, 0.28 m lower (the lab's roof and
+    // beam; no beam body, so the edge's drop is the street's, 4 m below)
+    let run = |legs: bool| {
+        let mut s = Sim::new(Vec3::new(-2.0, 4.0, 300.0), crate::player::heading_of(Vec3::X));
+        {
+            let w = s.app.world_mut();
+            let mut c = CollisionWorld::default();
+            c.boxes.push(Aabb3 { min: Vec3::new(-8.0, -1.0, 296.0), max: Vec3::new(2.0, 4.0, 304.0) });
+            c.boxes.push(Aabb3 { min: Vec3::new(-8.0, -1.0, 290.0), max: Vec3::new(30.0, 0.0, 310.0) });
+            *w.resource_mut::<CollisionWorld>() = c;
+            let mut g = GuidanceWorld::default();
+            g.edges.push(GuidanceEdge { p0: Vec3::new(2.0, 4.0, 304.0), p1: Vec3::new(2.0, 4.0, 296.0), n0: Vec3::Y, n1: Vec3::X, subtype: GuidanceSubType::LedgeGrab });
+            g.edges.push(GuidanceEdge { p0: Vec3::new(2.0, 3.72, 300.0), p1: Vec3::new(10.0, 3.72, 300.0), n0: Vec3::Y, n1: Vec3::Y, subtype: GuidanceSubType::Beam });
+            *w.resource_mut::<GuidanceWorld>() = g;
+        }
+        s.run(0.2);
+        s.pad(Vec3::X, 1.0, true, legs);
+        s.run_until(3.0, |s| s.loco().current != ActorContextId::Ground);
+        (s.loco().current, s.body().feet)
+    };
+    let (ctx, feet) = run(true);
+    assert_eq!(ctx, ActorContextId::InAir, "free running: the jump before the mount ({feet:?})");
+    let (ctx, feet) = run(false);
+    assert_eq!(ctx, ActorContextId::NarrowObject, "high profile without Legs: the mount ({feet:?})");
+}
+
 #[test]
 fn turn_around_on_a_beam() {
     use crate::player::narrow::BeamState;

@@ -855,6 +855,7 @@ pub fn side_move(right: bool, root: Vec3, n: Vec3, guidance: &GuidanceWorld, col
                     entry_move: Some(mv),
                     entry_rest: [None, None],
                     catch: None,
+                    hand_n: None,
                 }, takeoff)
             }
         });
