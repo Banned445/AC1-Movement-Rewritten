@@ -343,6 +343,9 @@ pub struct HumanNarrowObjectData {
     pub entry_from: Vec3,
     pub entry_mode: BeamEntryMode,
     pub seq: u32,
+    /// The blend the code passes into the playing action (`play` clears it): the step off's entry
+    /// (`StepOff_Enter` 0xF7B720, `STEP_OFF_ENTRY_BLEND`).
+    pub entry_blend: Option<crate::assets::ac_actions::ActBlend>,
     /// Root displacement already applied for the playing action (animation space).
     applied: Vec3,
     lateral: Vec3,
@@ -410,6 +413,17 @@ pub fn beam_bands() -> [f32; 5] {
 /// `HumanNarrowObjectBeam__StepOff_Enter` 0xF7B8C5: the beam speed from which the step off plays the locomotion's jog
 /// slot, a quarter of the way from band 1 to band 2 of the beam's band table (+164: +4 / +8; **hypothesis** that those
 /// are `beam_bands`' entries 1 and 2).
+/// The turn to / from the 90° wait (Main +127) accepts the jump, event 4 (`sub_F765F0` 0xF765F0).
+pub const TURN_90_TAKES_JUMPS: bool = true;
+
+/// `StepOff_Enter` 0xF7B720 passes its own blend into the locomotion (1.0 s from the beam walk, 0.5 s otherwise).
+pub const STEP_OFF_ENTRY_BLEND: bool = true;
+
+/// The step off's entry blend (`StepOff_Enter` 0xF7B720): AROLLBROLL, B PROGRESSIVE, BLENDAB, acuator FROMB.
+pub(crate) fn step_off_blend(from_walk: bool) -> crate::assets::ac_actions::ActBlend {
+    crate::assets::ac_actions::ActBlend { kind: 1, b_pos: 1, acuator: 1, time: if from_walk { 1.0 } else { 0.5 }, ..crate::assets::ac_actions::ActBlend::DEFAULT }
+}
+
 fn step_off_jog_speed() -> f32 {
     let b = beam_bands();
     b[1] + (b[2] - b[1]) * 0.25
@@ -548,6 +562,18 @@ impl HumanNarrowObjectData {
         self.t = 0.0;
         self.applied = Vec3::ZERO;
         self.seq = self.seq.wrapping_add(1);
+        self.entry_blend = None;
+    }
+
+    /// The step off's start (`HumanNarrowObjectBeam__StepOff_Enter` 0xF7B720): the ground locomotion through a passed
+    /// ActionTransition, blend A AROLLBROLL with B PROGRESSIVE (0xF7B875 / 0xF7B88C; the rest the `ActionBlend` ctor's),
+    /// 1.0 s when the beam walk 0x28A3A8E4 plays (0xF7B8CF), else 0.5 s (0xF7B94D).
+    fn start_step_off(&mut self) {
+        let from_walk = self.action.is_some_and(|a| a.id == BEAM_WALK);
+        self.play(BeamState::StepOff, self.ground_step(self.step_jog));
+        if STEP_OFF_ENTRY_BLEND {
+            self.entry_blend = Some(step_off_blend(from_walk));
+        }
     }
 
     fn ground_step(&self, jog: bool) -> Option<ActionBlend> {
@@ -1605,7 +1631,10 @@ pub fn update_narrow(
         let impulse_ready = n.impulse_elapsed >= 0.2;
         // 0xF7A740 gates events 4 / 5 / 6 on the timer, independently of the entry clip. The jog stop accepts no
         // event at all (`Main_CanHandleEvent` 0xF7FB60 returns 1 for sub-state +97, `PlayJogStop` 0xF6EE90).
+        // The turn to / from the 90° wait (+127) takes event 4 too (`Main_CanHandleEvent` 0xF7FBF3 → `sub_F765F0`: event 4
+        // only), so the stick held off the side jumps mid-turn (lab 10-15 `hangtype72_reception`: 0.30 s into the turn).
         let can_jump = matches!(n.state, BeamState::Wait | BeamState::Start | BeamState::Walk | BeamState::Wait90 | BeamState::ImpulseWait | BeamState::PilotisWait)
+            || (TURN_90_TAKES_JUMPS && matches!(n.state, BeamState::TurnTo90 | BeamState::TurnBack))
             || (BEAM_COMPLETION && n.state == BeamState::ImpulseIn && impulse_ready)
             || (!BEAM_COMPLETION && n.state == BeamState::Stop);
         if stick {
@@ -1621,7 +1650,10 @@ pub fn update_narrow(
             let (kind, free) = if n.kind == NarrowKind::Pilotis && !impulsion {
                 super::free_step::jump_kind(feet, if stick { pad.dir } else { facing }, pad.high_profile, stick, pad.legs_held, pressed, &guidance, &collision)
             } else {
-                let forward_sector = stick && a < std::f32::consts::FRAC_PI_4;
+                // the sector (v103 = 2, 0xEEA698) is the stick's angle to the entity's forward row (0xEE9C98 → 0xEE9DDD), the
+                // body's, not the beam's facing: mid-turn to the 90° wait the stick off the side comes within 45° of it
+                let ref_fwd = if TURN_90_TAKES_JUMPS { body.forward() } else { facing };
+                let forward_sector = stick && pad.dir.dot(ref_fwd).clamp(-1.0, 1.0).acos() < std::f32::consts::FRAC_PI_4;
                 let next = stick && next_segment(feet, pad.dir, (n.p0, n.p1), &guidance, &report).is_some();
                 let mut drop = if stick { super::free_step::drop_edge_ahead(feet, pad.dir, &guidance, &collision) } else { None };
                 // NARROW-11's gate (0xEEA930–0xEEA999): with the stick within 45° of the facing and no beam running along
@@ -1842,7 +1874,7 @@ pub fn update_narrow(
                     n.step_off_to = n.stand() + n.facing() * 0.8;
                     n.foot = n.item_foot();
                     n.step_jog = n.speed >= step_off_jog_speed();
-                    n.play(BeamState::StepOff, n.ground_step(n.step_jog));
+                    n.start_step_off();
                 } else if forward && !clamped {
                     // the start seeds the speed at band 0 (0xF724C4)
                     n.speed = beam_bands()[0];
@@ -2106,6 +2138,12 @@ pub fn update_narrow(
             }).unwrap_or(n.facing());
             let dh = (super::heading_of(wanted) - body.heading + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
             body.heading += dh * (4.0 * dt).min(1.0);
+        } else if TURN_90_TAKES_JUMPS && matches!(n.state, BeamState::Turn | BeamState::TurnTo90 | BeamState::TurnBack | BeamState::Turn90) {
+            // the turns' root turns with their DISPLACEMENT track's yaw (FROMANIM; lab 10-15 `hangtype72_reception`: 0.30 s
+            // into `crouchwait_footl_turn_left_to_crouchwait_90` the game faces 47° off the beam, the clip's yaw 45°); the
+            // facing the turn ends on takes over when it is done
+            let yaw = n.current().map(|(a, ph)| a.yaw(ph)).unwrap_or(0.0);
+            body.heading = super::heading_of(n.facing()) + yaw;
         } else { body.heading = super::heading_of(n.facing()); }
         // step off the end onto the floor beyond (0xF77C00) → Ground
         if n.kind == NarrowKind::Beam
@@ -2124,7 +2162,7 @@ pub fn update_narrow(
                 // the slot by the beam speed (`StepOff_Enter` 0xF7B720: the jog slot 6 at or above band 1 + ¼ (band 2 −
                 // band 1), else the walk slot 3), not by the profile held
                 n.step_jog = n.speed >= step_off_jog_speed();
-                n.play(BeamState::StepOff, n.ground_step(n.step_jog));
+                n.start_step_off();
             } else {
                 body.feet += n.facing() * (BEAM_STEP_OFF + 0.2);
                 switch_context(&mut loco, &mut data, TransitionSetup::ToMovement { landing: None });

@@ -88,7 +88,7 @@ impl CitySim {
             .init_resource::<super::stream::City>()
             .add_systems(Update, (super::update_city, crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, crate::player::ground::update_ground,
                 crate::player::air::update_air, crate::player::ledge::update_ledge, crate::player::climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk,
-                crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, super::hold_player).chain());
+                crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, crate::player::proxy_layer, super::hold_player).chain());
         let lab_ik = std::env::var_os("AC_LAB_IK").is_some();
         if lab_ik {
             app.add_systems(Update, (crate::anim::headless_animation_systems(), crate::ik::headless_ik_systems()).chain().after(super::hold_player));

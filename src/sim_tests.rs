@@ -59,7 +59,7 @@ impl Sim {
             .insert_resource(PadInput { legs_pressed_ago: f32::INFINITY, hand_pressed_ago: f32::INFINITY, ..default() })
             .insert_resource(SpawnPoint(SPAWN))
             .init_resource::<CameraRig>()
-            .add_systems(Update, ((crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs).chain(), crate::anim::headless_animation_systems()).chain());
+            .add_systems(Update, ((crate::player::interpreter::update_interpreter, crate::player::social::update_social, crate::player::crowd::update_crowd, ground::update_ground, air::update_air, ledge::update_ledge, climb::update_climb, crate::player::hay::update_hay, crate::player::kiosk::update_kiosk, crate::player::walling::update_walling, crate::player::narrow::update_narrow, crate::player::ladder::update_ladder, crate::player::release_limbs, crate::player::proxy_layer).chain(), crate::anim::headless_animation_systems()).chain());
         let (c, g) = level::geometry();
         app.insert_resource(c).insert_resource(g);
         // the animation runs as in the game when the install is found (the player's BonePose; bone positions in the
@@ -1727,6 +1727,41 @@ fn from_the_haystack_the_stick_vaults_a_railing_beside_it() {
     assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.z > 28.3), "not over the railing: {:?} {:?}", s.loco().current, s.body().feet);
 }
 
+/// `HumanHayStack__ToPassOverJump` 0xE42B20 sets the root interpolation onto the candidate and advances it once with
+/// the frame's dt on its own frame (`RootInterp__Advance` 0xE42CF1): the pass-over's first frame already moves.
+#[test]
+fn the_haystack_pass_over_moves_on_its_first_frame() {
+    use crate::player::hay::HayPhase;
+    let mut s = Sim::new(Vec3::new(30.5, 9.5, 26.0), -std::f32::consts::FRAC_PI_2);
+    {
+        let (min, max) = (Vec3::new(36.0, 0.0, 28.0), Vec3::new(39.0, 1.0, 28.3));
+        s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3 { min, max });
+        let mut g = s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>();
+        crate::level::add_roof_edges(&mut g, min, max);
+    }
+    s.pad(Vec3::X, 1.0, true, true);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "never jumped");
+    s.pad(Vec3::X, 0.0, false, false);
+    assert!(s.run_until(5.0, |s| s.data().hay.phase == HayPhase::Waiting), "never waited in the haystack");
+    s.pad(Vec3::Z, 1.0, false, false);
+    let dt = 1.0 / 60.0 + 1e-4;
+    for _ in 0..12 {
+        let before = s.body().feet;
+        s.run(dt);
+        if s.data().hay.phase == HayPhase::PassOver {
+            let h = &s.data().hay;
+            let (edge, _) = h.pass.unwrap();
+            let k = h.t / h.interp;
+            assert!(h.t > 0.0 && k < 0.2, "one frame's step: t {} of {}", h.t, h.interp);
+            let moved = s.body().feet - before;
+            let want = (edge - before) * k;
+            assert!(moved.length() > 0.5 * want.length() && (moved - want).length() < 0.02, "moved {moved:?}, want {want:?}");
+            return;
+        }
+    }
+    panic!("no pass-over");
+}
+
 #[test]
 fn releasing_the_stick_stops_quickly_like_the_game() {
     use crate::player::jump_blend::{RUN_STOP, RUN_STOP_TO_WAIT};
@@ -2368,6 +2403,37 @@ fn stick_to_the_side_on_a_beam_turns_to_the_90_wait_and_back() {
     assert!(s.body().forward().dot(Vec3::NEG_X) > 0.99, "facing -X: {:?}", s.body().forward());
 }
 
+/// The turn to the 90° wait (Main +127) turns the root with its clip's DISPLACEMENT yaw, and it takes the jump (event 4,
+/// `Main_CanHandleEvent` 0xF7FBF3 → `sub_F765F0`), whose forward sector is the stick against the body's forward
+/// (0xEE9C98 / 0xEEA698): with the stick held off the side toward a roof 0.7 m below, the free step leaves mid-turn,
+/// once the body has turned within 45° of the stick (lab 10-15 `hangtype72_reception`: 0.30 s into the turn).
+#[test]
+fn the_turn_to_the_90_wait_turns_the_body_and_takes_the_jump() {
+    use crate::player::narrow::BeamState;
+    let mut s = on_free_beam(87.0);
+    {
+        let (min, max) = (Vec3::new(84.0, 0.0, 70.6), Vec3::new(91.0, 3.3, 74.0));
+        s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3 { min, max });
+        let mut g = s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>();
+        crate::level::add_roof_edges(&mut g, min, max);
+    }
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(0.3, |s| s.data().narrow.state == BeamState::TurnTo90), "no turn: {:?}", s.data().narrow.state);
+    let mut turned = false;
+    for _ in 0..60 {
+        s.run(1.0 / 60.0 + 1e-4);
+        if s.loco().current != ActorContextId::NarrowObject {
+            break;
+        }
+        let f = s.body().forward();
+        turned |= s.data().narrow.state == BeamState::TurnTo90 && f.dot(Vec3::X) < 0.95 && f.dot(Vec3::Z) > 0.3;
+        assert_ne!(s.data().narrow.state, BeamState::Wait90, "the turn ended before the jump");
+    }
+    assert!(turned, "the body turns with the clip during the turn");
+    assert_eq!(s.loco().current, ActorContextId::InAir, "jumped mid-turn");
+    assert!(s.body().forward().dot(Vec3::Z) > std::f32::consts::FRAC_1_SQRT_2 - 0.1, "within about 45° of the stick: {:?}", s.body().forward());
+}
+
 #[test]
 fn empty_hand_on_a_beam_pulls_down_to_a_hang_under_it() {
     use crate::player::ledge_moves::{MoveKind, PULLDOWN_BEAM_DESCENT, PULLDOWN_BEAM_ORIENT};
@@ -2702,6 +2768,48 @@ fn standing_at_a_beam_end_steps_off_without_walking() {
         }
     }
     panic!("never stepped off: {:?}", s.data().narrow.state);
+}
+
+/// `StepOff_Enter` 0xF7B720 passes its own blend into the locomotion: AROLLBROLL, B PROGRESSIVE, 1.0 s when the beam
+/// walk plays (0xF7B8CF), else 0.5 s (from the wait or the start, 0xF7B94D). The re-played locomotion item at the
+/// step's end is an item seam, not a passed blend.
+#[test]
+fn the_beam_step_off_enters_through_its_own_blend() {
+    use crate::player::narrow::{BeamEntry, BeamEntryMode, BeamState};
+    let step_off = |point: Vec3, wait_first: bool| {
+        let mut s = Sim::new(point, crate::player::heading_of(Vec3::X));
+        force(&mut s, crate::player::TransitionSetup::ToBeam(BeamEntry { p0: Vec3::new(72.0,4.0,70.0), p1: Vec3::new(78.0,4.0,70.0),
+            point, from: point, toward_p1: true, mode: BeamEntryMode::Straight, foot: 0, action: None, facing: Vec3::X }));
+        if wait_first {
+            assert!(s.run_until(2.0, |s| s.data().narrow.state == BeamState::Wait), "never waited");
+        }
+        s.pad(Vec3::X, 1.0, false, false);
+        let mut from = None;
+        for _ in 0..600 {
+            let st = s.data().narrow.state;
+            s.run(1.0 / 60.0 + 1e-4);
+            if s.data().narrow.state == BeamState::StepOff {
+                from = Some(st);
+                break;
+            }
+        }
+        let from = from.expect("never stepped off");
+        let b = s.data().narrow.entry_blend.expect("the step off passes its blend");
+        assert_eq!((b.kind, b.b_pos, b.disp_src, b.acuator), (1, 1, 0, 1), "AROLLBROLL, PROGRESSIVE, BLENDAB, FROMB");
+        if s.app.world().get::<crate::anim::AnimPlayer>(s.player).is_some() {
+            s.run(1.0 / 60.0 + 1e-4);
+            if s.data().narrow.state == BeamState::StepOff {
+                assert_eq!(s.app.world().get::<crate::anim::AnimPlayer>(s.player).unwrap().blend.time, b.time, "the animation takes it");
+            }
+        }
+        (from, b.time)
+    };
+    let (from, time) = step_off(Vec3::new(73.0, 4.0, 70.0), false);
+    assert_eq!(from, BeamState::Walk);
+    assert_eq!(time, 1.0, "from the beam walk");
+    let (from, time) = step_off(Vec3::new(77.86, 4.0, 70.0), true);
+    assert_eq!(from, BeamState::Wait);
+    assert_eq!(time, 0.5, "from the wait");
 }
 
 #[test]
@@ -3525,6 +3633,35 @@ fn a_high_profile_ladder_onto_a_wall_top_takes_the_low_exit() {
     assert_eq!(s.data().ladder.thick_top, Some(true), "the wall top behind the ladder");
     assert!(EXIT_TOP[0].contains(&s.data().ladder.action.unwrap().id), "the low exit");
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ground), "never stood on top");
+}
+
+/// `Human__ProbeWallTopThickness` 0xB18FB0 with the ladder's 0.8 / 3.0 / 0.35 (0xE2261A): from 1.5 m in front of the
+/// ladder's top less 0.75 m, back 3 m: a wall top needs its near and its far edge inside that reach, each with a drop of
+/// 0.35 m or more beyond it. A thin wall has both; a deep roof's far edge lies beyond the reach; a wall top with a
+/// floor right behind it has no drop at its far edge.
+#[test]
+fn the_ladders_top_probe_needs_both_edges_of_a_wall_top() {
+    use crate::player::ladder::wall_top_behind;
+    // a ladder on the −Z face of a box at z 570, climbed from −Z (n = −Z), top 4 m; away from the greybox
+    let (base, top, n) = (Vec3::new(510.0, 0.0, 569.9), Vec3::new(510.0, 4.0, 569.9), Vec3::NEG_Z);
+    let probe = |depth: f32, floor_behind: bool| {
+        let mut s = Sim::new(Vec3::new(500.0, 0.0, 560.0), 0.0);
+        {
+            let (min, max) = (Vec3::new(508.0, 0.0, 570.0), Vec3::new(512.0, 3.5, 570.0 + depth));
+            let mut c = s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>();
+            c.boxes.push(crate::collision::Aabb3 { min, max });
+            if floor_behind {
+                c.boxes.push(crate::collision::Aabb3 { min: Vec3::new(508.0, 0.0, 570.0 + depth), max: Vec3::new(512.0, 3.3, 575.0) });
+            }
+            let mut g = s.app.world_mut().resource_mut::<crate::guidance::GuidanceWorld>();
+            crate::level::add_roof_edges(&mut g, min, max);
+        }
+        let w = s.app.world();
+        wall_top_behind(base, top, n, w.resource::<crate::guidance::GuidanceWorld>(), w.resource::<crate::collision::CollisionWorld>())
+    };
+    assert!(probe(0.5, false), "a thin wall top");
+    assert!(!probe(2.5, false), "a deep roof: its far edge is beyond the reach");
+    assert!(!probe(0.5, true), "no drop behind the far edge");
 }
 
 /// RE/24 LADDER-7: after a ground entry the wait's column is the entry item's feet after (LEFTAHEAD → column l), not

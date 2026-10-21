@@ -209,12 +209,18 @@ pub fn top_entry_side(base: Vec3, top: Vec3, n: Vec3, collision: &CollisionWorld
     }
 }
 
-/// +908 & 0x20 (`Human__ProbeWallTopThickness` 0xB18FB0 from `SetupFromEntryType` 0xE22400: from base + (H − 0.75)·Z
-/// + 1.5·Y back along −Y, 3 m, a wall top's near and far edges with a drop below each; RE/24 LADDER-8). PORT: the roof
-/// edge right behind the ladder's top (a LedgeGrab edge facing out, up to 1 m below the top: the native tops stand
-/// 0.37–0.73 m above their roofs) with a far edge within 1.5 m behind it.
-pub fn wall_top_behind(top: Vec3, n: Vec3, guidance: &GuidanceWorld) -> bool {
+/// +908 & 0x20 (`HumanLadder__SetupFromEntryType` 0xE22400 → `Human__ProbeWallTopThickness` 0xB18FB0 at 0xE2261A, with
+/// 0.8 / 3.0 / 0.35): a wall top behind the ladder's top. `LADDER_TOP_PROBE`: the game's probe (`probe_wall_top`) from
+/// base + (H − 0.75)·Z + 1.5·Y along −Y, with Y the side the ladder is climbed from **(hypothesis: the entity's Y row
+/// points out of the wall; the port keeps only the climb side, `n`)**; else the earlier stand-in (the roof edge right behind
+/// the top with a far edge within 1.5 m).
+pub fn wall_top_behind(base: Vec3, top: Vec3, n: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> bool {
     let n = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+    if LADDER_TOP_PROBE {
+        let up = (top - base).normalize_or(Vec3::Y);
+        let origin = base + up * ((top - base).length() - 0.75) + n * 1.5;
+        return probe_wall_top(origin, -n, 0.8, 3.0, 0.35, guidance, collision).is_some();
+    }
     guidance
         .edges
         .iter()
@@ -224,9 +230,55 @@ pub fn wall_top_behind(top: Vec3, n: Vec3, guidance: &GuidanceWorld) -> bool {
         .any(|q| super::passover::far_edge(q, -n, guidance).is_some_and(|(_, t)| t <= 1.5))
 }
 
-/// `sub_E24FD0` 0xE24FD0 (from `StateEntry_Enter` 0xE26AFB): a static-geometry box at the attach point + 0.95 m up, half
-/// 0.45 across / 0.45 along the facing / 0.35 up in the frame [F × up, F, up], F = the facing toward the ladder; blocked
-/// → the back-approach turn (RE/24 LADDER-4).
+/// The ladder's top probe is the game's `Human__ProbeWallTopThickness` (RE/05 §4.1).
+pub const LADDER_TOP_PROBE: bool = true;
+
+/// `Human__ProbeWallTopThickness` 0xB18FB0 (a wall top's near and far edges along `fwd`):
+/// - a `GuidanceZonePlane` (0x658780) at `origin`: the rectangle 0 … `along` along `fwd` and 0 … `height` up in the
+///   vertical plane through `fwd` (as 0xB253D0's; every guidance type);
+/// - of its edges the not steep ones (`Guidance__IsNotSteep`), each where it crosses that plane
+///   (`Math__SegmentPlaneIntersect` 0xB19180), with a drop of at least `min_drop` there: a 2 m ray straight down from
+///   0.5 m above the crossing, 0.15 m out along the edge's wall normal (the lower of its two, flattened), less 0.5
+///   (`Human__RayDistance` 0xB19308, the player's layer 21; 0xB1930D);
+/// - the nearest (flat, from `origin`) whose wall faces against `fwd` is the near edge, the nearest whose wall faces
+///   along it (dot ≥ 0, 0xB19399) the far edge. Both found → (their crossings' middle, the thickness between them).
+pub fn probe_wall_top(origin: Vec3, fwd: Vec3, height: f32, along: f32, min_drop: f32, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<(Vec3, f32)> {
+    use super::jump_candidates::wall_of;
+    let fwd = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+    let side = fwd.cross(Vec3::Y);
+    let (mut near, mut far): (Option<(f32, Vec3)>, Option<(f32, Vec3)>) = (None, None);
+    for e in &guidance.edges {
+        if crate::guidance::steep(e.p1 - e.p0) {
+            continue;
+        }
+        let d = e.p1 - e.p0;
+        let den = d.dot(side);
+        if den.abs() <= 0.0005 {
+            continue;
+        }
+        let t = (origin - e.p0).dot(side) / den;
+        if !(0.0..=1.0).contains(&t) {
+            continue;
+        }
+        let x = e.p0 + d * t;
+        if !(0.0..=along).contains(&(x - origin).dot(fwd)) || !(0.0..=height).contains(&(x.y - origin.y)) {
+            continue;
+        }
+        let n = wall_of(e.n0, e.n1);
+        let from = x + Vec3::Y * 0.5 + n * 0.15;
+        if collision.ray_distance(from, Vec3::NEG_Y, 2.0, crate::layers::MAIN_CHARACTER) - 0.5 < min_drop {
+            continue;
+        }
+        let dist = Vec2::new(x.x - origin.x, x.z - origin.z).length_squared();
+        let slot = if n.dot(fwd) >= 0.0 { &mut far } else { &mut near };
+        if slot.is_none_or(|(b, _)| dist < b) {
+            *slot = Some((dist, x));
+        }
+    }
+    let ((_, a), (_, b)) = (near?, far?);
+    Some(((a + b) * 0.5, Vec2::new(b.x - a.x, b.z - a.z).length()))
+}
+
 pub fn attach_blocked(attach: Vec3, f: Vec3, collision: &CollisionWorld) -> bool {
     let f = Vec3::new(f.x, 0.0, f.z).normalize_or(Vec3::NEG_Z);
     !collision.obb_free(attach + Vec3::Y * 0.95, [super::right_of(f), Vec3::Y, f], Vec3::new(0.45, 0.35, 0.45))
@@ -1122,7 +1174,7 @@ pub fn update_ladder(
                 if stepping {
                     l.rate = if !stick || l.high || pad.band > 1 { 1.0 } else { 0.5 };
                 }
-                let thick_top =*l.thick_top.get_or_insert_with(|| wall_top_behind(l.top, l.n, &guidance));
+                let thick_top =*l.thick_top.get_or_insert_with(|| wall_top_behind(l.base, l.top, l.n, &guidance, &collision));
                 // ReachedTop / ReachedBottom (`UpdateReachedTopBottom` 0xE1D490) on the continuous height while climbing,
                 // and the exits posted every frame (LadderState 0xEEBF87, events 2 / 3): mid-step too (RE/24 LADDER-9).
                 // The top margin: 1.63 m in low profile or with a wall top (0x20), else 1.95 m (LADDER-8)
