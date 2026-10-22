@@ -7358,7 +7358,8 @@ fn m5_a_jog_let_go_on_the_beam_entry_stops_with_the_jog_stop() {
 }
 
 /// M5 F13: in the climb wait both hands' LimbIK records are released (LimbIK 0xE55CB0; live `m5b_d2_courtyard` 005):
-/// the wait's hands are the animation's; the moves still take the holds.
+/// the wait's hands are the animation's; the moves still take the holds. Fenced by `CLIMB_WAIT_RELEASES_HANDS` (off: the
+/// wait keeps the hand holds).
 #[test]
 fn m5_the_climb_wait_holds_no_hand_ik() {
     // the climb tower (x -23..-17, z 27..33): its -Z face's hold bands
@@ -7369,6 +7370,6 @@ fn m5_the_climb_wait_holds_no_hand_ik() {
     assert!(s.run_until(3.0, |s| s.data().climb.moving.is_none()), "never waited");
     s.run(0.1);
     let limbs = *s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap();
-    assert!(limbs.hands.is_none(), "hand IK in the climb wait");
+    assert_eq!(limbs.hands.is_none(), crate::player::climb::CLIMB_WAIT_RELEASES_HANDS, "the climb wait's hand IK against the switch");
     assert!(limbs.feet.is_some(), "the feet keep their holds");
 }

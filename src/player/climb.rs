@@ -75,8 +75,10 @@ pub const FREE_DROP_TO_CLIMB_END: u32 = 0x1EB2_25F1;
 /// ActionTransition's length)**.
 pub const FREE_DROP_TO_CLIMB_END_TIME: f32 = 0.15;
 pub const FREE_DROP_TO_HANG: [u32; 2] = [0x49CE_7E53, 0x49CE_7E54];
-/// The climb wait holds no hand IK (M5 F13): both LimbIK hand records are released there.
-pub const CLIMB_WAIT_RELEASES_HANDS: bool = true;
+/// The climb wait holds no hand IK (M5 F13): both LimbIK hand records are released there. PORT: off (owner, 2026-10-22):
+/// with it on, the port's wait hands are the animation's and the climb looks wrong in play; the game's wait pose on
+/// the holds is still to be read live (RE/20). Off: the hands keep their holds in the wait, as before M5.
+pub const CLIMB_WAIT_RELEASES_HANDS: bool = false;
 /// The fall started when a hold is lost (`HumanClimb__FillInAirData_LostGrip` 0xDF3300: InAir animation state 33 with
 /// action 287367547, blend 0.2).
 pub const LOST_GRIP: u32 = 0x1120_E17B;
