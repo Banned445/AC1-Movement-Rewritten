@@ -929,6 +929,8 @@ pub fn update_air(
         let mut ladder_on: Option<super::ladder::LadderEntry> = None;
         let mut climb_on: Option<super::climb::ClimbEntry> = None;
         let mut catch_hang: Option<(u32, bool, Option<bool>)> = None;
+        // the flight's wall rebound found this frame (normal, the playing item's word), started after the catches
+        let mut rebound_pending: Option<(Vec3, Option<u16>)> = None;
         let mut step_off: Option<(u32, Vec3)> = None;
         // a flat landing contact where the edge landing may be searched (after the catches)
         let mut edge_contact = false;
@@ -968,9 +970,13 @@ pub fn update_air(
                     .flatten();
                 if let Some(n) = rebound {
                     // → event 4 → `HumanInAir__BounceOffContact` 0xE03630 (M5 F10, RE/37 item 2: the 4.10 m edge's
-                    // run-off flight meets the wall under the edge and plays `air_all_*_tr_rebound_*`)
+                    // run-off flight meets the wall under the edge and plays `air_all_*_tr_rebound_*`). The flight's
+                    // detectors (`UpdateJumpMotion` 0xE0F210: `CheckAirCatch` first) run before the state's check list
+                    // that holds the rebound, so a catch this frame wins (lab `freerun_east_drift4` 10-12 016–020: the
+                    // game catches the ledge there)
                     let playing = if t1 < t_takeoff { air.takeoff } else { air.flight };
-                    air.start_rebound(n, playing.and_then(|b| super::anim_gate::word(&b)), &mut body);
+                    rebound_pending = Some((n, playing.and_then(|b| super::anim_gate::word(&b))));
+                    air.mode = AirMode::Jump { from, clip_end, aim, duration, t: t1, then_fall_to, t_takeoff, fwd };
                 } else if air.free_target && r.landed && path_vel.y <= 0.0 {
                     // the free jump comes down on the ground before its target (0xE05200, controller contact)
                     landed_at = Some(body.feet.y);
@@ -1508,6 +1514,12 @@ pub fn update_air(
             let gate = fall_height > 0.3 || air.time_in_air >= 0.4;
             if edge_contact && gate && ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && narrow_on.is_none() {
                 step_off = super::air_catches::edge_landing(body.feet, body.forward(), &guidance, &collision);
+            }
+        }
+
+        if let Some((n, word)) = rebound_pending {
+            if ladder_on.is_none() && hang_on.is_none() && climb_on.is_none() && narrow_on.is_none() && step_off.is_none() {
+                air.start_rebound(n, word, &mut body);
             }
         }
 
