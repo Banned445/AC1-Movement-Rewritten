@@ -11,6 +11,8 @@ pub struct Triangle {
     pub layer: u8,
     /// The surface's sound material (CollisionMaterial +8), `NO_MATERIAL` when unknown.
     pub material: u16,
+    /// A haystack's collision: it gives the controller contacts but does not hold the body (M5 F5).
+    pub phantom: bool,
 }
 
 pub const NO_MATERIAL: u16 = u16::MAX;
@@ -20,7 +22,7 @@ impl Triangle {
         let [a, b, c] = vertices;
         let n = (b - a).cross(c - a);
         if !a.is_finite() || !b.is_finite() || !c.is_finite() || n.length_squared() < 1e-14 { return None; }
-        Some(Self { vertices, normal: n.normalize(), bounds: Aabb3 { min: a.min(b).min(c), max: a.max(b).max(c) }, layer, material: NO_MATERIAL })
+        Some(Self { vertices, normal: n.normalize(), bounds: Aabb3 { min: a.min(b).min(c), max: a.max(b).max(c) }, layer, material: NO_MATERIAL, phantom: false })
     }
 
     pub fn with_material(mut self, material: Option<u16>) -> Self {

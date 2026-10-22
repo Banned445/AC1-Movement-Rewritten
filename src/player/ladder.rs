@@ -18,12 +18,14 @@ pub const REVERSAL_HOLD: f32 = 0.15;
 /// frame's dt (`AnimComponent__RunStages`), and that root, projected on the ladder line less 0.5·F, is the move target.
 /// There is no rung in it: a step runs from wherever the root is, by the clip's DISPLACEMENT (0.500 m a low step up,
 /// 0.499 m down), and only the wait aligns to a rung (`AlignRootWhileWaiting` 0xE226D0, 2 m/s).
-/// Not ported: the Bureau ladder's extra rise (lab 10-12 `ladder_footm` / `ladder_bureau_up` / `ladder_drop`, all on the
-/// ladder at (54.16, 3.25): +0.003…+0.013 m a step up, −0.007…−0.019 m a step down, +1.4 cm through a B-stop hold),
-/// which the other ladders do not show (10-15 `ladder61_*`, 10-17 `ladder38_rows`, 10-18 `a6_ladder_side_shimmy`:
-/// 0.497–0.506 m a step): not the clips' motion, a drift of the detached root on that ladder (**hypothesis**: the
-/// character proxy against that ladder's geometry). RE/31c g12.
+/// The Bureau ladder's extra rise (lab 10-12 `ladder_footm` / `ladder_bureau_up` / `ladder_drop`, all on the ladder at
+/// (54.16, 3.25): +0.003…+0.013 m a step up, −0.007…−0.019 m a step down, +1.4 cm through a B-stop hold), which the
+/// other ladders do not show (10-15 `ladder61_*`, 10-17 `ladder38_rows`, 10-18 `a6_ladder_side_shimmy`: 0.497–0.506 m
+/// a step), is the character proxy sliding on the wall behind that ladder: the step's root is a colliding move-to
+/// (live M5 F6, RE/37 item 4; `LADDER_STEP_COLLIDES`). RE/31c g12.
 pub const LADDER_STEP_FROM_ROOT: bool = true;
+/// The climb step moves the body through the character proxy (`sub_E21600` 0xE218FD → `CharacterController__RequestMoveTo`).
+pub const LADDER_STEP_COLLIDES: bool = true;
 
 /// The B-stop hold of a step started from `from` (the playing action): the action graph's item transitions into the
 /// four step actions (DataPC `HumanLadder`) are all ASTOPBSTOP, B's clock held with no displacement (`sub_774350`,
@@ -997,12 +999,23 @@ pub fn update_ladder(
             body.feet = body.feet.move_towards(target, 2.0 * dt);
             body.heading = super::heading_of(l.heading);
         } else {
-            body.feet = p;
+            let climbing = LADDER_STEP_FROM_ROOT && matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown);
+            if climbing && LADDER_STEP_COLLIDES {
+                // the step's root is a move-to request (`CharacterController__RequestMoveTo` from `sub_E21600` 0xE218FD):
+                // the proxy collides on the way, and where a wall stands close behind the ladder it slides on it (live M5
+                // F6, RE/37 item 4: on the Bureau ladder the controller touches the wall behind in 95 % of the frames,
+                // normal (0, 0.999, 0.003) in the game's frame, and the root gains 0.505 m a step against the west
+                // ladder's 0.499 with no contact; the wait's rung alignment takes 1–3 cm back)
+                let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, p - b.feet, false, dt) };
+                body.feet = r.position;
+            } else {
+                body.feet = p;
+            }
             body.heading = super::heading_of(l.heading);
-            if LADDER_STEP_FROM_ROOT && matches!(phase, LadderPhase::ClimbUp | LadderPhase::ClimbDown) {
+            if climbing {
                 // HeightInLadder is the root's (`sub_E211D0`): the next step, the top / bottom tests and the wait's rung
                 // start from it
-                l.height = l.height_of(p);
+                l.height = l.height_of(body.feet);
             }
             if phase == LadderPhase::EnterGround {
                 // the turn onto the ladder by min(2s, 1) from the start facing (`sub_E1EF50`, RE/24 LADDER-6)

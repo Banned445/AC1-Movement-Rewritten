@@ -737,7 +737,9 @@ impl CityState {
             if o.o.collision.len() > budget && budget < limit { break; }
             budget = budget.saturating_sub(o.o.collision.len());
             self.work[3] += o.o.collision.len();
-            let triangles = ctx.collision.add_triangles(o.o.collision.clone());
+            // a haystack's collision gives contacts but holds nothing (`CollisionWorld::phantom`, M5 F5)
+            let hay = o.o.haystack.is_some();
+            let triangles = ctx.collision.add_triangles(o.o.collision.iter().map(|t| crate::triangles::Triangle { phantom: hay, ..*t }).collect());
             let mut edges = Vec::with_capacity(o.o.edges.len());
             for e in &o.o.edges {
                 match self.edge_free.pop() {

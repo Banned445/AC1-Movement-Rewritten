@@ -1098,24 +1098,34 @@ fn let_go_from_a_hang_falls_and_lands() {
 }
 
 /// A37 / A36: `AnimSlot__IsActionDone` (0xE0F47A) waits for the whole fall action, so the wall hang's let-go
-/// 0x1120E17B plays `hangwall_tr_fall_a` (0.33 s) and then `_b` (0.53 s) before `jump_falling01`, which starts from
-/// rest (lab `catch_auto_wall`: 0.86 s of the action, then 0 m/s).
+/// 0x1120E17B plays `hangwall_tr_fall_a` (0.33 s) and then `_b` (0.53 s) before `jump_falling01` (lab `catch_auto_wall`:
+/// 0.86 s of the action). M5 F3: at 60 fps `jump_falling01` starts with the action's last move-to velocity (live 068 /
+/// 069: −10.19 m/s after `fall_step_off_right_max`); in the lab's 4–5 ms frames from rest (A36's 14 recordings).
 #[test]
-fn a_fall_action_plays_all_its_items_then_falls_from_rest() {
+fn a_fall_action_plays_all_its_items_then_falls_with_its_last_step() {
     use crate::player::climb::LOST_GRIP;
-    let from = Vec3::new(-20.0, 30.0, -20.0);
-    let mut s = Sim::new(from, 0.0);
-    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::HangWall, speed_param: 0.0 }));
-    s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().air.fall_action = crate::player::ledge_moves::single_item(LOST_GRIP, 0);
-    s.pad(Vec3::ZERO, 0.0, false, false);
-    assert!(s.run_until(0.5, |s| s.data().air.fall_action.is_some_and(|a| a.item == 1)), "item b never played");
-    let t = s.data().air.fall_t;
-    assert!(t < 0.05, "item b starts where item a ended: {t}");
-    assert!(s.run_until(1.0, |s| s.data().air.fall_action.is_some_and(|a| s.data().air.fall_t >= a.duration())), "item b never ended");
-    s.run(1.0 / 60.0);
-    let v = s.body().velocity;
-    assert_eq!(s.loco().current, ActorContextId::InAir);
-    assert!(v.y > -0.5 && Vec3::new(v.x, 0.0, v.z).length() < 0.05, "the fall starts from rest: {v:?}");
+    for fast in [false, true] {
+        let from = Vec3::new(-20.0, 30.0, -20.0);
+        let mut s = Sim::new(from, 0.0);
+        let dt = if fast { 0.0045 } else { 1.0 / 60.0 };
+        s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(dt)));
+        force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::Fall { from, velocity: Vec3::ZERO, origin: air::FallOrigin::HangWall, speed_param: 0.0 }));
+        s.app.world_mut().get_mut::<HumanDataBundle>(s.player).unwrap().air.fall_action = crate::player::ledge_moves::single_item(LOST_GRIP, 0);
+        s.pad(Vec3::ZERO, 0.0, false, false);
+        assert!(s.run_until(2.0, |s| s.data().air.fall_action.is_some_and(|a| a.item == 1)), "item b never played");
+        let t = s.data().air.fall_t;
+        assert!(t < 0.05, "item b starts where item a ended: {t}");
+        assert!(s.run_until(4.0, |s| s.data().air.fall_action.is_some_and(|a| s.data().air.fall_t >= a.duration())), "item b never ended");
+        s.run(1.0 / 60.0);
+        let v = s.body().velocity;
+        assert_eq!(s.loco().current, ActorContextId::InAir);
+        if fast {
+            assert!(v.y > -0.5 && Vec3::new(v.x, 0.0, v.z).length() < 0.05, "fast frames: the fall starts from rest: {v:?}");
+        } else {
+            // item b's root still falls at its end (live RE/20 #43: (0.69 −0.69 −4.97) m/s to its end)
+            assert!(v.y < -2.0, "60 fps: the fall keeps the item's last step: {v:?}");
+        }
+    }
 }
 
 #[test]
@@ -4190,7 +4200,9 @@ fn the_ledge_suspends_the_limb_ik_through_the_pull_up() {
 
 #[test]
 fn a_jump_that_clips_a_higher_roof_lip_steps_onto_it() {
-    // stepped roofs 3.2 -> 4.4 (2 m gap): the jump's foot catches the lip
+    // stepped roofs 3.2 -> 4.4 (2 m gap): the jump's foot catches the lip. M5 F4: no lag recovery and no lift; the flight's
+    // move-to collides and the body stays where the controller leaves it (live `m5_13_c03roof` 088–089), then the
+    // arrival places it
     let mut s = Sim::new(Vec3::new(5.5, 3.2, 24.0), -std::f32::consts::FRAC_PI_2);
     s.pad(Vec3::X, 1.0, true, true);
     assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no jump");
@@ -4198,7 +4210,7 @@ fn a_jump_that_clips_a_higher_roof_lip_steps_onto_it() {
     for _ in 0..90 {
         s.run(1.0 / 60.0 + 1e-4);
         let f = s.body().feet;
-        assert!((f.y - prev.y) * 60.0 < 7.0, "flung up: {prev:?} -> {f:?}");
+        assert!(f.y < 4.4 + 0.9, "flung over the roof: {prev:?} -> {f:?}");
         assert!(!matches!(s.data().air.mode, air::AirMode::Fall { .. }), "the jump aborted into a fall at {f:?}");
         prev = f;
         if s.loco().current == ActorContextId::Ground {
@@ -6484,10 +6496,10 @@ fn walking_and_running_off_an_edge_land_in_the_live_times() {
     for (from, h, stick, high, (lo, hi)) in [
         (Vec3::new(70.0, 1.8, 60.5), 1.8, 1.0, true, (0.42, 0.50)),
         (Vec3::new(70.0, 1.8, 60.5), 1.8, 0.6, false, (0.42, 0.55)),
-        // PORT (owner decision, A35): the lab's 24 run-offs (250 fps) start the fall at the flight's end (3 m down, 0.64 s)
-        // from rest, so the last 0.2 m takes 0.2 s more than the live 0.58–0.68 s (normal frame rate, walk and run-offs
-        // mixed); a live check at the normal frame rate is listed in RE/20
-        (Vec3::new(7.0, 3.2, 23.0), 3.2, 1.0, true, (0.56, 0.82)),
+        // M5 F3 (live `m5b_76_swing_60` 013): at 60 fps a 3.12 m run-off lands 0.600 s after the take-off, the flight's
+        // last step (−10.16 m/s) carried into the fall; RE/18's live 0.58–0.68 s for 3.16 m (the lab's 250 fps runs fall
+        // from rest: 0.677 s uncapped). The port's 3.2 m edge: 0.667 s, 0.067 s over the game's 3.12 m (not traced)
+        (Vec3::new(7.0, 3.2, 23.0), 3.2, 1.0, true, (0.56, 0.68)),
     ] {
         let mut s = Sim::new(from, 0.0);
         s.pad(Vec3::NEG_Z, stick, high, false);
@@ -6508,19 +6520,29 @@ fn walking_and_running_off_an_edge_land_in_the_live_times() {
 
 
 #[test]
-fn a_step_off_a_high_roof_falls_from_rest_after_its_flight() {
-    // A35 (lab, 24 recordings: `hay_plainfall`, `lip_drop_*`, `catch69_*`, `fall3_stepoff`): event 68's flight to its
-    // free target 3 m down ends with no arrival and the JumpFallAction plays (0xE0F3D4); the fall starts from the
-    // controller's stale velocity (−1.3 to +0.5 m/s up), not the flight's −7.4 m/s
+fn a_step_off_a_high_roof_keeps_the_flights_last_step_at_60_fps() {
+    // event 68's flight to its free target 3 m down ends with no arrival and the JumpFallAction plays (0xE0F3D4); the
+    // fall starts from the controller velocity the last move-to left (+144, `CharacterController__BuildVelocity`
+    // 0x52F501): at 60 fps the flight's last step (live M5 F3, `m5b_76_swing_60` 013: (−2.35, −0.15, −10.16) m/s), in
+    // the lab's 4–5 ms frames near rest (A35, 24 recordings: −1.3 to +0.5 m/s)
     // the 4.4 m roof (x 11.5..16.5, z 21.5..26.5; under the ledge stop's 5 m)
-    let mut s = Sim::new(Vec3::new(14.0, 4.4, 24.0), 0.0);
-    s.pad(Vec3::NEG_Z, 1.0, true, false);
-    assert!(s.run_until(5.0, |s| s.loco().current == ActorContextId::InAir), "never left the roof");
-    assert!(s.run_until(1.5, |s| matches!(s.data().air.mode, air::AirMode::Fall { .. })), "the flight never ended");
-    let (v, y) = (s.body().velocity, s.body().feet.y);
-    assert_eq!(s.loco().current, ActorContextId::InAir, "still in the air at the flight's end");
-    assert!(v.y > -1.0 && Vec3::new(v.x, 0.0, v.z).length() < 1.0, "the fall starts near rest: {v:?}");
-    assert!((4.4 - y - 3.0).abs() < 0.3, "the flight came down to its target 3 m below: {y}");
+    for fast in [false, true] {
+        let mut s = Sim::new(Vec3::new(14.0, 4.4, 24.0), 0.0);
+        if fast {
+            s.app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(0.0045)));
+        }
+        s.pad(Vec3::NEG_Z, 1.0, true, false);
+        assert!(s.run_until(20.0, |s| s.loco().current == ActorContextId::InAir), "never left the roof");
+        assert!(s.run_until(6.0, |s| matches!(s.data().air.mode, air::AirMode::Fall { .. })), "the flight never ended");
+        let (v, y) = (s.body().velocity, s.body().feet.y);
+        assert_eq!(s.loco().current, ActorContextId::InAir, "still in the air at the flight's end");
+        if fast {
+            assert!(v.y > -1.0 && Vec3::new(v.x, 0.0, v.z).length() < 1.0, "fast frames: the fall starts near rest: {v:?}");
+        } else {
+            assert!(v.y < -5.0, "60 fps: the fall keeps the flight's last step: {v:?}");
+        }
+        assert!((4.4 - y - 3.0).abs() < 0.3, "the flight came down to its target 3 m below: {y}");
+    }
 }
 
 
@@ -7224,3 +7246,129 @@ fn the_wall_run_pitches_with_a_leaning_wall_and_the_rebound_straightens_it() {
     assert_eq!(s.body().tilt, Quat::IDENTITY, "the push-off is upright");
 }
 
+
+// ---------------------------------------------------------------- the M5 fix group (RE/37 §6–§10, roadmap F1–F13)
+
+/// M5 F1: from a standing start (HG+1492 = 0) event 45 starts the impulsion at phase 1 (`sub_D83830` 0xD83870), so it is
+/// done at once and the free-step takeoff follows on the next frame (live `m5_k_freestep50` 001–004, `m5_k_courtyard`
+/// 005–008, `m5_k_lip13` 011–014: InAir at 0.02 s; the port played the impulsion on the Ground for 0.28 s).
+#[test]
+fn m5_a_standing_impulsion_starts_at_its_end() {
+    use crate::player::ground::{Event45, ImpulsionJump};
+    use crate::player::jump_blend::IMPULSION_JUMP;
+    use crate::player::targets::JumpTarget;
+    let target = JumpTarget { position: Vec3::new(0.0, 0.0, -3.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
+    let mut g = HumanGroundData::default();
+    assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None, true), Event45::Impulsion);
+    let os = g.oneshot.expect("the impulsion");
+    assert!(IMPULSION_JUMP.contains(&os.blend.id));
+    assert!(os.t >= os.duration - 1e-4, "starts at its end: {} of {}", os.t, os.duration);
+    // moving (HG+1492 = 2) with nothing in front of the locomotion: the run jump, as before
+    let mut g = HumanGroundData::default();
+    assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None, false), Event45::Run);
+}
+
+/// M5 F5 (owner decision 2026-10-22): a haystack is not solid. Its collision gives the controller contacts (the entry
+/// tests read them) but holds nothing: a capsule moved into it passes (live `m5_01_climb20` 074: the free-step arrival
+/// walks into the stack).
+#[test]
+fn m5_a_haystack_gives_contacts_but_does_not_hold_the_body() {
+    let (collision, guidance) = crate::level::geometry();
+    let stack = guidance.haystacks[0];
+    let c = (stack.bounds.min + stack.bounds.max) * 0.5;
+    let from = Vec3::new(stack.bounds.min.x - 1.0, 0.0, c.z);
+    let mut proxy = crate::proxy::ProxyState::default();
+    let r = collision.move_capsule(&mut proxy, from, Vec3::X * 1.2, true, 1.0 / 60.0 * 20.0);
+    assert!(r.position.x > stack.bounds.min.x, "held at the haystack's side: {:?}", r.position);
+    // the next frame's closest-point query finds it
+    collision.move_capsule(&mut proxy, r.position, Vec3::X * 0.01, true, 1.0 / 60.0);
+    assert!(!r.hit_wall, "the haystack counts as a wall touch");
+    assert!(crate::player::hay::haystack_contacts(&proxy.manifold, &guidance.haystacks, &collision).next().is_some(), "no haystack contact");
+    // a plain fall onto its top still enters it (the contact branch of `CheckHayStackEntry` 0xE05490)
+    let top = Vec3::new(c.x, stack.bounds.max.y + 2.0, c.z);
+    let mut s = Sim::new_falling(top, 0.0);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(2.0, |s| s.loco().current == ActorContextId::HayStack), "never entered: {:?} {:?}", s.loco().current, s.body().feet);
+}
+
+/// M5 F6: the ladder step's root is a colliding move-to (`sub_E21600` 0xE218FD): the proxy keeps its contacts with the wall
+/// behind the ladder while it climbs, and the step still rises its clip's 0.5 m.
+#[test]
+fn m5_the_ladder_step_moves_through_the_proxy() {
+    use crate::player::ladder::LadderPhase;
+    let mut s = Sim::new(Vec3::new(-100.0, 0.0, -12.5), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, false, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::Ladder), "never mounted");
+    assert!(s.run_until(3.0, |s| s.data().ladder.phase == Some(LadderPhase::ClimbUp)), "never climbed");
+    let h0 = s.data().ladder.height;
+    let mut touched = false;
+    for _ in 0..90 {
+        s.run(1.0 / 60.0 + 1e-4);
+        touched |= !s.body().proxy.manifold.is_empty();
+    }
+    assert!(touched, "the climb never touched the wall behind the ladder");
+    assert!(s.data().ladder.height > h0 + 1.0, "the climb stalled: {} -> {}", h0, s.data().ladder.height);
+}
+
+/// M5 F7: in the blend (Legs held in low profile, IHumanGround vt1196) the pivot takes the second table, 0x1A2C1E8
+/// (`HumanGround__Pivot_Enter` 0xDA6315): `xx_l_pray_turn_*` (live `m5_blend_pivot` 018–019).
+#[test]
+fn m5_the_blend_pivots_with_its_own_turns() {
+    use crate::player::ground::PRAY_PIVOT;
+    let mut s = Sim::new(Vec3::new(-30.0, 0.0, -30.0), 0.0); // facing -Z
+    s.pad(Vec3::ZERO, 0.0, false, true);
+    s.run(0.2);
+    assert!(s.ground().pray, "Legs held in low profile: the blend");
+    s.pad(Vec3::Z, 1.0, false, true); // straight behind
+    s.run(1.0 / 60.0 + 1e-4);
+    let os = s.ground().oneshot.expect("no pivot");
+    assert!(PRAY_PIVOT.iter().flatten().any(|&id| id == os.blend.id), "not the blend's turn: {:#x}", os.blend.id);
+    assert!(s.ground().pray, "the blend holds through its pivot (state 26, `sub_DC62A0`)");
+}
+
+/// M5 F10: a free flight that meets a wall within 45° of its facing at more than 2 m/s across rebounds off it
+/// (`HumanInAir__CheckAirCollisionRebound` 0xE03140 → `HumanInAir__BounceOffContact` 0xE03630), then pushes off into
+/// its fall (`SubState2_PushOffHuman` 0xE04860; live `m5_76_e410` 029–033).
+#[test]
+fn m5_a_free_flight_into_a_wall_rebounds_off_it() {
+    use crate::player::air::{AIR_REBOUND, AIR_REBOUND_TO_FALL};
+    // the 6 m block (x -14.5..-9.5, z 1.5..6.5): a free jump at its +Z face, facing it
+    let from = Vec3::new(-12.0, 2.5, 8.2);
+    let mut s = Sim::new(from, 0.0);
+    force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::FreeJump { from, dir: Vec3::NEG_Z, ahead: 3.0, speed_param: 1.0, foot_left: true }));
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(1.0, |s| s.data().air.rebound_done), "no rebound: {:?} {:?}", s.loco().current, s.body().feet);
+    assert!(s.data().air.fall_action.is_some_and(|a| AIR_REBOUND.contains(&a.id)), "the rebound plays");
+    assert!(s.run_until(1.0, |s| s.data().air.fall_action.is_some_and(|a| AIR_REBOUND_TO_FALL.contains(&a.id))), "no push-off");
+    assert!(s.body().forward().dot(Vec3::NEG_Z) > 0.95, "faces the wall: {:?}", s.body().forward());
+    assert!(s.body().feet.z > 6.5, "stayed out of the wall: {:?}", s.body().feet);
+}
+
+/// M5 F11: the beam's ground entry ends in Main / Walk (+1728 = 3, 0xF7AB99), so a jog let go right after the run onto
+/// the beam plays the jog stop (0xF749D0; live `m5_12_runstop_145` 038: `xx_h_beam_crouchjog_stop_footr`).
+#[test]
+fn m5_a_jog_let_go_on_the_beam_entry_stops_with_the_jog_stop() {
+    use crate::player::narrow::BEAM_JOG_STOP;
+    // platform A x 68..72 (top 4 m), beam x 72..78 at 4 m
+    let mut s = Sim::new(Vec3::new(69.0, 4.0, 70.0), -std::f32::consts::FRAC_PI_2);
+    s.pad(Vec3::X, 1.0, true, false);
+    assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::NarrowObject), "never mounted: {:?}", s.body().feet);
+    s.pad(Vec3::ZERO, 0.0, true, false);
+    assert!(s.run_until(1.0, |s| s.data().narrow.action.is_some_and(|a| BEAM_JOG_STOP.contains(&a.id))), "no jog stop: {:?}", s.data().narrow.state);
+}
+
+/// M5 F13: in the climb wait both hands' LimbIK records are released (LimbIK 0xE55CB0; live `m5b_d2_courtyard` 005):
+/// the wait's hands are the animation's; the moves still take the holds.
+#[test]
+fn m5_the_climb_wait_holds_no_hand_ik() {
+    // the climb tower (x -23..-17, z 27..33): its -Z face's hold bands
+    let mut s = Sim::new(Vec3::new(-20.0, 0.0, 26.0), FACE_PZ);
+    s.pad(Vec3::Z, 1.0, true, true);
+    assert!(s.run_until(6.0, |s| s.loco().current == ActorContextId::Climb), "never climbed: {:?}", s.loco().current);
+    s.pad(Vec3::ZERO, 0.0, false, false);
+    assert!(s.run_until(3.0, |s| s.data().climb.moving.is_none()), "never waited");
+    s.run(0.1);
+    let limbs = *s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap();
+    assert!(limbs.hands.is_none(), "hand IK in the climb wait");
+    assert!(limbs.feet.is_some(), "the feet keep their holds");
+}

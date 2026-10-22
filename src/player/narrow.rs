@@ -32,6 +32,10 @@ use crate::input::PadInput;
 
 /// Fence the A2 beam completion changes for comparison with the previous port.
 pub const BEAM_COMPLETION: bool = true;
+/// M5 F11: the ground entry (mode 1) ends in Main / Walk whatever the stick (+1728 = 3, 0xF7AB99). PORT: only from a
+/// jog (band 4); from a walk with the stick off the beam the port's walk brakes to a stop where the game walks on (lab
+/// 10-17 `sol31_lookdown` 011), so the port keeps the wait there.
+pub const BEAM_ENTRY_ENDS_IN_WALK: bool = true;
 /// The ground mount (event 72) on imported maps reads HumanGuidance's runtime beam report (paired LedgeGrab
 /// contacts, `beam_contacts::detect`) like the air catch and the support pass: imported maps author no Beam lines
 /// (Damascus has none; its beams are LedgeGrab pairs, RE/17 §8). Off: authored Beam lines only.
@@ -1786,8 +1790,16 @@ pub fn update_narrow(
                     n.lateral = off - n.dir() * off.dot(n.dir());
                     if Vec2::new(body.feet.x - n.entry_from.x, body.feet.z - n.entry_from.z).length_squared() > 0.25
                         || n.to_end() <= BEAM_END_STOP || moved.hit_wall {
-                        if forward { n.speed = if jog { beam_bands()[4] } else { beam_bands()[0] }; n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed))); }
-                        else { n.wait_state(); }
+                        // the entry's end goes to Main / Walk whatever the stick (`HumanNarrowObjectBeam__UpdateFSM`
+                        // 0xF80B1C: mode 1 set +1728 = 3 and the speed +1716 = band 0, or band 4 running, at 0xF7AB99),
+                        // so the walk's own stop rule takes over: a jog let go plays the jog stop (0xF749D0; live M5
+                        // F11, RE/37 item 8: `m5_12_runstop_145` 038, `xx_h_beam_crouchjog_stop_footr` at 1.46 s)
+                        if forward || (BEAM_ENTRY_ENDS_IN_WALK && jog) {
+                            n.speed = if jog { beam_bands()[4] } else { beam_bands()[0] };
+                            n.play(BeamState::Walk, item(BEAM_WALK, n.foot, &speed_weights(n.speed)));
+                        } else {
+                            n.wait_state();
+                        }
                     } else if done {
                         // the next beam walk item, the same blend
                         let w = n.action.map(|a| { let w = a.weights(); [w.first().copied().unwrap_or(1.0), w.get(1).copied().unwrap_or(0.0)] }).unwrap_or([1.0, 0.0]);

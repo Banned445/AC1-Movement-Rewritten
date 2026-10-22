@@ -67,7 +67,15 @@ pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collis
     if cands.is_empty() {
         return haystack_target(feet, fwd, fwd, guidance, collision);
     }
-    let t = jump_candidates::select(&cands, feet, fwd, fwd, 1, false).and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));
+    let sel = jump_candidates::select(&cands, feet, fwd, fwd, 1, false);
+    let t = sel.and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));
+    if std::env::var_os("AC_JUMP_LOG").is_some() {
+        let g = |v: Vec3| format!("({:.3} {:.3} {:.3})", v.x, -v.z, v.y);
+        eprintln!("swing jump query pos={} dir={} -> {:?} target {:?}", g(feet), g(fwd), sel, t.map(|t| (g(t.position), t.type_flags)));
+        for c in &cands {
+            eprintln!("  cand {} n={} t={} s={} f={:#x}", g(c.pos), g(c.wall), c.ty, c.sub, c.flags);
+        }
+    }
     super::target_debug::record(|| "swing jump".into(), feet, fwd, &cands, t.as_ref());
     t
 }

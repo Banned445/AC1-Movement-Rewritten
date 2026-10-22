@@ -173,7 +173,8 @@ fn linear_cast(world: &CollisionWorld, layer: u8, p: Vec3, disp: Vec3, lift: f32
     let margin = Vec3::splat(r + COLLISION_TOLERANCE);
     let min = a.min(b).min(a + disp).min(b + disp) - margin;
     let max = a.max(b).max(a + disp).max(b + disp) + margin;
-    for i in (0..world.boxes.len()).chain(world.triangle_candidates(min, max)).filter(|&i| world.sees(layer, i)) {
+    // a haystack's collision is not cast against (M5 F5, `CollisionWorld::phantom`)
+    for i in (0..world.boxes.len()).chain(world.triangle_candidates(min, max)).filter(|&i| world.sees(layer, i) && !world.phantom(i)) {
         let mut t = 0.0f32;
         let mut c = closest(world, i, p, lift, height);
         if c.dist <= 0.0 {
@@ -545,7 +546,9 @@ pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: V
             let start = closest_points(world, state.layer, pos, lift, height);
             let cast = linear_cast(world, state.layer, pos, planned, lift, height);
             update_manifold(&mut state.manifold, &start, &cast);
-            let planes = planes_from(&state.manifold, moving);
+            // a haystack's contact stays in the manifold (the hay entries read it) but holds nothing (M5 F5)
+            let solid: Vec<Contact> = state.manifold.iter().filter(|c| !world.phantom(c.body)).copied().collect();
+            let planes = planes_from(&solid, moving);
             let (disp, v, used) = simplex_solve(&planes, vel, up, remaining, min_dt);
             out_vel = v;
             let mut moved = false;
@@ -582,7 +585,7 @@ pub fn integrate(world: &CollisionWorld, state: &mut ProxyState, p: Vec3, vel: V
     // what is touching now (within a centimetre of the keep distance)
     let mut t = Touched::default();
     for c in closest_points(world, state.layer, pos, lift, height) {
-        if c.dist - KEEP_DISTANCE > 0.01 {
+        if c.dist - KEEP_DISTANCE > 0.01 || world.phantom(c.body) {
             continue;
         }
         if c.normal.y >= MAX_SLOPE_COS {

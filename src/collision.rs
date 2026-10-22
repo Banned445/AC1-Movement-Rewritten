@@ -106,6 +106,8 @@ pub struct CollisionWorld {
     pub triangles: Vec<crate::triangles::Triangle>,
     /// Each box's collision layer (`crate::layers`); boxes past the end of the list are `STATIC`, as the greybox is.
     pub layers: Vec<u8>,
+    /// Boxes that give the controller contacts but do not hold the body (the haystacks, M5 F5); past the end: none.
+    pub phantoms: Vec<bool>,
     /// PORT: conservative bounds rejection, not Havok MOPP. Disable for comparison with
     /// AC_NATIVE_QUERY_CULLING=0; exact collision tests and authored geometry are unchanged.
     pub native_query_culling: bool,
@@ -122,7 +124,7 @@ pub struct CollisionWorld {
 impl Default for CollisionWorld {
     fn default() -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Self { boxes: Vec::new(), triangles: Vec::new(), layers: Vec::new(),
+        Self { boxes: Vec::new(), triangles: Vec::new(), layers: Vec::new(), phantoms: Vec::new(),
             native_query_culling: std::env::var("AC_NATIVE_QUERY_CULLING").as_deref() != Ok("0"), index: None,
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed), revision: 0 }
     }
@@ -235,7 +237,7 @@ impl CollisionWorld {
         let parked = Vec3::splat(PARKED);
         for &s in slots {
             self.triangles[s as usize] = crate::triangles::Triangle { vertices: [parked; 3], bounds: Aabb3 { min: parked, max: parked },
-                normal: Vec3::Y, layer: crate::layers::NOTHING, material: crate::triangles::NO_MATERIAL };
+                normal: Vec3::Y, layer: crate::layers::NOTHING, material: crate::triangles::NO_MATERIAL, phantom: false };
         }
     }
 
@@ -261,7 +263,20 @@ impl<'a> Iterator for SlotIter<'a> {
     }
 }
 
+/// M5 F5 (owner decision 2026-10-22): the haystacks' collision does not hold the body (`CollisionWorld::phantom`).
+pub const HAYSTACKS_NOT_SOLID: bool = true;
+
 impl CollisionWorld {
+    /// Body `i` is a haystack's collision (live M5, RE/37 item 3, owner decision 2026-10-22: the haystacks are not
+    /// solid): the controller's closest-point query still reports it (a fall's top contact enters the HayStack through
+    /// `CheckHayStackEntry` 0xE05490's contact branch, a push into its side is Ground event 122), but the casts, the
+    /// solver and the support leave it out, so a free-step arrival walks into it (`m5_01_climb20` 074).
+    pub fn phantom(&self, i: usize) -> bool {
+        if !HAYSTACKS_NOT_SOLID { return false; }
+        if i >= self.boxes.len() { return self.triangles[i - self.boxes.len()].phantom; }
+        self.phantoms.get(i).copied().unwrap_or(false)
+    }
+
     /// Box `i`'s collision layer.
     pub fn layer_of(&self, i: usize) -> u8 {
         if i >= self.boxes.len() { return self.triangles[i - self.boxes.len()].layer; }

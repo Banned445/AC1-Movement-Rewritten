@@ -153,6 +153,8 @@ pub struct HumanGroundData {
     /// IHumanGround vt1196 (`HumanGround__IsBlendPray` 0xD80820) reports it to
     /// the interpreter, which caps the wanted speed at 0.75 (0xEE6C58) and turns at 0.375 / 3.0 rad/s (0xEE6D27).
     pub pray: bool,
+    /// HG+1492 != 0: the desired move mode the last update set (the stick past the dead zone).
+    pub move_mode: bool,
     /// Human+3056 … +3093: the step-up just made, while it holds (RE/24 GUIDE-15).
     pub step_up: Option<StepUp>,
     /// Which of the foot-IK switching states the ground was in last frame (RE/24 GROUND-16).
@@ -343,6 +345,11 @@ pub const PIVOT: [[[[u32; 2]; 2]; 2]; 2] = [
     [[[0x082F_BC7C, 0x082F_BC87], [0x1ABA_2384, 0x1ABA_2385]], [[0x1ABA_2388, 0x1ABA_2389], [0x09A0_9DF1, 0x09A0_A217]]],
     [[[0x082F_BC88, 0x082F_BC89], [0x1ABA_2386, 0x1ABA_2387]], [[0x1ABA_238A, 0x1ABA_238B], [0x09A0_9DF2, 0x09A0_A218]]],
 ];
+/// The blend's pivot table (0x1A2C1E8, filled by `HumanGround__InitAnimTables` 0xDB7016–0xDB7034): `HumanGround__Pivot_Enter`
+/// 0xDA6150 takes it instead of `PIVOT` while IHumanGround vt1196 holds (the blend), at [foot + 12 · side] (0xDA6306), and
+/// sets both profiles low: [left, right] x [foot l, r], `HumanGround_Pray: xx_l_pray_turn_{left,right}_090_foot{l,r}`
+/// (live M5 F7, RE/37 item 7: `m5_blend_pivot` 018–019).
+pub const PRAY_PIVOT: [[u32; 2]; 2] = [[0xA6BA_D0DC, 0xA6BA_D0DE], [0xA6BA_D0DF, 0xA6BA_D0E0]];
 /// Start from standing (`HumanGround__PlayStartMove` 0xD98990): the locomotion action entered through these items,
 /// [low, high profile] x [foot l, r] (by `Human__GetLeadingFoot` 0xB18850). Clips [wait_tr_walk_slow, wait_tr_walk,
 /// wait_tr_jog, impulsion_to_sprint]; the exe weights walk (low) or jog (high) and sets the speed parameter HG+0x5E8 to
@@ -354,7 +361,7 @@ pub fn is_start(id: u32) -> bool {
 }
 
 // Probe action list also includes the native Ground extras; kept here for the existing dump tool.
-pub const PIVOT_ACTIONS: [u32; 37] = [
+pub const PIVOT_ACTIONS: [u32; 41] = [
     super::ground_extras::FREERUN_WAIT[0], super::ground_extras::FREERUN_WAIT[1],
     super::ground_extras::STATIC_PREPARE[0], super::ground_extras::STATIC_PREPARE[1],
     super::ground_extras::STATIC_JUMP[0], super::ground_extras::STATIC_JUMP[1], super::ground_extras::STATIC_FALL,
@@ -366,6 +373,7 @@ pub const PIVOT_ACTIONS: [u32; 37] = [
     0x09A0_8AC6, 0x09A0_A426, 0x09A0_AA2D, 0x09A0_AA2E,
     0x082F_BC7C, 0x082F_BC87, 0x1ABA_2384, 0x1ABA_2385, 0x1ABA_2388, 0x1ABA_2389, 0x09A0_9DF1, 0x09A0_A217,
     0x082F_BC88, 0x082F_BC89, 0x1ABA_2386, 0x1ABA_2387, 0x1ABA_238A, 0x1ABA_238B, 0x09A0_9DF2, 0x09A0_A218,
+    PRAY_PIVOT[0][0], PRAY_PIVOT[0][1], PRAY_PIVOT[1][0], PRAY_PIVOT[1][1],
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -440,7 +448,12 @@ impl HumanGroundData {
     /// Live (lab): from the impulsion wait 0.27 s of impulsion then `freestep_front_front_*_to_air`; from a walk start or
     /// a free-step exit 0.05-0.09 s; from the running locomotion `run_front_*_to_air`. PORT: HG+616 is taken as the
     /// impulsion's start phase (`sub_724500`'s node call is not decoded; the timings fit it).
-    pub fn event45(&mut self, feet: Vec3, forward: Vec3, jump: ImpulsionJump, free_run: Option<ActionBlend>, leading: Option<usize>) -> Event45 {
+    ///
+    /// `standing`: HG+1492 (the desired move mode) is 0, as the last Ground update left it: the stick was released then.
+    /// The impulsion then starts at phase 1 (0xD83870), so it is done at once and the free-step takeoff follows on the
+    /// next frame (live M5 F1, RE/37 item 1: from a standing start with RT + A and the full stick the game is in the air
+    /// on frame 2, `m5_k_freestep50` 001–004, `m5_k_courtyard` 005–008, `m5_k_lip13` 011–014).
+    pub fn event45(&mut self, feet: Vec3, forward: Vec3, jump: ImpulsionJump, free_run: Option<ActionBlend>, leading: Option<usize>, standing: bool) -> Event45 {
         // `free_run`: the FreeRun sub-state's playing item (its wait, `ground_extras::FREERUN_WAIT`): the port starts the
         // run start in the frame the wait hands over, so the item event 45 reads in the game is passed in
         let free_run_item = free_run;
@@ -482,6 +495,7 @@ impl HumanGroundData {
             w[0] = 1.0 - v;
             w[1] = v;
             match item {
+                _ if standing && STANDING_IMPULSION_AT_END => 1.0,
                 Some((_, t)) if t >= 0.75 => return Event45::Run,
                 Some((_, t)) => (t / 0.75).max(0.0),
                 None => return Event45::Run,
@@ -1365,6 +1379,10 @@ pub fn update_ground(
         }
         let busy = g.oneshot.is_some() || g.tr.is_some_and(|t| t.to_wait);
         let moving = mv_speed > 0.0 && !busy;
+        // HG+1492, the desired move mode (`UpdateDesiredMoveMode` 0xD7D4B0: 0 or 2), as the last update left it: the
+        // interpreter's events of this frame read it before the Ground update sets it from this frame's stick
+        let standing = !g.move_mode;
+        g.move_mode = mv_speed > 0.0;
         // a landing one-shot (Movement states 21 / 22): no HG+609 bit, no animation gate on events 68 / 69 (below)
         let landing_cut = matches!(g.owner, TreeState::Landing | TreeState::DamageLanding) && g.oneshot.is_some();
 
@@ -1379,7 +1397,7 @@ pub fn update_ground(
         // untraced (`sub_D82880` / `sub_D828B0` post them, no reference found); live, the pray overlay holds exactly while
         // Legs is held in low profile, standing, starting and walking (lab 10-17 `crouch4_blend` 047: 1.010–7.013 s, RE/20 #4)
         g.pray = PRAY_BLEND && GAME_GROUND_TREE && pad.legs_held && !g.high_profile && g.sub_state == HumanGroundSubState::Movement
-            && g.oneshot.is_none() && g.collide.is_none() && g.crouch.is_none() && g.extra.is_none() && g.look_down.is_none()
+            && (g.oneshot.is_none() || (PRAY_PIVOT_KEEPS && g.owner == TreeState::Pivot)) && g.collide.is_none() && g.crouch.is_none() && g.extra.is_none() && g.look_down.is_none()
             && g.ledge_stop.is_none();
 
         // turn attenuation (interpreter 0xEE65A0): beyond 45° slow down; forced to 1 in low profile. The angle is +0x1264,
@@ -1481,7 +1499,9 @@ pub fn update_ground(
             // high → high turns
             let to_high = if GAME_GROUND_TREE { prev_high } else { g.high_profile };
             let foot = pivot_foot(frame_word, g.speed_param, g.wait_foot, g.playing_word(), leading_foot.unwrap_or(g.blend.foot), g.blend.foot);
-            let id = PIVOT[(!left) as usize][prev_high as usize][to_high as usize][foot];
+            // in the blend (vt1196) the second table, both profiles low (0xDA62F7–0xDA630F)
+            let pray = g.pray;
+            let (prev_high, id) = if pray && PRAY_PIVOT_TABLE { (false, PRAY_PIVOT[(!left) as usize][foot]) } else { (prev_high, PIVOT[(!left) as usize][prev_high as usize][to_high as usize][foot]) };
             let w = ((pivot_off - std::f32::consts::FRAC_PI_2) / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
             if jump_blend::action_items(id).is_some() {
                 g.play_oneshot(ActionBlend::new(id, 0, &[1.0 - w, w]));
@@ -1793,7 +1813,7 @@ pub fn update_ground(
         if g.high_profile && moving && !busy && ab.allows(Ability::Jump) {
             if let Some(target) = super::targets::find_target(body.feet, body.forward(), pad.dir_snap, &super::jump_candidates::Query::free_run(pad.legs_held), false, &guidance, &collision) {
                 jump_log("free-run target jump", body.feet, Some(&target));
-                match g.event45(body.feet, body.forward(), ImpulsionJump::Target(target), free_run_ready, leading_foot) {
+                match g.event45(body.feet, body.forward(), ImpulsionJump::Target(target), free_run_ready, leading_foot, standing) {
                     Event45::Run => {
                         let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, g.playing_word(), leading_foot, g.blend.foot) };
                         switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
@@ -1917,7 +1937,7 @@ pub fn update_ground(
                 Some(t) => ImpulsionJump::Target(t),
                 None => ImpulsionJump::Free { dir: want },
             };
-            match g.event45(body.feet, forward, jump, free_run_ready, leading_foot) {
+            match g.event45(body.feet, forward, jump, free_run_ready, leading_foot, standing) {
                 Event45::Run => {}
                 Event45::Impulsion => {
                     body.velocity = Vec3::ZERO;
@@ -1989,7 +2009,7 @@ pub fn update_ground(
                         // the target goes to IHuman vt24 (0xEE87BF), event 45 as the tap jump's: the impulsion or the run
                         // jump by the playing item (lab 10-12 `climb_16` 017: out of `freestep_entry_tr_l_walk` at 0.32
                         // of it, `impultionstraight_footl_to_ground_to_air_front_down`; RE/34 A34)
-                        match g.event45(body.feet, forward, ImpulsionJump::Target(target), free_run_ready, leading_foot) {
+                        match g.event45(body.feet, forward, ImpulsionJump::Target(target), free_run_ready, leading_foot, standing) {
                             Event45::Run => {}
                             Event45::Impulsion => {
                                 body.velocity = Vec3::ZERO;
@@ -2636,6 +2656,15 @@ const PULLDOWN_HAND_WINDOW: f32 = 0.2;
 pub const PRAY_SPEED_CAP: f32 = 0.75;
 /// The blend (`HumanGroundData::pray`): Legs held in low profile caps the speed and turn rates as the vt1196 state does.
 pub const PRAY_BLEND: bool = true;
+/// The blend holds through its own pivot: the upper-body FSM's check `sub_DC62A0` 0xDC62A0 takes HumanGround's active
+/// states 6 / 9 / 13 / 26, and the pivot is state 26 (`HumanGround__Pivot_Enter` 0xDA616F); Idle pushes 5 / 6 / 8
+/// (0xDA6AB1–0xDA6B28) and Move 13 (0xDA42AC). The landing (21) is not in the list (live M5 F7: InAir and the landing
+/// item leave mode 1).
+pub const PRAY_PIVOT_KEEPS: bool = true;
+/// M5 F7: the blend's pivot plays its own table (0x1A2C1E8).
+pub const PRAY_PIVOT_TABLE: bool = true;
+/// M5 F1: event 45 from a standing start (HG+1492 = 0) starts the impulsion at phase 1 (0xD83870).
+pub const STANDING_IMPULSION_AT_END: bool = true;
 
 /// Pull-down from the ground at edge `p` / normal `n`: type Wait (from Movement) or EdgeStop (from the ledge stop).
 fn pulldown_entry(p: Vec3, n: Vec3, feet: Vec3, wait: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<super::ledge::LedgeEntry> {
@@ -2705,14 +2734,14 @@ mod reanalysis_tests {
             .find(|b| !super::super::anim_gate::locked(b))
             .expect("an unlocked start item");
         let mut g = HumanGroundData::default();
-        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None), Event45::Run, "the locomotion");
+        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None, false), Event45::Run, "the locomotion");
         for (t, want) in [(0.3f32, Event45::Impulsion), (0.8, Event45::Run)] {
             let mut g = HumanGroundData::default();
             g.play_oneshot(start);
             if let Some(os) = g.oneshot.as_mut() {
                 os.t = t * os.duration;
             }
-            assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None), want, "t {t}");
+            assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None, false), want, "t {t}");
             if want == Event45::Impulsion {
                 let os = g.oneshot.unwrap();
                 assert!(jump_blend::IMPULSION_JUMP.contains(&os.blend.id));
@@ -2723,7 +2752,7 @@ mod reanalysis_tests {
         // FreeRun: from the start, the target 45 degrees to the right blends front and right half and half
         let mut g = HumanGroundData::default();
         let right = JumpTarget { position: Vec3::new(2.0, 0.0, -2.0), ..target };
-        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(right), Some(ActionBlend::new(super::super::ground_extras::FREERUN_WAIT[0], 0, &[1.0])), None), Event45::Impulsion);
+        assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(right), Some(ActionBlend::new(super::super::ground_extras::FREERUN_WAIT[0], 0, &[1.0])), None, false), Event45::Impulsion);
         let os = g.oneshot.unwrap();
         let w = os.blend.weights();
         assert!(os.t == 0.0 && (w[0] - 0.5).abs() < 1e-3 && (w[4] - 0.5).abs() < 1e-3, "{w:?}");

@@ -229,8 +229,9 @@ const SLABS: &[(f32, f32, f32, f32, f32, f32)] = &[
     // slab Q left of wall P (x -54.2..-53.0, top 3.6, edge on the face line z -10.5, nothing below): a long reach from the
     // climb into a free hang, caught on one hand (`climb1m_tr_hangfree_left_3`, then SecondHandGrab)
     (-53.6, 3.6, -10.2, 1.2, 0.6, 0.3),
-    // over the top of the ladder at x -129.4: the top is blocked (sub_E240B0), the climb stops below it
-    (-129.2, 8.4, -10.25, 1.6, 1.5, 0.9),
+    // over the top of the ladder at x -129.4, from the wall side (z -10.6..-9.5, clear of the climber, whose step collides,
+    // M5 F6): the top is blocked (sub_E240B0), the climb stops below it
+    (-129.2, 8.4, -10.05, 1.6, 1.1, 0.9),
 ];
 
 /// Further climb walls (x range, face z with normal -Z, band index range: heights 0.6·k): wall K's bands up to 3.0 m
@@ -355,15 +356,17 @@ pub fn geometry() -> (CollisionWorld, GuidanceWorld) {
     for &(p0, p1, n) in KIOSKS {
         guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1: n, subtype: GuidanceSubType::Kiosk });
     }
-    // haystacks are solid boxes on layer Dynamic, as Damascus's `Hay_Bale_*` collision is (a 12-triangle box, layer 2):
-    // the character collides with them on MainCharacter and on the aimed jump's OnlyDynamic alike, and the contact is
-    // what lets an aimed jump into one (RE/24 AIR-25)
+    // haystacks are boxes on layer Dynamic, as Damascus's `Hay_Bale_*` collision is (a 12-triangle box, layer 2): the
+    // controller's contact with one is what enters it, on MainCharacter and on the aimed jump's OnlyDynamic alike (RE/24
+    // AIR-25), but it does not hold the body (live M5 F5, RE/37 item 3; owner decision 2026-10-22)
     collision.layers.resize(collision.boxes.len(), crate::layers::STATIC);
+    collision.phantoms.resize(collision.boxes.len(), false);
     for &(x, z, sx, sz, h) in HAYSTACKS {
         let b = Aabb3 { min: Vec3::new(x - sx * 0.5, 0.0, z - sz * 0.5), max: Vec3::new(x + sx * 0.5, h, z + sz * 0.5) };
         guidance.haystacks.push(crate::collision::HayStack::from_box(b));
         collision.boxes.push(b);
         collision.layers.push(crate::layers::DYNAMIC);
+        collision.phantoms.push(true);
     }
     for &(p0, p1, n1) in WALL_LEDGES {
         guidance.edges.push(GuidanceEdge { p0, p1, n0: Vec3::Y, n1, subtype: GuidanceSubType::LedgeGrab });

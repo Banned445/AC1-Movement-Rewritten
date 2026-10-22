@@ -289,6 +289,12 @@ pub struct HumanInAirData {
     /// The action played once the jump turns into a fall (HumanInAirData+416), and the time since.
     pub fall_action: Option<ActionBlend>,
     pub fall_t: f32,
+    /// The air rebound has run in this air stay (InAir +226 bit 2, set by `HumanInAir__BounceOffContact` 0xE03854).
+    pub rebound_done: bool,
+    /// The rebound's push-off item, played when the rebound ends (0xE04860).
+    pub rebound_next: Option<ActionBlend>,
+    /// The rebound's turn to face the wall: (from heading, to heading, progress 0..1 over 0.1 s).
+    pub rebound_turn: Option<(f32, f32, f32)>,
     /// The jump is at the free-jump target (no target found): the ground contact ends it, as it does in the game
     /// (0xE05200 on the controller contact) long before the target 3 m down is reached.
     pub free_target: bool,
@@ -332,6 +338,9 @@ impl HumanInAirData {
         self.time_in_air = 0.0;
         self.fall_action = None;
         self.fall_t = 0.0;
+        self.rebound_done = false;
+        self.rebound_next = None;
+        self.rebound_turn = None;
         self.free_target = false;
         self.free_step_abort = false;
         self.drop = None;
@@ -687,11 +696,82 @@ impl HumanInAirData {
         let d = (h1 - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         h0 + d * s
     }
+
+    /// `HumanInAir__BounceOffContact` 0xE03630, the air rebound off the wall of normal `n`, with `word` the playing
+    /// item's: the body turns to face the wall over 0.1 s (`sub_711130`, forward −n across), the controller velocity is
+    /// cleared (+1152), the rebound plays (FROMANIM: its root moves the body) and the target is dropped (Data+505 /
+    /// +506 = 0, +420 / +424 / +432 = −1). Its end plays the push-off (0xE04860) and the fall goes on.
+    pub fn start_rebound(&mut self, n: Vec3, word: Option<u16>, body: &mut super::Body) {
+        let left = word.is_some_and(|w| w & 0xC == 4);
+        let id = AIR_REBOUND[(!left) as usize];
+        self.rebound_done = true;
+        self.fall_action = super::ledge_moves::single_item(id, 0);
+        self.fall_t = 0.0;
+        let next_left = super::anim_gate::item_word(id, 0).is_some_and(|w| w & 0xC == 4);
+        self.rebound_next = super::ledge_moves::single_item(AIR_REBOUND_TO_FALL[(!next_left) as usize], 0);
+        let into = -Vec3::new(n.x, 0.0, n.z).normalize_or(body.forward());
+        self.rebound_turn = Some((body.heading, super::heading_of(into), 0.0));
+        self.target = None;
+        self.target_flags = 0;
+        self.free_target = false;
+        self.turn = None;
+        self.mode = AirMode::Fall { steer_to: None };
+        body.velocity = Vec3::ZERO;
+    }
 }
 
-/// PORT: how fast a target jump closes a lag behind its path (1/s), and the lag at which it gives up and falls.
-const JUMP_LAG_RECOVERY: f32 = 6.0;
-const JUMP_BLOCKED_LAG: f32 = 0.6;
+/// PORT (F3, owner decision A27 2026-10-22): the frame time from which a fall after a flight or a fall action keeps
+/// the controller velocity the last move-to left (+144). Live (M5, RE/37 §6 item 2 / §10): at 30 and 60 fps the fall
+/// starts with it (−10.2 m/s); in the lab's uncapped frames (4–5 ms) the flight ends near rest (A35's 24 run-offs,
+/// `m5b_76_swing_free` 015: 0.17 m/s) and so do A36's 14 fall actions. The game's carry is
+/// `CharacterController__BuildVelocity` 0x52F501–0x52F658; the fast frames' rest comes from the Havok proxy's step
+/// (**hypothesis**, not decoded), so the port switches between the two regimes at 10 ms (100 fps), between the measured
+/// 5 ms and 16.7 ms.
+pub const CARRY_MIN_DT: f32 = 0.010;
+/// M5 F4: the flight's root is the path's point requested from the controller (off: the old lag recovery at 6/s).
+pub const FLIGHT_MOVE_TO: bool = true;
+/// M5 F10: the flight's wall rebound (`HumanInAir__CheckAirCollisionRebound` 0xE03140).
+pub const AIR_REBOUND_ON: bool = true;
+
+pub fn carries_controller_velocity(dt: f32) -> bool {
+    dt >= CARRY_MIN_DT
+}
+
+/// The air rebound off a wall, [the flight's item leaves the left foot ahead, else]: `xx_h_air_all_footl_tr_rebound_footr`
+/// 0x01271A20 / `…_footr_tr_rebound_footl` 0x01271A1F (`HumanInAir__BounceOffContact` 0xE03630, by the playing item's word
+/// & 0xC == 4).
+pub const AIR_REBOUND: [u32; 2] = [0x0127_1A20, 0x0127_1A1F];
+/// Its push-off when it ends (`HumanInAir__SubState2_PushOffHuman` 0xE04860, by the rebound item's word & 0xC == 4):
+/// `xx_h_rebound_footl_tr_fall` 0x01291761 / `xx_h_rebound_footr_tr_fall` 0x01291762.
+pub const AIR_REBOUND_TO_FALL: [u32; 2] = [0x0129_1761, 0x0129_1762];
+pub const DUMPED_ACTIONS: &[u32] = &[AIR_REBOUND[0], AIR_REBOUND[1], AIR_REBOUND_TO_FALL[0]];
+
+/// `HumanInAir__CheckAirCollisionRebound` 0xE03140 (any wall contact qualifies), the flight's wall test:
+/// - a wall contact (class 4) whose horizontal inward normal −n has the controller velocity v (+1264, not normalised)
+///   along it beyond cos 80° (0.17364818, 0xE032F4);
+/// - of those, the one whose normal is closest to the back of the facing, within 45° (0xE03448);
+/// - |v| across above 2 m/s (0xE03589) and v across within 60° of the facing (0xE035D2).
+///
+/// Returns that contact's normal. Not ported: the contact's owner tests (flag 0x10000000 with an entity, 0xE03304; an
+/// owner of kind 3 with type 8 / 9 is skipped, 0xE0351E) and the upper-body action check `sub_DFECE0` (two fight
+/// actions on layer 1).
+pub fn air_rebound_normal(manifold: &[crate::proxy::Contact], v: Vec3, fwd: Vec3) -> Option<Vec3> {
+    let flat = |a: Vec3| Vec3::new(a.x, 0.0, a.z).normalize_or_zero();
+    let back = -flat(fwd);
+    let mut best: Option<(f32, Vec3)> = None;
+    for c in manifold.iter().filter(|c| crate::proxy::contact_class(c) == 4) {
+        if (-flat(c.normal)).dot(v) <= 0.173_648_18 {
+            continue;
+        }
+        let a = back.angle_between(flat(c.normal));
+        if a < std::f32::consts::FRAC_PI_4 && best.is_none_or(|(b, _)| a < b) {
+            best = Some((a, c.normal));
+        }
+    }
+    let (_, n) = best?;
+    let across = Vec3::new(v.x, 0.0, v.z);
+    (across.length() > 2.0 && flat(fwd).angle_between(across.normalize()) < std::f32::consts::FRAC_PI_3).then_some(n)
+}
 
 /// Signed angle from `f` to `to` about up (+ = to the left, the heading's positive sense).
 fn right_of_signed(f: Vec3, to: Vec3) -> f32 {
@@ -869,19 +949,29 @@ pub fn update_air(
                 // the path's own velocity (not the collision-resolved displacement: a depenetration push is not
                 // a velocity, using it flung the character up when a foot clipped the lip of a higher roof)
                 let path_vel = (next - path(t1 - dt.max(1e-3))) / dt.max(1e-3);
-                // The game drives the jump as a velocity through the character proxy (0xE0DEF0 → controller +0x90,
-                // 0x57C7C0): the body moves by the path's step and slides along what it touches (a lip's rounded
-                // contact lifts it over). PORT: a lag behind the path (a contact held the body back) is closed at
-                // `JUMP_LAG_RECOVERY`/s so the arrival still lands on the target; driving the absolute position instead
-                // made the body stall on a lip, then jump ahead to catch up.
-                let lag = path(t) - body.feet;
-                let mv = (next - path(t)) + lag * (dt * JUMP_LAG_RECOVERY).min(1.0);
+                // The game requests the path's point from the controller each frame (`CharacterController__RequestMoveTo`
+                // 0x710B40 at 0xE0F149): the controller velocity (+144) is (target − position) / dt, and the move
+                // collides, so the body stays where the controller leaves it. No lag recovery and no lift (live M5 F4,
+                // RE/37 item 8: in `m5_13_c03roof` 088–089 the request sinks 0.78 m into the next roof while the body
+                // stays on its surface, and the arrival places it)
+                let mv = if FLIGHT_MOVE_TO { next - body.feet } else { (next - path(t)) + (path(t) - body.feet) * (dt * 6.0).min(1.0) };
                 let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, mv, false, dt) };
-                body.velocity = path_vel;
+                // the controller velocity the move-to leaves, which a fall after the flight starts with (F3)
+                body.velocity = if FLIGHT_MOVE_TO { mv / dt.max(1e-4) } else { path_vel };
                 body.heading = air.jump_heading(t1, t_takeoff, fwd);
                 body.feet = r.position;
-                let blocked = (r.position - next).length() > JUMP_BLOCKED_LAG;
-                if air.free_target && r.landed && path_vel.y <= 0.0 {
+                // the flight's wall test (0xE03140) runs once per air stay (InAir +226 bit 2); a jump at a target is
+                // left alone (hypothesis: the target's owner object, Data+652, refuses it at 0xE034C7; the free
+                // targets have none)
+                let rebound = (AIR_REBOUND_ON && !air.rebound_done && air.target.is_none())
+                    .then(|| air_rebound_normal(&body.proxy.manifold, body.velocity, body.forward()))
+                    .flatten();
+                if let Some(n) = rebound {
+                    // → event 4 → `HumanInAir__BounceOffContact` 0xE03630 (M5 F10, RE/37 item 2: the 4.10 m edge's
+                    // run-off flight meets the wall under the edge and plays `air_all_*_tr_rebound_*`)
+                    let playing = if t1 < t_takeoff { air.takeoff } else { air.flight };
+                    air.start_rebound(n, playing.and_then(|b| super::anim_gate::word(&b)), &mut body);
+                } else if air.free_target && r.landed && path_vel.y <= 0.0 {
                     // the free jump comes down on the ground before its target (0xE05200, controller contact)
                     landed_at = Some(body.feet.y);
                     // A36: `CheckAirCatch` runs during the jump too, and its edge landing (LABEL_140, 0xE0D684) goes
@@ -890,14 +980,6 @@ pub fn update_air(
                     let fall_h = if air.apex_reached { air.apex_y - body.feet.y } else { 0.0 };
                     edge_contact = !air.edge_landed && !air.faith_dive() && fall_h < 9.0 && GAME_GROUND_EXTRAS
                         && super::ground_extras::ground_contact(body.proxy.manifold.iter().map(|c| c.normal.y)) == super::ground_extras::GroundContact::Flat;
-                } else if blocked {
-                    // held back by a wall (anti-stuck 0xE0B1E0, simplified): fall from here with the path's
-                    // horizontal velocity damped and no upward push. PORT: the 30 % kept has no game source; the game's
-                    // support-loss re-entry (0xE01B70, RE/24 AIR-24) is not ported (RE/24 AIR-36)
-                    air.mode = AirMode::Fall { steer_to: None };
-                    body.velocity.x *= 0.3;
-                    body.velocity.z *= 0.3;
-                    body.velocity.y = body.velocity.y.min(0.0);
                 } else if t1 >= duration {
                     // arrival (0xE07D00, within 0.01 m, 0xE07F2A): while Data+505 is set the tested point is the root
                     // requested from the controller (`CharacterController__RequestMoveTo` 0xE0F149, var_80), the path
@@ -1022,11 +1104,18 @@ pub fn update_air(
                                 // a free jump at its own target (the tap jump's, the free-step free jump's and event 68's
                                 // step off an edge): the flight ends with no arrival and the JumpFallAction plays
                                 // (0xE0F3D4–0xE0F45B), which sets no velocity, so the fall starts from the controller's
-                                // velocity, which the flight's kinematic moves (`CharacterController__RequestMoveTo`
-                                // 0x710B40) do not keep. Lab: the tap jump's 30 recordings 0–1 m/s across, mostly ≈ 0.4,
-                                // after a 3.8 m/s flight; the step off's 24 (A35) −1.3 to +0.5 m/s up after the flight's
-                                // −7.4, then gravity and the 4 m/s² drift decay. PORT: that stale velocity is taken as 0
-                                body.velocity = Vec3::ZERO;
+                                // velocity: the last move-to's (target − position) / dt (+144, `CharacterController__
+                                // RequestMoveTo` 0x710B40), set above. At 60 fps that is the flight's last step (live M5
+                                // F3, RE/37 §10: `m5b_76_swing_60` 013 carries (−2.35, −0.15, −10.16) m/s into
+                                // `jump_falling01` at the flight end 0xE0F3DA, and lands 0.600 s after the take-off for
+                                // 3.12 m); the lab's 250 fps runs (A35's 24, the tap jump's 30) end near rest, as the
+                                // uncapped M5 run does (0.677 s). `CharacterController__BuildVelocity` 0x52F501–0x52F658
+                                // keeps +144 from the last move-to ((target − proxy) · 1/dt) and only adds g·dt while
+                                // no request comes, so the carry itself is the game's; why the fast frames end at rest
+                                // lies in the Havok proxy's step and is not decoded (`carries_controller_velocity`)
+                                if !carries_controller_velocity(dt) {
+                                    body.velocity = Vec3::ZERO;
+                                }
                             }
                             air.mode = AirMode::Fall { steer_to: if free_end { None } else { Some(p) } };
                         }
@@ -1091,7 +1180,23 @@ pub fn update_air(
                     if let Some(next) = super::ledge_moves::single_item(a.id, a.item + 1) {
                         air.fall_t -= a.duration();
                         air.fall_action = Some(next);
+                    } else if let Some(next) = air.rebound_next.take() {
+                        // the air rebound done (InAir sub-state 2, `HumanInAir__UpdateSubState2` 0xE07180):
+                        // `SubState2_PushOffHuman` 0xE04860 plays its `rebound_*_tr_fall` and requests the root 0.05 m
+                        // back along the facing (controller +1296), then sub-state 1 (the fall) goes on with it
+                        let back = -Vec3::new(body.forward().x, 0.0, body.forward().z).normalize_or_zero() * 0.05;
+                        let r = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, back, false, dt) };
+                        body.feet = r.position;
+                        air.fall_t -= a.duration();
+                        air.fall_action = Some(next);
                     }
+                }
+                // the rebound's turn to face the wall (`sub_711130` over 0.1 s, 0xE0378B)
+                if let Some((h0, h1, s)) = air.rebound_turn {
+                    let s1 = (s + dt / 0.1).min(1.0);
+                    let d = (h1 - h0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                    body.heading = h0 + d * s1;
+                    air.rebound_turn = (s1 < 1.0).then_some((h0, h1, s1));
                 }
                 let anim_v = steer_to.is_none().then_some(air.fall_action).flatten().and_then(|a| {
                     let d = a.duration();
@@ -1102,16 +1207,17 @@ pub fn update_air(
                     })
                 });
                 // When the fall action ends in the air, `jump_falling01` (request 33, 0xE0F47A → 0xE0F4D9) sets no
-                // velocity, and the action's root moved the body by move-to requests, so the fall starts from rest, as
-                // a free flight's does (A35, 0xE0F43B). Lab: all 14 recordings where a fall action ends in the air (the
-                // rebound's, the hang let-goes', the edge landing's step-off, `fall_ground_back_tr_fall`) read 0 on the
-                // switch frame and −g·dt on the next (A36: 10-14 `005_edge_landing_out`, the fall after the step-off)
+                // velocity, so the fall starts from the controller's: the action's last move-to request, (target −
+                // position) / dt (+144, 0x710B40), which at 60 fps is the clip's last step (live M5 F3, RE/37 item 2:
+                // z −10.19 m/s at 60 fps into `jump_falling01` after `fall_step_off_right_max`, 068 / 069; the port fell
+                // from rest and landed 0.28 s late). The lab's 250 fps recordings (A36's 14) read near 0 there
+                // (`carries_controller_velocity`).
                 let ended = steer_to.is_none()
                     && air.fall_action.is_some_and(|a| a.duration() > 1e-4 && air.fall_t >= a.duration() && air.fall_t - dt < a.duration());
                 if let Some(v) = anim_v {
                     body.velocity = v;
                 } else {
-                    if ended {
+                    if ended && !carries_controller_velocity(dt) {
                         body.velocity = Vec3::ZERO;
                     }
                     body.velocity.y -= GRAVITY * dt;
@@ -1180,7 +1286,7 @@ pub fn update_air(
                     None if anim_v.is_some() => {}
                     None => {
                         // Non-target drift 0xE0F643–0xE0F707, constants 0x19BA434/438. PORT: the game drifts only while
-                        // `AnimComponent__GetSlotMotionMode`(0) == 1 and no BounceOffHuman deadline runs (`sub_DFEEE0`,
+                        // `AnimComponent__GetSlotMotionMode`(0) == 1 and no BounceOffContact (0xE03630) deadline runs (`sub_DFEEE0`,
                         // HumanInAir+0x1A8). Mode 1 is written only by the physics blend at Human+0x830 in its states 2 / 3
                         // (`HumanPhysicsBlend__SetPhysicsDriven` 0xB31530; drowning requests state 2), its init writes 0
                         // (RE/24 AIR-21). Hypothesis: a normal fall runs in mode 0 and skips this decay; the port decays.
