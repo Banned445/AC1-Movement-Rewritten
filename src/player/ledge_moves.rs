@@ -507,14 +507,20 @@ pub fn probe_lateral(mover: Vec3, other: Vec3, n: Vec3, dv: Vec3, closing: bool,
 #[allow(clippy::too_many_arguments)]
 pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang: LedgeHangType, feet: Vec3, facing: Vec3, source: usize, collision: &CollisionWorld) -> Option<super::climb::ClimbEntry> {
     let (fi, hi) = [(2usize, 4usize), (1, 3), (0, 2)][band];
+    let log = std::env::var_os("AC_LEDGE_LOG").is_some();
+    if log {
+        eprintln!("side-to-climb band {band} rows {:?}", rows.iter().map(|r| r.map(|h| h.point)).collect::<Vec<_>>());
+    }
     let (foot, hand) = (rows[fi]?, rows[hi]?);
     let (hn, fnn) = (hand.wall_normal, foot.wall_normal);
     let pose = super::climb::climb_pose([hand.point, hand.point, foot.point, foot.point], [hn, hn, fnn, fnn], facing);
     if !super::climb::body_boxes_free(collision, &pose, 0, source == 2) {
+        if log { eprintln!("  body boxes blocked"); }
         return None;
     }
     let ha = if hang == LedgeHangType::Wall { 1.1 } else { 2.4 };
     if !lateral_path_free(feet, facing, ha, pose.root, pose.forward, 1.8, if right { 1.0 } else { -1.0 }, collision) {
+        if log { eprintln!("  lateral path blocked"); }
         return None;
     }
     Some(super::climb::ClimbEntry {

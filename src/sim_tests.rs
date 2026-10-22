@@ -2175,7 +2175,7 @@ fn the_over_drop_tail_steers_onto_the_true_target() {
     use crate::player::targets::JumpTarget;
     let mut s = Sim::new(Vec3::new(30.0, 9.5, 23.5), 0.0);
     s.run(0.2);
-    let target = JumpTarget { position: Vec3::new(30.0, 0.0, 17.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
+    let target = JumpTarget { no_owner: false, position: Vec3::new(30.0, 0.0, 17.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
     let from = s.body().feet;
     force(&mut s, crate::player::TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
     assert!(s.run_until(1.5, |s| matches!(s.data().air.mode, crate::player::air::AirMode::Fall { steer_to: Some(_) })), "no tail: {:?}", s.data().air.mode);
@@ -7257,7 +7257,7 @@ fn m5_a_standing_impulsion_starts_at_its_end() {
     use crate::player::ground::{Event45, ImpulsionJump};
     use crate::player::jump_blend::IMPULSION_JUMP;
     use crate::player::targets::JumpTarget;
-    let target = JumpTarget { position: Vec3::new(0.0, 0.0, -3.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
+    let target = JumpTarget { no_owner: false, position: Vec3::new(0.0, 0.0, -3.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
     let mut g = HumanGroundData::default();
     assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None, true), Event45::Impulsion);
     let os = g.oneshot.expect("the impulsion");
@@ -7357,11 +7357,10 @@ fn m5_a_jog_let_go_on_the_beam_entry_stops_with_the_jog_stop() {
     assert!(s.run_until(1.0, |s| s.data().narrow.action.is_some_and(|a| BEAM_JOG_STOP.contains(&a.id))), "no jog stop: {:?}", s.data().narrow.state);
 }
 
-/// M5 F13: in the climb wait both hands' LimbIK records are released (LimbIK 0xE55CB0; live `m5b_d2_courtyard` 005):
-/// the wait's hands are the animation's; the moves still take the holds. Fenced by `CLIMB_WAIT_RELEASES_HANDS` (off: the
-/// wait keeps the hand holds).
+/// RE/20 #77 (live M5 pass 3, `m5c_77_wait` 001–002): the game IK-holds both hands on their holds in the climb wait
+/// (LimbIK 0xE55CB0, weight 1); the second pass's "released" reading was the wrong record fields (F13 removed).
 #[test]
-fn m5_the_climb_wait_holds_no_hand_ik() {
+fn m5_the_climb_wait_holds_both_hands_on_their_holds() {
     // the climb tower (x -23..-17, z 27..33): its -Z face's hold bands
     let mut s = Sim::new(Vec3::new(-20.0, 0.0, 26.0), FACE_PZ);
     s.pad(Vec3::Z, 1.0, true, true);
@@ -7370,6 +7369,24 @@ fn m5_the_climb_wait_holds_no_hand_ik() {
     assert!(s.run_until(3.0, |s| s.data().climb.moving.is_none()), "never waited");
     s.run(0.1);
     let limbs = *s.app.world().get::<crate::player::LimbTargets>(s.player).unwrap();
-    assert_eq!(limbs.hands.is_none(), crate::player::climb::CLIMB_WAIT_RELEASES_HANDS, "the climb wait's hand IK against the switch");
+    assert!(limbs.hands.is_some(), "the climb wait holds the hands");
     assert!(limbs.feet.is_some(), "the feet keep their holds");
+}
+
+/// M5 F8 (live pass 3, RE/37 §13 `m5c_f8_swing` 010–011): a far-edge target (type 2, sub-type 1, 0x10000) lies on no
+/// entity, so `HumanInAir__CheckJumpTargetArrival` 0xE07D91 returns at once: the flight ends with no reception and the
+/// landing takes it (the game lands into the Ground); a target on an entity takes the free-step stay.
+#[test]
+fn m5_a_jump_at_a_target_on_no_entity_lands_instead_of_the_stay() {
+    use crate::player::targets::JumpTarget;
+    for no_owner in [true, false] {
+        let from = Vec3::new(-30.0, 0.0, -30.0);
+        let mut s = Sim::new(from, 0.0);
+        let target = JumpTarget { no_owner, position: Vec3::new(-30.0, 0.0, -33.0), type_flags: 0x10000, hang: None, straight: None, pass: None, ladder: None, support: Some((Vec3::Z, false)) };
+        force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
+        s.pad(Vec3::ZERO, 0.0, false, false);
+        assert!(s.run_until(3.0, |s| s.loco().current != ActorContextId::InAir), "never came down");
+        let want = if no_owner { ActorContextId::Ground } else { ActorContextId::NarrowObject };
+        assert_eq!(s.loco().current, want, "no_owner {no_owner}");
+    }
 }

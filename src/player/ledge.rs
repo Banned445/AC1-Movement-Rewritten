@@ -1428,7 +1428,7 @@ pub fn update_ledge(
             let plain = dive.is_none();
             let entry = match dive {
                 Some(s) => {
-                    let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
+                    let target = super::targets::JumpTarget { no_owner: false, position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
                     InAirEntry::LetGoDive { from: body.feet, target, origin }
                 }
                 None => InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 },

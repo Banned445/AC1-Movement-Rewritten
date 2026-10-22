@@ -2460,7 +2460,7 @@ fn straight_target(feet:Vec3,point:Vec3,n:Vec3,collision:&CollisionWorld,beam:bo
     if std::env::var_os("AC_ANIM_LOG").is_some() {
         info!("straight target: hands {point:.2} n {n:.2} dz {dz:.2} wall {wall} -> out {:.2} down {:.2}", j.out, j.down);
     }
-    Some(JumpTarget { position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None, ladder: None, support: None })
+    Some(JumpTarget { no_owner: false, position: point + n * j.out - Vec3::Y * j.down, type_flags: j.flags, hang: Some((point, n)), straight: Some(j), pass: None, ladder: None, support: None })
 }
 
 /// The standing request's hand targets (`Human__EvaluateStaticHandTargets` 0xE165D0; the box initialised by
@@ -2728,7 +2728,7 @@ mod reanalysis_tests {
     /// jump; FreeRun's impulsion from its start, blended toward the target's side.
     #[test]
     fn event_45_picks_the_impulsion_or_the_run_jump_by_the_playing_item() {
-        let target = JumpTarget { position: Vec3::new(0.0, 0.0, -3.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
+        let target = JumpTarget { no_owner: false, position: Vec3::new(0.0, 0.0, -3.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
         let start = START_MOVE.iter().flatten().copied()
             .filter_map(|id| jump_blend::action_items(id).and_then(|i| i.first().map(|c| ActionBlend::new(id, 0, &vec![1.0 / c.len() as f32; c.len()]))))
             .find(|b| !super::super::anim_gate::locked(b))
@@ -2751,7 +2751,7 @@ mod reanalysis_tests {
         }
         // FreeRun: from the start, the target 45 degrees to the right blends front and right half and half
         let mut g = HumanGroundData::default();
-        let right = JumpTarget { position: Vec3::new(2.0, 0.0, -2.0), ..target };
+        let right = JumpTarget { no_owner: false, position: Vec3::new(2.0, 0.0, -2.0), ..target };
         assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(right), Some(ActionBlend::new(super::super::ground_extras::FREERUN_WAIT[0], 0, &[1.0])), None, false), Event45::Impulsion);
         let os = g.oneshot.unwrap();
         let w = os.blend.weights();

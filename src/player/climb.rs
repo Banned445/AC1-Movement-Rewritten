@@ -75,10 +75,6 @@ pub const FREE_DROP_TO_CLIMB_END: u32 = 0x1EB2_25F1;
 /// ActionTransition's length)**.
 pub const FREE_DROP_TO_CLIMB_END_TIME: f32 = 0.15;
 pub const FREE_DROP_TO_HANG: [u32; 2] = [0x49CE_7E53, 0x49CE_7E54];
-/// The climb wait holds no hand IK (M5 F13): both LimbIK hand records are released there. PORT: off (owner, 2026-10-22):
-/// with it on, the port's wait hands are the animation's and the climb looks wrong in play; the game's wait pose on
-/// the holds is still to be read live (RE/20). Off: the hands keep their holds in the wait, as before M5.
-pub const CLIMB_WAIT_RELEASES_HANDS: bool = false;
 /// The fall started when a hold is lost (`HumanClimb__FillInAirData_LostGrip` 0xDF3300: InAir animation state 33 with
 /// action 287367547, blend 0.2).
 pub const LOST_GRIP: u32 = 0x1120_E17B;
@@ -1373,10 +1369,9 @@ pub fn update_climb(
         body.heading = heading_of(facing);
         body.velocity = Vec3::ZERO;
         body.grounded = false;
-        // in the climb wait both hands' LimbIK records are released (LimbIK 0xE55CB0; live M5 F13, RE/37 §10:
-        // `m5b_d2_courtyard` 005 and round 1 005–008 / 080 read both records free in every wait), so the wait's hands are
-        // the animation's on the root; the holds take the hands only during the moves
-        limbs.hands = (!CLIMB_WAIT_RELEASES_HANDS || d.moving.is_some()).then_some((d.hand_l, d.hand_r));
+        // both hands stay IK-held on their holds in the climb wait, weight 1 (LimbIK records Human+0x530 + 144·limb,
+        // 0xE55CB0: live M5 pass 3, RE/37 §13 `m5c_77_wait` 001–002, the hold in the previous-hold fields +48 / +80)
+        limbs.hands = Some((d.hand_l, d.hand_r));
         limbs.feet = Some((d.foot_l, d.foot_r));
         limbs.normal = n;
         limbs.adjust = crate::ik::ADJUST_SLOPE | crate::ik::ADJUST_HEAD;

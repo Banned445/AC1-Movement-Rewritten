@@ -962,10 +962,9 @@ pub fn update_air(
                 body.velocity = if FLIGHT_MOVE_TO { mv / dt.max(1e-4) } else { path_vel };
                 body.heading = air.jump_heading(t1, t_takeoff, fwd);
                 body.feet = r.position;
-                // the flight's wall test (0xE03140) runs once per air stay (InAir +226 bit 2); a jump at a target is
-                // left alone (hypothesis: the target's owner object, Data+652, refuses it at 0xE034C7; the free
-                // targets have none)
-                let rebound = (AIR_REBOUND_ON && !air.rebound_done && air.target.is_none())
+                // the flight's wall test (0xE03140) runs once per air stay (InAir +226 bit 2); a jump at a target with an
+                // owner object (Data+652) is refused at 0xE034C7; the free and far-edge targets have none
+                let rebound = (AIR_REBOUND_ON && !air.rebound_done && air.target.is_none_or(|t| t.no_owner))
                     .then(|| air_rebound_normal(&body.proxy.manifold, body.velocity, body.forward()))
                     .flatten();
                 if let Some(n) = rebound {
@@ -977,7 +976,7 @@ pub fn update_air(
                     let playing = if t1 < t_takeoff { air.takeoff } else { air.flight };
                     rebound_pending = Some((n, playing.and_then(|b| super::anim_gate::word(&b))));
                     air.mode = AirMode::Jump { from, clip_end, aim, duration, t: t1, then_fall_to, t_takeoff, fwd };
-                } else if air.free_target && r.landed && path_vel.y <= 0.0 {
+                } else if (air.free_target || air.target.is_some_and(|t| t.no_owner)) && r.landed && path_vel.y <= 0.0 {
                     // the free jump comes down on the ground before its target (0xE05200, controller contact)
                     landed_at = Some(body.feet.y);
                     // A36: `CheckAirCatch` runs during the jump too, and its edge landing (LABEL_140, 0xE0D684) goes
@@ -994,7 +993,8 @@ pub fn update_air(
                     // offset, so it ends on the aim and the test passes at the flight's end
                     debug_assert!((path(t1) - aim).length() < ARRIVAL_TOLERANCE, "{} {}", path(t1), aim);
                     // hand-off by target type (ledge targets → Ledge context)
-                    let mut no_arrival = false;
+                    // a target on no entity: the arrival returns at once (0xE07D91) and the fall takes over (M5 F8)
+                    let mut no_arrival = air.target.is_some_and(|t| t.no_owner);
                     if let Some((mid, normal)) = air.target.and_then(|t| t.hang) {
                         // the reception by the flight that arrived (CheckJumpTargetArrival 0xE07D00)
                         let t = air.target.unwrap();
@@ -1737,7 +1737,7 @@ mod fall_tests {
     /// own item before the dive are not.
     #[test]
     fn the_faith_dive_is_the_faith_actions() {
-        let target = JumpTarget { position: Vec3::new(0.0, -10.0, -4.0), type_flags: jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
+        let target = JumpTarget { no_owner: false, position: Vec3::new(0.0, -10.0, -4.0), type_flags: jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
         let mut air = HumanInAirData::default();
         air.enter(InAirEntry::JumpToTarget { from: Vec3::ZERO, target, speed_param: 0.5, foot_left: true });
         assert!(air.faith_dive());
@@ -1756,7 +1756,7 @@ mod fall_tests {
         let edge = Vec3::new(0.0, 1.664, -4.933);
         let n = Vec3::Z;
         let root = edge + n * 0.5 - Vec3::Y * 0.5;
-        let target = JumpTarget { position: root, type_flags: super::super::targets::TARGET_LEDGE_FREE, hang: Some((edge, n)), straight: None, pass: None, ladder: None, support: None };
+        let target = JumpTarget { no_owner: false, position: root, type_flags: super::super::targets::TARGET_LEDGE_FREE, hang: Some((edge, n)), straight: None, pass: None, ladder: None, support: None };
         let mut air = HumanInAirData::default();
         air.enter(InAirEntry::JumpToTarget { from: Vec3::ZERO, target, speed_param: 1.0, foot_left: false });
         let AirMode::Jump { t_takeoff, duration, aim, .. } = air.mode else { panic!("not a jump: {:?}", air.mode) };
