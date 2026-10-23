@@ -7373,9 +7373,9 @@ fn m5_the_climb_wait_holds_both_hands_on_their_holds() {
     assert!(limbs.feet.is_some(), "the feet keep their holds");
 }
 
-/// M5 part 4 (live pass 4, RE/37 §16, RE/20 #80): the arrival runs only with the flight item at its end (0xE0F1C7); after
-/// the swing release's take-off (0x0292655B) the flight comes through a cross-fade and the gate is never met, so the
-/// flight lands into the Ground. The same target from a plain jump arrives (the free-step stay).
+/// M5 part 4 (live pass 4, RE/37 §16–§17, RE/20 #80): the swing release's flight at a far edge (0x10000) lands into the
+/// Ground before its item ends (the arrival needs the item at its end, 0xE0F1C7); the same target from a plain jump
+/// arrives (the free-step stay).
 #[test]
 fn m5_the_swing_release_flight_lands_instead_of_arriving() {
     use crate::player::targets::JumpTarget;

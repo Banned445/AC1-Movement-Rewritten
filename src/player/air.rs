@@ -730,12 +730,15 @@ impl HumanInAirData {
 pub const CARRY_MIN_DT: f32 = 0.010;
 /// M5 F4: the flight's root is the path's point requested from the controller (off: the old lag recovery at 6/s).
 pub const FLIGHT_MOVE_TO: bool = true;
-/// M5 part 4 (RE/20 #80): the swing release's flight never arrives. `UpdateJumpMotion` runs `CheckJumpTargetArrival`
-/// with "the jump item at its end" (the playing item is the flight, Data+0x1A8, at phase 1; 0xE0F1C7–0xE0F1E7). After the
-/// release's take-off (0x0292655B, 0xE0F29F) the flight is played through a cross-fade of 0.8 × its duration (Data+0x1E8
-/// × 0.8, 0xE0F2D3–0xE0F311) instead of the plain switch (0xE0F342), and live (pass 4, RE/37 §16) that flag is 0 in all
-/// 112 / 109 calls of the release's flight, which lands into the Ground. Replaces part 2's ownerless far edge (the far
-/// edges have owners). **Hypothesis:** that the cross-fade is what keeps the flag 0 (the flag was read, not its cause).
+/// M5 part 4 (RE/20 #80): the swing release's flight at the far roof edge lands instead of arriving. `UpdateJumpMotion`
+/// runs `CheckJumpTargetArrival` only with "the jump item at its end" (the playing item is the flight, Data+0x1A8, at
+/// phase 1; 0xE0F1C7–0xE0F1E7) and `CheckGroundLanding` (0xE0F252) after it every frame. Live (pass 4, RE/37 §16) that
+/// flag is 0 in all 112 / 109 calls of the release's flight, which lands into the Ground at 1.66 s, about one frame
+/// before its 0.58 s item would end: the landing wins a frame race the port's path cannot reproduce (its contact comes
+/// at the flight's end). After the same take-off (0x0292655B; its flight comes through a 0.8 × duration cross-fade,
+/// 0xE0F29F–0xE0F311) a flight at a beam target arrives (`swing_chain_souk` 10-16: `…_to_freestep_tr_freestep_entry`).
+/// PORT: no arrival for the release take-off's far-edge targets (0x10000), the one case read live. Replaces part 2's
+/// ownerless far edge (the far edges have owners).
 pub const RELEASE_FLIGHT_NO_ARRIVAL: bool = true;
 /// M5 F10: the flight's wall rebound (`HumanInAir__CheckAirCollisionRebound` 0xE03140).
 pub const AIR_REBOUND_ON: bool = true;
@@ -1000,8 +1003,11 @@ pub fn update_air(
                     // offset, so it ends on the aim and the test passes at the flight's end
                     debug_assert!((path(t1) - aim).length() < ARRIVAL_TOLERANCE, "{} {}", path(t1), aim);
                     // hand-off by target type (ledge targets → Ledge context)
-                    // the release's flight: the item-at-end gate is never met (0xE0F1C7), the fall's landing takes it
-                    let mut no_arrival = RELEASE_FLIGHT_NO_ARRIVAL && air.takeoff.is_some_and(|b| b.id == super::swing::TAKEOFF_SWING);
+                    // the release's flight at a far edge lands before its item ends (0xE0F1C7 / 0xE0F252), the fall's
+                    // landing takes it
+                    let mut no_arrival = RELEASE_FLIGHT_NO_ARRIVAL
+                        && air.takeoff.is_some_and(|b| b.id == super::swing::TAKEOFF_SWING)
+                        && air.target.is_some_and(|t| t.type_flags & 0x10000 != 0);
                     if let Some((mid, normal)) = air.target.and_then(|t| t.hang) {
                         // the reception by the flight that arrived (CheckJumpTargetArrival 0xE07D00)
                         let t = air.target.unwrap();
