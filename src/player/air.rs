@@ -730,6 +730,13 @@ impl HumanInAirData {
 pub const CARRY_MIN_DT: f32 = 0.010;
 /// M5 F4: the flight's root is the path's point requested from the controller (off: the old lag recovery at 6/s).
 pub const FLIGHT_MOVE_TO: bool = true;
+/// M5 part 4 (RE/20 #80): the swing release's flight never arrives. `UpdateJumpMotion` runs `CheckJumpTargetArrival`
+/// with "the jump item at its end" (the playing item is the flight, Data+0x1A8, at phase 1; 0xE0F1C7–0xE0F1E7). After the
+/// release's take-off (0x0292655B, 0xE0F29F) the flight is played through a cross-fade of 0.8 × its duration (Data+0x1E8
+/// × 0.8, 0xE0F2D3–0xE0F311) instead of the plain switch (0xE0F342), and live (pass 4, RE/37 §16) that flag is 0 in all
+/// 112 / 109 calls of the release's flight, which lands into the Ground. Replaces part 2's ownerless far edge (the far
+/// edges have owners). **Hypothesis:** that the cross-fade is what keeps the flag 0 (the flag was read, not its cause).
+pub const RELEASE_FLIGHT_NO_ARRIVAL: bool = true;
 /// M5 F10: the flight's wall rebound (`HumanInAir__CheckAirCollisionRebound` 0xE03140).
 pub const AIR_REBOUND_ON: bool = true;
 
@@ -963,8 +970,8 @@ pub fn update_air(
                 body.heading = air.jump_heading(t1, t_takeoff, fwd);
                 body.feet = r.position;
                 // the flight's wall test (0xE03140) runs once per air stay (InAir +226 bit 2); a jump at a target with an
-                // owner object (Data+652) is refused at 0xE034C7; the free and far-edge targets have none
-                let rebound = (AIR_REBOUND_ON && !air.rebound_done && air.target.is_none_or(|t| t.no_owner))
+                // owner object (Data+652) is refused at 0xE034C7 (every target's, the far edges' too: live pass 4, RE/37 §16)
+                let rebound = (AIR_REBOUND_ON && !air.rebound_done && air.target.is_none())
                     .then(|| air_rebound_normal(&body.proxy.manifold, body.velocity, body.forward()))
                     .flatten();
                 if let Some(n) = rebound {
@@ -993,8 +1000,8 @@ pub fn update_air(
                     // offset, so it ends on the aim and the test passes at the flight's end
                     debug_assert!((path(t1) - aim).length() < ARRIVAL_TOLERANCE, "{} {}", path(t1), aim);
                     // hand-off by target type (ledge targets → Ledge context)
-                    // a target on no entity: the arrival returns at once (0xE07D91) and the fall takes over (M5 F8)
-                    let mut no_arrival = air.target.is_some_and(|t| t.no_owner);
+                    // the release's flight: the item-at-end gate is never met (0xE0F1C7), the fall's landing takes it
+                    let mut no_arrival = RELEASE_FLIGHT_NO_ARRIVAL && air.takeoff.is_some_and(|b| b.id == super::swing::TAKEOFF_SWING);
                     if let Some((mid, normal)) = air.target.and_then(|t| t.hang) {
                         // the reception by the flight that arrived (CheckJumpTargetArrival 0xE07D00)
                         let t = air.target.unwrap();
@@ -1737,7 +1744,7 @@ mod fall_tests {
     /// own item before the dive are not.
     #[test]
     fn the_faith_dive_is_the_faith_actions() {
-        let target = JumpTarget { no_owner: false, position: Vec3::new(0.0, -10.0, -4.0), type_flags: jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
+        let target = JumpTarget { position: Vec3::new(0.0, -10.0, -4.0), type_flags: jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
         let mut air = HumanInAirData::default();
         air.enter(InAirEntry::JumpToTarget { from: Vec3::ZERO, target, speed_param: 0.5, foot_left: true });
         assert!(air.faith_dive());
@@ -1756,7 +1763,7 @@ mod fall_tests {
         let edge = Vec3::new(0.0, 1.664, -4.933);
         let n = Vec3::Z;
         let root = edge + n * 0.5 - Vec3::Y * 0.5;
-        let target = JumpTarget { no_owner: false, position: root, type_flags: super::super::targets::TARGET_LEDGE_FREE, hang: Some((edge, n)), straight: None, pass: None, ladder: None, support: None };
+        let target = JumpTarget { position: root, type_flags: super::super::targets::TARGET_LEDGE_FREE, hang: Some((edge, n)), straight: None, pass: None, ladder: None, support: None };
         let mut air = HumanInAirData::default();
         air.enter(InAirEntry::JumpToTarget { from: Vec3::ZERO, target, speed_param: 1.0, foot_left: false });
         let AirMode::Jump { t_takeoff, duration, aim, .. } = air.mode else { panic!("not a jump: {:?}", air.mode) };

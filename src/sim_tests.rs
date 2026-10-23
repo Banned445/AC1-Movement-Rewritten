@@ -2175,7 +2175,7 @@ fn the_over_drop_tail_steers_onto_the_true_target() {
     use crate::player::targets::JumpTarget;
     let mut s = Sim::new(Vec3::new(30.0, 9.5, 23.5), 0.0);
     s.run(0.2);
-    let target = JumpTarget { no_owner: false, position: Vec3::new(30.0, 0.0, 17.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
+    let target = JumpTarget { position: Vec3::new(30.0, 0.0, 17.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
     let from = s.body().feet;
     force(&mut s, crate::player::TransitionSetup::ToInAir(InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
     assert!(s.run_until(1.5, |s| matches!(s.data().air.mode, crate::player::air::AirMode::Fall { steer_to: Some(_) })), "no tail: {:?}", s.data().air.mode);
@@ -7257,7 +7257,7 @@ fn m5_a_standing_impulsion_starts_at_its_end() {
     use crate::player::ground::{Event45, ImpulsionJump};
     use crate::player::jump_blend::IMPULSION_JUMP;
     use crate::player::targets::JumpTarget;
-    let target = JumpTarget { no_owner: false, position: Vec3::new(0.0, 0.0, -3.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
+    let target = JumpTarget { position: Vec3::new(0.0, 0.0, -3.0), type_flags: 1, hang: None, straight: None, pass: None, ladder: None, support: None };
     let mut g = HumanGroundData::default();
     assert_eq!(g.event45(Vec3::ZERO, Vec3::NEG_Z, ImpulsionJump::Target(target), None, None, true), Event45::Impulsion);
     let os = g.oneshot.expect("the impulsion");
@@ -7373,20 +7373,28 @@ fn m5_the_climb_wait_holds_both_hands_on_their_holds() {
     assert!(limbs.feet.is_some(), "the feet keep their holds");
 }
 
-/// M5 F8 (live pass 3, RE/37 §13 `m5c_f8_swing` 010–011): a far-edge target (type 2, sub-type 1, 0x10000) lies on no
-/// entity, so `HumanInAir__CheckJumpTargetArrival` 0xE07D91 returns at once: the flight ends with no reception and the
-/// landing takes it (the game lands into the Ground); a target on an entity takes the free-step stay.
+/// M5 part 4 (live pass 4, RE/37 §16, RE/20 #80): the arrival runs only with the flight item at its end (0xE0F1C7); after
+/// the swing release's take-off (0x0292655B) the flight comes through a cross-fade and the gate is never met, so the
+/// flight lands into the Ground. The same target from a plain jump arrives (the free-step stay).
 #[test]
-fn m5_a_jump_at_a_target_on_no_entity_lands_instead_of_the_stay() {
+fn m5_the_swing_release_flight_lands_instead_of_arriving() {
     use crate::player::targets::JumpTarget;
-    for no_owner in [true, false] {
+    for swing in [true, false] {
         let from = Vec3::new(-30.0, 0.0, -30.0);
         let mut s = Sim::new(from, 0.0);
-        let target = JumpTarget { no_owner, position: Vec3::new(-30.0, 0.0, -33.0), type_flags: 0x10000, hang: None, straight: None, pass: None, ladder: None, support: Some((Vec3::Z, false)) };
-        force(&mut s, crate::player::TransitionSetup::ToInAir(air::InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }));
+        let target = JumpTarget { position: Vec3::new(-30.0, 0.0, -33.0), type_flags: 0x10000, hang: None, straight: None, pass: None, ladder: None, support: Some((Vec3::Z, false)) };
+        let entry = if swing {
+            air::InAirEntry::SwingJump { from, target: Some(target), dir: Vec3::NEG_Z }
+        } else {
+            air::InAirEntry::JumpToTarget { from, target, speed_param: 0.5, foot_left: true }
+        };
+        force(&mut s, crate::player::TransitionSetup::ToInAir(entry));
         s.pad(Vec3::ZERO, 0.0, false, false);
+        if swing {
+            assert_eq!(s.data().air.takeoff.map(|b| b.id), Some(crate::player::swing::TAKEOFF_SWING));
+        }
         assert!(s.run_until(3.0, |s| s.loco().current != ActorContextId::InAir), "never came down");
-        let want = if no_owner { ActorContextId::Ground } else { ActorContextId::NarrowObject };
-        assert_eq!(s.loco().current, want, "no_owner {no_owner}");
+        let want = if swing { ActorContextId::Ground } else { ActorContextId::NarrowObject };
+        assert_eq!(s.loco().current, want, "swing release {swing}");
     }
 }

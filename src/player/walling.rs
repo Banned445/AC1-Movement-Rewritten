@@ -730,6 +730,7 @@ pub fn update_walling(
                     body.tilt = Quat::IDENTITY;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                     data.ledge.repose_at_entry_end = hang;
+                    data.ledge.from_wall_run = hang;
                     // the exit's action starts with the time past the walling item's end (the Ledge, earlier in the
                     // chain, advances it from the next frame on)
                     if let Some(m) = data.ledge.mv.as_mut() {
@@ -749,6 +750,7 @@ pub fn update_walling(
                     body.tilt = Quat::IDENTITY;
                     switch_context(&mut loco, &mut data, TransitionSetup::ToLedge(e));
                     data.ledge.repose_at_entry_end = hang;
+                    data.ledge.from_wall_run = hang;
                     // the exit's action starts with the time past the walling item's end (the Ledge, earlier in the
                     // chain, advances it from the next frame on)
                     if let Some(m) = data.ledge.mv.as_mut() {

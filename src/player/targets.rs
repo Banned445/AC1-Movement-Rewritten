@@ -26,17 +26,7 @@ pub struct JumpTarget {
     /// The candidate's normal (pointing back at the jumper) and whether its hit type is 4 (a beam): what the free-step
     /// arrival writes to NarrowObjectData +0x100 / +0x140 (0xE09A13–0xE09A94, RE/05 §2.15).
     pub support: Option<(Vec3, bool)>,
-    /// The candidate lies on no entity (Data+652 empty): `HumanInAir__CheckJumpTargetArrival` 0xE07D91 returns at once,
-    /// so the flight ends with no reception and the fall's landing takes it. The far-edge landings (type 2, sub-type 1,
-    /// 0x10000) are such targets (live M5 pass 3, RE/37 §13: the swing bar's release at the far roof edge lands into the
-    /// Ground, `m5c_f8_swing` 010–011).
-    pub no_owner: bool,
 }
-
-/// M5 F8: the swing release's far-edge target has no owner object, so its flight ends with no arrival (0xE07D91).
-/// **Hypothesis** for which far edges lack one: only the swing release's is read live; on the other jumps' far edges
-/// the port keeps the arrival (the rule on all of them made three recordings worse).
-pub const FAR_EDGE_NO_OWNER: bool = true;
 
 /// Roof-edge landing spot: the game's free-step target type 1 (narrow object / edge; its flight is
 /// `xx_h_air_*_to_freestep` and arrival plays the free-step reception, 0xB1EC40 / 0xE07D00). 0x8000 is the
@@ -78,11 +68,7 @@ pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collis
         return haystack_target(feet, fwd, fwd, guidance, collision);
     }
     let sel = jump_candidates::select(&cands, feet, fwd, fwd, 1, false);
-    // the swing release at a far edge has no owner object (live M5 pass 3); the port keeps the arrival for the far edges
-    // of the other jumps (with the rule on every far edge, `climb_16` 10-12, `sol31_lookdown` 10-17 and `m5_cc_c_315` got
-    // worse: their game targets arrive)
-    let far = |c: &Candidate| FAR_EDGE_NO_OWNER && c.ty == 2 && c.sub == 1 && c.flags & 0x10000 != 0;
-    let t = sel.and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision).map(|t| JumpTarget { no_owner: far(&cands[i]), ..t }));
+    let t = sel.and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));
     if std::env::var_os("AC_JUMP_LOG").is_some() {
         let g = |v: Vec3| format!("({:.3} {:.3} {:.3})", v.x, -v.z, v.y);
         eprintln!("swing jump query pos={} dir={} -> {:?} target {:?}", g(feet), g(fwd), sel, t.map(|t| (g(t.position), t.type_flags)));
@@ -118,7 +104,7 @@ pub const FLAT_HANG_TARGET_NORMAL: bool = true;
 
 /// The port's jump target for a candidate and the scorer's jump type.
 pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, _collision: &CollisionWorld) -> Option<JumpTarget> {
-    let base = JumpTarget { no_owner: false, position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None, support: Some((c.wall, c.ty == 4)) };
+    let base = JumpTarget { position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None, support: Some((c.wall, c.ty == 4)) };
     match ty {
         1 | 0x10000 => {
             // beams and far-edge landings already lie on the surface
@@ -135,7 +121,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, _
             // only (`Human__SelectJumpCandidate` 0xE96BF0 at 0xE97584), which no ground jump asks for (RE/18 §1.8)
             Some(base)
         }
-        2 => Some(JumpTarget { no_owner: false, position: c.pos, pass: Some((c.pos, c.wall)), ..base }),
+        2 => Some(JumpTarget { position: c.pos, pass: Some((c.pos, c.wall)), ..base }),
         TARGET_LEDGE | TARGET_LEDGE_FREE => {
             // a Pole edge (type 32: the horizontal swing bars, subtype 4) is a free-hang target (the scorer's pole case
             // 0xE96BF0 → 0x80, the swing flight); the cut content of RE/05 §3.5 is the vertical pole climb, not the bars
@@ -166,7 +152,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, _
             let h = super::ladder::catch_height(c.pos.y - bottom.y + 0.0005, top.y - bottom.y)?;
             let pos = bottom + n * super::ladder::ATTACH_OUT + Vec3::Y * h;
             let entry = super::ladder::LadderEntry { base: bottom, top, n, from: pos, facing: -n, from_ledge: true, height: Some(h), action: Some(super::ladder::ARRIVE_TARGET), chain: true, ..Default::default() };
-            Some(JumpTarget { no_owner: false, position: pos, ladder: Some(entry), ..base })
+            Some(JumpTarget { position: pos, ladder: Some(entry), ..base })
         }
         // a kiosk's piece (0x400): its middle (0xE18970), handed to the Kiosk context on arrival (0xE07D00)
         0x400 => Some(base),
@@ -180,7 +166,7 @@ pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, _
 /// 0x800. A Leap of Faith when it lies 3 m or more below (bands −30 m / 7.5 m), else the haystack bands (0xB1EC40).
 pub fn haystack_target(feet: Vec3, want_dir: Vec3, facing: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
     let s = super::hay::search(feet, want_dir, facing, &super::hay::LEAP_OF_FAITH, &guidance.haystacks, collision)?;
-    let t = JumpTarget { no_owner: false, position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
+    let t = JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
     super::target_debug::record(|| "leap of faith".into(), feet, want_dir, &[], Some(&t));
     Some(t)
 }

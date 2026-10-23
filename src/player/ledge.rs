@@ -305,6 +305,12 @@ pub struct HumanLedgeData {
     /// hands from the hand bones (`HumanLedge__EntryEnd_PlayIdle` 0xDE1FE0; RE/24 LEDGE-22). Set by the caller after the
     /// switch; `enter` clears it.
     pub repose_at_entry_end: bool,
+    /// LedgeData +1856 = 2: a hang entered from the wall run (live M5 pass 4, RE/37 §16: 1 on the hang's first frame, 2
+    /// from the next; 0 after a hang-type switch and when the hang leaves). With it `Movement_ChooseAction` 0xDE29E0 tries
+    /// the climb holds 16 / 8 / 4 before `StartHandStep` (0xDE2B87–0xDE2BE5). Its writer is indirect (only the ctor's 0 at
+    /// 0xDE0429 and a `movaps` in `PullupSwitchFreeToWall` 0xDD43E0 store there); the first frame's 1 is not kept. Set by
+    /// the walling's exits after the switch; `enter` clears it.
+    pub from_wall_run: bool,
     /// +1844: the hand the last step moved (0 left, 1 right; `StartHandStep` 0xDDE0C0). `EnterCommon` 0xDE26D0 sets 0, so
     /// the first vertical step after an entry moves the right hand (`PickVerticalHandAndAnim` 0xDCB3E0, RE/24 LEDGE-5).
     pub last_hand: usize,
@@ -385,6 +391,7 @@ impl HumanLedgeData {
         // (`HumanLedge__SetAlternationFromHandSpacing` 0xDCBCD0: 0.3 m or more apart → the trailing hand closes first)
         self.alt_flag = alternation_from_spacing(e.hand_l, e.hand_r);
         self.repose_at_entry_end = false;
+        self.from_wall_run = false;
         self.last_hand = 0; // and +1844
         self.blocked_up = false;
         self.pending_vstep = None;
@@ -925,12 +932,25 @@ pub fn quantize(stick: Vec3, facing: Vec3) -> LedgeDir {
     }
 }
 
+/// M5 part 4 (RE/20 #78): LedgeData +1856 = 2 after a hang entered from the wall run puts the climb holds 16 / 8 / 4
+/// ahead of the hand step (`from_wall_run`; 0xDE2B87–0xDE2BE5, and none after it, 0xDE2C3F–0xDE2C84). **Off (fenced):**
+/// the order is the game's, but the side move's acceptance (`side_move_to_climb_holds`: `lateral_path_free`) differs
+/// from the game's at A07's wall both ways: on `m5c_f12_climb11` 013 the path's first leg (hang root → corner) is
+/// blocked where the game climbs on mask 4, and in the free hang entered from the wall run (`m5d_a07_climb11` 006,
+/// `m5_a07_climb11` 079, 2.35 s) mask 4 passes where the game switches to the wall hang instead. With it on, 013 is
+/// unchanged and 006 / 079 get worse (RE/37 §17).
+pub const HANG_PREF_FROM_WALL_RUN: bool = false;
+
 fn start_move(d: &mut HumanLedgeData, mv: LedgeMove, what: &'static str) {
     d.mv = Some(mv);
     d.step_seq += 1;
     d.sub_state = LedgeSubState::HandPlacement;
     d.blocked_up = false;
     d.last_action = what;
+    // a hang-type switch clears +1856 (live pass 4, 006: `hangfree_tr_hangwall_right`)
+    if what.starts_with("switch to") {
+        d.from_wall_run = false;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1428,7 +1448,7 @@ pub fn update_ledge(
             let plain = dive.is_none();
             let entry = match dive {
                 Some(s) => {
-                    let target = super::targets::JumpTarget { no_owner: false, position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
+                    let target = super::targets::JumpTarget { position: super::hay::top_of(&s), type_flags: super::jump_blend::TARGET_HAYSTACK, hang: None, straight: None, pass: None, ladder: None, support: None };
                     InAirEntry::LetGoDive { from: body.feet, target, origin }
                 }
                 None => InAirEntry::Fall { from: body.feet, velocity: Vec3::ZERO, origin, speed_param: 0.0 },
@@ -1692,8 +1712,8 @@ pub fn update_ledge(
                 // lead hand = hand on the move side; roles swap when the alternation flag is set
                 let move_right_hand = right_dir != d.alt_flag;
                 let (mover, other) = if move_right_hand { (d.hand_r, d.hand_l) } else { (d.hand_l, d.hand_r) };
-                // Movement_ChooseAction 0xDE29E0, left / right, with the preference +1856 = 0 (the ctor's value; nothing
-                // else sets it): ProbeLateral 0xDD9640 first (the rows and the shimmy target)
+                // Movement_ChooseAction 0xDE29E0, left / right: ProbeLateral 0xDD9640 first (the rows and the shimmy
+                // target); +1856 (`from_wall_run`) picks where the climb holds go
                 let (rows, target) = ledge_moves::probe_lateral(mover, other, n, dv, d.alt_flag, d.hang_type, &report, &collision);
                 // TrySideMoveToLadder 0xDD4CD0 (`sub_DD4CD0(dir, 8, 0)`): a ladder at the side, skipped during a closing
                 // step (+133 set, RE/03 §7.6e; live RE/25: the shimmy closes the trailing hand before the ladder move)
@@ -1713,8 +1733,10 @@ pub fn update_ledge(
                 let climb_holds = |rows: &ledge_moves::EdgeRows, bands: &[usize], source: usize| {
                     if alt { None } else { bands.iter().find_map(|&b| ledge_moves::side_move_to_climb_holds(rows, b, right_dir, hang_type, feet, facing, source, &collision)) }
                 };
-                // climb holds down, then level (16 / 8 on ProbeLateral's rows)
-                if let Some(e) = climb_holds(&rows, &[2, 1], 0) {
+                // climb holds down, then level (16 / 8 on ProbeLateral's rows); with +1856 = 2 up (4) too, all before
+                // the hand step (0xDE2B87–0xDE2BE5, live pass 4: `m5d_a07_climb11` 005 climbs on mask 4 at 1.899 s)
+                let pre_step: &[usize] = if HANG_PREF_FROM_WALL_RUN && d.from_wall_run { &[2, 1, 0] } else { &[2, 1] };
+                if let Some(e) = climb_holds(&rows, pre_step, 0) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
@@ -1772,7 +1794,7 @@ pub fn update_ledge(
                     continue;
                 }
                 // climb holds up (4)
-                if let Some(e) = climb_holds(&rows, &[0], 0) {
+                if let Some(e) = climb_holds(&rows, &[0], 0).filter(|_| pre_step.len() == 2) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
                 }
