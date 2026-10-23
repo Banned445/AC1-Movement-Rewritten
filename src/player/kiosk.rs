@@ -65,11 +65,30 @@ pub struct KioskEntry {
     pub axis: Vec3,
     /// The jump's direction.
     pub dir: Vec3,
+    /// What the side test dots with the axis in place of `dir`: −(the target piece's normal, flattened)
+    /// (`KIOSK_SIDE_FROM_NORMAL`; None: the jump's direction).
+    pub side_dir: Option<Vec3>,
+    /// The reception's entry foot is the right one (`entry_footr`, after a left-foot flight): the entry type 1.
+    pub entry_foot_right: bool,
     /// The player's facing at the arrival (the entity's forward row, `sub_4C2F90`).
     pub facing: Vec3,
     /// The free-step reception the arrival played (0xE084CA), held by the wait state.
     pub reception: Option<ActionBlend>,
 }
+
+/// Kiosk parity (2026-10-23): the side test's second operand is not the jump's direction but −(Data+608 flattened),
+/// the target hit's normal (GuidanceHit +48, 0xE0868D). Lab: in all five stall / `climb_17` runs the game lands on the
+/// front piece the port targets and enters from the side; −n against the stall's axis gives 0.992 / −0.986 (lateral),
+/// the jump direction 0.970 / −0.974 (front). Read as a world vector: in its owner's local frame the stall's front
+/// piece would give 0.106 (front).
+pub const KIOSK_SIDE_FROM_NORMAL: bool = true;
+/// Kiosk parity: the lateral entry's clip follows the entry type (`HumanKioskData::table_slot`).
+pub const KIOSK_LATERAL_BY_ENTRY_TYPE: bool = true;
+/// Kiosk parity: the Kiosk context faces −(the target piece's normal).
+pub const KIOSK_HEADING_FROM_NORMAL: bool = true;
+/// Kiosk parity: the lateral free step's root does not go through the controller; it passes the stall and stops on the
+/// ground under it (PORT: the game's Kiosk layer 27 meets the static world, and the stall's body is not hit).
+pub const KIOSK_LATERAL_NO_COLLIDE: bool = true;
 
 /// The entry side (0xE08672): `d` = axis·dir (the kiosk entity's forward row against the jump direction);
 /// d > cos 10° → LateralLeft, d < −cos 10° → LateralRight; otherwise axis·facing (the player's forward row) < 0 →
@@ -115,6 +134,8 @@ pub fn kiosk_axis(p: Vec3, guidance: &GuidanceWorld) -> Option<Vec3> {
 #[derive(Debug, Default)]
 pub struct HumanKioskData {
     pub side: KioskSide,
+    /// The entry type (+0xE4) as the clips read it: 1 after the reception's right-foot entry (`entry_footr`).
+    pub entry_type: usize,
     /// The wait state (+104) before the entry: the arrival's reception plays.
     pub waiting: bool,
     /// 0 entry, 1 monkey bar.
@@ -137,15 +158,26 @@ fn action(id: u32) -> Option<ActionBlend> {
 }
 
 impl HumanKioskData {
+    /// The action table's slot (`HumanKiosk__InitActionTable` 0xE3DAE0, index 2·side + entry type): the front sides share
+    /// one clip for both types; both lateral sides hold `side_freestep_footl` for type 0 and `_footr` for type 1, so the
+    /// lateral clip follows the entry type, not the side (Kiosk parity, lab `b1_stall_*` 10-18: 035 / 037 `footl`,
+    /// 036 / 038 `footr` after receptions `entry_footl` / `entry_footr`, the same stall and side).
+    fn table_slot(&self) -> usize {
+        if self.side.lateral() && KIOSK_LATERAL_BY_ENTRY_TYPE { 2 + self.entry_type } else { self.side as usize }
+    }
+
     pub fn enter(&mut self, e: KioskEntry) {
         self.seq = self.seq.wrapping_add(1);
-        self.side = entry_side(e.axis, e.dir, e.facing);
+        self.side = entry_side(e.axis, e.side_dir.unwrap_or(e.dir), e.facing);
+        self.entry_type = e.entry_foot_right as usize;
         self.stage = 0;
         self.axis = e.axis;
         self.dir = Vec3::new(e.dir.x, 0.0, e.dir.z).normalize_or(Vec3::NEG_Z);
-        self.heading = super::heading_of(self.dir);
+        // the Kiosk's facing is −(the target piece's normal) (lab `b1_stall_run` 038: (0.994, −0.106) through the side free
+        // step, the piece's −n, where the jump came in at (0.978, −0.207)); the jump's direction without a normal
+        self.heading = super::heading_of(e.side_dir.filter(|_| KIOSK_HEADING_FROM_NORMAL && e.side_dir.is_some_and(|d| d.length() > 0.5)).unwrap_or(self.dir));
         self.waiting = e.reception.is_some_and(|r| r.duration() > 0.0);
-        self.action = if self.waiting { e.reception } else { action(KIOSK_ACTIONS[0][self.side as usize]) };
+        self.action = if self.waiting { e.reception } else { action(KIOSK_ACTIONS[0][self.table_slot()]) };
         self.t = 0.0;
         self.applied = [0.0; 3];
         self.interp = super::RootInterp::new(e.from, e.target, ARRIVAL_INTERP);
@@ -188,7 +220,7 @@ pub fn update_kiosk(
                 k.waiting = false;
                 k.t = 0.0;
                 k.applied = [0.0; 3];
-                k.action = action(KIOSK_ACTIONS[0][k.side as usize]);
+                k.action = action(KIOSK_ACTIONS[0][k.table_slot()]);
                 k.seq = k.seq.wrapping_add(1);
             }
             continue;
@@ -203,9 +235,15 @@ pub fn update_kiosk(
         // the static world and slides along it. Before, the port set the root straight onto the clip and the front
         // entry's monkey bar carried it through the wall behind a stall
         let want = start + super::right_of(fwd) * disp[0] + fwd * disp[1] + Vec3::Y * disp[2];
-        if k.interp.done() {
+        if k.interp.done() && !(k.side.lateral() && KIOSK_LATERAL_NO_COLLIDE) {
             let moved = { let b = &mut *body; collision.move_capsule(&mut b.proxy, b.feet, want - b.feet, false, dt) };
             body.feet = moved.position;
+        } else if k.interp.done() {
+            // PORT: the lateral free step passes the stall (the game's Kiosk layer 27 meets the static world only; the
+            // stall's own body is not hit: lab `b1_stall_*` 10-18 run 3.5 m along it) and stops on the ground under it
+            let drop = (body.feet.y - want.y).max(0.0) + 0.1;
+            let floor = collision.ground_height(Vec3::new(want.x, body.feet.y + 0.05, want.z), drop + 0.05);
+            body.feet = match floor { Some(h) if want.y < h => Vec3::new(want.x, h, want.z), _ => want };
         } else {
             body.feet = want;
         }
@@ -254,12 +292,12 @@ pub fn update_kiosk(
             k.base = here;
             k.t = 0.0;
             k.applied = [0.0; 3];
-            k.action = action(KIOSK_ACTIONS[1][k.side as usize]);
+            k.action = action(KIOSK_ACTIONS[1][k.table_slot()]);
             k.seq = k.seq.wrapping_add(1);
             continue;
         }
         // the monkey bar ended: InAir with the exit action (0xE3E390 → 0xE3DDB0)
-        let exit = action(KIOSK_ACTIONS[2][k.side as usize]);
+        let exit = action(KIOSK_ACTIONS[2][k.table_slot()]);
         let entry = match exit {
             Some(a) => InAirEntry::OnPlace { from: here, fwd, action: a, fall: None },
             None => InAirEntry::Fall { from: here, velocity: Vec3::ZERO, origin: super::air::FallOrigin::Ground, speed_param: 0.0 },

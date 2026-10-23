@@ -1088,12 +1088,13 @@ pub fn update_air(
                         if let Some(t) = air.target {
                             if let Some(axis) = super::kiosk::kiosk_axis(t.position, &guidance) {
                                 let dir = Vec3::new(t.position.x - air.start.x, 0.0, t.position.z - air.start.z).normalize_or(fwd);
+                                let side_dir = t.support.filter(|_| super::kiosk::KIOSK_SIDE_FROM_NORMAL).map(|(n, _)| -Vec3::new(n.x, 0.0, n.z).normalize_or_zero());
                                 // the arrival weights slot by slot over the reception's clips (its `_fast` half stays 0)
                                 let id = jump_blend::RECEPTION_FREESTEP[(!air.foot_left) as usize];
                                 let mut fw = air.flight.map(|f| f.weights().to_vec()).unwrap_or_else(|| vec![1.0]);
                                 fw.resize(jump_blend::action_items(id).and_then(|i| i.first()).map_or(fw.len(), |c| c.len()), 0.0);
                                 let reception = Some(ActionBlend::new(id, 0, &fw));
-                                kiosk_on = Some(super::kiosk::KioskEntry { from: body.feet, target: t.position, axis, dir, facing: body.forward(), reception });
+                                kiosk_on = Some(super::kiosk::KioskEntry { from: body.feet, target: t.position, axis, dir, side_dir, entry_foot_right: air.foot_left, facing: body.forward(), reception });
                             }
                         }
                     }

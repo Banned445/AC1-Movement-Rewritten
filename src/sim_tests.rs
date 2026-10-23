@@ -6131,7 +6131,7 @@ fn a_kiosk_front_entry_does_not_pass_through_a_wall_behind_it() {
     let mut s = Sim::new(target, -std::f32::consts::FRAC_PI_2);
     s.app.world_mut().resource_mut::<crate::collision::CollisionWorld>().boxes.push(crate::collision::Aabb3 {
         min: Vec3::new(wall_x, 0.0, 20.0), max: Vec3::new(wall_x + 1.0, 6.0, 30.0) });
-    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::Z, dir: Vec3::X, facing: Vec3::X, reception: None }));
+    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::Z, dir: Vec3::X, side_dir: None, entry_foot_right: false, facing: Vec3::X, reception: None }));
     s.run(1.0 / 60.0 + 1e-4);
     assert!(!s.data().kiosk.side.lateral(), "a front side");
     let mut max_x = f32::MIN;
@@ -6152,7 +6152,7 @@ fn a_lateral_kiosk_side_plays_its_entry_then_falls() {
     use crate::player::kiosk::{KioskEntry, KIOSK_ACTIONS};
     let target = Vec3::new(120.0, 3.0, 25.0);
     let mut s = Sim::new(target, -std::f32::consts::FRAC_PI_2);
-    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::X, dir: Vec3::X, facing: Vec3::X, reception: None }));
+    force(&mut s, crate::player::TransitionSetup::ToKiosk(KioskEntry { from: target, target, axis: Vec3::X, dir: Vec3::X, side_dir: None, entry_foot_right: false, facing: Vec3::X, reception: None }));
     s.run(1.0 / 60.0 + 1e-4);
     let side = s.data().kiosk.side;
     assert!(side.lateral(), "{side:?}");
