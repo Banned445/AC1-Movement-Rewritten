@@ -36,6 +36,9 @@ pub const ZONES: [&[[f32; 2]]; 13] = [
 /// Is `p` inside reach zone `slot` of a jumper at `origin` (`sub_1173590`: cylindrical, the point turned onto the
 /// forward plane)? `k` = the character scale (IHuman+2712, live 1.0): vertices from the third on stretch forward by it
 /// (0xD75990).
+/// Kiosk parity: a kiosk candidate sits at the middle of its whole guidance edge, not of the query's clipped part.
+pub const KIOSK_WHOLE_PIECE: bool = true;
+
 pub fn in_zone(slot: usize, origin: Vec3, p: Vec3, k: f32) -> bool {
     let x = Vec2::new(p.x - origin.x, p.z - origin.z).length();
     let y = p.y - origin.y;
@@ -486,7 +489,10 @@ pub fn query(pos: Vec3, dir: Vec3, q: &Query, guidance: &GuidanceWorld, collisio
         let e = &guidance.edges[piece.edge];
         let kind = piece.subtype;
         let w = wall_of(e.n0, e.n1);
-        let g = if kind == GuidanceSubType::Kiosk { (piece.a + piece.b) * 0.5 } else { g };
+        // a kiosk's point is its piece's middle (0xE18970): the whole edge's, not the part the query box kept (Kiosk
+        // parity, lab `b1_stall_*` 10-18: the game's root goes to the front bar's middle, y 10.66 against the clipped
+        // part's 11.26)
+        let g = if kind == GuidanceSubType::Kiosk { if KIOSK_WHOLE_PIECE { (e.p0 + e.p1) * 0.5 } else { (piece.a + piece.b) * 0.5 } } else { g };
         // facing: a piece off the forward line must face the jumper within 45 degrees (0x9765E0, -0.7071)
         let sa = (piece.a - centre).dot(right);
         let sb = (piece.b - centre).dot(right);
