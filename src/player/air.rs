@@ -740,6 +740,8 @@ pub const FLIGHT_MOVE_TO: bool = true;
 /// PORT: no arrival for the release take-off's far-edge targets (0x10000), the one case read live. Replaces part 2's
 /// ownerless far edge (the far edges have owners).
 pub const RELEASE_FLIGHT_NO_ARRIVAL: bool = true;
+/// Beams parity: a jump's flight enters a haystack it touches (`CheckHayStackEntry` 0xE05490 in `UpdateJumpMotion`).
+pub const FLIGHT_HAY_CONTACT: bool = true;
 /// M5 F10: the flight's wall rebound (`HumanInAir__CheckAirCollisionRebound` 0xE03140).
 pub const AIR_REBOUND_ON: bool = true;
 
@@ -972,9 +974,18 @@ pub fn update_air(
                 body.velocity = if FLIGHT_MOVE_TO { mv / dt.max(1e-4) } else { path_vel };
                 body.heading = air.jump_heading(t1, t_takeoff, fwd);
                 body.feet = r.position;
+                // `UpdateJumpMotion` runs `CheckHayStackEntry` (0xE05490, call 0xE0F21F) every frame of the flight too,
+                // after the arrival and the air catch and before the ground landing and the state's rebound: a
+                // controller contact with a haystack enters it (live, Beams parity: `climb_20`'s stay jump into the roof
+                // garden plays `xx_h_air_to_haystack` 0.05 s after the take-off, 2026-10-23_134650 001)
+                if FLIGHT_HAY_CONTACT && GAME_FALLS && !air.faith_dive() && !air.hollywood {
+                    hay_on = super::hay::haystack_contacts(&body.proxy.manifold, &guidance.haystacks, &collision)
+                        .next()
+                        .map(|(stack, n)| super::hay::HayStackEntry { stack, kind: if n.y > 0.9 { super::hay::HayEntry::Top } else { super::hay::HayEntry::SideJump }, from: body.feet, speed: body.velocity.length() });
+                }
                 // the flight's wall test (0xE03140) runs once per air stay (InAir +226 bit 2); a jump at a target with an
                 // owner object (Data+652) is refused at 0xE034C7 (every target's, the far edges' too: live pass 4, RE/37 §16)
-                let rebound = (AIR_REBOUND_ON && !air.rebound_done && air.target.is_none())
+                let rebound = (AIR_REBOUND_ON && !air.rebound_done && air.target.is_none() && hay_on.is_none())
                     .then(|| air_rebound_normal(&body.proxy.manifold, body.velocity, body.forward()))
                     .flatten();
                 if let Some(n) = rebound {
