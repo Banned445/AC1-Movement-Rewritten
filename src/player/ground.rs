@@ -909,7 +909,10 @@ impl HumanGroundData {
             // through the exit's authored transition instead of the start, **hypothesis** that the speed is the same)
             // (the ledge stop's end action hands back to Movement when it ends, `Locomotion_Update` 0xDAF2D0)
             TreeState::Other if self.ledge_stop.is_none_or(|l| l.ending) && self.collide.is_none() && self.look_down.is_none() => {
-                if stick {
+                // the climb's drop enters Idle (mode 1, below): a stick held more than 90° from the facing is Idle's
+                // pivot (`Idle_CanPivot` 0xD84B10, |HG+1532| > π/2 at the item's end), not a walk start
+                let climb_drop_pivot = CLIMB_DROP_IDLE_PIVOT && super::climb::CLIMB_TO_GROUND_B.contains(&ended.id) && turn.abs() > std::f32::consts::FRAC_PI_2;
+                if stick && !climb_drop_pivot {
                     if super::ground_tree::authored_transition(ended.id, ended.item, super::move_blend::ACT_GROUND_LOCOMOTION).is_some() {
                         self.speed_param = self.speed_param.max(if high { 0.5 } else { 0.25 });
                         self.blend.speed_param = self.speed_param;
@@ -1498,6 +1501,10 @@ pub fn update_ground(
             // the player's EntityDescriptorType is Main (entity+168 & 7 == 1): `Pivot_Enter` 0xDA6150 then sets the
             // destination profile HG+1504 to the current one HG+1500, so the player only plays the low → low and
             // high → high turns
+            // from Idle the current profile HG+1500 is the wait's (`wait_high`): the climb's drop sets it high whatever the
+            // stick's profile (mode 1, 0xDE9E59), and Idle's pivot turns in it (lab 10-17 `climb10_lowhold`, M5
+            // `m5_k_courtyard`: `h_wait_hipm_footl_to_h_waitturn_left_090` with the low profile wanted)
+            let prev_high = if CLIMB_DROP_IDLE_PIVOT && g.speed_param <= 0.0 { g.wait_high } else { prev_high };
             let to_high = if GAME_GROUND_TREE { prev_high } else { g.high_profile };
             let foot = pivot_foot(frame_word, g.speed_param, g.wait_foot, g.playing_word(), leading_foot.unwrap_or(g.blend.foot), g.blend.foot);
             // in the blend (vt1196) the second table, both profiles low (0xDA62F7–0xDA630F)
@@ -1538,7 +1545,10 @@ pub fn update_ground(
             // the waits allow standing in both profiles (words 0x0FC5 / 0x0FCA / 0x0FCF); a transition into the wait by
             // its own word
             let gate = g.tr.is_none_or(|t| super::anim_gate::allows_mode_exit(&t.action, false, g.high_profile));
-            if gate && (g.wait_high != g.high_profile || (g.stance_change && g.stance_timer <= 0.0)) {
+            // a pivot due (the stick more than 90° off) goes first: Idle turns in the wait's profile, the stance change
+            // does not run before it (M5 `m5_k_courtyard`: `h_waitturn_left_090` with the low profile wanted)
+            let pivot_due = CLIMB_DROP_IDLE_PIVOT && moving && stick_turn.abs() > std::f32::consts::FRAC_PI_2;
+            if gate && !pivot_due && (g.wait_high != g.high_profile || (g.stance_change && g.stance_timer <= 0.0)) {
                 // leaving the stance-change wait: the wait is played from it, so its authored item transition into the new
                 // profile's wait plays first (`IdleWait_Enter` 0xD94580 → `AnimSlot__SetAction`'s lookup, RE/13 §7.1;
                 // live RE/25 #63: `xx_lh_wait_*_tr_h_wait_*` 0.66 s, `xx_hl_wait_*_tr_l_wait_*` 1.0 s)
@@ -2668,6 +2678,11 @@ pub const PRAY_PIVOT_KEEPS: bool = true;
 /// M5 pass 3 `m5c_f9_crate` 003: `lean_040cm_twohand_to_backleft_walk_tr_l_walk` plays 4.31–4.98 s, its full 0.667 s, at
 /// 2 m/s; the port cut it on its first frame for the walk at 0.4 m/s).
 pub const LEAN_EXIT_TR_PLAYS_OUT: bool = true;
+/// Ground parity (RE/34 A03): the climb's drop to the ground hands Movement entry mode 1 (Idle, high profile, 0xDE9E59),
+/// so a stick held more than 90° from the facing when it ends turns round in place (`h_wait_*_to_h_waitturn_*`, Idle's
+/// pivot 0xD84B10) instead of walking off through the drop's authored transition (lab 10-17 `climb10_lowhold`, M5
+/// `m5_k_courtyard` 005–008: `climb_1m_tr_h_wait_hipm_footl_b`, then `h_waitturn_left_090` at 8.215 s).
+pub const CLIMB_DROP_IDLE_PIVOT: bool = true;
 /// M5 F7: the blend's pivot plays its own table (0x1A2C1E8).
 pub const PRAY_PIVOT_TABLE: bool = true;
 /// M5 F1: event 45 from a standing start (HG+1492 = 0) starts the impulsion at phase 1 (0xD83870).
