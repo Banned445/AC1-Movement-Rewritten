@@ -518,7 +518,7 @@ pub fn side_move_to_climb_holds(rows: &EdgeRows, band: usize, right: bool, hang:
     }
     let (foot, hand) = (rows[fi]?, rows[hi]?);
     let (hn, fnn) = (hand.wall_normal, foot.wall_normal);
-    let pose = super::climb::climb_pose([hand.point, hand.point, foot.point, foot.point], [hn, hn, fnn, fnn], facing);
+    let pose = super::climb::climb_pose([hand.point, hand.point, foot.point, foot.point], [hn, hn, fnn, fnn], Vec3::new(facing.x, 0.0, facing.z).normalize_or(facing));
     if !super::climb::body_boxes_free(collision, &pose, 0, source == 2) {
         if log { eprintln!("  body boxes blocked"); }
         return None;
@@ -2086,6 +2086,9 @@ pub const TO_WALL: [u32; 2] = [0x01C3_2562, 0x01C3_2563];
 pub const TO_FREE: [u32; 4] = [0x01C3_14BD, 0x01C3_14BE, 0x01C3_217A, 0x01C3_217C];
 
 /// Ledge stick direction as the exe numbers it (QuantizeStickDirection 0xDD1920): 0 up, 1 down, 2 left, 3 right.
+/// Ledge / climb parity (#78): the path's bases are `Math__FlatOffsetAlongFrameUp` of the poses' (unflattened) forwards.
+pub const LATERAL_PATH_TILT_BASE: bool = true;
+
 /// `Human__LateralPathFree` 0xB2A410: the hang-type switch's path from the current pose (root `a`, facing `fa`, body
 /// height `ha`: 1.1 wall / 2.4 free, `sub_DCE2F0`) to the new one (`b`, `fb`, `hb`), `s` the move's side (−1 left, +1
 /// right). Each pose's base is its root (`sub_B18140`, upright), pulled 0.25 m back along its facing for a body taller
@@ -2100,11 +2103,19 @@ pub const TO_FREE: [u32; 4] = [0x01C3_14BD, 0x01C3_14BE, 0x01C3_217A, 0x01C3_217
 #[allow(clippy::too_many_arguments)]
 pub fn lateral_path_free(a: Vec3, fa: Vec3, ha: f32, b: Vec3, fb: Vec3, hb: f32, s: f32, collision: &CollisionWorld) -> bool {
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
+    // `Math__FlatOffsetAlongFrameUp` 0xB18140 (0xB2A5C5 / 0xB2A5E0): the forward turned 90° toward up, times the body's
+    // height, horizontal part only; a forward above the horizontal (a body leaning back, the wall hang on an inset wall)
+    // moves the base back by height · sin(lean), one level or below leaves the root
+    let base = |p: Vec3, f: Vec3, h: f32| {
+        let f = f.normalize_or_zero();
+        if LATERAL_PATH_TILT_BASE && f.y > 0.0 { p - flat(f) * (f.y * h) } else { p }
+    };
+    let (pa0, pb0) = (base(a, fa, ha), base(b, fb, hb));
     let (fa, fb) = (flat(fa), flat(fb));
     let side_a = fa.cross(Vec3::Y * s);
     let side_b = fb.cross(-Vec3::Y * s);
-    let mut pa = a;
-    let mut pb = b;
+    let mut pa = pa0;
+    let mut pb = pb0;
     if ha > 2.0 {
         pa -= fa * 0.25;
     }

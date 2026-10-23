@@ -933,13 +933,13 @@ pub fn quantize(stick: Vec3, facing: Vec3) -> LedgeDir {
 }
 
 /// M5 part 4 (RE/20 #78): LedgeData +1856 = 2 after a hang entered from the wall run puts the climb holds 16 / 8 / 4
-/// ahead of the hand step (`from_wall_run`; 0xDE2B87–0xDE2BE5, and none after it, 0xDE2C3F–0xDE2C84). **Off (fenced):**
-/// the order is the game's, but the side move's acceptance (`side_move_to_climb_holds`: `lateral_path_free`) differs
-/// from the game's at A07's wall both ways: on `m5c_f12_climb11` 013 the path's first leg (hang root → corner) is
-/// blocked where the game climbs on mask 4, and in the free hang entered from the wall run (`m5d_a07_climb11` 006,
-/// `m5_a07_climb11` 079, 2.35 s) mask 4 passes where the game switches to the wall hang instead. With it on, 013 is
-/// unchanged and 006 / 079 get worse (RE/37 §17).
-pub const HANG_PREF_FROM_WALL_RUN: bool = false;
+/// ahead of the hand step (`from_wall_run`; 0xDE2B87–0xDE2BE5, and none after it, 0xDE2C3F–0xDE2C84). On (ledge / climb
+/// parity, 2026-10-23) with the side move's path base taken from the tilted wall-hang forward
+/// (`ledge_moves::LATERAL_PATH_TILT_BASE`, `Math__FlatOffsetAlongFrameUp` 0xB18140): `m5c_f12_climb11` 013,
+/// `m5_a07_climb11` 078 and `climb_11` 012 now match. Scoped to the wall hang: in the free hang entered from the wall
+/// run (`m5d_a07_climb11` 006, `m5_a07_climb11` 079, 2.35 s) the game's mask 4 fails where the port's passes (it
+/// switches to the wall hang), so the free hang keeps the plain order (PORT).
+pub const HANG_PREF_FROM_WALL_RUN: bool = true;
 
 fn start_move(d: &mut HumanLedgeData, mv: LedgeMove, what: &'static str) {
     d.mv = Some(mv);
@@ -1733,12 +1733,18 @@ pub fn update_ledge(
                 }
                 // TrySideMoveToClimbHolds 0xDD48B0 on a row source, the bands in order (none during a closing step)
                 let (alt, hang_type, feet) = (d.alt_flag, d.hang_type, body.feet);
+                // the hanging entity's forward (Entity__GetForward at 0xDD4AD5 / 0xDD4B7A): the wall hang's is
+                // `sub_B157B0`'s, tilted by its body axis from the foot records; the free hang's is level
+                let hang_fwd = if hang_type == LedgeHangType::Wall { -wall_hang_pose(d.hand_l, d.hand_r, n, d.feet, true).1 } else { facing };
                 let climb_holds = |rows: &ledge_moves::EdgeRows, bands: &[usize], source: usize| {
-                    if alt { None } else { bands.iter().find_map(|&b| ledge_moves::side_move_to_climb_holds(rows, b, right_dir, hang_type, feet, facing, source, &collision)) }
+                    if alt { None } else { bands.iter().find_map(|&b| ledge_moves::side_move_to_climb_holds(rows, b, right_dir, hang_type, feet, hang_fwd, source, &collision)) }
                 };
                 // climb holds down, then level (16 / 8 on ProbeLateral's rows); with +1856 = 2 up (4) too, all before
                 // the hand step (0xDE2B87–0xDE2BE5, live pass 4: `m5d_a07_climb11` 005 climbs on mask 4 at 1.899 s)
-                let pre_step: &[usize] = if HANG_PREF_FROM_WALL_RUN && d.from_wall_run { &[2, 1, 0] } else { &[2, 1] };
+                // PORT: the wall hang only; in the free hang entered from the wall run (+1856 = 2 too) the game's mask 4 fails where
+                // the port's passes (`m5d_a07_climb11` 006, `m5_a07_climb11` 079: the game switches to the wall hang),
+                // **hypothesis**: the free hang's entity forward carries its swing's pitch, which moves the path's base
+                let pre_step: &[usize] = if HANG_PREF_FROM_WALL_RUN && d.from_wall_run && d.hang_type == LedgeHangType::Wall { &[2, 1, 0] } else { &[2, 1] };
                 if let Some(e) = climb_holds(&rows, pre_step, 0) {
                     switch_context(&mut loco, &mut data, TransitionSetup::ToClimb(e));
                     continue;
