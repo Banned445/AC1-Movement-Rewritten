@@ -1359,7 +1359,8 @@ pub fn update_ground(
             && g.ledge_stop.is_none()
             && g.collide.is_none()
             && g.impulsion_jump.is_none()
-            && g.oneshot.is_some_and(|o| super::anim_gate::allows_mode_exit(&o.blend, true, pad.high_profile))
+            && g.oneshot.is_some_and(|o| super::anim_gate::allows_mode_exit(&o.blend, true, pad.high_profile)
+                && !(LEAN_EXIT_TR_PLAYS_OUT && super::collide::LEAN_EXIT_TR.contains(&o.blend.id)))
         {
             g.oneshot = None;
             g.oneshot_next = None;
@@ -2661,6 +2662,12 @@ pub const PRAY_BLEND: bool = true;
 /// (0xDA6AB1–0xDA6B28) and Move 13 (0xDA42AC). The landing (21) is not in the list (live M5 F7: InAir and the landing
 /// item leave mode 1).
 pub const PRAY_PIVOT_KEEPS: bool = true;
+/// M5 part 3 (A01): the lean exit's transition into the walk / jog (`collide::LEAN_EXIT_TR`) plays to its end, its own
+/// root motion carrying the body, before Movement takes over: the obstacle collision (sub-state 5,
+/// `HumanGround__ObstacleCollision_Update` 0xD9DA20) leaves by its own rules, not by the anim gate's moving exit (live
+/// M5 pass 3 `m5c_f9_crate` 003: `lean_040cm_twohand_to_backleft_walk_tr_l_walk` plays 4.31–4.98 s, its full 0.667 s, at
+/// 2 m/s; the port cut it on its first frame for the walk at 0.4 m/s).
+pub const LEAN_EXIT_TR_PLAYS_OUT: bool = true;
 /// M5 F7: the blend's pivot plays its own table (0x1A2C1E8).
 pub const PRAY_PIVOT_TABLE: bool = true;
 /// M5 F1: event 45 from a standing start (HG+1492 = 0) starts the impulsion at phase 1 (0xD83870).

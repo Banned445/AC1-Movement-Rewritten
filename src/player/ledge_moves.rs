@@ -487,6 +487,11 @@ pub fn probe_lateral(mover: Vec3, other: Vec3, n: Vec3, dv: Vec3, closing: bool,
         let reference = centre + dv * (width * 0.5) - facing * 0.2;
         guidance.probe_box(centre, right, facing, Vec3::Y, half, reference, 0.785_398_2, crate::guidance::PROBE_STEP, MASK_CLIMB_HOLDS)
     });
+    if std::env::var_os("AC_LEDGE_LOG").is_some() {
+        let g = |v: Vec3| format!("({:.3} {:.3} {:.3})", v.x, -v.z, v.y);
+        eprintln!("probe_lateral mover {} other {} dv {} closing {closing} width {width:.3} rows {:?}", g(mover), g(other), g(dv),
+            rows.iter().map(|r| r.map(|h| g(h.point))).collect::<Vec<_>>());
+    }
     let row = rows[3].map(|h| h.point);
     let flat = |a: Vec3, b: Vec3| Vec2::new(a.x - b.x, a.z - b.z).length();
     let target = if closing {
