@@ -60,12 +60,13 @@ pub fn find_jump_target(
 /// 0x80000000); `HumanLedge__SetupSwingJump` 0xDCD0B0 passes the second as `Human__SetupJumpToTarget`'s chained target.
 /// The scorer reads its mode only as `a5 == 2` (0xE97584) and both calls pass the same actor and a zero wanted direction,
 /// so both selections return the same candidate and type: the chain is the target itself, and one selection is the
-/// game's result. PORT: the query is the tap jump's, and the Leap of Faith looks along the facing (the game: the
-/// camera-relative stick).
-pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+/// game's result. The Leap of Faith (IHuman vt76, 0xEED040–0xEED063) searches along `stick` (var_100: the stick's
+/// world direction, which the release's 75° test at 0xEECE22 compares with the facing) in the facing's frame (var_140).
+/// PORT: the query is the tap jump's.
+pub fn swing_jump_target(feet: Vec3, fwd: Vec3, stick: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
     let cands = jump_candidates::query(feet, fwd, &Query::TAP, guidance, collision);
     if cands.is_empty() {
-        return haystack_target(feet, fwd, fwd, guidance, collision);
+        return haystack_target(feet, stick, fwd, guidance, collision);
     }
     let sel = jump_candidates::select(&cands, feet, fwd, fwd, 1, false);
     let t = sel.and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));

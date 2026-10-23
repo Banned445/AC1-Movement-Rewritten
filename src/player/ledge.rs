@@ -1004,7 +1004,10 @@ pub fn update_ledge(
             let held = pad.high_profile && pad.legs_held;
             let toward = pad.speed01 > 0.0 && pad.dir_snap.dot(s.fwd) > 1.308_997f32.cos();
             let jump = held && toward;
-            let out = super::swing::update(&mut s, dt, held, jump, &mut feet, &collision, |p, f| super::targets::swing_jump_target(p, f, &guidance, &collision));
+            // the stick's world direction, the Leap of Faith's search direction (vt76 at 0xEED040: var_100, the direction
+            // the 75° test at 0xEECE22 reads)
+            let stick_dir = if pad.dir_snap != Vec3::ZERO { pad.dir_snap } else { s.fwd };
+            let out = super::swing::update(&mut s, dt, held, jump, &mut feet, &collision, |p, f| super::targets::swing_jump_target(p, f, stick_dir, &guidance, &collision));
             body.feet = feet;
             match out {
                 super::swing::SwingOut::Stay => data.ledge.swing = Some(s),
