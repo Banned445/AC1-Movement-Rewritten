@@ -115,14 +115,25 @@ fn single(id: u32, item: usize, w: &[f32]) -> Option<ActionBlend> {
     Some(ActionBlend::new(id, item, &v))
 }
 
-/// `HumanLedge__PickSwingImpact` 0xDCFBC0: base = the hands (LedgeData+144) + 0.5·forward + 0.5·up; two box queries
+/// LedgeData+144, the point `PickSwingImpact` and the legs impact build on: the edge (the hands' point) − 0.5·forward −
+/// 0.5·up. Live (RE/37 §18, bug-1792747030, Damascus plank walkway, 2026-10-23_113130/004): (79.499, 43.277, 3.534) for the
+/// target edge (79.999, 43.277, 4.034), the swing entered from a flight. Not read for a swing started from a still hang
+/// (event 5, whose entry sets +144): **(hypothesis)** the same point.
+fn ledge_144(s: &Swing) -> Vec3 {
+    let f = Vec3::new(s.fwd.x, 0.0, s.fwd.z).normalize_or(Vec3::NEG_Z);
+    s.hands_mid - f * 0.5 - Vec3::Y * 0.5
+}
+
+/// `HumanLedge__PickSwingImpact` 0xDCFBC0: base = LedgeData+144 (`ledge_144`) + 0.5·forward + 0.5·up; two box queries
 /// (`sub_B2A070` 0xB2A070: half 0.2 across, 0.5 along the flat forward, 0.35 / 0.6 up) centred at base lowered 0.65 m
 /// (shoulders) and 1.6 m (legs), pulled back 0.25 m along LedgeData+192; each returns the nearest geometry's distance from
 /// the box's rear face (local y + 0.5), 1000 with nothing in it. The legs blocked (< 1) → the legs impact (at the fixed
 /// `LEGS_IMPACT_WEIGHTS`, not the distance); else the shoulders → the shoulder impact; else the elbow impact (RE/24
 /// NARROW-17). PORT: LedgeData+192 is taken as the swing's facing.
 fn impact(s: &Swing, collision: &CollisionWorld) -> u32 {
-    let base = s.hands_mid + s.fwd * 0.5 + Vec3::Y * 0.5;
+    // the edge itself (live: legs box empty, shoulders 0.653 → the shoulder impact on the plank walkway, where the hands
+    // taken as +144 put the legs box 0.5 m in and up, onto the joist under the boards: bug-1792747030)
+    let base = ledge_144(s) + s.fwd * 0.5 + Vec3::Y * 0.5;
     let probe = |drop: f32| base - Vec3::Y * drop - s.fwd * 0.25;
     let upper = box_depth(collision, probe(0.65), s.fwd, 0.35);
     let lower = box_depth(collision, probe(1.6), s.fwd, 0.6);
@@ -277,7 +288,7 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump: bool, feet: &mut Vec3, c
             SwingOut::Stay
         }
         SwingPhase::Settle(id, item) => {
-            // the legs impact requests the controller root hands + 0.5·forward + 0.5·up − 2.4·up (+1296, flag +1360,
+            // the legs impact requests the controller root +144 + 0.5·forward + 0.5·up − 2.4·up (+1296, flag +1360,
             // `HumanLedge__SwingLandingToImpactLegs` 0xDD0077), reached in one frame (`CharacterController__RequestMoveTo`
             // 0x710B40: the velocity (target − position) / dt) (RE/24 NARROW-17); the others stay on the hang root.
             *feet = if id == IMPACT_LEGS { legs_impact_root(s) } else { s.root };
@@ -311,10 +322,11 @@ pub fn update(s: &mut Swing, dt: f32, held: bool, jump: bool, feet: &mut Vec3, c
     }
 }
 
-/// The legs impact's controller root (0xDCFFC0–0xDD0077): the hands (LedgeData+144) + 0.5·forward + 0.5·up − 2.4·up.
+/// The legs impact's controller root (0xDCFFC0–0xDD0077): LedgeData+144 (`ledge_144`) + 0.5·forward + 0.5·up − 2.4·up,
+/// i.e. 2.4 m straight under the edge.
 pub fn legs_impact_root(s: &Swing) -> Vec3 {
     let f = Vec3::new(s.fwd.x, 0.0, s.fwd.z).normalize_or(Vec3::NEG_Z);
-    s.hands_mid + f * 0.5 - Vec3::Y * 1.9
+    ledge_144(s) + f * 0.5 + Vec3::Y * 0.5 - Vec3::Y * 2.4
 }
 
 /// The legs impact's clip weights [`_00cm`, `_50cm`, `_150cm`]: `SwingLandingToImpactLegs` 0xDCFE90 plays the free idle
@@ -361,17 +373,17 @@ mod stop_tests {
         assert!(matches!(release(&c), SwingOut::Stay), "no room: no jump");
     }
 
-    /// RE/24 NARROW-17: the legs impact holds the root at the controller target (0xDD0077): 0.5 m toward the obstacle and
-    /// 1.9 m below the hands, not on the hang root.
+    /// RE/24 NARROW-17: the legs impact holds the root at the controller target (0xDD0077): LedgeData+144 + 0.5·forward +
+    /// 0.5·up − 2.4·up, with +144 the edge − 0.5·forward − 0.5·up (live RE/37 §18): 2.4 m straight under the hands.
     #[test]
-    fn the_legs_impact_moves_the_root_toward_the_obstacle() {
+    fn the_legs_impact_holds_the_root_under_the_edge() {
         let mut s = start(Vec3::new(0.0, 0.6, 0.0), Vec3::NEG_Z, Vec3::new(0.0, 3.0, 0.0), 0).expect("swing cycle");
         let Some(a) = single(IMPACT_LEGS, 0, &[1.0, 0.0, 0.0]) else { return };
         s.phase = SwingPhase::Settle(IMPACT_LEGS, 0);
         s.action = a;
         let mut feet = s.root;
         let _ = update(&mut s, 1.0 / 60.0, false, false, &mut feet, &CollisionWorld::default(), |_, _| None);
-        assert!((feet - Vec3::new(0.0, 1.1, -0.5)).length() < 1e-4, "{feet:?}");
+        assert!((feet - Vec3::new(0.0, 0.6, 0.0)).length() < 1e-4, "{feet:?}");
     }
 
     /// RE/24 NARROW-17: a landing with the legs blocked plays the legs impact at the fixed [0, 0.5, 0.5] through both of
@@ -382,7 +394,8 @@ mod stop_tests {
         let mut s = start(Vec3::new(0.0, 0.6, 0.0), Vec3::NEG_Z, Vec3::new(0.0, 3.0, 0.0), 0).expect("swing cycle");
         let Some(a) = single(SWING_LANDING, 0, &[]) else { return };
         let mut c = CollisionWorld::default();
-        c.boxes.push(Aabb3 { min: Vec3::new(-1.0, 0.0, -2.0), max: Vec3::new(1.0, 4.0, -0.4) });
+        // a wall 0.2 m past the edge: inside the legs box (from 0.75 m behind the edge to 0.25 m past it)
+        c.boxes.push(Aabb3 { min: Vec3::new(-1.0, 0.0, -2.0), max: Vec3::new(1.0, 4.0, -0.2) });
         (s.phase, s.action, s.t) = (SwingPhase::Landing, a, 100.0);
         let mut feet = s.root;
         let _ = update(&mut s, 1.0 / 60.0, false, false, &mut feet, &c, |_, _| None);
