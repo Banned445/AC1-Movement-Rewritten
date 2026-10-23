@@ -33,7 +33,9 @@ pub struct JumpTarget {
     pub no_owner: bool,
 }
 
-/// M5 F8: far-edge targets have no owner object, so their flight ends with no arrival (0xE07D91).
+/// M5 F8: the swing release's far-edge target has no owner object, so its flight ends with no arrival (0xE07D91).
+/// **Hypothesis** for which far edges lack one: only the swing release's is read live; on the other jumps' far edges
+/// the port keeps the arrival (the rule on all of them made three recordings worse).
 pub const FAR_EDGE_NO_OWNER: bool = true;
 
 /// Roof-edge landing spot: the game's free-step target type 1 (narrow object / edge; its flight is
@@ -76,7 +78,11 @@ pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collis
         return haystack_target(feet, fwd, fwd, guidance, collision);
     }
     let sel = jump_candidates::select(&cands, feet, fwd, fwd, 1, false);
-    let t = sel.and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision));
+    // the swing release at a far edge has no owner object (live M5 pass 3); the port keeps the arrival for the far edges
+    // of the other jumps (with the rule on every far edge, `climb_16` 10-12, `sol31_lookdown` 10-17 and `m5_cc_c_315` got
+    // worse: their game targets arrive)
+    let far = |c: &Candidate| FAR_EDGE_NO_OWNER && c.ty == 2 && c.sub == 1 && c.flags & 0x10000 != 0;
+    let t = sel.and_then(|(i, ty)| to_target(&cands[i], ty, feet, guidance, collision).map(|t| JumpTarget { no_owner: far(&cands[i]), ..t }));
     if std::env::var_os("AC_JUMP_LOG").is_some() {
         let g = |v: Vec3| format!("({:.3} {:.3} {:.3})", v.x, -v.z, v.y);
         eprintln!("swing jump query pos={} dir={} -> {:?} target {:?}", g(feet), g(fwd), sel, t.map(|t| (g(t.position), t.type_flags)));
@@ -112,7 +118,7 @@ pub const FLAT_HANG_TARGET_NORMAL: bool = true;
 
 /// The port's jump target for a candidate and the scorer's jump type.
 pub fn to_target(c: &Candidate, ty: u32, feet: Vec3, guidance: &GuidanceWorld, _collision: &CollisionWorld) -> Option<JumpTarget> {
-    let base = JumpTarget { no_owner: FAR_EDGE_NO_OWNER && c.ty == 2 && c.sub == 1 && c.flags & 0x10000 != 0, position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None, support: Some((c.wall, c.ty == 4)) };
+    let base = JumpTarget { no_owner: false, position: c.pos, type_flags: ty, hang: None, straight: None, pass: None, ladder: None, support: Some((c.wall, c.ty == 4)) };
     match ty {
         1 | 0x10000 => {
             // beams and far-edge landings already lie on the surface
