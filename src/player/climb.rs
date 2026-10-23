@@ -376,6 +376,8 @@ pub struct HumanClimbData {
     pub reach: Option<ClimbReach>,
     /// The reach's end action, playing in the Wait state (`HumanClimb__PlayReachEnd` 0xDE9B50), and its time left.
     pub settle: Option<(u32, f32)>,
+    /// The settle was set this frame: its first frame adds no time (A13, lab `climb_08`).
+    pub settle_fresh: bool,
     /// +2916 with ClimbData+108 from an EntryType 2 entry: the end action played when the entry's Move ends.
     pub entry_end: Option<u32>,
 }
@@ -443,6 +445,7 @@ impl HumanClimbData {
         if let Some(end) = e.end_action.filter(|&id| id == FREE_DROP_TO_CLIMB_END) {
             self.move_seq += 1;
             self.settle = Some((end, FREE_DROP_TO_CLIMB_END_TIME));
+            self.settle_fresh = true;
         }
     }
 }
@@ -1512,8 +1515,9 @@ pub fn update_climb(
         // locked item that ends during this frame still holds it (lab `climb_08` 10-18 017: the drop's end item ends
         // 13.985 s, the step starts on the next frame)
         let locked = d.settle.is_some_and(|(id, _)| super::anim_gate::item_word(id, 0).is_some_and(|w| w & 0x20 != 0));
+        let fresh = std::mem::take(&mut d.settle_fresh);
         if let Some((_, t)) = d.settle.as_mut() {
-            *t -= dt;
+            *t -= if fresh { 0.0 } else { dt };
             if *t <= 0.0 {
                 d.settle = None;
             }
