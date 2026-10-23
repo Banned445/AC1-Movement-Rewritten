@@ -976,7 +976,7 @@ pub fn update_air(
                     let playing = if t1 < t_takeoff { air.takeoff } else { air.flight };
                     rebound_pending = Some((n, playing.and_then(|b| super::anim_gate::word(&b))));
                     air.mode = AirMode::Jump { from, clip_end, aim, duration, t: t1, then_fall_to, t_takeoff, fwd };
-                } else if (air.free_target || air.target.is_some_and(|t| t.no_owner)) && r.landed && path_vel.y <= 0.0 {
+                } else if air.free_target && r.landed && path_vel.y <= 0.0 {
                     // the free jump comes down on the ground before its target (0xE05200, controller contact)
                     landed_at = Some(body.feet.y);
                     // A36: `CheckAirCatch` runs during the jump too, and its edge landing (LABEL_140, 0xE0D684) goes
