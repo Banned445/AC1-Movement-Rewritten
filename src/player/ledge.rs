@@ -365,6 +365,10 @@ pub struct HumanLedgeData {
     /// The jitter source of the quick wall test (`HumanLedge__QuickWallTestForStep` 0xDD1F67). PORT: the game draws from
     /// the shared LCG (`dword_1A1FC3C` + 4); the port keeps its own state.
     pub quick_rng: u32,
+    /// The hand the last root computation's height came from (`ComputeRootFromHandTargets` 0xDD6730 leaves +0x6A0 =
+    /// +0x670): the higher one after a lateral step, else the lower (the entries' wall root, `hang_root`). The quick
+    /// wall test of the next step builds its frame there.
+    pub root_from_higher: bool,
 }
 
 impl HumanLedgeData {
@@ -395,6 +399,7 @@ impl HumanLedgeData {
         self.last_hand = 0; // and +1844
         self.blocked_up = false;
         self.pending_vstep = None;
+        self.root_from_higher = false;
         self.jump_off = None;
         self.swing_strength = None;
         self.wallfree_wait = None;
@@ -481,9 +486,11 @@ fn start_pullup(d: &mut HumanLedgeData, feet: Vec3, limbs: &mut LimbTargets, n: 
     let right = right_of(-Vec3::new(n.x, 0.0, n.z).normalize_or_zero());
     // root: from a wall hang, linear up to the hands' height, then the second item's own motion in over
     // the lip (RE/24 LEDGE-15, `pullup_move`); from a free hang along the clips' own displacement
-    // (FROMANIM). PORT: for the free hang, with a floor 0.5 m in (Pullup_Start 0xDDBE80's stand point)
-    // the root is also corrected onto it; on a narrow top (a beam) the clips alone place it, and the
-    // free-step stay mounts what is there
+    // (FROMANIM). The game's free pull-up (0xDDC3A0–0xDDC5D5) sets the root under the hand records' midpoint,
+    // 2.4 m down, then interpolates `_a` with its action to midpoint − 0.5·forward − 1.0·up over the item: the clip's
+    // own end from that root (lab 10-13 `climb_13` 005: the paths agree within 0.01 m through the knee step).
+    // PORT: with a floor 0.5 m in the stand-up's root is also corrected onto it; on a narrow top (a beam) the clips
+    // alone place it, and the free-step stay mounts what is there
     let top = Vec3::new(mid.x, mid.y, mid.z) - n * PULLUP_IN;
     let standable = collision
         .ground_height(top + Vec3::Y * 0.05, 0.3)
@@ -731,23 +738,24 @@ fn needs_switch(cur: LedgeHangType, mid: Vec3, n: Vec3, collision: &CollisionWor
 /// The step's hand and clip are `PickVerticalHandAndAnim` 0xDCB3E0 / `PickShimmyHandAndAnim` 0xDCB520 (the foot on the
 /// hand's side); the foot bone is sampled at the end (`sub_4FEE50`, phase 1.0) and placed in the frame
 /// `ComputeRootFromHandTargets` 0xDD6730 left at +0x6A0 / +0x6B0 / +0x6C0 (x across = forward × up, y = forward into the
-/// wall, z = up; the origin is the hang's root at the hands' midpoint: a wall hang's 1.1 m below the lower hand for a
-/// vertical step, the higher for a lateral one, and 0.5 m out; a free hang's 2.4 m below the higher hand).
+/// wall, z = up; the origin is the hang's root at the hands' midpoint as the last root computation left it: a wall
+/// hang's 1.1 m below the lower hand after a vertical step or an entry, the higher after a lateral one, and 0.5 m out;
+/// a free hang's 2.4 m below the higher hand).
 /// From there a `Guidance__FindWallSupport` 0x11718B0 box (half 0.25 across, 0.75 deep, 0.15 high, step 0.07) with a
 /// random ±0.15 m offset across and up (0xDD1F67–0xDD200F: the first draw is the height, the second across).
 /// None without the install's clips (the switch's own rays then decide alone).
 #[allow(clippy::too_many_arguments)]
-fn quick_wall_test(d: &mut HumanLedgeData, action: u32, left_foot: bool, lateral: bool, n: Vec3, lib: Option<&crate::anim::AnimLibrary>, skel: Option<&crate::bone_pose::PoseSkeleton>, collision: &CollisionWorld) -> Option<bool> {
+fn quick_wall_test(d: &mut HumanLedgeData, action: u32, left_foot: bool, n: Vec3, lib: Option<&crate::anim::AnimLibrary>, skel: Option<&crate::bone_pose::PoseSkeleton>, collision: &CollisionWorld) -> Option<bool> {
     let bone = if left_foot { crate::bone_pose::LEFT_FOOT } else { crate::bone_pose::RIGHT_FOOT };
     let foot = crate::anim::action_end_bone(lib?, skel?, action, bone)?;
     let facing = -Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
     let mid = (d.hand_l + d.hand_r) * 0.5;
     let (lo, hi) = (d.hand_l.y.min(d.hand_r.y), d.hand_l.y.max(d.hand_r.y));
     // `ComputeRootFromHandTargets` 0xDD6730: +0x6A0 = +0x670 after its height is set (free: the higher hand − 2.4 m;
-    // wall: − 1.1 m, then 0.5 m out along −forward). PORT: the game's frame is the last root computation's, whose step
-    // picked the lower or higher hand; the port uses this step's (equal for level hands)
+    // wall: − 1.1 m, then 0.5 m out along −forward): the frame is the last root computation's, whose step picked the
+    // lower or higher hand (`root_from_higher`), not this step's
     let origin = match d.hang_type {
-        LedgeHangType::Wall => Vec3::new(mid.x, if lateral { hi } else { lo } - WALL_HANG_DROP, mid.z) - facing * 0.5,
+        LedgeHangType::Wall => Vec3::new(mid.x, if d.root_from_higher { hi } else { lo } - WALL_HANG_DROP, mid.z) - facing * 0.5,
         _ => Vec3::new(mid.x, hi - FREE_HANG_DROP, mid.z),
     };
     let point = origin + right_of(facing) * foot.x + facing * foot.y + Vec3::Y * foot.z;
@@ -1533,6 +1541,7 @@ pub fn update_ledge(
             d.last_hand = second;
             d.alt_flag = false;
             let to = step_root(d, n, false);
+            d.root_from_higher = false;
             d.vstep = Some((second == 1, true));
             // the step lasts its action (`StartHandStep` 0xDDE0C0 interpolates over `sub_501CB0`(0), RE/24 LEDGE-21)
             let wi = (d.hang_type != LedgeHangType::Wall) as usize;
@@ -1595,7 +1604,7 @@ pub fn update_ledge(
                 if let Some(h) = rows.step {
                     let first_left = d.last_hand == 1;
                     let wi = (d.hang_type != LedgeHangType::Wall) as usize;
-                    let quick = quick_wall_test(d, ACT_VSTEP[wi][vstep_index(sign < 0.0, false, first_left)], first_left, false, n, lib.as_deref(), skeleton.as_deref(), &collision);
+                    let quick = quick_wall_test(d, ACT_VSTEP[wi][vstep_index(sign < 0.0, false, first_left)], first_left, n, lib.as_deref(), skeleton.as_deref(), &collision);
                     if let Some(nt) = needs_switch(d.hang_type, h.point, n, &collision).filter(|_| switch_gate(d.hang_type, quick)) {
                         let mv = ledge_moves::switch_move(if sign > 0.0 { 0 } else { 1 }, nt == LedgeHangType::Wall, body.feet, h.point, h.point, n, &collision);
                         start_move(d, mv, if nt == LedgeHangType::Wall { "switch to wall hang" } else { "switch to free hang" });
@@ -1628,6 +1637,7 @@ pub fn update_ledge(
                     // (bug-1791711547). Its distance from the wall is the type's: a step from the straight jump's wall-free
                     // reception (root 0.5 m out) brings it under the hands
                     let mid_root = step_root(d, n, false);
+                    d.root_from_higher = false;
                     d.vstep = Some((first_left, false));
                     let wi = (d.hang_type != LedgeHangType::Wall) as usize;
                     let first_time = action_time(ACT_VSTEP[wi][vstep_index(sign < 0.0, false, first_left)]);
@@ -1759,7 +1769,7 @@ pub fn update_ledge(
                         None
                     } else {
                         let wi = (d.hang_type != LedgeHangType::Wall) as usize;
-                        let quick = quick_wall_test(d, ACT_SHIMMY[wi][shimmy_index(right_dir, true)], !right_dir, true, n, lib.as_deref(), skeleton.as_deref(), &collision);
+                        let quick = quick_wall_test(d, ACT_SHIMMY[wi][shimmy_index(right_dir, true)], !right_dir, n, lib.as_deref(), skeleton.as_deref(), &collision);
                         needs_switch(d.hang_type, t, n, &collision).filter(|_| switch_gate(d.hang_type, quick))
                     };
                     let switch = switch.and_then(|nt| {
@@ -1792,6 +1802,7 @@ pub fn update_ledge(
                     d.last_hand = move_right_hand as usize;
                     d.alt_flag = !d.alt_flag;
                     let to = step_root(d, n, true);
+                    d.root_from_higher = true;
                     // after the toggle: alt_flag set = this was the lead hand's reach (open), clear = closing step; the step
                     // lasts its action (RE/24 LEDGE-21: the free hang's closing step is 0.533 s, not the wall's 0.6 s)
                     let wi = (d.hang_type != LedgeHangType::Wall) as usize;
