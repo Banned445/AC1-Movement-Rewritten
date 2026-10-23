@@ -155,6 +155,10 @@ fn bind_pose_mesh(d: &[u8]) -> Option<StaticMesh> {
     Some(out)
 }
 
+/// Beams parity: the hiding places (`BhvHidingPlace`, entity descriptor 9) are haystacks to the movement queries
+/// (guard 0xD8F0B0 takes descriptor 8 or 9, RE/18).
+pub const HIDING_PLACE_IS_HAYSTACK: bool = true;
+
 /// Everything the loader threads share.
 pub struct CityData {
     pub archives: Arc<Archives>,
@@ -339,7 +343,10 @@ fn decode_body(data: &CityData, b: &[u8], name: &str, materials: &mut HashMap<u3
     let grow = |a: &mut Aabb3, p: Vec3| { a.min = a.min.min(p); a.max = a.max.max(p); };
     for t in &o.collision { grow(&mut o.bounds, t.bounds.min); grow(&mut o.bounds, t.bounds.max); }
     for e in &o.edges { grow(&mut o.bounds, e.p0); grow(&mut o.bounds, e.p1); }
-    if !markers(b, "BhvHayStack").is_empty() {
+    // the haystack queries take entities of descriptor 8 (HayStack) or 9 (HidingPlace: the roof gardens, the hiding
+    // spots), guard 0xD8F0B0 (RE/18): the game enters them through the HayStack context (lab `climb_20` 10-12, 5.28 s:
+    // the free-step stay onto `Hiding_Spot_P_01a_012` plays `freestep_footr_to_haystack_01`)
+    if !markers(b, "BhvHayStack").is_empty() || (HIDING_PLACE_IS_HAYSTACK && !markers(b, "BhvHidingPlace").is_empty()) {
         o.haystack = haystack_of(&o);
     }
     if !markers(b, "BhvLadder").is_empty() {
