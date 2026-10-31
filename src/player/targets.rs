@@ -72,6 +72,17 @@ pub fn swing_jump_target(feet: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collis
     t
 }
 
+/// PORT (the manual vault, `PadInput::vault_held`): `find_target`'s query scored in mode 2, as the haystack's event 2 and
+/// the narrow tops with the empty hand held score it (`Human__SelectJumpCandidate` 0xE96BF0 / 0xE97584): only the
+/// nearest wall top in front, jumped as a pass-over (type 2). None when the answer is no pass-over.
+pub fn find_vault_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {
+    let cands = jump_candidates::query(feet, want, q, guidance, collision);
+    let (i, ty) = jump_candidates::select(&cands, feet, facing, want, 2, false)?;
+    let t = to_target(&cands[i], ty, feet, guidance, collision)?;
+    super::target_debug::record(|| "manual vault".into(), feet, want, &cands, Some(&t));
+    t.pass.is_some().then_some(t)
+}
+
 /// Query + scorer + the port's target for the chosen candidate. `facing` = the actor's forward (the scorer's frame),
 /// `want` = the wanted direction.
 pub fn find_target(feet: Vec3, facing: Vec3, want: Vec3, q: &Query, behind_far: bool, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<JumpTarget> {

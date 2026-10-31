@@ -21,6 +21,9 @@ pub const RUN_TURN_ANGLE: f32 = 2.094_395_2;
 // ---------------------------------------------------------------- input (RE/01 §6)
 /// Stick dead-zone; speed = (|stick| - 0.35) / 0.65.  GoAssassinActionInterpreter 0xEE65A0
 pub const STICK_DEADZONE: f32 = 0.35;
+/// PORT (not the game's): the manual vault (the parkour mods' "Manual Vault"): holding F / B / Circle with the stick
+/// pushed vaults a wall top in front (`player::ground`, `PadInput::vault_held`). false = the game's rules only.
+pub const MANUAL_VAULT: bool = true;
 /// "Legs" (jump) button buffer, seconds.  0xEEDE60
 pub const JUMP_BUFFER: f32 = 0.3;
 /// Turn attenuation: beyond 45° from facing, speed scales down to 0 at 90°; floor 0.1. 0xEE65A0
