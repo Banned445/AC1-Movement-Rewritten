@@ -125,6 +125,9 @@ impl Sim {
     fn hold_hand(&mut self, held: bool) {
         self.app.world_mut().resource_mut::<PadInput>().hand_held = held;
     }
+    fn hold_vault(&mut self, held: bool) {
+        self.app.world_mut().resource_mut::<PadInput>().vault_held = held;
+    }
     /// Run until `pred` holds or `max_s` elapses; returns whether it held.
     fn run_until(&mut self, max_s: f32, pred: impl Fn(&Sim) -> bool) -> bool {
         for _ in 0..(max_s * 60.0) as usize {
@@ -3134,6 +3137,25 @@ fn running_at_a_railing_in_high_profile_hops_onto_it_without_a_vault() {
         assert!(t.pass.is_none());
         let vaulted = s.run_until(2.0, |s| s.data().ledge.pass_over.is_some());
         assert!(!vaulted, "no hand-plant vault (legs {legs}): {:?}", s.loco().current);
+    }
+}
+
+/// PORT (the manual vault, `tuning::MANUAL_VAULT`): the vault button held (F / B / Circle) while running at the 1 m
+/// railing scores the hop's search in mode 2, so the railing is jumped as a pass-over and vaulted with the hand plant,
+/// in either profile, and the run lands beyond it. Let go, the same run hops onto its top
+/// (`running_at_a_railing_in_high_profile_hops_onto_it_without_a_vault`).
+#[test]
+fn holding_the_vault_button_vaults_a_railing() {
+    use crate::player::passover::PassOverPhase;
+    for high in [false, true] {
+        let mut s = Sim::new(Vec3::new(40.0, 0.0, 8.5), 0.0);
+        s.pad(Vec3::NEG_Z, 1.0, high, false);
+        s.hold_vault(true);
+        assert!(s.run_until(3.0, |s| s.loco().current == ActorContextId::InAir), "no jump (high {high}): {:?}", s.body().feet);
+        let t = s.data().air.target.expect("a target");
+        assert!(t.pass.is_some(), "a pass-over target (high {high}): {:?}", t.type_flags);
+        assert!(s.run_until(2.0, |s| s.data().ledge.pass_over.is_some_and(|p| p.phase == PassOverPhase::Vault)), "no vault (high {high}): {:?}", s.loco().current);
+        assert!(s.run_until(4.0, |s| s.loco().current == ActorContextId::Ground && s.body().feet.z < 3.6), "never landed beyond (high {high}): {:?} {:?}", s.loco().current, s.body().feet);
     }
 }
 

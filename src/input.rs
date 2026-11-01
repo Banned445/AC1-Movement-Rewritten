@@ -29,6 +29,9 @@ pub struct PadInput {
     pub hand_held: bool,
     /// Seconds since Legs was last pressed (jump buffer, 0.3 s).
     pub legs_pressed_ago: f32,
+    /// PORT (not the game's; the manual-vault mod feature): the vault button held, F on the keyboard or the gamepad's
+    /// East button (B / Circle, the empty hand's). Only the live input sets it, so the lab replays never force a vault.
+    pub vault_held: bool,
     /// Seconds since the empty-hand button (pad button 3) was last pressed.
     pub hand_pressed_ago: f32,
     /// The pad's 16 buttons this frame (PadXenon order, RE/21 §1).
@@ -266,6 +269,7 @@ pub fn read_pad(
     pad.speed01 = crate::player::abilities::of(abilities.as_deref()).clamp_speed(pad.speed01, high);
     pad.legs_held = buttons[0];
     pad.hand_held = buttons[3];
+    pad.vault_held = keys.pressed(KeyCode::KeyF) || gamepads.iter().any(|gp| gp.pressed(GamepadButton::East));
     pad.buttons = buttons;
     pad.cam_stick = cam;
     pad.stick = stick;

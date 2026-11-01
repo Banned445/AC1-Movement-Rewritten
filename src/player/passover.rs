@@ -84,8 +84,8 @@ pub fn enter(e: PassOverEntry, seq: u32) -> Option<HandPassOver> {
     Some(HandPassOver { edge: e.edge, fwd, phase: PassOverPhase::Reception, action, t: 0.0, from: e.from, to: e.edge, warp: 0.067, w: 0.0, hand: e.flight_foot_left as usize, flight_foot_left: e.flight_foot_left, seq: seq.wrapping_add(1), far: None })
 }
 
-/// `sub_B18FB0` (as used by 0xDDB800): the wall top along `fwd` from the near edge: the far LedgeGrab edge (normal
-/// along +fwd, same height) within 1.8 m. Returns (far edge point, thickness).
+/// PORT (the ladder's top test, `ladder::wall_top_behind`): the far LedgeGrab edge (normal along +fwd, same height) within
+/// 1.8 m of `edge`. Returns (far edge point, thickness). The vault itself uses the game's probe, `probe_wall_top`.
 pub fn far_edge(edge: Vec3, fwd: Vec3, guidance: &GuidanceWorld) -> Option<(Vec3, f32)> {
     far_edge_record(edge, fwd, guidance).map(|(q, d, _)| (q, d))
 }
@@ -100,6 +100,67 @@ pub fn far_edge_record(edge: Vec3, fwd: Vec3, guidance: &GuidanceWorld) -> Optio
         .map(|(q, n)| (q, Vec3::new(q.x - edge.x, 0.0, q.z - edge.z).dot(fwd), n))
         .filter(|(q, d, _)| *d > 0.02 && *d <= 1.8 && Vec2::new(q.x - (edge.x + fwd.x * d), q.z - (edge.z + fwd.z * d)).length() < 0.1)
         .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// The wall top `Human__ProbeWallTopThickness` 0xB18FB0 finds: the near and far edges where the facing line crosses
+/// them, the far edge's wall normal (HumanLedge +1264), and the distance between the two crossings (+0xA0).
+#[derive(Clone, Copy, Debug)]
+pub struct WallTop {
+    pub near: Vec3,
+    pub far: Vec3,
+    pub far_normal: Vec3,
+    pub thickness: f32,
+}
+
+/// `Human__ProbeWallTopThickness` 0xB18FB0 as `HumanLedge__HandPassOver_Update` 0xDDB800 calls it (verified
+/// 2026-10-31): from `root` − 0.3·fwd − 0.25 up, a vertical `GuidanceZonePlane` (0x658780; its AABB 0x658C50 runs
+/// 1.8 m along the facing and 0.6 m up from that corner, no width) takes every guidance edge (type mask −1) that
+/// crosses it. Each edge no steeper than 40° (`Guidance__IsNotSteep` 0xB12480: |dir.up| ≤ 0.6428) is cut by the
+/// vertical plane through the facing line (`Math__SegmentPlaneIntersect` 0x9765E0); its wall normal is the edge
+/// normal with the lower up component, flattened. The edge counts only with 0.45 m or more of drop on that side:
+/// `Human__RayDistance` from the crossing + 0.5 up + 0.15·normal, 2.0 m down on the player's layer 21, less 0.5.
+/// A normal against the facing is a near edge, along it (dot ≥ 0) a far edge; the nearest of each to the start
+/// (horizontally, 0xB193D1 / 0xB193A5). Both must be found. The far edge's record (`GuidanceHit__Set` 0xB18600 into
+/// out+0x50) is the crossing point and its unflattened normal; out+0xA0 the crossings' distance.
+pub fn probe_wall_top(root: Vec3, fwd: Vec3, guidance: &GuidanceWorld, collision: &CollisionWorld) -> Option<WallTop> {
+    let fwd = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+    let start = root - fwd * 0.3 - Vec3::Y * 0.25;
+    // the plane through the facing line: normal = fwd × up (0xB19178)
+    let side = fwd.cross(Vec3::Y);
+    let mut near: Option<(f32, Vec3)> = None;
+    let mut far: Option<(f32, Vec3, Vec3)> = None;
+    for e in &guidance.edges {
+        let d = e.p1 - e.p0;
+        if d.abs().max_element() <= 0.0005 || d.normalize().y.abs() > 0.642_787_6 {
+            continue;
+        }
+        let (a, b) = ((e.p0 - start).dot(side), (e.p1 - start).dot(side));
+        if a * b > 0.0 || (a - b).abs() < 1e-9 {
+            continue;
+        }
+        let x = e.p0 + d * (a / (a - b));
+        // inside the zone: 0..1.8 along the facing, 0..0.6 up from the start
+        let (along, up) = ((x - start).dot(fwd), x.y - start.y);
+        if !(0.0..=1.8).contains(&along) || !(0.0..=0.6).contains(&up) {
+            continue;
+        }
+        let wall = if e.n1.y <= e.n0.y { e.n1 } else { e.n0 };
+        let n = Vec3::new(wall.x, 0.0, wall.z).normalize_or_zero();
+        let from = Vec3::new(x.x, x.y + 0.5, x.z) + n * 0.15;
+        if collision.ray_distance(from, -Vec3::Y, 2.0, crate::layers::MAIN_CHARACTER) - 0.5 < 0.45 {
+            continue;
+        }
+        let dist2 = Vec3::new(x.x - start.x, 0.0, x.z - start.z).length_squared();
+        if n.dot(fwd) >= 0.0 {
+            if far.is_none_or(|(best, _, _)| dist2 < best) {
+                far = Some((dist2, x, wall));
+            }
+        } else if near.is_none_or(|(best, _)| dist2 < best) {
+            near = Some((dist2, x));
+        }
+    }
+    let ((_, near), (_, far, far_normal)) = (near?, far?);
+    Some(WallTop { near, far, far_normal, thickness: (far - near).length() })
 }
 
 pub enum PassOverOut {
@@ -123,17 +184,19 @@ pub fn update(p: &mut HandPassOver, dt: f32, feet: &mut Vec3, guidance: &Guidanc
             if k < 1.0 {
                 return PassOverOut::Stay;
             }
-            // warp done → the vault by the leading foot of the reception (footl flight → `tr_passover_handr` →
-            // hand r); thickness blend w = min(thickness, 1); root to the far edge + 0.3·(1 − w)·forward over the
-            // vault (hypothesis: the point sub_B0FC50 derives from the probe is the far edge); none → edge + 0.3·fwd
-            let record = far_edge_record(p.edge, p.fwd, guidance);
-            p.far = record.map(|(q, _, n)| (q, n));
-            let (to, w) = match record {
-                Some((far, thick, _)) => {
-                    let w = thick.min(1.0);
-                    (far + p.fwd * 0.3 * (1.0 - w), w)
+            // warp done → the vault by the reception's item foot (0xDDB8C6: word & 0xC == 4 → hand l 0x09A0A7E1, else
+            // hand r): the footl flight's `tr_passover_handr` ends 8 → hand r, the footr flight's and the haystack's
+            // `…_handl` end 4 → hand l (verified 2026-10-31). Thickness blend w = min(thickness, 1); the root goes over
+            // the vault to the far edge's crossing point (`ClimbHoldRecord__Copy` 0xB0FC50 copies the probe's far record,
+            // out+0x50, into HumanLedge +1248) + 0.3·(1 − w)·forward; no wall top → root + 0.3·fwd, w = 0 (verified)
+            let top = probe_wall_top(*feet, p.fwd, guidance, collision);
+            p.far = top.map(|t| (t.far, t.far_normal));
+            let (to, w) = match top {
+                Some(t) => {
+                    let w = t.thickness.min(1.0);
+                    (t.far + p.fwd * 0.3 * (1.0 - w), w)
                 }
-                None => (p.edge + p.fwd * 0.3, 0.0),
+                None => (*feet + p.fwd * 0.3, 0.0),
             };
             let hand = if p.flight_foot_left { 1 } else { 0 };
             let Some(_) = jump_blend::action_items(VAULT[hand]) else { return PassOverOut::Ground };
@@ -142,7 +205,7 @@ pub fn update(p: &mut HandPassOver, dt: f32, feet: &mut Vec3, guidance: &Guidanc
             p.w = w;
             p.phase = PassOverPhase::Vault;
             p.from = *feet;
-            p.to = Vec3::new(to.x, p.edge.y, to.z);
+            p.to = to;
             p.warp = p.action.duration().max(0.05);
             p.t = 0.0;
             p.seq = p.seq.wrapping_add(1);
@@ -165,5 +228,63 @@ pub fn update(p: &mut HandPassOver, dt: f32, feet: &mut Vec3, guidance: &Guidanc
                 PassOverOut::Fall(ActionBlend::new(VAULT_TO_FALL[p.hand], 0, &[1.0 - p.w, p.w]))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collision::Aabb3;
+    use crate::guidance::GuidanceEdge;
+
+    /// A wall top facing −Z: near edge at z 0, far edge at z −thick (height `far_y`, tilted by `slope` end to end),
+    /// over a floor at y 0 (raised to `far_floor` beyond it). The root stands on the near edge after the reception.
+    fn wall(thick: f32, far_y: f32, far_floor: Option<f32>, slope: f32) -> (GuidanceWorld, CollisionWorld) {
+        let aabb = |min: Vec3, max: Vec3| Aabb3 { min, max };
+        let mut boxes = vec![aabb(Vec3::new(-20.0, -1.0, -20.0), Vec3::new(20.0, 0.0, 20.0)), aabb(Vec3::new(-2.0, 0.0, -thick), Vec3::new(2.0, 1.0, 0.0))];
+        if let Some(f) = far_floor {
+            boxes.push(aabb(Vec3::new(-2.0, 0.0, -6.0), Vec3::new(2.0, f, -thick)));
+        }
+        let edge = |p0: Vec3, p1: Vec3, n1: Vec3| GuidanceEdge { p0, p1, n0: Vec3::Y, n1, subtype: GuidanceSubType::LedgeGrab };
+        let edges = vec![
+            edge(Vec3::new(-2.0, 1.0, 0.0), Vec3::new(2.0, 1.0, 0.0), Vec3::Z),
+            edge(Vec3::new(-2.0, far_y - slope, -thick), Vec3::new(2.0, far_y + slope, -thick), Vec3::NEG_Z),
+        ];
+        (GuidanceWorld { edges, ..Default::default() }, CollisionWorld { boxes, ..Default::default() })
+    }
+
+    fn probe(w: &(GuidanceWorld, CollisionWorld)) -> Option<WallTop> {
+        probe_wall_top(Vec3::new(0.0, 1.0, 0.0), Vec3::NEG_Z, &w.0, &w.1)
+    }
+
+    #[test]
+    fn a_30cm_wall_top_gives_the_far_crossing_and_its_thickness() {
+        let t = probe(&wall(0.3, 1.0, None, 0.0)).expect("a wall top");
+        assert!((t.thickness - 0.3).abs() < 1e-4 && (t.far - Vec3::new(0.0, 1.0, -0.3)).length() < 1e-4, "{t:?}");
+        assert!((t.near - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-4 && t.far_normal == Vec3::NEG_Z, "{t:?}");
+    }
+
+    #[test]
+    fn the_zone_reaches_1_8m_from_0_3m_behind_the_near_edge() {
+        assert!(probe(&wall(1.45, 1.0, None, 0.0)).is_some());
+        assert!(probe(&wall(1.55, 1.0, None, 0.0)).is_none());
+    }
+
+    #[test]
+    fn the_zone_is_0_6m_tall_from_0_25m_below_the_root() {
+        assert!(probe(&wall(0.5, 1.3, None, 0.0)).is_some());
+        assert!(probe(&wall(0.5, 1.4, None, 0.0)).is_none());
+    }
+
+    #[test]
+    fn a_far_edge_needs_0_45m_of_drop_beyond_it() {
+        assert!(probe(&wall(0.3, 1.0, Some(0.5), 0.0)).is_some());
+        assert!(probe(&wall(0.3, 1.0, Some(0.6), 0.0)).is_none());
+    }
+
+    #[test]
+    fn an_edge_steeper_than_40_degrees_is_no_wall_top() {
+        assert!(probe(&wall(0.3, 1.0, None, 1.5)).is_some());
+        assert!(probe(&wall(0.3, 1.0, None, 1.8)).is_none());
     }
 }

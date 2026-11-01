@@ -1786,6 +1786,29 @@ pub fn update_ground(
             }
         }
 
+        // ---------------------------------------------------------------- manual vault (PORT, not the game's)
+        // The manual-vault mod feature: the vault button held (F / B / Circle, `PadInput::vault_held`) with the stick
+        // pushed: the free-run hop's search (low obstacles, 0.45–1.3 m up, 0.5–2.0 m ahead) scored in mode 2 as the
+        // haystack's event 2 does, so a wall top in front is jumped as a pass-over (type 2) and vaulted with the hand
+        // plant (InAir 0xE07D00 case 2 → Ledge HandPassOver). Any profile; the jump goes through event 45 as the hop's.
+        if crate::tuning::MANUAL_VAULT && pad.vault_held && moving && !busy && ab.allows(Ability::Jump) {
+            if let Some(target) = super::targets::find_vault_target(body.feet, body.forward(), pad.dir_snap, &super::jump_candidates::Query::free_run(true), &guidance, &collision) {
+                jump_log("manual vault", body.feet, Some(&target));
+                match g.event45(body.feet, body.forward(), ImpulsionJump::Target(target), free_run_ready, leading_foot) {
+                    Event45::Run => {
+                        let entry = InAirEntry::JumpToTarget { from: body.feet, target, speed_param: g.speed_param, foot_left: run_jump_foot_left(g.sub_state, g.playing_word(), leading_foot, g.blend.foot) };
+                        switch_context(&mut loco, &mut data, TransitionSetup::ToInAir(entry));
+                        continue;
+                    }
+                    Event45::Impulsion => {
+                        body.velocity = Vec3::ZERO;
+                        continue;
+                    }
+                    Event45::Refused => {}
+                }
+            }
+        }
+
         // ---------------------------------------------------------------- free-run target jump (0xEE7F7A)
         // No press: high profile, the stick past the dead zone, the Jump ability, IHumanGround vt16 (CanHandleEvent
         // 45) → IHuman vt56 with kind 4 (Legs held) / 3, ladders left out, then the scorer (mode 1) → vt24. Its box
